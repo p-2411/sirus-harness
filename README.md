@@ -7,11 +7,34 @@ local-first memory (SQLite + vector search) shared across sessions and agents,
 with a graph view for browsing it. Tool chaining: multi-step tool sequences
 authored by the LLM or by hand.
 
+## Requirements
 
-Stack:
-- Ink TUI
-- Electron Shell
-- PTY
+- [Bun](https://bun.sh/) 1.3.12 or newer
+- macOS or Linux
+- A Claude or ChatGPT subscription, or an Anthropic or OpenAI API key
+- On macOS, Homebrew SQLite (`brew install sqlite`) for persistent vector memory
+
+## Install
+
+Install the public npm package with Bun:
+
+```sh
+bun add --global sirus-harness
+```
+
+Then launch Sirus in the current directory:
+
+```sh
+sirus
+```
+
+To try a release without installing it globally:
+
+```sh
+bunx sirus-harness
+```
+
+Sirus is distributed through the npm registry and requires Bun at runtime.
 
 ## Launching Sirus
 
@@ -213,3 +236,13 @@ Tests live under `tests/`, mirroring the structure of `src/`. Run the suite with
 ```sh
 bun test
 ```
+
+Run the complete pre-release validation with:
+
+```sh
+bun run release:check
+```
+
+## License
+
+[MIT](LICENSE)

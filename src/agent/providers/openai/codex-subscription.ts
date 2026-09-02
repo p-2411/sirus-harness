@@ -9,6 +9,7 @@ import { CodexRpc } from './codex-rpc';
 import { abortReason, abortable, throwIfAborted } from '../../../abort';
 import type { PermissionContext } from '../../permissions';
 import type { JudgePrompt } from '../../judge';
+import { SIRUS_VERSION } from '../../../version';
 import {
   WEB_SEARCH_TOOL,
   fetchUrlCall,
@@ -23,7 +24,7 @@ import {
 // tools that the server asks us to run. The ChatGPT login lives in Codex's
 // own store.
 
-export const CODEX_CLIENT_INFO = { name: 'sirus', title: 'Sirus', version: '0.0.1' };
+export const CODEX_CLIENT_INFO = { name: 'sirus', title: 'Sirus', version: SIRUS_VERSION };
 
 // Mirrors the overrides Codex itself uses for a tool-less, ephemeral thread,
 // plus the apply_patch tool and AGENTS.md discovery.

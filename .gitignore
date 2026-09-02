@@ -1,6 +1,9 @@
 node_modules/
 dist/
 out/
+coverage/
+*.tgz
+debug.log
 *.tsbuildinfo
 .DS_Store
 *.db

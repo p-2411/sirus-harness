@@ -16,6 +16,7 @@ import { promptWithSharedHistory } from '../../subscriptions';
 import { abortable, throwIfAborted } from '../../../abort';
 import type { PermissionContext } from '../../permissions';
 import type { JudgePrompt } from '../../judge';
+import { SIRUS_CLIENT_ID } from '../../../version';
 import {
   WEB_SEARCH_TOOL,
   fetchUrlCall,
@@ -298,7 +299,7 @@ function createSession(
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
       persistSession: false,
-      env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: 'sirus/0.0.1' },
+      env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: SIRUS_CLIENT_ID },
     },
   });
 
@@ -458,7 +459,7 @@ async function judge(prompt: JudgePrompt, model: string, signal?: AbortSignal): 
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
       persistSession: false,
-      env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: 'sirus/0.0.1' },
+      env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: SIRUS_CLIENT_ID },
     },
   });
   const stop = () => q.close();
