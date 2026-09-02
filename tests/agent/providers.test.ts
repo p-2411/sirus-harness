@@ -17,6 +17,7 @@ import {
   toAnthropicMessages,
 } from '../../src/agent/providers/anthropic/api';
 import { OpenAIProvider, toOpenAIContinuationInput, toOpenAIInput } from '../../src/agent/providers/openai/api';
+import { modelStrategies } from '../../src/agent/chat';
 import type { Message, ToolResultBlock } from '../../src/data/data';
 
 const toolHistory: Message[] = [
@@ -44,6 +45,11 @@ const toolHistory: Message[] = [
 
 describe('provider tool history', () => {
   test('maps shared thinking levels to adaptive and legacy Claude requests', () => {
+    expect(modelStrategies['claude-fable-5-1']).toBe(AnthropicProvider);
+    expect(anthropicThinkingConfig('claude-fable-5-1', 'max')).toEqual({
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'max' },
+    });
     expect(anthropicThinkingConfig('claude-opus-5', 'xhigh')).toEqual({
       thinking: { type: 'adaptive' },
       output_config: { effort: 'xhigh' },

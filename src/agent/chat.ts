@@ -60,6 +60,7 @@ export const modelStrategies: Record<string, ModelStrategy> = {
   'claude-opus-5': AnthropicProvider,
   'claude-sonnet-5': AnthropicProvider,
   'claude-haiku-4.5': AnthropicProvider,
+  'claude-fable-5-1': AnthropicProvider,
   'claude-fable-5': AnthropicProvider,
 }
 
