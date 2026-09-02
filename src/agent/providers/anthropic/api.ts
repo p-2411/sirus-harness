@@ -13,6 +13,25 @@ import {
   type FetchUrlOutcome,
   type WebSearchOutcome,
 } from '../../web';
+import {
+  DEFAULT_THINKING_LEVEL,
+  legacyClaudeThinkingBudget,
+  usesLegacyClaudeThinking,
+  type ThinkingLevel,
+} from '../../thinking';
+
+const CLAUDE_MAX_TOKENS = 16_384;
+
+export function anthropicThinkingConfig(model: string, level: ThinkingLevel) {
+  return usesLegacyClaudeThinking(model)
+    ? {
+      thinking: { type: 'enabled' as const, budget_tokens: legacyClaudeThinkingBudget(level) },
+    }
+    : {
+      thinking: { type: 'adaptive' as const },
+      output_config: { effort: level },
+    };
+}
 
 // The API runs web search and fetch itself, inside the request, and reports
 // each use as a server_tool_use block followed by its result block. Sirus
@@ -216,10 +235,12 @@ async function request(
   subagent: boolean,
   signal?: AbortSignal,
   onUpdate?: ModelContext['onUpdate'],
+  thinkingLevel: ThinkingLevel = DEFAULT_THINKING_LEVEL,
 ): Promise<Response> {
   const stream = getClient().messages.stream({
     model,
-    max_tokens: 1024,
+    max_tokens: CLAUDE_MAX_TOKENS,
+    ...anthropicThinkingConfig(model, thinkingLevel),
     system: getSystemPrompt(directory, participantName, subagent),
     messages,
     tools: [
@@ -254,6 +275,7 @@ async function request(
       subagent,
       signal,
       onUpdate ? blocks => onUpdate([...content, ...blocks]) : undefined,
+      thinkingLevel,
     );
     return { ...resumed, content: [...content, ...resumed.content] };
   }
@@ -285,6 +307,7 @@ async function request(
       subagent,
       signal,
       onUpdate,
+      thinkingLevel,
     );
   }
 
@@ -302,6 +325,7 @@ async function getResponse(messages: readonly Message[], model: string, context:
     context.subagent ?? false,
     context.signal,
     context.onUpdate,
+    context.thinkingLevel,
   );
 }
 

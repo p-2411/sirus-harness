@@ -8,6 +8,8 @@ import {
   memoryCommand,
   permissionsCommand,
   permissionsMenuItems,
+  thinkingCommand,
+  thinkingMenuItems,
   type CommandMenuItem,
 } from './commands';
 import { Session } from '../runtime/session';
@@ -46,14 +48,14 @@ export const commandRegistry: CommandSpec[] = [
   {
     name: 'model',
     args: '[agent] <model>',
-    description: 'set the model for a participant',
+    description: 'set the model for an agent in the session',
     run: (args, session, _notify, _signal, context) => {
       if (args.length === 1) {
         return changeModel('sirus', args[0], session, context?.changeSirusModel);
       } else if (args.length === 2) {
         return changeModel(args[0], args[1], session, context?.changeSirusModel);
       } else {
-        throw new Error('Usage: /model [participant] <model>');
+        throw new Error('Usage: /model [name] <model>');
       }
     },
   },
@@ -61,6 +63,13 @@ export const commandRegistry: CommandSpec[] = [
     name: 'clear',
     description: 'clear this session history',
     run: (_args, session) => clearSession(session),
+  },
+  {
+    name: 'thinking',
+    args: '[agent] [low|medium|high|xhigh|max]',
+    description: 'show or set reasoning depth for a participant',
+    run: (args, session) => thinkingCommand(args, session),
+    menu: thinkingMenuItems,
   },
   {
     name: 'login',

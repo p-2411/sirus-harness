@@ -9,17 +9,17 @@ authored by the LLM or by hand.
 
 ## Requirements
 
-- [Bun](https://bun.sh/) 1.3.12 or newer
+- [Node.js](https://nodejs.org/) 18 or newer with npm (used only to install and launch)
 - macOS or Linux
 - A Claude or ChatGPT subscription, or an Anthropic or OpenAI API key
 - On macOS, Homebrew SQLite (`brew install sqlite`) for persistent vector memory
 
 ## Install
 
-Install the public npm package with Bun:
+Install the public npm package globally:
 
 ```sh
-bun add --global sirus-harness
+npm install -g sirus-harness
 ```
 
 Then launch Sirus in the current directory:
@@ -31,10 +31,15 @@ sirus
 To try a release without installing it globally:
 
 ```sh
-bunx sirus-harness
+npx sirus-harness
 ```
 
-Sirus is distributed through the npm registry and requires Bun at runtime.
+Sirus runs on [Bun](https://bun.sh/). You do not need to install Bun yourself:
+the package depends on the `bun` npm package, so npm downloads a matching Bun
+binary during install and the `sirus` command uses that copy. If you already
+use Bun, `bun add --global sirus-harness` and `bunx sirus-harness` work too;
+the launcher falls back to whichever `bun` is on your PATH when the bundled
+copy is unavailable (for example after an install with `--ignore-scripts`).
 
 ## Launching Sirus
 
@@ -77,6 +82,8 @@ provider runtime only carries the model.
 - `/logout claude|gpt` — signs out of whatever is active for that provider:
   the subscription if it is on, otherwise the stored API key.
 - `/memory [on|off]` — shows or toggles agent access to persistent memory.
+- `/thinking [participant] [low|medium|high|xhigh|max]` — opens a picker or
+  sets one participant's reasoning depth. The default is `high`.
 - `/permissions [ask|auto|bypass]` — shows or sets how the session approves
   tool calls (see below).
 - `/clear` — clears the current session's message history.
@@ -141,8 +148,8 @@ one message to run those agents in parallel:
 
 Participant names are case-insensitive and each participant responds at most
 once per message. All participants receive the same shared session history,
-and their names and model choices are persisted with the session. Use
-`/model [participant] <model>` to change one participant's model.
+and their names, model choices, and thinking levels are persisted with the
+session. Use `/model [participant] <model>` to change one participant's model.
 
 Only mentions in top-level prose invoke agents. Mentions shown as quoted
 examples, inline code, blockquotes/callouts, lists, tables, headings, fenced or

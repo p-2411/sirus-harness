@@ -18,6 +18,12 @@ import {
   type PermissionMode,
 } from '../agent/permissions';
 import type { Feedback } from '../feedback';
+import {
+  THINKING_LEVEL_DESCRIPTIONS,
+  THINKING_LEVELS,
+  parseThinkingLevel,
+  type ThinkingLevel,
+} from '../agent/thinking';
 
 export function changeModel(
   participantName: string = 'sirus',
@@ -39,6 +45,21 @@ export function changeModel(
   } else {
     throw new Error(`Unknown model. Try: ${Object.keys(modelStrategies).join(', ')}`);
   }
+}
+
+export function changeThinkingLevel(
+  participantName: string = 'sirus',
+  value: string,
+  session: Session,
+): Feedback {
+  const level = parseThinkingLevel(value);
+  if (!level) throw new Error(`Unknown thinking level. Try: ${THINKING_LEVELS.join(', ')}`);
+  const normalizedParticipantName = participantName.replace(/^@/, '');
+  session.setThinkingLevel(level, normalizedParticipantName);
+  return {
+    kind: 'success',
+    text: `@${normalizedParticipantName} thinking level changed to ${level}.`,
+  };
 }
 
 export function clearSession(session: Session): Feedback {
@@ -190,6 +211,38 @@ export function permissionsMenuItems(): CommandMenuItem[] {
     description: PERMISSION_MODE_DESCRIPTIONS[mode],
     command: `/permissions ${mode}`,
   }));
+}
+
+export function thinkingMenuItems(args: readonly string[] = []): CommandMenuItem[] | null {
+  if (args.length > 1 || (args.length === 1 && (parseThinkingLevel(args[0]) || !args[0].startsWith('@')))) {
+    return null;
+  }
+  const participant = args[0]?.replace(/^@/, '');
+  return THINKING_LEVELS.map((level: ThinkingLevel) => ({
+    key: level,
+    label: level,
+    description: THINKING_LEVEL_DESCRIPTIONS[level],
+    command: participant ? `/thinking @${participant} ${level}` : `/thinking ${level}`,
+  }));
+}
+
+export function thinkingCommand(args: readonly string[], session: Session): Feedback {
+  if (args.length === 0) {
+    return { kind: 'info', text: `@sirus thinking level is ${session.getThinkingLevel()}.` };
+  }
+  if (args.length === 1) {
+    const level = parseThinkingLevel(args[0]);
+    if (level) return changeThinkingLevel('sirus', level, session);
+    if (!args[0].startsWith('@')) {
+      throw new Error(`Unknown thinking level. Try: ${THINKING_LEVELS.join(', ')}`);
+    }
+    return {
+      kind: 'info',
+      text: `@${args[0].replace(/^@/, '')} thinking level is ${session.getThinkingLevel(args[0])}.`,
+    };
+  }
+  if (args.length === 2) return changeThinkingLevel(args[0], args[1], session);
+  throw new Error('Usage: /thinking [participant] [low|medium|high|xhigh|max]');
 }
 
 // `/permissions` alone opens the picker; `/permissions <mode>` sets it.

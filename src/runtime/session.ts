@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { getResponse, modelStrategies } from '../agent/chat';
+import { clearSessionRuntime, getResponse, modelStrategies } from '../agent/chat';
 import type { Message } from '../data/data';
 import { rootTextRanges } from '../mentions';
 import { isAbortError, TurnCancelledError } from '../abort';
@@ -8,10 +8,17 @@ import {
   type PermissionContext,
   type PermissionMode,
 } from '../agent/permissions';
+import {
+  DEFAULT_THINKING_LEVEL,
+  type ThinkingLevel,
+} from '../agent/thinking';
 
 export interface Participant {
   name: string;
   model: string;
+  // Absent in older snapshots and for untouched participants; high is the
+  // default in both cases.
+  thinkingLevel?: ThinkingLevel;
 }
 
 export type SessionStatus = 'idle' | 'working' | 'error';
@@ -233,6 +240,12 @@ export class Session {
     return this.defaultModel.model;
   }
 
+  getThinkingLevel(participantName: string = this.defaultModel.name): ThinkingLevel {
+    const participant = this.findParticipant(participantName.replace(/^@/, ''));
+    if (!participant) throw new Error(`Participant ${participantName} not found`);
+    return participant.thinkingLevel ?? DEFAULT_THINKING_LEVEL;
+  }
+
   getStatus(): SessionStatus {
     return this.status;
   }
@@ -243,6 +256,18 @@ export class Session {
 
   setModel(model: string): void {
     this.changeParticipantModel(this.defaultModel.name, model);
+  }
+
+  setThinkingLevel(level: ThinkingLevel, participantName: string = this.defaultModel.name): void {
+    const participant = this.findParticipant(participantName.replace(/^@/, ''));
+    if (!participant) throw new Error(`Participant ${participantName} not found`);
+    if (this.getThinkingLevel(participant.name) === level) return;
+    participant.thinkingLevel = level;
+    // Subscription transports keep provider-owned sessions whose thinking
+    // options are fixed at creation. Recreate just this participant's runtime;
+    // its complete shared history is replayed on the next turn.
+    clearSessionRuntime(this.runtimeIdFor(participant));
+    this.notifyListeners();
   }
 
   getParticipantRuntimeIds(): string[] {
@@ -468,6 +493,7 @@ export class Session {
           false,
           signal,
           this.permissionContextFor(participant),
+          this.getThinkingLevel(participant.name),
         );
         return { ...response, participant: participant.name, model: participant.model };
       }));

@@ -16,6 +16,12 @@ import { promptWithSharedHistory } from '../../subscriptions';
 import { abortable, throwIfAborted } from '../../../abort';
 import type { PermissionContext } from '../../permissions';
 import type { JudgePrompt } from '../../judge';
+import {
+  DEFAULT_THINKING_LEVEL,
+  legacyClaudeThinkingBudget,
+  usesLegacyClaudeThinking,
+  type ThinkingLevel,
+} from '../../thinking';
 import { SIRUS_CLIENT_ID } from '../../../version';
 import {
   WEB_SEARCH_TOOL,
@@ -57,6 +63,7 @@ interface ClaudeSession {
   iterator: AsyncIterator<SDKMessage>;
   send: (text: string) => void;
   model: string;
+  thinkingLevel: ThinkingLevel;
   turn: Turn | null;
   hasSpoken: boolean;
   seenMessageCount: number;
@@ -258,10 +265,12 @@ function createSession(
   directory: string,
   participantName: string,
   subagent: boolean,
+  thinkingLevel: ThinkingLevel,
 ): ClaudeSession {
   const inbox = createInbox();
   const session: Partial<ClaudeSession> = {
     model,
+    thinkingLevel,
     turn: null,
     hasSpoken: false,
     seenMessageCount: 0,
@@ -289,6 +298,9 @@ function createSession(
     prompt: inbox.messages(),
     options: {
       model,
+      ...(usesLegacyClaudeThinking(model)
+        ? { thinking: { type: 'enabled' as const, budgetTokens: legacyClaudeThinkingBudget(thinkingLevel) } }
+        : { thinking: { type: 'adaptive' as const }, effort: thinkingLevel }),
       cwd: directory,
       systemPrompt: getSystemPrompt(directory, participantName, subagent),
       tools: [CLAUDE_WEB_SEARCH, CLAUDE_WEB_FETCH],
@@ -417,12 +429,18 @@ async function getResponse(
   throwIfAborted(context.signal);
   let session = sessions.get(context.sessionId);
   const participantName = context.participantName ?? 'sirus';
+  const thinkingLevel = context.thinkingLevel ?? DEFAULT_THINKING_LEVEL;
+  // Query options cannot be changed after creation. Rebuild when either the
+  // model or level changes so switching to/from Haiku also swaps between its
+  // legacy thinking budget and Claude 5's adaptive thinking.
+  if (session && (session.model !== model || session.thinkingLevel !== thinkingLevel)) {
+    sessions.delete(context.sessionId);
+    session.query.close();
+    session = undefined;
+  }
   if (!session) {
-    session = createSession(model, context.directory, participantName, context.subagent ?? false);
+    session = createSession(model, context.directory, participantName, context.subagent ?? false, thinkingLevel);
     sessions.set(context.sessionId, session);
-  } else if (session.model !== model) {
-    await abortable(session.query.setModel(model), context.signal);
-    session.model = model;
   }
 
   const content = await runTurn(

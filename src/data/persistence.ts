@@ -4,6 +4,7 @@ import os from 'os';
 import path from 'path';
 import { z } from 'zod';
 import { Session, type SessionSnapshot } from '../runtime/session';
+import { THINKING_LEVELS } from '../agent/thinking';
 
 const textBlockSchema = z.object({
   type: z.literal('text'),
@@ -38,6 +39,7 @@ const messageSchema = z.object({
 const participantSchema = z.object({
   name: z.string().min(1),
   model: z.string().min(1),
+  thinkingLevel: z.enum(THINKING_LEVELS).optional(),
 });
 
 const sessionSchema = z.object({

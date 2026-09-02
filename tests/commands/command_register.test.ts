@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, beforeEach } from 'bun:test';
-import { executeCommand, loginMenuItems, matchCommands } from '../../src/commands/command_register';
+import { commandMenu, executeCommand, loginMenuItems, matchCommands } from '../../src/commands/command_register';
 import { Session } from '../../src/data/data';
 import { findApiKey } from '../../src/agent/credentials';
 import { isSubscriptionEnabled, setSubscriptionEnabled } from '../../src/agent/subscriptions';
@@ -14,6 +14,7 @@ describe('matchCommands', () => {
     expect(all.length).toBeGreaterThan(0);
     expect(all.map(c => c.name)).toContain('model');
     expect(all.map(c => c.name)).toContain('memory');
+    expect(all.map(c => c.name)).toContain('thinking');
   });
 
   test('filters by typed prefix', () => {
@@ -91,6 +92,37 @@ describe('executeCommand', () => {
   test('model command rejects unknown models', () => {
     const session = new Session();
     expect(() => executeCommand('model', ['gpt-2'], session)).toThrow(/unknown model/i);
+  });
+
+  test('thinking command defaults to high and sets Sirus or a named participant', () => {
+    const session = new Session();
+    session.addParticipant('reviewer', 'claude-sonnet-5');
+
+    expect(session.getThinkingLevel()).toBe('high');
+    expect(executeCommand('thinking', ['low'], session)).toEqual({
+      kind: 'success',
+      text: '@sirus thinking level changed to low.',
+    });
+    expect(executeCommand('thinking', ['@reviewer', 'max'], session)).toEqual({
+      kind: 'success',
+      text: '@reviewer thinking level changed to max.',
+    });
+    expect(session.getThinkingLevel()).toBe('low');
+    expect(session.getThinkingLevel('reviewer')).toBe('max');
+    expect(() => executeCommand('thinking', ['turbo'], session)).toThrow(/unknown thinking level/i);
+    expect(() => executeCommand('thinking', ['sirus', 'turbo'], session)).toThrow(/unknown thinking level/i);
+  });
+
+  test('thinking command offers a picker for Sirus or a named participant', () => {
+    expect(commandMenu('thinking', [])?.map(item => item.command)).toEqual([
+      '/thinking low',
+      '/thinking medium',
+      '/thinking high',
+      '/thinking xhigh',
+      '/thinking max',
+    ]);
+    expect(commandMenu('thinking', ['@reviewer'])?.[2].command).toBe('/thinking @reviewer high');
+    expect(commandMenu('thinking', ['low'])).toBeNull();
   });
 
   test('memory command reports and persists on/off access', () => {

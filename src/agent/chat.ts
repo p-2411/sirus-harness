@@ -16,6 +16,7 @@ import { isSubscriptionEnabled, vendorOf, type Vendor } from './subscriptions';
 import type { PermissionContext } from './permissions';
 import type { JudgePrompt } from './judge';
 import { abortable, throwIfAborted } from '../abort';
+import type { ThinkingLevel } from './thinking';
 export { systemPrompt } from './prompt';
 
 export interface ModelContext {
@@ -39,6 +40,9 @@ export interface ModelContext {
   // The permission gate every tool call of this request goes through. Absent
   // only for direct programmatic callers (tests); every session passes one.
   permissions?: PermissionContext;
+  // User-selected reasoning depth for this participant. Providers translate
+  // the shared level into their own request format.
+  thinkingLevel?: ThinkingLevel;
 }
 
 export interface ModelStrategy {
@@ -105,6 +109,7 @@ export async function getResponse(
   subagent: boolean = false,
   signal?: AbortSignal,
   permissions?: PermissionContext,
+  thinkingLevel?: ThinkingLevel,
 ): Promise<Message> {
   throwIfAborted(signal);
   const strategy: ModelStrategy = resolveStrategy(model);
@@ -126,6 +131,7 @@ export async function getResponse(
     ...(subagent ? { subagent } : {}),
     ...(signal ? { signal } : {}),
     ...(permissions ? { permissions } : {}),
+    ...(thinkingLevel ? { thinkingLevel } : {}),
   };
   let response: Response = await abortable(strategy.getResponse(messages, model, context), signal);
 

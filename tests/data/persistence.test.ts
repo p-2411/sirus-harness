@@ -31,6 +31,8 @@ describe('session persistence', () => {
     const first = new Session('First', 'first-id', 'claude-fable-5', [], '/projects/first');
     first.append({ role: 'user', content: [{ type: 'text', text: 'Inspect this' }] });
     first.addParticipant('reviewer', 'gpt-5.6-terra');
+    first.setThinkingLevel('medium');
+    first.setThinkingLevel('xhigh', 'reviewer');
     first.append({
       role: 'assistant',
       participant: 'sirus',
@@ -52,6 +54,8 @@ describe('session persistence', () => {
       first.toSnapshot(),
       second.toSnapshot(),
     ]);
+    expect(restored.sessions[0].getThinkingLevel()).toBe('medium');
+    expect(restored.sessions[0].getThinkingLevel('reviewer')).toBe('xhigh');
   });
 
   test('falls back safely when the session file is corrupt or from an unknown version', () => {

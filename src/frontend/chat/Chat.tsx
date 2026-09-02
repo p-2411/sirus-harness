@@ -314,6 +314,7 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
         permissionMode={currSession.getPermissionMode()}
         onCyclePermissionMode={cyclePermissionMode}
         model={currSession.getModel()}
+        thinkingLevel={currSession.getThinkingLevel()}
       />
     </Box>
   );

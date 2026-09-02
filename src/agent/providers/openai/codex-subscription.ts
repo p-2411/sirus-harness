@@ -17,6 +17,7 @@ import {
   webSearchCall,
   webSearchResult,
 } from '../../web';
+import { DEFAULT_THINKING_LEVEL, type ThinkingLevel } from '../../thinking';
 
 // Codex, reduced to a model transport: one app-server process, one thread per
 // Sirus session, every built-in tool except web search switched off, Sirus's
@@ -311,6 +312,7 @@ async function runTurn(
   signal?: AbortSignal,
   onUpdate?: ModelContext['onUpdate'],
   permissions?: PermissionContext,
+  thinkingLevel: ThinkingLevel = DEFAULT_THINKING_LEVEL,
 ): Promise<MessageBlock[]> {
   throwIfAborted(signal);
   let finish!: (error?: Error) => void;
@@ -342,6 +344,7 @@ async function runTurn(
     const starting = rpc.request<Json>('turn/start', {
       threadId: session.threadId,
       input: [{ type: 'text', text }],
+      effort: thinkingLevel,
       ...(session.model !== model ? { model } : {}),
     });
     // If Escape lands while turn/start itself is in flight, interrupt the turn
@@ -396,6 +399,7 @@ async function getResponse(
     context.signal,
     context.onUpdate,
     context.permissions,
+    context.thinkingLevel,
   );
   session.seenMessageCount = messages.length;
   return { content, stop_reason: 'end_turn' };

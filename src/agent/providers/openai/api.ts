@@ -6,6 +6,7 @@ import { getSystemPrompt } from '../../prompt';
 import { availableTools } from '../../tools';
 import { requireApiKey } from '../../credentials';
 import { fetchUrlCall, fetchUrlResult, webSearchCall, webSearchResult } from '../../web';
+import { DEFAULT_THINKING_LEVEL, type ThinkingLevel } from '../../thinking';
 
 // The Responses API runs web search inside the request and reports the action
 // the model took: a search and the pages it consulted, a page it opened, or a
@@ -135,9 +136,11 @@ async function request(
   subagent: boolean,
   signal?: AbortSignal,
   onUpdate?: ModelContext['onUpdate'],
+  thinkingLevel: ThinkingLevel = DEFAULT_THINKING_LEVEL,
 ): Promise<Response> {
   const stream = await getClient().responses.create({
     model,
+    reasoning: { effort: thinkingLevel },
     instructions: getSystemPrompt(directory, participantName, subagent),
     input,
     stream: true,
@@ -245,6 +248,7 @@ async function request(
       subagent,
       signal,
       onUpdate,
+      thinkingLevel,
     );
   }
 
@@ -262,6 +266,7 @@ async function getResponse(messages: readonly Message[], model: string, context:
     context.subagent ?? false,
     context.signal,
     context.onUpdate,
+    context.thinkingLevel,
   );
 }
 

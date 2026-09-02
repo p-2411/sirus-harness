@@ -11,7 +11,11 @@ import {
   setApiKey,
 } from '../../src/agent/credentials';
 import { isSubscriptionEnabled, setSubscriptionEnabled } from '../../src/agent/subscriptions';
-import { AnthropicProvider, toAnthropicMessages } from '../../src/agent/providers/anthropic/api';
+import {
+  AnthropicProvider,
+  anthropicThinkingConfig,
+  toAnthropicMessages,
+} from '../../src/agent/providers/anthropic/api';
 import { OpenAIProvider, toOpenAIContinuationInput, toOpenAIInput } from '../../src/agent/providers/openai/api';
 import type { Message, ToolResultBlock } from '../../src/data/data';
 
@@ -39,6 +43,16 @@ const toolHistory: Message[] = [
 ];
 
 describe('provider tool history', () => {
+  test('maps shared thinking levels to adaptive and legacy Claude requests', () => {
+    expect(anthropicThinkingConfig('claude-opus-5', 'xhigh')).toEqual({
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'xhigh' },
+    });
+    expect(anthropicThinkingConfig('claude-haiku-4.5', 'high')).toEqual({
+      thinking: { type: 'enabled', budget_tokens: 4096 },
+    });
+  });
+
   test('labels named participants in provider history', () => {
     const history: Message[] = [{
       role: 'assistant',

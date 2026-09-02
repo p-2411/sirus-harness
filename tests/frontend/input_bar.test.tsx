@@ -1,7 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 import { renderToString } from 'ink';
 import stripAnsi from 'strip-ansi';
-import { applyInputEdit, InputFeedback, SecretInput, type InputState } from '../../src/frontend/chat/InputBar';
+import {
+  applyInputEdit,
+  InputFeedback,
+  SecretInput,
+  SubagentStatusRow,
+  type InputState,
+} from '../../src/frontend/chat/InputBar';
 import { moveSelection, SelectMenu } from '../../src/frontend/chat/SelectMenu';
 import type { CommandMenuItem } from '../../src/commands/command_register';
 import type { Feedback } from '../../src/feedback';
@@ -35,6 +41,16 @@ describe('input feedback', () => {
 
   test('takes no vertical space when there is no feedback', () => {
     expect(render(null)).toBe('');
+  });
+});
+
+describe('input status', () => {
+  test('shows the active model and thinking level together', () => {
+    const output = stripAnsi(renderToString(
+      <SubagentStatusRow model="gpt-5.6-sol" thinkingLevel="high" />,
+      { columns: 80 },
+    ));
+    expect(output).toContain('gpt-5.6-sol · high');
   });
 });
 

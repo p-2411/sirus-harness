@@ -17,6 +17,22 @@ describe('Session model', () => {
   test('has a default model', () => {
     const session = new Session();
     expect(session.getModel()).toBe('gpt-5.6-luna');
+    expect(session.getThinkingLevel()).toBe('high');
+  });
+
+  test('tracks thinking levels independently for each participant', () => {
+    const session = new Session();
+    session.addParticipant('reviewer', 'claude-sonnet-5');
+
+    session.setThinkingLevel('low');
+    session.setThinkingLevel('max', '@reviewer');
+
+    expect(session.getThinkingLevel()).toBe('low');
+    expect(session.getThinkingLevel('reviewer')).toBe('max');
+    expect(session.getParticipants()).toEqual([
+      { name: 'sirus', model: 'gpt-5.6-luna', thinkingLevel: 'low' },
+      { name: 'reviewer', model: 'claude-sonnet-5', thinkingLevel: 'max' },
+    ]);
   });
 
   test('is owned by the directory where it was created', () => {
@@ -56,6 +72,7 @@ describe('Session model', () => {
 
   test('sends a message through the agent runtime and returns the updated history', async () => {
     const session = new Session('Test', 'session-id', testModel, [], '/projects/test');
+    session.setThinkingLevel('medium');
     let receivedMessages: Message[] | undefined;
     let receivedContext: (ModelContext & { model: string }) | undefined;
 
@@ -90,6 +107,7 @@ describe('Session model', () => {
         requester: { participant: 'sirus' },
         model: testModel,
       },
+      thinkingLevel: 'medium',
     });
     expect(messages).toEqual([
       { role: 'user', content: [{ type: 'text', text: 'Hello' }] },

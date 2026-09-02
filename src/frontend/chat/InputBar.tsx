@@ -115,6 +115,7 @@ interface InputBarProps {
   onCyclePermissionMode?: () => void;
   // the session's current model, shown under the input bar
   model?: string;
+  thinkingLevel?: string;
 }
 
 const FEEDBACK_ICONS = {
@@ -159,7 +160,11 @@ export function SecretInput({ prompt, value }: { prompt: string; value: string }
 // spawned subagents are still at work; the session's model stays on the far
 // right. It keeps its height when there is nothing to say so the layout stays
 // put.
-export function SubagentStatusRow({ permissionMode, model }: { permissionMode?: PermissionMode; model?: string }) {
+export function SubagentStatusRow({ permissionMode, model, thinkingLevel }: {
+  permissionMode?: PermissionMode;
+  model?: string;
+  thinkingLevel?: string;
+}) {
   useSyncExternalStore(subscribeSubagents, getSubagentsVersion);
   const active = activeSubagentCount();
   return (
@@ -175,7 +180,11 @@ export function SubagentStatusRow({ permissionMode, model }: { permissionMode?: 
           <Text color={theme.textMuted}>{permissionMode ? ' · ' : ''}{active} active subagent{active === 1 ? '' : 's'}</Text>
         )}
       </Box>
-      {model && <Text color={theme.textSubtle} dimColor>{model}</Text>}
+      {model && (
+        <Text color={theme.textSubtle} dimColor>
+          {model}{thinkingLevel ? ` · ${thinkingLevel}` : ''}
+        </Text>
+      )}
     </Box>
   );
 }
@@ -241,6 +250,7 @@ export function InputBar({
   permissionMode,
   onCyclePermissionMode,
   model,
+  thinkingLevel,
 }: InputBarProps) {
   const [editor, setEditor] = useState<InputState>({ text: '', cursor: 0 });
   const input = editor.text;
@@ -386,7 +396,7 @@ export function InputBar({
             <Text color={theme.textSubtle}>{mode.type === 'approval' ? 'esc cancels the turn' : 'esc cancels'}</Text>
           </Box>
         </Box>
-        <SubagentStatusRow permissionMode={permissionMode} model={model} />
+        <SubagentStatusRow permissionMode={permissionMode} model={model} thinkingLevel={thinkingLevel} />
       </>
     );
   }
@@ -431,7 +441,7 @@ export function InputBar({
             : <Text color={theme.textSubtle}>enter ↵</Text>}
         </Box>
       </Box>
-      <SubagentStatusRow permissionMode={permissionMode} model={model} />
+      <SubagentStatusRow permissionMode={permissionMode} model={model} thinkingLevel={thinkingLevel} />
     </>
   );
 }

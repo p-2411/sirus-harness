@@ -7,9 +7,10 @@ import packageManifest from '../package.json';
 
 describe('sirus CLI', () => {
   test('is installed as a package-level executable', () => {
-    expect(packageManifest.bin).toEqual({ sirus: 'src/cli.ts' });
+    expect(packageManifest.bin).toEqual({ sirus: 'bin/sirus.js' });
     expect(readFileSync(join(import.meta.dir, '..', packageManifest.bin.sirus), 'utf8'))
-      .toStartWith('#!/usr/bin/env bun');
+      .toStartWith('#!/usr/bin/env node');
+    expect(packageManifest.dependencies.bun).toBeDefined();
   });
 
   test('uses the current directory when no path is supplied', () => {
