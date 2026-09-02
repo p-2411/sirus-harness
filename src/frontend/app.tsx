@@ -13,6 +13,7 @@ import {
 import { useTextSelection } from "./useTextSelection";
 import { cancelAllSubagents } from '../agent/subagents';
 import { modelStrategies } from '../agent/chat';
+import { checkSirusUpdate } from '../updater';
 
 export function nextSessionName(sessions: readonly Session[]): string {
   let sessionCount = sessions.length + 1;
@@ -77,6 +78,7 @@ export default function App({ launchDirectory = process.cwd() }: { launchDirecto
   const activeSession = selectedSession ?? draftSession;
   const { stdout } = useStdout();
   const [terminalHeight, setTerminalHeight] = useState(() => stdout.rows ?? 24);
+  const [updateAvailable, setUpdateAvailable] = useState(false);
   // tracked so width-only resizes also re-render (the header rule spans the width)
   const [, setTerminalWidth] = useState(() => stdout.columns ?? 80);
   // mouse tracking and drag-to-copy live for the whole app, not per chat
@@ -86,6 +88,27 @@ export default function App({ launchDirectory = process.cwd() }: { launchDirecto
     for (const session of new Set([...sessions, draftSession])) session.cancel();
     cancelAllSubagents();
   });
+
+  useEffect(() => {
+    let disposed = false;
+    let activeController: AbortController | undefined;
+    const checkForUpdate = () => {
+      activeController?.abort();
+      activeController = new AbortController();
+      void checkSirusUpdate(activeController.signal)
+        .then(result => {
+          if (!disposed) setUpdateAvailable(result.updateAvailable);
+        })
+        .catch(() => void 0);
+    };
+    checkForUpdate();
+    const timer = setInterval(checkForUpdate, 60 * 60 * 1000);
+    return () => {
+      disposed = true;
+      clearInterval(timer);
+      activeController?.abort();
+    };
+  }, []);
 
   useEffect(() => {
     const updateTerminalSize = () => {
@@ -156,7 +179,7 @@ export default function App({ launchDirectory = process.cwd() }: { launchDirecto
     // render inside the chat column (bottom-anchored, clipped at the top), so
     // nothing ever lands in scrollback outside the viewport.
     <Box flexDirection="row" width="100%" height={Math.max(terminalHeight, 14)}>
-      <Sidebar sessions={sessions} currSession={selectedSession} selectSession={selectSession} addSession={addSession} deleteSession={deleteSession} />
+      <Sidebar sessions={sessions} currSession={selectedSession} selectSession={selectSession} addSession={addSession} deleteSession={deleteSession} updateAvailable={updateAvailable} />
       <Chat
         key={activeSession.getId()}
         currSession={activeSession}

@@ -15,6 +15,7 @@ describe('matchCommands', () => {
     expect(all.map(c => c.name)).toContain('model');
     expect(all.map(c => c.name)).toContain('memory');
     expect(all.map(c => c.name)).toContain('thinking');
+    expect(all.map(c => c.name)).toContain('update');
   });
 
   test('filters by typed prefix', () => {
@@ -157,6 +158,10 @@ describe('executeCommand', () => {
   test('unknown command throws instead of silently doing nothing', () => {
     const session = new Session();
     expect(() => executeCommand('nope', [], session)).toThrow(/unknown command/i);
+  });
+
+  test('update command rejects arguments before running the updater', () => {
+    expect(() => executeCommand('update', ['now'], new Session())).toThrow('Usage: /update');
   });
 });
 

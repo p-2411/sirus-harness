@@ -50,6 +50,23 @@ describe('sidebar header', () => {
     expect(formatSidebarTime(new Date(2026, 0, 1, 0, 5))).toBe('12:05 AM');
     expect(formatSidebarTime(new Date(2026, 0, 1, 13, 7))).toBe('1:07 PM');
   });
+
+  test('replaces the clock with the green /update command when an update is available', () => {
+    const output = renderToString(
+      <Sidebar
+        sessions={[]}
+        currSession={null}
+        selectSession={noOp}
+        addSession={noOp}
+        deleteSession={noOp}
+        updateAvailable
+      />,
+      { columns: 40 },
+    );
+    expect(stripAnsi(output)).toMatch(/^ sirus\s+\/update │$/m);
+    expect(stripAnsi(output)).not.toMatch(/\d{1,2}:\d{2} (?:AM|PM)/);
+    expect(theme.success).toBe('#00C853');
+  });
 });
 
 describe('sidebar session status', () => {

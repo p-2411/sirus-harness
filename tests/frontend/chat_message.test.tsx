@@ -63,6 +63,24 @@ describe('chat message', () => {
     expect(output).not.toContain('gpt-5.6-sol');
   });
 
+  test('aligns user messages right and assistant messages left', () => {
+    const userOutput = stripAnsi(renderToString(
+      <ChatMessage message={{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }} />,
+      { columns: 40 },
+    ));
+    const assistantOutput = stripAnsi(renderToString(
+      <ChatMessage message={{ role: 'assistant', content: [{ type: 'text', text: 'Hello' }] }} />,
+      { columns: 40 },
+    ));
+    const userLines = userOutput.split('\n');
+    const assistantLines = assistantOutput.split('\n');
+
+    expect(userLines[0].indexOf('you')).toBeGreaterThan(assistantLines[0].indexOf('sirus'));
+    expect(userLines[1].indexOf('Hello')).toBeGreaterThan(assistantLines[1].indexOf('Hello'));
+    expect(assistantLines[0]).toStartWith('   sirus');
+    expect(assistantLines[1]).toStartWith('   Hello');
+  });
+
   test('renders only the first tool-call argument with long values truncated to ten characters', () => {
     const output = stripAnsi(renderToString(
       <ChatMessage message={{

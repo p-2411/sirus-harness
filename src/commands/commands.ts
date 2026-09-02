@@ -24,6 +24,7 @@ import {
   parseThinkingLevel,
   type ThinkingLevel,
 } from '../agent/thinking';
+import { updateSirus } from '../updater';
 
 export function changeModel(
   participantName: string = 'sirus',
@@ -196,6 +197,19 @@ async function describeVendor(vendor: Vendor, signal?: AbortSignal): Promise<str
 export async function infoCommand(signal?: AbortSignal): Promise<Feedback> {
   const lines = await Promise.all(VENDORS.map(vendor => describeVendor(vendor, signal)));
   return { kind: 'info', text: lines.join('\n'), showIcon: false };
+}
+
+export async function updateCommand(notify: Notify, signal?: AbortSignal): Promise<Feedback> {
+  const result = await updateSirus(notify, signal);
+  return result.updated
+    ? {
+      kind: 'success',
+      text: `Updated Sirus ${result.currentVersion} → ${result.latestVersion}. Restart Sirus to use the new version.`,
+    }
+    : {
+      kind: 'info',
+      text: `Sirus is already up to date (${result.currentVersion}).`,
+    };
 }
 
 const PERMISSION_MODE_DESCRIPTIONS: Record<PermissionMode, string> = {

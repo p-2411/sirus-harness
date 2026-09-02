@@ -79,6 +79,9 @@ provider runtime only carries the model.
 - `/info` — shows each provider and how it is signed in: the subscription plan
   and account, or the API key (masked) and whether it came from Sirus or the
   environment.
+- `/update` — checks npm for the latest published release and installs it
+  globally. When one is available, green `/update` replaces the sidebar clock.
+  Restart Sirus after it finishes. Source checkouts use `git pull`.
 - `/logout claude|gpt` — signs out of whatever is active for that provider:
   the subscription if it is on, otherwise the stored API key.
 - `/memory [on|off]` — shows or toggles agent access to persistent memory.

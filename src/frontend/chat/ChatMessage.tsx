@@ -213,7 +213,13 @@ export function ChatMessage({
 	return (
 		// no bars, no boxes — bold speaker label, body aligned flush beneath,
 		// whitespace doing the separating
-		<Box flexDirection="column" marginBottom={1} paddingX={3} flexShrink={0}>
+		<Box
+			flexDirection="column"
+			alignItems={isUser ? 'flex-end' : 'flex-start'}
+			marginBottom={1}
+			paddingX={3}
+			flexShrink={0}
+		>
 			<Text>
 				<Text
 					color={isUser ? theme.highlight : participantColor(participantName, participantColors)}

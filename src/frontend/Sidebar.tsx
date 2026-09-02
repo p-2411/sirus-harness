@@ -18,7 +18,7 @@ export function formatSidebarTime(time: Date | number): string {
   return SIDEBAR_TIME_FORMAT.format(time);
 }
 
-export function SidebarHeader() {
+export function SidebarHeader({ updateAvailable = false }: { updateAvailable?: boolean }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout>;
@@ -36,7 +36,9 @@ export function SidebarHeader() {
   return (
     <Box justifyContent="space-between">
       <Text color={theme.accent}>sirus</Text>
-      <Text color={theme.textSubtle} dimColor>{formatSidebarTime(now)}</Text>
+      {updateAvailable
+        ? <Text color={theme.success}>/update</Text>
+        : <Text color={theme.textSubtle} dimColor>{formatSidebarTime(now)}</Text>}
     </Box>
   );
 }
@@ -96,8 +98,8 @@ export function SessionItem({ session, isSelected, onSelect, onDelete }: {
     </Box>
   );
 }
-export default function SideBar({ sessions, currSession, selectSession, addSession, deleteSession }: {
-  sessions: Session[]; currSession: Session | null; selectSession: (session: Session) => void; addSession: () => void; deleteSession: (session: Session) => void;
+export default function SideBar({ sessions, currSession, selectSession, addSession, deleteSession, updateAvailable = false }: {
+  sessions: Session[]; currSession: Session | null; selectSession: (session: Session) => void; addSession: () => void; deleteSession: (session: Session) => void; updateAvailable?: boolean;
 }) {
   const ref = useRef<DOMElement>(null);
   useSelectionRegion(ref);
@@ -132,7 +134,7 @@ export default function SideBar({ sessions, currSession, selectSession, addSessi
       justifyContent="space-between"
     >
       <Box flexDirection="column">
-        <SidebarHeader />
+        <SidebarHeader updateAvailable={updateAvailable} />
         <Box flexDirection="column" marginTop={2}>
           {sessions.map((session) => (
             <SessionItem key={session.getId()} session={session} isSelected={currSession?.getId() === session.getId()} onSelect={selectSession} onDelete={deleteSession} />

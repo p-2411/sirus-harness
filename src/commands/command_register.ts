@@ -10,6 +10,7 @@ import {
   permissionsMenuItems,
   thinkingCommand,
   thinkingMenuItems,
+  updateCommand,
   type CommandMenuItem,
 } from './commands';
 import { Session } from '../runtime/session';
@@ -88,6 +89,14 @@ export const commandRegistry: CommandSpec[] = [
     name: 'info',
     description: 'show how each provider is signed in',
     run: (_args, _session, _notify, signal) => infoCommand(signal),
+  },
+  {
+    name: 'update',
+    description: 'install the latest published Sirus release',
+    run: (args, _session, notify, signal) => {
+      if (args.length > 0) throw new Error('Usage: /update');
+      return updateCommand(notify, signal);
+    },
   },
   {
     name: 'memory',
