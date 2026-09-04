@@ -1,4 +1,5 @@
 import { Session, type SessionStatus } from '../agent_runtime/session';
+import path from 'path';
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { Box, Text, useInput, type DOMElement } from 'ink';
 import { theme } from './styles/theme';
@@ -14,11 +15,37 @@ const SIDEBAR_TIME_FORMAT = new Intl.DateTimeFormat('en-US', {
   hour12: true,
 });
 
+const SIDEBAR_DATE_FORMAT = new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+  day: 'numeric',
+});
+
 export function formatSidebarTime(time: Date | number): string {
   return SIDEBAR_TIME_FORMAT.format(time);
 }
 
-export function SidebarHeader({ updateAvailable = false }: { updateAvailable?: boolean }) {
+// How long ago a session was last active, in the fewest characters: nothing
+// for a session that predates activity tracking.
+export function formatRelativeTime(then: number, now: number = Date.now()): string {
+  if (then <= 0) return '';
+  const seconds = Math.max(0, Math.round((now - then) / 1000));
+  if (seconds < 45) return 'now';
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.round(hours / 24);
+  if (days < 7) return `${days}d`;
+  return SIDEBAR_DATE_FORMAT.format(then);
+}
+
+// The most recently active session first. Ties keep their creation order.
+export function sessionsByRecency(sessions: readonly Session[]): Session[] {
+  return [...sessions].sort((left, right) => right.getLastActivity() - left.getLastActivity());
+}
+
+// The wall clock, refreshed on the minute, for the header and relative times.
+function useMinuteClock(): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout>;
@@ -32,6 +59,11 @@ export function SidebarHeader({ updateAvailable = false }: { updateAvailable?: b
     scheduleNextMinute();
     return () => clearTimeout(timer);
   }, []);
+  return now;
+}
+
+export function SidebarHeader({ updateAvailable = false }: { updateAvailable?: boolean }) {
+  const now = useMinuteClock();
 
   return (
     <Box justifyContent="space-between">
@@ -54,8 +86,12 @@ export function sessionStatusAppearance(status: SessionStatus, hasUnread: boolea
   return SESSION_STATUS_APPEARANCE[status === 'idle' && hasUnread ? 'unread' : status];
 }
 
-export function SessionItem({ session, isSelected, onSelect, onDelete }: {
-  session: Session; isSelected: boolean; onSelect: (session: Session) => void; onDelete: (session: Session) => void;
+export function SessionItem({ session, isSelected, onSelect, onDelete, now = Date.now() }: {
+  session: Session;
+  isSelected: boolean;
+  onSelect: (session: Session) => void;
+  onDelete: (session: Session) => void;
+  now?: number;
 }) {
   const ref = useRef<DOMElement>(null);
   const select = useCallback(() => onSelect(session), [onSelect, session]);
@@ -83,21 +119,36 @@ export function SessionItem({ session, isSelected, onSelect, onDelete }: {
   }, [assistantVersion, isSelected]);
 
   const status = sessionStatusAppearance(session.getStatus(), hasUnread && !isSelected);
+  const directory = path.basename(session.getDirectory()) || session.getDirectory();
+  const activity = formatRelativeTime(session.getLastActivity(), now);
 
   return (
-    <Box ref={ref} justifyContent="space-between">
-      <Box flexShrink={1}>
-        <Text color={status.color}>{status.symbol}</Text>
-        <Text color={hovered ? theme.highlight : isSelected ? theme.text : theme.textMuted} bold={isSelected} wrap="truncate-end"> {session.getName()}</Text>
-      </Box>
-      {hovered && (
-        <Box ref={deleteRef} marginLeft={1} flexShrink={0}>
-          <Text color={theme.textSubtle}>×</Text>
+    <Box ref={ref} flexDirection="column">
+      <Box justifyContent="space-between">
+        <Box flexShrink={1}>
+          <Text color={status.color}>{status.symbol}</Text>
+          <Text color={hovered ? theme.highlight : isSelected ? theme.text : theme.textMuted} bold={isSelected} wrap="truncate-end"> {session.getName()}</Text>
         </Box>
-      )}
+        {hovered && (
+          <Box ref={deleteRef} marginLeft={1} flexShrink={0}>
+            <Text color={theme.textSubtle}>×</Text>
+          </Box>
+        )}
+      </Box>
+      <Box justifyContent="space-between">
+        <Box flexShrink={1}>
+          <Text color={theme.textSubtle} dimColor wrap="truncate-end">  {directory}</Text>
+        </Box>
+        {activity && (
+          <Box marginLeft={1} flexShrink={0}>
+            <Text color={theme.textSubtle} dimColor>{activity}</Text>
+          </Box>
+        )}
+      </Box>
     </Box>
   );
 }
+
 export default function SideBar({ sessions, currSession, selectSession, addSession, deleteSession, updateAvailable = false }: {
   sessions: Session[]; currSession: Session | null; selectSession: (session: Session) => void; addSession: () => void; deleteSession: (session: Session) => void; updateAvailable?: boolean;
 }) {
@@ -105,17 +156,32 @@ export default function SideBar({ sessions, currSession, selectSession, addSessi
   useSelectionRegion(ref);
   const newSessionRef = useRef<DOMElement>(null);
   const newSessionHovered = useClickable(newSessionRef, addSession);
+  const now = useMinuteClock();
+  // Activity in any session can change the order, so the list follows them all.
+  const subscribeAll = useCallback((listener: () => void) => {
+    const unsubscribe = sessions.map(session => session.subscribe(listener));
+    return () => {
+      for (const stop of unsubscribe) stop();
+    };
+  }, [sessions]);
+  const versions = useCallback(() => sessions.map(session => session.getVersion()).join(','), [sessions]);
+  useSyncExternalStore(subscribeAll, versions);
+  const ordered = sessionsByRecency(sessions);
 
   useInput((input, key) => {
     if (key.ctrl && input === 'n') addSession();
     if (arrowKeysCaptured()) return;
-    if (sessions.length > 0 && key.downArrow) {
-      const currentIndex = currSession ? sessions.indexOf(currSession) : -1;
-      selectSession(sessions[(currentIndex + 1) % sessions.length]);
+    // Bare arrows belong to the input bar (prompt history); a modifier makes
+    // them session switching, whichever one the terminal reports.
+    const modified = key.shift || key.ctrl || key.meta;
+    if (!modified || ordered.length === 0) return;
+    if (key.downArrow) {
+      const currentIndex = currSession ? ordered.indexOf(currSession) : -1;
+      selectSession(ordered[(currentIndex + 1) % ordered.length]);
     }
-    if (sessions.length > 0 && key.upArrow) {
-      const currentIndex = currSession ? sessions.indexOf(currSession) : 0;
-      selectSession(sessions[(currentIndex - 1 + sessions.length) % sessions.length]);
+    if (key.upArrow) {
+      const currentIndex = currSession ? ordered.indexOf(currSession) : 0;
+      selectSession(ordered[(currentIndex - 1 + ordered.length) % ordered.length]);
     }
   })
 
@@ -136,8 +202,15 @@ export default function SideBar({ sessions, currSession, selectSession, addSessi
       <Box flexDirection="column">
         <SidebarHeader updateAvailable={updateAvailable} />
         <Box flexDirection="column" marginTop={2}>
-          {sessions.map((session) => (
-            <SessionItem key={session.getId()} session={session} isSelected={currSession?.getId() === session.getId()} onSelect={selectSession} onDelete={deleteSession} />
+          {ordered.map((session) => (
+            <SessionItem
+              key={session.getId()}
+              session={session}
+              isSelected={currSession?.getId() === session.getId()}
+              onSelect={selectSession}
+              onDelete={deleteSession}
+              now={now}
+            />
           ))}
         </Box>
       </Box>
@@ -148,7 +221,11 @@ export default function SideBar({ sessions, currSession, selectSession, addSessi
         </Box>
         <Box justifyContent="space-between">
           <Text color={theme.textMuted}>switch session</Text>
-          <Text color={theme.textSubtle}>↑↓</Text>
+          <Text color={theme.textSubtle}>shift+↑↓</Text>
+        </Box>
+        <Box justifyContent="space-between">
+          <Text color={theme.textMuted}>help</Text>
+          <Text color={theme.textSubtle}>/help</Text>
         </Box>
       </Box>
     </Box>

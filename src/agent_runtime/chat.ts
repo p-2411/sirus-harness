@@ -1,4 +1,4 @@
-import type { Message, MessageBlock, ToolCallBlock, ToolResultBlock } from './types';
+import type { Message, MessageBlock, ToolCallBlock, ToolResultBlock, Usage } from './types';
 import { modelStrategies, resolveStrategy } from './providers/providers';
 import { runTool } from './tools'
 import { abortable, throwIfAborted } from '../abort';
@@ -24,6 +24,9 @@ export interface Response {
   content: MessageBlock[];
   stop_reason: 'end_turn' | 'tool_use';
   continueWithToolResults?: (toolResults: readonly ToolResultBlock[]) => Promise<Response>;
+  // The tokens this response cost, when the provider reports them. A
+  // transport that ran the whole turn itself reports the turn's total.
+  usage?: Usage;
 }
 
 // Runs one turn to completion: provider requests and host-side tool calls
@@ -35,6 +38,7 @@ export async function getResponse(messages: readonly Message[], turn: TurnContex
     throwIfAborted(signal);
     const strategy: ModelStrategy = resolveStrategy(agent.model);
     let response: Response = await abortable(strategy.getResponse(messages, turn), signal);
+    if (response.usage) turn.addUsage(response.usage);
 
     while (response.stop_reason === 'tool_use') {
       throwIfAborted(signal);
@@ -60,6 +64,7 @@ export async function getResponse(messages: readonly Message[], turn: TurnContex
       }
       throwIfAborted(signal);
       response = await abortable(response.continueWithToolResults(toolResults), signal);
+      if (response.usage) turn.addUsage(response.usage);
     }
 
     throwIfAborted(signal);

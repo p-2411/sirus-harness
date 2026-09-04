@@ -1,4 +1,4 @@
-import type { Message, MessageBlock, ToolResultBlock } from '../../types';
+import type { Message, MessageBlock, ToolResultBlock, Usage } from '../../types';
 import { OpenAI } from 'openai';
 import type { Response } from '../../chat';
 import type { Transport } from '../provider';
@@ -6,6 +6,14 @@ import type { TurnContext } from '../../turn';
 import { systemPromptFor } from '../../prompt';
 import { availableTools } from '../../tools';
 import { fetchUrlCall, fetchUrlResult, webSearchCall, webSearchResult } from '../../tools/web';
+
+export function openAIUsage(usage: Pick<OpenAI.Responses.ResponseUsage, 'input_tokens' | 'output_tokens'>): Usage {
+  return {
+    inputTokens: usage.input_tokens,
+    outputTokens: usage.output_tokens,
+    contextTokens: usage.input_tokens + usage.output_tokens,
+  };
+}
 
 // The Responses API runs web search inside the request and reports the action
 // the model took: a search and the pages it consulted, a page it opened, or a
@@ -211,6 +219,11 @@ async function request(
   const finalResponse: Response = {
     stop_reason: 'end_turn',
     content: [],
+    ...(response.usage
+      ? {
+        usage: openAIUsage(response.usage),
+      }
+      : {}),
   };
   const titles = citationTitles(response.output);
 
