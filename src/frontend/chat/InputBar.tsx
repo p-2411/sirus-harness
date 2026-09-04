@@ -156,6 +156,8 @@ export type InputMode =
 
 interface InputBarProps {
   send: (input: string, attachments?: readonly ImageBlock[]) => void;
+  inputContent: string;
+  setInputContent: (inputContent: string) => void;
   disabled: boolean;
   feedback: Feedback | null;
   participants: readonly Participant[];
@@ -358,6 +360,8 @@ const NO_HISTORY: readonly string[] = [];
 
 export function InputBar({
   send,
+  inputContent,
+  setInputContent,
   disabled,
   feedback,
   participants,
@@ -374,8 +378,13 @@ export function InputBar({
   onQueue,
   contextUsage,
 }: InputBarProps) {
-  const [editor, setEditor] = useState<InputState>({ text: '', cursor: 0 });
-  const input = editor.text;
+  const [cursor, setCursor] = useState(inputContent.length);
+  const input = inputContent;
+  const editor: InputState = { text: inputContent, cursor };
+  function setEditor(next: InputState): void {
+    setCursor(next.cursor);
+    setInputContent(next.text);
+  }
   const participantColors = participantColorMap(participants);
   // Menu and secret state live apart from the draft so leaving either mode
   // brings back whatever the user had typed.
@@ -420,7 +429,7 @@ export function InputBar({
 
   const edit = (change: InputEdit) => {
     setRecall(null);
-    setEditor(state => applyInputEdit(state, change));
+    setEditor(applyInputEdit(editor, change));
   };
   const insertText = (text: string) => edit({ type: 'insert', text: normalizeNewlines(text) });
   const recallPrevious = () => {
@@ -522,11 +531,11 @@ export function InputBar({
       // inside a long prompt the arrows move between its lines; past its
       // first or last line they walk the session's earlier prompts
       if (key.upArrow && !onFirstLine(editor)) {
-        setEditor(state => applyInputEdit(state, { type: 'up' }));
+        setEditor(applyInputEdit(editor, { type: 'up' }));
         return;
       }
       if (key.downArrow && !onLastLine(editor)) {
-        setEditor(state => applyInputEdit(state, { type: 'down' }));
+        setEditor(applyInputEdit(editor, { type: 'down' }));
         return;
       }
       if (key.upArrow) recallPrevious();
@@ -551,11 +560,11 @@ export function InputBar({
     }
 
     if (key.leftArrow) {
-      setEditor(state => applyInputEdit(state, { type: 'left' }));
+      setEditor(applyInputEdit(editor, { type: 'left' }));
       return;
     }
     if (key.rightArrow) {
-      setEditor(state => applyInputEdit(state, { type: 'right' }));
+      setEditor(applyInputEdit(editor, { type: 'right' }));
       return;
     }
 
@@ -661,9 +670,9 @@ export function InputBar({
             </Text>
             {input ? (
               <Text color={theme.text} wrap="wrap">
-                <MentionText colors={participantColors}>{input.slice(0, editor.cursor)}</MentionText>
+                <MentionText colors={participantColors}>{input.slice(0, cursor)}</MentionText>
                 <Text color={theme.accentSoft}>▌</Text>
-                <MentionText colors={participantColors}>{input.slice(editor.cursor)}</MentionText>
+                <MentionText colors={participantColors}>{input.slice(cursor)}</MentionText>
               </Text>
             ) : (
               <>

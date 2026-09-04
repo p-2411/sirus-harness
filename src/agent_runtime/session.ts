@@ -46,6 +46,8 @@ export interface SessionSnapshot {
   participants: Participant[];
   defaultModel: Participant;
   messages: Message[];
+  // Absent in snapshots saved before session drafts were supported.
+  inputContent?: string;
   // How tool calls are approved in this session; absent in older snapshots.
   permissionMode?: PermissionMode;
   // Directory snapshots taken before turns, oldest first; absent when none.
@@ -138,6 +140,7 @@ export class Session {
   private permissionMode: PermissionMode;
   private checkpoints: Checkpoint[];
   private rewinding = false;
+  private inputContent: string;
   // When the history last changed; 0 for a restored session that predates
   // the field, so it sorts last and shows no time.
   private lastActivity: number;
@@ -159,6 +162,7 @@ export class Session {
     checkpoints: readonly Checkpoint[] = [],
     updatedAt: number = Date.now(),
     autoNamePending: boolean = false,
+    inputContent: string = '',
   ) {
     this.name = name;
     this.id = id;
@@ -173,6 +177,7 @@ export class Session {
     this.participants = restored.length > 0 ? restored : [this.defaultAgent];
     if (!this.participants.includes(this.defaultAgent)) this.participants.unshift(this.defaultAgent);
     this.messages = [...messages];
+    this.inputContent = inputContent;
   }
 
   static create(
@@ -209,6 +214,7 @@ export class Session {
         snapshot.checkpoints ?? [],
         snapshot.updatedAt ?? 0,
         snapshot.autoNamePending ?? false,
+        snapshot.inputContent ?? '',
       );
     }
     return new Session(
@@ -536,6 +542,16 @@ export class Session {
     this.notifyListeners();
   }
 
+  getInputContent(): string {
+    return this.inputContent;
+  }
+
+  setInputContent(inputContent: string): void {
+    if (this.inputContent === inputContent) return;
+    this.inputContent = inputContent;
+    this.notifyListeners();
+  }
+
   toSnapshot(): SessionSnapshot {
     return {
       id: this.id,
@@ -544,6 +560,7 @@ export class Session {
       participants: this.getParticipants(),
       defaultModel: this.getDefaultParticipant(),
       messages: [...this.messages],
+      inputContent: this.inputContent,
       permissionMode: this.permissionMode,
       ...(this.checkpoints.length > 0 ? { checkpoints: [...this.checkpoints] } : {}),
       updatedAt: this.lastActivity,
@@ -860,4 +877,5 @@ export class Session {
       beforeMutation: () => beforeMutation,
     };
   }
+
 }

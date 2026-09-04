@@ -76,6 +76,7 @@ const sessionSchema = z.object({
   participants: z.array(participantSchema).min(1).optional(),
   defaultModel: participantSchema.optional(),
   messages: z.array(messageSchema),
+  inputContent: z.string().optional(),
   // Unknown values fail the parse of that file; an absent one means the
   // default (auto approve).
   permissionMode: z.enum(['ask', 'auto', 'bypass']).optional(),
@@ -199,6 +200,7 @@ export function loadSessions(
           participants: snapshot.participants,
           defaultModel: snapshot.defaultModel,
           messages: snapshot.messages,
+          inputContent: snapshot.inputContent ?? '',
           ...(snapshot.permissionMode ? { permissionMode: snapshot.permissionMode } : {}),
           ...(snapshot.checkpoints ? { checkpoints: snapshot.checkpoints } : {}),
           ...(snapshot.updatedAt !== undefined ? { updatedAt: snapshot.updatedAt } : {}),

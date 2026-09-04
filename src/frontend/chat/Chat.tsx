@@ -453,6 +453,8 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
       </Box>
       <InputBar
         send={send}
+        inputContent={currSession.getInputContent()}
+        setInputContent={inputContent => currSession.setInputContent(inputContent)}
         disabled={isLoading}
         feedback={feedback}
         participants={participants}
