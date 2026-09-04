@@ -45,7 +45,7 @@
     "i": "bun run src/cli.ts",
     "start": "bun run src/cli.ts",
     "test": "bun test tests",
-    "typecheck": "tsc --noEmit -p tsconfig.base.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
     "release:check": "bun test && bun run typecheck && npm pack --dry-run",
     "prepublishOnly": "bun test && bun run typecheck"
   },
