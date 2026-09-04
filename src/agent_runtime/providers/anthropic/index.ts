@@ -1,6 +1,6 @@
 import { createProvider } from '../provider';
 import { apiTransport } from './api';
-import { subscriptionTransport } from './claude-subscription';
+import { subscriptionTransport, claudeSubscriptionTransport } from './claude-subscription';
 
 export const AnthropicProvider = createProvider({
   vendor: 'claude',
@@ -8,4 +8,5 @@ export const AnthropicProvider = createProvider({
   apiKey: { env: 'ANTHROPIC_API', owner: 'Anthropic' },
   api: apiTransport,
   subscription: subscriptionTransport,
+  subscriptionFor: claudeSubscriptionTransport,
 });

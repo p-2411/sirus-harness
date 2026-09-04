@@ -335,7 +335,7 @@ describe('credential commands', () => {
     const result = runCommand('login', ['claude', 'api', 'sk-ant-pasted-key-9876']);
     expect(result).toEqual({
       kind: 'success',
-      text: expect.stringContaining('claude-* models now use'),
+      text: expect.stringContaining('claude-* models try it first'),
     });
     expect((result as { text: string }).text).not.toContain('sk-ant-pasted-key-9876');
     expect((result as { text: string }).text).toContain('9876');
@@ -389,7 +389,7 @@ describe('credential commands', () => {
     expect(providerFor('gpt').source).toBe('api');
     expect(result).toEqual({
       kind: 'success',
-      text: expect.stringMatching(/Signed out of the ChatGPT subscription\. gpt-\* models now use the OpenAI API key \(sk-proj-…4321\)/),
+      text: 'Removed gpt subscription source.',
     });
   });
 
@@ -399,7 +399,7 @@ describe('credential commands', () => {
     expect(providerFor('claude').apiKey()).toBeNull();
     expect(result).toEqual({
       kind: 'success',
-      text: 'Removed your saved Anthropic API key. claude-* models are signed out; run /login to sign in.',
+      text: 'Removed claude api source. 0 source(s) remaining.',
     });
   });
 

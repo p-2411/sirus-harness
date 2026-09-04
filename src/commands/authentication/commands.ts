@@ -16,13 +16,13 @@ export const loginCommandSpec: CommandSpec = {
 
 export const logoutCommandSpec: CommandSpec = {
   name: 'logout',
-  args: '<claude|gpt>',
+  args: '<claude|gpt> [source-id]',
   description: 'sign out of the subscription or stored API key for a provider',
-  run: args => logoutCommand(args[0]),
+  run: args => logoutCommand(args[0], args[1]),
 };
 
 export const infoCommandSpec: CommandSpec = {
   name: 'info',
-  description: 'show subscription allowance, reset times, and session token usage',
+  description: 'show sources, remaining subscription allowance, and session token usage',
   run: (_args, execution) => infoCommand(execution.signal, execution.session),
 };

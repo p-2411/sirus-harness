@@ -17,15 +17,14 @@ describe('chat header', () => {
     expect(output).not.toContain('gpt-5.6-luna');
   });
 
-  test('uses the same one-line top inset as the sidebar header', () => {
+  test('sits on the first row, flush with the sidebar header', () => {
     const session = new Session('Project work', 'session-id', 'gpt-5.6-luna', [], '/projects/sirus');
     const output = stripAnsi(renderToString(
       <ChatHeader session={session} />,
       { columns: 100 },
     ));
 
-    expect(output.split('\n')[0]).toBe('');
-    expect(output.split('\n')[1]).toContain('PROJECT WORK');
+    expect(output.split('\n')[0]).toContain('PROJECT WORK');
   });
 
   test('lists participant names without their models', () => {

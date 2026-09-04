@@ -34,7 +34,7 @@ export function ChatHeader({ session }: { session: Session }) {
   const participants = session.getParticipants();
   const participantColors = participantColorMap(participants);
   return (
-    <Box paddingX={3} marginTop={1} justifyContent="space-between" flexShrink={0}>
+    <Box paddingX={3} justifyContent="space-between" flexShrink={0}>
       <Box flexShrink={1}>
         <Text wrap="truncate-middle">
           <Text color={theme.textMuted}>{session.getName().toUpperCase()}</Text>

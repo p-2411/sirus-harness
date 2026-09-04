@@ -55,28 +55,28 @@ describe('subscription allowance normalization', () => {
 });
 
 describe('allowance display', () => {
-  test('shows remaining allowance, used percent, local reset date and countdown', () => {
-    const now = Date.parse('2026-09-05T00:00:00Z');
-    const text = describeSubscriptionUsage({ windows: [
-      { label: '5-hour', usedPercent: 25, resetsAt: now + 2 * 3600_000 + 3 * 60_000 },
-      { label: '7-day', usedPercent: 100, resetsAt: now + 2 * 86400_000 },
-    ] }, now);
-    expect(text).toContain('shared across sessions');
-    expect(text).toContain('75% remaining · 25% used · resets');
-    expect(text).toContain('(in 2h 3m)');
-    expect(text).toContain('0% remaining · 100% used');
-    expect(text).toContain('(in 2d)');
+  test('selects the overall Codex bucket even when its display name changes', () => {
+    const usage = codexSubscriptionUsage({ rateLimitsByLimitId: {
+      spark: { primary: { usedPercent: 99, windowDurationMins: 300 } },
+      codex: { limitName: 'Coding', primary: { usedPercent: 12.5, windowDurationMins: 300 },
+        secondary: { usedPercent: 45, windowDurationMins: 10080 } },
+    } });
+    expect(describeSubscriptionUsage(usage)).toBe('  5 hour: 87.5%\n  7-day: 55%');
+  });
+  test('shows only the two overall remaining percentages', () => {
+    expect(describeSubscriptionUsage({ windows: [
+      { label: '5-hour', usedPercent: 25, resetsAt: 1234 },
+      { label: '7-day', usedPercent: 100, resetsAt: 1234 },
+      { label: '7-day Sonnet', usedPercent: 50, resetsAt: 1234 },
+    ] })).toBe('  5 hour: 75%\n  7-day: 0%');
   });
 
-  test('distinguishes missing data from unused allowance and elapsed resets', () => {
-    const text = describeSubscriptionUsage({ windows: [
-      { label: 'unknown', usedPercent: null, resetsAt: null },
-      { label: 'unused', usedPercent: 0, resetsAt: 1000 },
-    ] }, 2000);
-    expect(text).toContain('unknown: usage unavailable · reset time unavailable');
-    expect(text).toContain('unused: 100% remaining · 0% used');
-    expect(text).toContain('reset time passed; refresh /info');
+  test('distinguishes missing data from unused allowance', () => {
+    expect(describeSubscriptionUsage({ windows: [
+      { label: '5-hour', usedPercent: null, resetsAt: null },
+      { label: '7-day', usedPercent: 0, resetsAt: 1000 },
+    ] })).toBe('  5 hour: unavailable\n  7-day: 100%');
     expect(describeSubscriptionUsage({ windows: [], unavailable: 'request timed out' }))
-      .toBe('  allowance unavailable · request timed out');
+      .toBe('  5 hour: unavailable\n  7-day: unavailable');
   });
 });

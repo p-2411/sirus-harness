@@ -102,11 +102,12 @@ export class CodexRpc {
   static async start(
     clientInfo: { name: string; title: string; version: string },
     configOverrides: Record<string, unknown> = {},
+    environment: NodeJS.ProcessEnv = process.env,
   ): Promise<CodexRpc> {
     const overrideArgs = Object.entries(configOverrides).flatMap(([key, value]) => ['-c', `${key}=${toToml(value)}`]);
     const child = spawn(codexBinaryPath(), ['app-server', '--listen', 'stdio://', ...overrideArgs], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: process.env,
+      env: environment,
     });
     const rpc = new CodexRpc(child);
     process.once('exit', () => rpc.close());

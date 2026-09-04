@@ -1,4 +1,5 @@
-import { login, subscriptionDetail, type Notify } from '../../agent_runtime/providers/login';
+import { maskApiKey } from '../../agent_runtime/providers/provider';
+import { login, type Notify } from '../../agent_runtime/providers/login';
 import {
   parseVendor,
   providerFor,
@@ -9,8 +10,7 @@ import type { Session } from '../../agent_runtime/session';
 import { contextPercent, formatTokens } from '../../agent_runtime/usage';
 import type { Feedback } from '../feedback';
 import type { CommandMenuItem } from '../types';
-import { abortable, throwIfAborted } from '../../abort';
-import { readSubscriptionUsage, type SubscriptionUsage } from '../../agent_runtime/providers/usage';
+import { readSubscriptionUsage, remainingAllowance, formatRemaining, type SubscriptionUsage } from '../../agent_runtime/providers/usage';
 
 const VENDOR_NAMES: Record<Vendor, string> = { claude: 'Claude', gpt: 'ChatGPT' };
 
@@ -38,14 +38,14 @@ export function loginMenuItems(args: readonly string[] = []): CommandMenuItem[] 
       type: 'item',
       key: 'subscription',
       label: 'Subscription',
-      description: `sign in with your ${VENDOR_NAMES[vendor]} account in the browser`,
+      description: `add a ${VENDOR_NAMES[vendor]} subscription in the browser`,
       command: `/login ${vendor} subscription`,
     },
     {
       type: 'item',
       key: 'api',
       label: 'API key',
-      description: `paste an ${providerFor(vendor).apiKeyOwner} API key`,
+      description: `add an ${providerFor(vendor).apiKeyOwner} API key`,
       command: `/login ${vendor} api`,
       secret: { prompt: `Paste your ${providerFor(vendor).apiKeyOwner} API key` },
     },
@@ -73,85 +73,42 @@ export function loginCommand(
     const stored = provider.setApiKey(args[2]);
     return {
       kind: 'success',
-      text: `Saved your ${provider.apiKeyOwner} API key (${stored.masked}). ${modelsOf(vendor)} now use it.`,
+      text: `Saved your ${provider.apiKeyOwner} API key (${stored.masked}). ${modelsOf(vendor)} try it first, then your other sources.`,
     };
   }
   throw new Error(`Usage: /login ${vendor} subscription  or  /login ${vendor} api <key>`);
 }
 
-function remainingCredentials(vendor: Vendor): string {
-  const provider = providerFor(vendor);
-  const found = provider.apiKey();
-  if (!found) return `${modelsOf(vendor)} are signed out; run /login to sign in.`;
-  return found.source === 'settings'
-    ? `${modelsOf(vendor)} now use your saved ${provider.apiKeyOwner} API key (${found.masked}).`
-    : `${modelsOf(vendor)} now use the ${provider.apiKeyOwner} API key (${found.masked}).`;
-}
-
-export function logoutCommand(name: string | undefined): Feedback {
+export function logoutCommand(name: string | undefined, sourceId?: string): Feedback {
   const vendor = parseVendor(name);
   const provider = providerFor(vendor);
-  if (provider.source === 'subscription') {
-    provider.setSource('api');
-    return {
-      kind: 'success',
-      text: `Signed out of the ${VENDOR_NAMES[vendor]} subscription. ${remainingCredentials(vendor)}`,
-    };
+  const sources = provider.sources();
+  const target = sourceId
+    ? sources.find(source => source.id === sourceId || source.id.startsWith(sourceId))
+    : sources.find(source => source.type === provider.source && !('environment' in source));
+  if (sourceId && sources.filter(source => source.id.startsWith(sourceId)).length > 1) {
+    throw new Error('Source ID is ambiguous. Use the full ID from /info.');
   }
-  if (provider.clearApiKey()) {
-    return {
-      kind: 'success',
-      text: `Removed your saved ${provider.apiKeyOwner} API key. ${remainingCredentials(vendor)}`,
-    };
-  }
-  return { kind: 'info', text: `Nothing to sign out of for ${vendor}.` };
+  if (sourceId && !target) throw new Error('Unknown source. Use an ID from /info.');
+  if (!target || !provider.removeSource(target.id)) return { kind: 'info', text: `Nothing to sign out of for ${vendor}.` };
+  return { kind: 'success', text: `Removed ${vendor} ${target.type} source.` };
 }
 
 async function describeVendor(vendor: Vendor, signal?: AbortSignal): Promise<string> {
-  const status = providerFor(vendor).authStatus();
-  switch (status.mode) {
-    case 'subscription': {
-      const timeout = AbortSignal.timeout(10_000);
-      const bounded = signal ? AbortSignal.any([signal, timeout]) : timeout;
-      const [detail, usage] = await Promise.all([
-        abortable(subscriptionDetail(vendor, bounded), bounded).catch(() => {
-          throwIfAborted(signal);
-          return 'account status unavailable';
-        }),
-        readSubscriptionUsage(vendor, signal),
-      ]);
-      return `${vendor}: subscription · ${detail}\n${describeSubscriptionUsage(usage)}`;
-    }
-    case 'api':
-      return `${vendor}: API key · ${status.masked}`;
-    case 'none':
-      return `${vendor}: not configured`;
-  }
+  const sources = providerFor(vendor).sources();
+  if (!sources.length) return `${vendor}: not configured`;
+  const rows = await Promise.all(sources.map(async source => {
+    const peers = sources.filter(item => item.type === source.type);
+    const title = `${vendor}${peers.length > 1 ? ` ${peers.indexOf(source) + 1}` : ''}`;
+    if (source.type === 'api') return `${title}: API key · ${maskApiKey(source.key)} · ${source.id}`;
+    const usage = await readSubscriptionUsage(vendor, signal, source.profile);
+    return `${title}: subscription · ${source.id}\n${describeSubscriptionUsage(usage)}`;
+  }));
+  return rows.join('\n');
 }
 
-const RESET_TIME = new Intl.DateTimeFormat(undefined, {
-  month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
-});
-
-export function describeSubscriptionUsage(usage: SubscriptionUsage, now: number = Date.now()): string {
-  if (usage.windows.length === 0) return `  allowance unavailable · ${usage.unavailable ?? 'not reported by provider'}`;
-  const lines = usage.windows.map(window => {
-    const amount = window.usedPercent === null
-      ? 'usage unavailable'
-      : `${Number((100 - window.usedPercent).toFixed(1))}% remaining · ${Number(window.usedPercent.toFixed(1))}% used`;
-    let reset = 'reset time unavailable';
-    if (window.resetsAt !== null) {
-      const minutes = Math.max(0, Math.ceil((window.resetsAt - now) / 60_000));
-      const days = Math.floor(minutes / 1440);
-      const hours = Math.floor(minutes % 1440 / 60);
-      const remaining = minutes % 60;
-      const relative = minutes === 0 ? 'reset time passed; refresh /info'
-        : `in ${[days ? `${days}d` : '', hours ? `${hours}h` : '', remaining ? `${remaining}m` : ''].filter(Boolean).join(' ')}`;
-      reset = `resets ${RESET_TIME.format(window.resetsAt)} (${relative})`;
-    }
-    return `    ${window.label}: ${amount} · ${reset}`;
-  });
-  return ['  allowance (shared across sessions):', ...lines].join('\n');
+export function describeSubscriptionUsage(usage: SubscriptionUsage, _now?: number): string {
+  return `  5 hour: ${formatRemaining(remainingAllowance(usage, '5-hour'))}\n  7-day: ${formatRemaining(remainingAllowance(usage, '7-day'))}`;
 }
 
 // What the session has spent so far and how full its window is, when any

@@ -4,6 +4,7 @@ import { Box, Text, useInput, type DOMElement } from 'ink';
 import { theme } from './styles/theme';
 import { useSelectionRegion } from './interaction/useTextSelection';
 import { useClickable } from './interaction/clickable';
+import SubscriptionLimits from './SubscriptionLimits';
 
 export const SIDEBAR_WIDTH = 26;
 // Left padding, the status dot, right padding, and the divider.
@@ -187,7 +188,7 @@ export default function SideBar({ sessions, currSession, selectSession, addSessi
       overflow="hidden"
       flexDirection="column"
       paddingX={1}
-      paddingY={1}
+      paddingBottom={1}
       borderStyle="single"
       borderColor={theme.border}
       borderTop={false}
@@ -199,6 +200,7 @@ export default function SideBar({ sessions, currSession, selectSession, addSessi
         <Box height={1} flexShrink={0} flexDirection="column">
           {!collapsed && <SidebarHeader updateAvailable={updateAvailable} />}
         </Box>
+        {!collapsed && <SubscriptionLimits />}
         <Box flexDirection="column" marginTop={2}>
           {ordered.map((session) => (
             <SessionItem

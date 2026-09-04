@@ -7,7 +7,8 @@ import { CodexRpc } from '../../src/agent_runtime/providers/openai/codex-rpc';
 import { shutdownCodexRuntime } from '../../src/agent_runtime/providers/openai/codex-subscription';
 import { providerFor } from '../../src/agent_runtime/providers/providers';
 import { infoCommand } from '../../src/commands/authentication/behavior';
-import { readSubscriptionUsage } from '../../src/agent_runtime/providers/usage';
+import { cachedSubscriptionRemaining, readSubscriptionUsage } from '../../src/agent_runtime/providers/usage';
+import { loadSubscriptionLimitCache, saveSubscriptionLimitCache } from '../../src/persistence';
 import { TurnCancelledError } from '../../src/abort';
 
 describe('/info subscription allowance', () => {
@@ -52,18 +53,18 @@ describe('/info subscription allowance', () => {
     session.append({ role: 'assistant', content: [{ type: 'text', text: 'Done' }],
       usage: { inputTokens: 1000, outputTokens: 200, contextTokens: 1200, contextWindow: 400_000 } });
     const result = await infoCommand(undefined, session);
-    expect(result.text).toContain('gpt: subscription · plus plan');
-    expect(result.text).toContain('70% remaining · 30% used');
+    expect(result.text).toContain('gpt: subscription · default');
+    expect(result.text).toContain('5 hour: 70%');
     expect(result.text).toContain('session: 1k in · 200 out · context 1.2k');
     expect(request.mock.calls.map(([method]) => method).sort())
-      .toEqual(['account/rateLimits/read', 'account/read']);
+      .toEqual(['account/rateLimits/read']);
   });
 
-  test('a quota read failure does not hide account or session data', async () => {
+  test('a quota read failure displays unavailable without hiding session data', async () => {
     fakeRuntime(() => { throw new Error('Unavailable'); });
     const result = await infoCommand(undefined, new Session());
-    expect(result.text).toContain('plus plan');
-    expect(result.text).toContain('allowance unavailable');
+    expect(result.text).toContain('gpt: subscription');
+    expect(result.text).toContain('5 hour: unavailable');
     expect(result.text).toContain('session: token usage unavailable');
     expect(result.text).not.toContain('100% remaining');
   });
@@ -77,5 +78,42 @@ describe('/info subscription allowance', () => {
     await ready;
     controller.abort(new TurnCancelledError());
     await expect(pending).rejects.toThrow('Cancelled');
+  });
+
+  test('persists successful reads by account and keeps the cache when refresh fails', async () => {
+    let fail = false;
+    fakeRuntime(() => {
+      if (fail) throw new Error('offline');
+      return { rateLimits: { secondary: { usedPercent: 100, windowDurationMins: 10080 } } };
+    });
+    await readSubscriptionUsage('gpt', undefined, 'work');
+    expect(loadSubscriptionLimitCache()).toMatchObject([
+      { vendor: 'gpt', profile: 'work', period: '7-day', remaining: 0 },
+    ]);
+    expect(cachedSubscriptionRemaining('gpt', 'work', '7-day')).toBe(0);
+    expect(cachedSubscriptionRemaining('gpt', 'personal', '7-day')).toBeUndefined();
+    expect(cachedSubscriptionRemaining('claude', 'work', '7-day')).toBeUndefined();
+    expect(cachedSubscriptionRemaining('gpt', 'work', '5-hour')).toBeUndefined();
+    fail = true;
+    await readSubscriptionUsage('gpt', undefined, 'work');
+    expect(cachedSubscriptionRemaining('gpt', 'work', '7-day')).toBe(0);
+  });
+
+  test('expires cached windows and clears account values on removal or reauthentication', () => {
+    const now = Date.now();
+    const current = providerFor('gpt');
+    current.addSubscription('work');
+    const entry = { vendor: 'gpt' as const, profile: 'work', period: '7-day' as const,
+      remaining: 42, checkedAt: now, resetsAt: now + 1000 };
+    saveSubscriptionLimitCache([entry]);
+    expect(cachedSubscriptionRemaining('gpt', 'work', '7-day', now)).toBe(42);
+    expect(cachedSubscriptionRemaining('gpt', 'work', '7-day', now + 1000)).toBeUndefined();
+    saveSubscriptionLimitCache([{ ...entry, resetsAt: null }]);
+    expect(cachedSubscriptionRemaining('gpt', 'work', '7-day', now + 7 * 86400_000)).toBeUndefined();
+    current.addSubscription('work');
+    expect(cachedSubscriptionRemaining('gpt', 'work', '7-day', now)).toBeUndefined();
+    saveSubscriptionLimitCache([entry]);
+    current.removeSource('work');
+    expect(cachedSubscriptionRemaining('gpt', 'work', '7-day', now)).toBeUndefined();
   });
 });

@@ -73,20 +73,22 @@ provider runtime only carries the model.
 
 - `/login` — opens a picker in the input bar: first Claude or ChatGPT, then
   Subscription or API key. Choosing Subscription runs the provider's browser
-  flow (or detects an existing login). Choosing API key asks for the key
+  flow (or detects an existing login for the first source). Repeat to add another
+  subscription account. Choosing API key adds a key and asks for it
   with its characters hidden.
 - `/login claude` / `/login gpt` — skips straight to the second step.
 - `/login claude subscription` / `/login claude api <key>` (likewise for
-  `gpt`) — the text forms the picker sends, for typing directly.
-- `/info` — shows each provider and how it is signed in: the subscription plan
-  and account, or the API key (masked) and whether it came from Sirus or the
-  environment. It also totals the tokens this session's responses have
-  reported and how full the model's context window is.
+  `gpt`) — add a source directly. Repeat to save multiple keys or subscriptions.
+- `/info` — lists saved sources and their IDs, with API keys masked. Each
+  subscription shows only `5 hour: <percent>%` and `7-day: <percent>%`, both
+  remaining allowance. Unreported limits show `unavailable`. Session token
+  totals and context usage appear below the provider sources.
 - `/update` — checks npm for the latest published release and installs it
   globally. When one is available, green `/update` replaces the sidebar clock.
   Restart Sirus after it finishes. Source checkouts use `git pull`.
-- `/logout claude|gpt` — signs out of whatever is active for that provider:
-  the subscription if it is on, otherwise the stored API key.
+- `/logout claude|gpt [source-id]` — removes one source. Copy an ID from `/info`
+  to select it; omit the ID to remove the first source of the preferred type.
+  Other saved sources stay available. Environment keys are managed in your shell.
 - `/memory [on|off]` — shows or toggles agent access to persistent memory.
 - `/thinking [participant] [low|medium|high|xhigh|max]` — opens a picker or
   sets one participant's reasoning depth. The default is `high`.
@@ -97,10 +99,32 @@ provider runtime only carries the model.
   its first prompt until it is renamed.
 - `/help` — lists every command and keyboard shortcut.
 
-A pasted key takes precedence over the `ANTHROPIC_API` and `OPENAI_SECRET`
-environment variables, which still work as a fallback. Sirus never reads or
-stores the subscription credentials; they stay in Claude Code's and Codex's
-own stores.
+Newly added sources are tried first within their type. The latest login chooses
+whether subscriptions or API keys are preferred; other types remain available
+as fallbacks. Requests try each remaining source when one fails, including tool
+continuations. Successful fallback sources stay preferred for that agent runtime.
+Cancellation stops immediately. A subscription tool with an unknown outcome
+stops the turn to avoid repeating work. If all sources fail, Sirus reports the
+failures with credentials masked.
+
+The `ANTHROPIC_API` and `OPENAI_SECRET` environment keys remain final API
+fallbacks, with duplicates skipped. Existing saved keys and subscription logins
+are retained. Additional subscription accounts use separate provider-managed
+credential stores under Sirus's `subscriptions` directory, following
+[Claude's account configuration](https://code.claude.com/docs/en/env-vars) and
+[Codex's credential storage](https://developers.openai.com/codex/auth/).
+Sirus does not read subscription tokens.
+
+Under the sidebar header, each provider shows only its currently used
+subscription's remaining allowance: seven-day for Codex and five-hour for
+Claude, such as `codex: 75%` and `claude: 40%`. Before the first request,
+this is the preferred source; with
+concurrent sessions, it follows the most recently started request. Fallback
+switches the displayed account immediately. Providers using an API key have
+no subscription row. Limits refresh every minute and when sources change,
+without sending model prompts. The last known limits are cached per account
+across restarts and shown while fresh limits load. Cached values expire at
+the reported reset (or after one limit window when no reset is reported).
 
 Sessions, their complete message history, the selected session, each
 provider's subscription choice, and any pasted API keys are saved locally and

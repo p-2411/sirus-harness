@@ -35,7 +35,7 @@ const inlineRenderers: Record<string, InlineRenderer> = {
     <Text key={key} strikethrough>{renderInline(token.tokens, key, context.participantColors)}</Text>
   )),
   codespan: renderer<Tokens.Codespan>((token, key) => (
-    <Text key={key} color={theme.accentSoft} inverse>{` ${token.text} `}</Text>
+    <Text key={key} color={theme.accentSoft}>{` ${token.text} `}</Text>
   )),
   link: renderer<Tokens.Link>((token, key, context) => (
     <Text key={key} color={theme.highlight} underline>

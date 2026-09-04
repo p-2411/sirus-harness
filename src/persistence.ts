@@ -97,12 +97,23 @@ const sessionFileSchema = z.object({
   sessions: z.array(sessionSchema),
 });
 
+const providerSourceSchema = z.discriminatedUnion('type', [
+  z.object({ id: z.string().min(1), type: z.literal('api'), key: z.string().min(1) }),
+  z.object({ id: z.string().min(1), type: z.literal('subscription'), profile: z.string().regex(/^(default|[a-zA-Z0-9_-]+)$/), label: z.string().optional() }),
+]);
+export type StoredProviderSource = z.infer<typeof providerSourceSchema>;
+export type StoredProviderSources = Partial<Record<'claude' | 'gpt', StoredProviderSource[]>>;
+
 const settingsFileSchema = z.object({
   version: z.literal(1),
   subscriptions: z.object({
     claude: z.boolean(),
     gpt: z.boolean(),
   }),
+  providerSources: z.object({
+    claude: z.array(providerSourceSchema).optional(),
+    gpt: z.array(providerSourceSchema).optional(),
+  }).optional(),
   memory: z.object({
     enabled: z.boolean(),
   }).optional(),
@@ -261,6 +272,7 @@ function writeSettings(directory: string, changes: Partial<Omit<SettingsFile, 'v
     subscriptions: current?.subscriptions ?? { ...DEFAULT_SUBSCRIPTIONS },
     memory: current?.memory,
     apiKeys: current?.apiKeys,
+    providerSources: current?.providerSources,
     sirusModel: current?.sirusModel,
     notifications: current?.notifications,
     ...changes,
@@ -317,4 +329,46 @@ export function saveSirusModelPreference(
   directory: string = dataDirectory(),
 ): boolean {
   return writeSettings(directory, { sirusModel: model });
+}
+
+export function loadProviderSources(): StoredProviderSources {
+  return readSettings(dataDirectory())?.providerSources ?? {};
+}
+
+export function saveProviderSources(providerSources: StoredProviderSources): boolean {
+  // Once migrated, credentials live only in the source list. Removing a
+  // source must also remove the key instead of leaving a legacy copy behind.
+  const apiKeys = loadApiKeys();
+  for (const vendor of ['claude', 'gpt'] as const) {
+    if (providerSources[vendor]) delete apiKeys[vendor];
+  }
+  return writeSettings(dataDirectory(), { providerSources, apiKeys });
+}
+
+const subscriptionLimitCacheSchema = z.object({
+  version: z.literal(1),
+  entries: z.array(z.object({
+    vendor: z.enum(['claude', 'gpt']),
+    profile: z.string(),
+    period: z.enum(['5-hour', '7-day']),
+    remaining: z.number().min(0).max(100),
+    checkedAt: z.number().finite(),
+    resetsAt: z.number().finite().nullable(),
+  })),
+});
+export type CachedSubscriptionLimit = z.infer<typeof subscriptionLimitCacheSchema>['entries'][number];
+
+export function loadSubscriptionLimitCache(directory = dataDirectory()): CachedSubscriptionLimit[] {
+  const parsed = subscriptionLimitCacheSchema.safeParse(readJson(path.join(directory, 'subscription-limits.json')));
+  return parsed.success ? parsed.data.entries : [];
+}
+
+export function saveSubscriptionLimitCache(entries: CachedSubscriptionLimit[], directory = dataDirectory()): boolean {
+  return writeJson(path.join(directory, 'subscription-limits.json'), { version: 1, entries });
+}
+
+export function clearSubscriptionLimitCache(vendor: CachedSubscriptionLimit['vendor'], profile: string): void {
+  const entries = loadSubscriptionLimitCache();
+  const remaining = entries.filter(entry => entry.vendor !== vendor || entry.profile !== profile);
+  if (remaining.length !== entries.length) saveSubscriptionLimitCache(remaining);
 }
