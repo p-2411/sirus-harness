@@ -89,6 +89,7 @@ interface Turn {
 
 interface CodexSession {
   threadId: string;
+  agent: TurnContext['agent'];
   model: string;
   turn: Turn | null;
   hasSpoken: boolean;
@@ -244,7 +245,13 @@ async function handleToolCall(params: Json): Promise<unknown> {
   };
   turn.blocks.push(toolCall);
   publishTurn(turn);
-  const result = await runTool(toolCall, session.directory, turn.signal, turn.permissions);
+  const result = await runTool(
+    toolCall,
+    session.directory,
+    turn.signal,
+    turn.permissions,
+    session.agent,
+  );
   turn.blocks.push(result);
   publishTurn(turn);
   return {
@@ -307,6 +314,7 @@ async function ensureSession(rpc: CodexRpc, turn: TurnContext): Promise<CodexSes
   const thread = response.thread as Json;
   const session: CodexSession = {
     threadId: String(thread.id),
+    agent,
     model,
     turn: null,
     hasSpoken: false,

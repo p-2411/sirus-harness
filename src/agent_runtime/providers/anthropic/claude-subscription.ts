@@ -59,6 +59,7 @@ interface ClaudeSession {
   query: Query;
   iterator: AsyncIterator<SDKMessage>;
   send: (text: string) => void;
+  agent: TurnContext['agent'];
   model: string;
   thinkingLevel: ThinkingLevel;
   turn: Turn | null;
@@ -136,7 +137,13 @@ async function handleToolCall(session: ClaudeSession, name: string, args: Record
   turn.resolved.add(toolCall.id);
   publishTurn(turn);
 
-  const result = await runTool(toolCall, session.directory, turn.signal, turn.permissions);
+  const result = await runTool(
+    toolCall,
+    session.directory,
+    turn.signal,
+    turn.permissions,
+    session.agent,
+  );
   turn.blocks.push(result);
   publishTurn(turn);
   return result;
@@ -263,6 +270,7 @@ function createSession(turn: TurnContext): ClaudeSession {
   const participantName = agent.name;
   const inbox = createInbox();
   const session: Partial<ClaudeSession> = {
+    agent,
     model,
     thinkingLevel,
     turn: null,
