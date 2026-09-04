@@ -5,7 +5,7 @@ import {
   ParticipantMenu,
   participantMenuItems,
 } from '../../src/frontend/chat/ParticipantMenu';
-import type { Participant } from '../../src/runtime/session';
+import type { Participant } from '../../src/agent_runtime/session';
 
 const participants: Participant[] = [
   { name: 'sirus', model: 'gpt-5.6-luna' },

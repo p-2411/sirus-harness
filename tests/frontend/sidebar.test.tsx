@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import { renderToString } from 'ink';
 import stripAnsi from 'strip-ansi';
-import { modelStrategies } from '../../src/agent/chat';
-import { Session } from '../../src/runtime/session';
+import { modelStrategies } from '../../src/agent_runtime/chat';
+import { Session } from '../../src/agent_runtime/session';
 import {
   SESSION_STATUS_APPEARANCE,
   formatSidebarTime,
@@ -10,7 +10,7 @@ import {
   SessionItem,
 } from '../../src/frontend/Sidebar';
 import Sidebar from '../../src/frontend/Sidebar';
-import { theme } from '../../src/frontend/theme';
+import { theme } from '../../src/frontend/styles/theme';
 
 const noOp = () => {};
 

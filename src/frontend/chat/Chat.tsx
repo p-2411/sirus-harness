@@ -1,17 +1,22 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
-import type { Message } from '../../data/data';
-import { Session } from '../../runtime/session';
+import type { Message } from '../../agent_runtime/types';
+import { Session } from '../../agent_runtime/session';
 import { Box, Text, measureElement, renderToString, useBoxMetrics, useInput, useStdout, type DOMElement } from 'ink';
-import { theme } from '../theme';
-import { HORSE } from '../horse';
+import { theme } from '../styles/theme';
+import { HORSE } from '../branding/horse';
 import { ChatMessage } from './ChatMessage';
 import { Spinner } from './Spinner';
 import { InputBar, type InputMode } from './InputBar';
-import { commandMenu, executeCommand, type CommandMenuItem } from '../../commands/command_register';
-import { parseMouseWheel } from '../mouse';
+import {
+  commandMenu,
+  executeCommand,
+  type CommandMenuEntry,
+  type CommandMenuItem,
+} from '../../commands/registry';
+import { parseMouseWheel } from '../interaction/mouse';
 import { SIDEBAR_WIDTH } from '../Sidebar';
-import { useSelectionRegion } from '../useTextSelection';
-import type { Feedback } from '../../feedback';
+import { useSelectionRegion } from '../interaction/useTextSelection';
+import type { Feedback } from '../../commands/feedback';
 import { participantColorMap } from '../MentionText';
 import { isAbortError, TurnCancelledError } from '../../abort';
 import {
@@ -20,8 +25,8 @@ import {
   pendingApprovals,
   resolveApproval,
   subscribePermissions,
-} from '../../agent/permissions';
-import { permissionsCommand } from '../../commands/commands';
+} from '../../agent_runtime/permissions/permissions';
+import { permissionsCommand } from '../../commands/session/behavior';
 // import { AppState, useModel } from '../../state';
 
 export function ChatHeader({ session }: { session: Session }) {
@@ -51,7 +56,7 @@ export function ChatHeader({ session }: { session: Session }) {
 export default function Chat({ currSession, onStartSession, onSirusModelChange }: {
   currSession: Session;
   onStartSession?: (session: Session) => void;
-  onSirusModelChange?: (model: string) => void;
+  onSirusModelChange: (model: string) => void;
 }) {
   // Subscribe to the session: any mutation (append, setModel) bumps its
   // version and re-renders, so model and messages are read fresh below.
@@ -146,7 +151,7 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
   // A command with choices (like /login) turns the input bar into a
   // picker; the chosen item is sent as if the user had typed it, after any
   // secret it asks for.
-  const openMenu = (items: readonly CommandMenuItem[]) => {
+  const openMenu = (items: readonly CommandMenuEntry[]) => {
     const close = () => setInputMode({ type: 'text' });
     const choose = (item: CommandMenuItem) => {
       if (!item.secret) {
@@ -172,7 +177,7 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
       const command: string = text.split(' ')[0].slice(1);
       const args: string[] = text.split(' ').slice(1).filter(Boolean);
       setFeedback(null);
-      let menu: CommandMenuItem[] | null;
+      let menu: CommandMenuEntry[] | null;
       try {
         menu = commandMenu(command, args);
       } catch (e) {
@@ -188,9 +193,12 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
       commandAbort.current = controller;
       let result;
       try {
-        result = executeCommand(command, args, currSession, text => {
-          setFeedback({ kind: 'info', text });
-        }, controller.signal, { changeSirusModel: onSirusModelChange });
+        result = executeCommand(command, args, {
+          session: currSession,
+          setSirusModel: onSirusModelChange,
+          notify: text => setFeedback({ kind: 'info', text }),
+          signal: controller.signal,
+        });
       } catch (e) {
         commandAbort.current = null;
         setFeedback({ kind: 'error', text: e instanceof Error ? e.message : 'Something went wrong.' });

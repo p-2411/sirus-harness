@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Text } from 'ink';
-import { theme } from '../theme';
+import { theme } from '../styles/theme';
 
 export function Spinner() {
   const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];

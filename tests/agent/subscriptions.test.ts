@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import { promptWithSharedHistory, transcript } from '../../src/agent/subscriptions';
-import type { Message } from '../../src/data/data';
+import { promptWithSharedHistory, transcript } from '../../src/agent_runtime/providers/subscription';
+import type { Message } from '../../src/agent_runtime/types';
 
 describe('subscription shared history', () => {
   test('identifies participants in a plain-text transcript', () => {

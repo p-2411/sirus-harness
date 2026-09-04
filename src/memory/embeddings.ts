@@ -1,6 +1,6 @@
 import { mkdirSync } from 'fs';
 import { join } from 'path';
-import { dataDirectory } from '../data/persistence';
+import { dataDirectory } from '../persistence';
 
 export interface EmbeddingProvider {
   readonly model: string;

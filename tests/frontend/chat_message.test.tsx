@@ -6,7 +6,7 @@ import {
   messageSegments,
   ToolRunGroup,
 } from '../../src/frontend/chat/ChatMessage';
-import type { MessageBlock, ToolCallBlock, ToolResultBlock } from '../../src/data/data';
+import type { MessageBlock, ToolCallBlock, ToolResultBlock } from '../../src/agent_runtime/types';
 
 const calls: ToolCallBlock[] = [
   { type: 'tool_call', id: 'call-1', name: 'ReadFile', arguments: { path: 'one.ts' } },

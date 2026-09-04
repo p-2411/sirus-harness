@@ -3,10 +3,38 @@ import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, beforeEach } from 'bun:test';
-import { commandMenu, executeCommand, loginMenuItems, matchCommands } from '../../src/commands/command_register';
-import { Session } from '../../src/data/data';
-import { findApiKey } from '../../src/agent/credentials';
-import { isSubscriptionEnabled, setSubscriptionEnabled } from '../../src/agent/subscriptions';
+import {
+  commandMenu,
+  executeCommand,
+  loginMenuItems,
+  matchCommands,
+  type CommandExecution,
+  type CommandMenuItem,
+} from '../../src/commands/registry';
+import { Session } from '../../src/agent_runtime/session';
+import { providerFor } from '../../src/agent_runtime/providers/providers';
+
+function runCommand(
+  command: string,
+  args: string[],
+  session: Session = new Session(),
+  setSirusModel: CommandExecution['setSirusModel'] = () => {
+    throw new Error('This command unexpectedly tried to change the global Sirus model');
+  },
+) {
+  return executeCommand(command, args, {
+    session,
+    setSirusModel,
+    notify: () => {},
+    signal: new AbortController().signal,
+  });
+}
+
+function menuItems(command: string, args: readonly string[]): CommandMenuItem[] {
+  return commandMenu(command, args)?.filter(
+    (entry): entry is CommandMenuItem => entry.type === 'item',
+  ) ?? [];
+}
 
 describe('matchCommands', () => {
   test('bare slash lists every command', () => {
@@ -39,41 +67,44 @@ describe('matchCommands', () => {
 });
 
 describe('executeCommand', () => {
-  test('model command sets the session model', () => {
-    const session = new Session();
-    expect(executeCommand('model', ['claude-fable-5'], session)).toEqual({
-      kind: 'success',
-      text: '@sirus model changed to claude-fable-5.',
-    });
-    expect(session.getModel()).toBe('claude-fable-5');
-  });
-
-  test('model command delegates Sirus changes to the workspace when available', () => {
+  test('model command changes the global Sirus model', () => {
     const session = new Session();
     let globalModel: string | undefined;
-    expect(executeCommand(
-      'model',
-      ['gpt-5.6-sol'],
-      session,
-      undefined,
-      undefined,
-      { changeSirusModel: model => { globalModel = model; } },
-    )).toEqual({
+    expect(runCommand('model', ['claude-fable-5-1'], session, model => { globalModel = model; })).toEqual({
       kind: 'success',
-      text: '@sirus model changed to gpt-5.6-sol.',
+      text: '@sirus model changed to claude-fable-5-1.',
     });
-    expect(globalModel).toBe('gpt-5.6-sol');
+    expect(globalModel).toBe('claude-fable-5-1');
     expect(session.getModel()).toBe('gpt-5.6-luna');
   });
 
   test('model command changes a named participant and accepts its @ prefix', () => {
     const session = new Session();
     session.addParticipant('reviewer', 'gpt-5.6-terra');
-    expect(executeCommand('model', ['@reviewer', 'claude-fable-5'], session)).toEqual({
+    expect(runCommand('model', ['@reviewer', 'claude-fable-5-1'], session)).toEqual({
       kind: 'success',
-      text: '@reviewer model changed to claude-fable-5.',
+      text: '@reviewer model changed to claude-fable-5-1.',
     });
-    expect(session.getParticipants()[1]).toEqual({ name: 'reviewer', model: 'claude-fable-5' });
+    expect(session.getParticipants()[1]).toEqual({ name: 'reviewer', model: 'claude-fable-5-1' });
+  });
+
+  test('model command groups selectable models under provider headings', () => {
+    const menu = commandMenu('model', [])!;
+    expect(menu.filter(entry => entry.type === 'heading').map(entry => entry.label)).toEqual([
+      'Anthropic',
+      'OpenAI',
+    ]);
+    expect(menuItems('model', []).map(item => item.command)).toEqual([
+      '/model claude-opus-5',
+      '/model claude-sonnet-5',
+      '/model claude-haiku-4.5',
+      '/model claude-fable-5-1',
+      '/model gpt-5.6-luna',
+      '/model gpt-5.6-terra',
+      '/model gpt-5.6-sol',
+    ]);
+    expect(menuItems('model', ['@reviewer'])[0].command).toBe('/model @reviewer claude-opus-5');
+    expect(commandMenu('model', ['gpt-5.6-sol'])).toBeNull();
   });
 
   test('clear command empties only the current session history', () => {
@@ -82,7 +113,7 @@ describe('executeCommand', () => {
     current.append({ role: 'user', content: [{ type: 'text', text: 'clear me' }] });
     other.append({ role: 'user', content: [{ type: 'text', text: 'keep me' }] });
 
-    expect(executeCommand('clear', [], current)).toEqual({
+    expect(runCommand('clear', [], current)).toEqual({
       kind: 'success',
       text: 'Session history cleared.',
     });
@@ -92,7 +123,7 @@ describe('executeCommand', () => {
 
   test('model command rejects unknown models', () => {
     const session = new Session();
-    expect(() => executeCommand('model', ['gpt-2'], session)).toThrow(/unknown model/i);
+    expect(() => runCommand('model', ['gpt-2'], session)).toThrow(/unknown model/i);
   });
 
   test('thinking command defaults to high and sets Sirus or a named participant', () => {
@@ -100,29 +131,29 @@ describe('executeCommand', () => {
     session.addParticipant('reviewer', 'claude-sonnet-5');
 
     expect(session.getThinkingLevel()).toBe('high');
-    expect(executeCommand('thinking', ['low'], session)).toEqual({
+    expect(runCommand('thinking', ['low'], session)).toEqual({
       kind: 'success',
       text: '@sirus thinking level changed to low.',
     });
-    expect(executeCommand('thinking', ['@reviewer', 'max'], session)).toEqual({
+    expect(runCommand('thinking', ['@reviewer', 'max'], session)).toEqual({
       kind: 'success',
       text: '@reviewer thinking level changed to max.',
     });
     expect(session.getThinkingLevel()).toBe('low');
     expect(session.getThinkingLevel('reviewer')).toBe('max');
-    expect(() => executeCommand('thinking', ['turbo'], session)).toThrow(/unknown thinking level/i);
-    expect(() => executeCommand('thinking', ['sirus', 'turbo'], session)).toThrow(/unknown thinking level/i);
+    expect(() => runCommand('thinking', ['turbo'], session)).toThrow(/unknown thinking level/i);
+    expect(() => runCommand('thinking', ['sirus', 'turbo'], session)).toThrow(/unknown thinking level/i);
   });
 
   test('thinking command offers a picker for Sirus or a named participant', () => {
-    expect(commandMenu('thinking', [])?.map(item => item.command)).toEqual([
+    expect(menuItems('thinking', []).map(item => item.command)).toEqual([
       '/thinking low',
       '/thinking medium',
       '/thinking high',
       '/thinking xhigh',
       '/thinking max',
     ]);
-    expect(commandMenu('thinking', ['@reviewer'])?.[2].command).toBe('/thinking @reviewer high');
+    expect(menuItems('thinking', ['@reviewer'])[2].command).toBe('/thinking @reviewer high');
     expect(commandMenu('thinking', ['low'])).toBeNull();
   });
 
@@ -132,22 +163,22 @@ describe('executeCommand', () => {
     process.env.SIRUS_DATA_DIR = directory;
     try {
       const session = new Session();
-      expect(executeCommand('memory', [], session)).toEqual({
+      expect(runCommand('memory', [], session)).toEqual({
         kind: 'info',
         text: 'Memory access is on.',
       });
-      expect(executeCommand('memory', ['off'], session)).toEqual({
+      expect(runCommand('memory', ['off'], session)).toEqual({
         kind: 'success',
         text: 'Memory access disabled. Stored memories were not changed.',
       });
-      expect(executeCommand('memory', [], session)).toEqual({
+      expect(runCommand('memory', [], session)).toEqual({
         kind: 'info',
         text: 'Memory access is off.',
       });
-      expect(executeCommand('memory', ['on'], session)).toMatchObject({
+      expect(runCommand('memory', ['on'], session)).toMatchObject({
         kind: 'success',
       });
-      expect(() => executeCommand('memory', ['maybe'], session)).toThrow('/memory [on|off]');
+      expect(() => runCommand('memory', ['maybe'], session)).toThrow('/memory [on|off]');
     } finally {
       if (previousDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
       else process.env.SIRUS_DATA_DIR = previousDirectory;
@@ -157,11 +188,11 @@ describe('executeCommand', () => {
 
   test('unknown command throws instead of silently doing nothing', () => {
     const session = new Session();
-    expect(() => executeCommand('nope', [], session)).toThrow(/unknown command/i);
+    expect(() => runCommand('nope', [], session)).toThrow(/unknown command/i);
   });
 
   test('update command rejects arguments before running the updater', () => {
-    expect(() => executeCommand('update', ['now'], new Session())).toThrow('Usage: /update');
+    expect(() => runCommand('update', ['now'])).toThrow('Usage: /update');
   });
 });
 
@@ -205,39 +236,39 @@ describe('credential commands', () => {
     expect(loginMenuItems(['claude'])![1].secret?.prompt).toMatch(/Anthropic API key/);
     expect(loginMenuItems(['gpt', 'subscription'])).toBeNull();
     expect(() => loginMenuItems(['bing'])).toThrow(/unknown provider/i);
-    expect(executeCommand('login', ['gpt'], new Session())).toEqual({
+    expect(runCommand('login', ['gpt'])).toEqual({
       kind: 'info',
       text: expect.stringMatching(/\/login gpt subscription, \/login gpt api/),
     });
   });
 
   test('/login alone points at the menu instead of running a browser flow', () => {
-    expect(executeCommand('login', [], new Session())).toEqual({
+    expect(runCommand('login', [])).toEqual({
       kind: 'info',
       text: expect.stringMatching(/\/login claude|\/login gpt/),
     });
   });
 
   test('/login <provider> api <key> stores the key without echoing it', () => {
-    const result = executeCommand('login', ['claude', 'api', 'sk-ant-pasted-key-9876'], new Session());
+    const result = runCommand('login', ['claude', 'api', 'sk-ant-pasted-key-9876']);
     expect(result).toEqual({
       kind: 'success',
       text: expect.stringContaining('claude-* models now use'),
     });
     expect((result as { text: string }).text).not.toContain('sk-ant-pasted-key-9876');
     expect((result as { text: string }).text).toContain('9876');
-    expect(findApiKey('claude')).toEqual({ key: 'sk-ant-pasted-key-9876', source: 'settings' });
+    expect(providerFor('claude').apiKey()).toEqual({ key: 'sk-ant-pasted-key-9876', source: 'settings', masked: 'sk-ant-…9876' });
   });
 
   test('/login <provider> api without a key explains the usage', () => {
-    expect(() => executeCommand('login', ['gpt', 'api'], new Session())).toThrow(/\/login gpt api <key>/);
-    expect(() => executeCommand('login', ['gpt', 'browser'], new Session())).toThrow(/\/login gpt subscription/);
+    expect(() => runCommand('login', ['gpt', 'api'])).toThrow(/\/login gpt api <key>/);
+    expect(() => runCommand('login', ['gpt', 'browser'])).toThrow(/\/login gpt subscription/);
   });
 
   test('/info reports each provider and how it is authenticated', async () => {
     process.env.OPENAI_SECRET = 'sk-proj-from-env-4321';
-    executeCommand('login', ['claude', 'api', 'sk-ant-pasted-key-9876'], new Session());
-    const result = await executeCommand('info', [], new Session());
+    runCommand('login', ['claude', 'api', 'sk-ant-pasted-key-9876']);
+    const result = await runCommand('info', []);
     expect(result).toMatchObject({ kind: 'info', showIcon: false });
     const text = (result as { text: string }).text;
     expect(text).toMatch(/claude: API key · sk-ant-…9876/);
@@ -247,17 +278,17 @@ describe('credential commands', () => {
   });
 
   test('/info says when a provider has nothing configured', async () => {
-    const result = await executeCommand('info', [], new Session());
+    const result = await runCommand('info', []);
     const text = (result as { text: string }).text;
     expect(text).toMatch(/claude: not configured/);
     expect(text).toMatch(/gpt: not configured/);
   });
 
   test('/logout leaves the subscription when that is active', () => {
-    setSubscriptionEnabled('gpt', true);
+    providerFor('gpt').setSource('subscription');
     process.env.OPENAI_SECRET = 'sk-proj-from-env-4321';
-    const result = executeCommand('logout', ['gpt'], new Session());
-    expect(isSubscriptionEnabled('gpt')).toBe(false);
+    const result = runCommand('logout', ['gpt']);
+    expect(providerFor('gpt').source).toBe('api');
     expect(result).toEqual({
       kind: 'success',
       text: expect.stringMatching(/Signed out of the ChatGPT subscription\. gpt-\* models now use the OpenAI API key \(sk-proj-…4321\)/),
@@ -265,9 +296,9 @@ describe('credential commands', () => {
   });
 
   test('/logout removes the stored key when that is active', () => {
-    executeCommand('login', ['claude', 'api', 'sk-ant-pasted-key-9876'], new Session());
-    const result = executeCommand('logout', ['claude'], new Session());
-    expect(findApiKey('claude')).toBeNull();
+    runCommand('login', ['claude', 'api', 'sk-ant-pasted-key-9876']);
+    const result = runCommand('logout', ['claude']);
+    expect(providerFor('claude').apiKey()).toBeNull();
     expect(result).toEqual({
       kind: 'success',
       text: 'Removed your saved Anthropic API key. claude-* models are signed out; run /login to sign in.',
@@ -276,10 +307,10 @@ describe('credential commands', () => {
 
   test('/logout has nothing to do when neither mechanism is active', () => {
     process.env.ANTHROPIC_API = 'sk-ant-from-env-1234';
-    expect(executeCommand('logout', ['claude'], new Session())).toEqual({
+    expect(runCommand('logout', ['claude'])).toEqual({
       kind: 'info',
       text: 'Nothing to sign out of for claude.',
     });
-    expect(findApiKey('claude')).not.toBeNull();
+    expect(providerFor('claude').apiKey()).not.toBeNull();
   });
 });

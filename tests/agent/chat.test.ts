@@ -1,8 +1,18 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { getResponse, modelStrategies } from '../../src/agent/chat';
-import type { Message } from '../../src/data/data';
+import { getResponse, modelStrategies } from '../../src/agent_runtime/chat';
+import type { Response } from '../../src/agent_runtime/chat';
+import { SessionAgent } from '../../src/agent_runtime/agent';
+import { TurnContext, type TurnOptions } from '../../src/agent_runtime/turn';
+import type { Message, MessageBlock } from '../../src/agent_runtime/types';
 
 const testModel = 'test-message-list-model';
+
+function testTurn(options: Partial<TurnOptions> = {}): TurnContext {
+  return new TurnContext(
+    new SessionAgent({ name: 'sirus', model: testModel, runtimeId: 'default' }),
+    { directory: process.cwd(), ...options },
+  );
+}
 
 afterEach(() => {
   delete modelStrategies[testModel];
@@ -18,15 +28,16 @@ describe('getResponse', () => {
     let receivedDirectory: string | undefined;
 
     modelStrategies[testModel] = {
-      getResponse: async (providerMessages, model, context) => {
+      getResponse: async (providerMessages, turn) => {
         receivedMessages = providerMessages;
-        receivedModel = model;
-        receivedDirectory = context.directory;
+        receivedModel = turn.agent.model;
+        receivedDirectory = turn.directory;
         return { content: [{ type: 'text', text: 'Hi' }], stop_reason: 'end_turn' };
       },
     };
 
-    const response = await getResponse(messages, testModel);
+    const turn = testTurn();
+    const response = await getResponse(messages, turn);
 
     expect(receivedMessages).toEqual(messages);
     expect(receivedModel).toBe(testModel);
@@ -35,6 +46,8 @@ describe('getResponse', () => {
       role: 'assistant',
       content: [{ type: 'text', text: 'Hi' }],
     });
+    expect(await turn.result).toEqual(response);
+    expect(turn.done).toBe(true);
   });
 
   test('preserves tool call IDs and sends results into the next provider turn', async () => {
@@ -42,7 +55,7 @@ describe('getResponse', () => {
       { role: 'user', content: [{ type: 'text', text: 'Read package.json' }] },
     ];
     let receivedMessages: readonly Message[] | undefined;
-    let receivedToolResults: Parameters<NonNullable<import('../../src/agent/chat').Response['continueWithToolResults']>>[0] | undefined;
+    let receivedToolResults: Parameters<NonNullable<Response['continueWithToolResults']>>[0] | undefined;
 
     modelStrategies[testModel] = {
       getResponse: async providerMessages => {
@@ -66,7 +79,7 @@ describe('getResponse', () => {
       },
     };
 
-    const response = await getResponse(messages, testModel);
+    const response = await getResponse(messages, testTurn());
 
     expect(receivedMessages).toEqual(messages);
     expect(receivedToolResults?.[0]).toMatchObject({
@@ -94,7 +107,7 @@ describe('getResponse', () => {
     ];
     let continuationCount = 0;
 
-    const toolRound = (round: number): import('../../src/agent/chat').Response => ({
+    const toolRound = (round: number): Response => ({
       stop_reason: 'tool_use',
       content: [
         { type: 'text', text: `Before tool ${round}.` },
@@ -119,7 +132,7 @@ describe('getResponse', () => {
       getResponse: async () => toolRound(1),
     };
 
-    const response = await getResponse(messages, testModel);
+    const response = await getResponse(messages, testTurn());
 
     expect(response.content.map(block => block.type === 'text' ? block.text : block.type)).toEqual([
       'Before tool 1.',
@@ -133,50 +146,54 @@ describe('getResponse', () => {
     expect(continuationCount).toBe(2);
   });
 
-  test('publishes partial text before returning the completed response', async () => {
-    const updates: Message[] = [];
+  test('exposes streamed text on the turn before the provider finishes', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
     modelStrategies[testModel] = {
-      getResponse: async (_messages, _model, context) => {
-        context.onUpdate?.([{ type: 'text', text: 'Hel' }]);
-        context.onUpdate?.([{ type: 'text', text: 'Hello' }]);
+      getResponse: async (_messages, turn) => {
+        turn.updateStream([{ type: 'text', text: 'Hel' }]);
+        await gate;
+        turn.updateStream([{ type: 'text', text: 'Hello' }]);
         return { content: [{ type: 'text', text: 'Hello' }], stop_reason: 'end_turn' };
       },
     };
 
-    const response = await getResponse(
-      [{ role: 'user', content: [{ type: 'text', text: 'Say hello' }] }],
-      testModel,
-      'default',
-      process.cwd(),
-      undefined,
-      undefined,
-      update => updates.push(update),
-    );
+    const turn = testTurn();
+    const result = getResponse([{ role: 'user', content: [{ type: 'text', text: 'Say hello' }] }], turn);
+    const snapshots: MessageBlock[][] = [];
+    for await (const snapshot of turn.changes()) {
+      snapshots.push(snapshot.content);
+      if (snapshots.length === 1) {
+        expect(turn.content).toEqual([{ type: 'text', text: 'Hel' }]);
+        expect(turn.done).toBe(false);
+        release();
+      }
+    }
 
-    expect(updates.map(update => update.content)).toEqual([
-      [{ type: 'text', text: 'Hel' }],
-      [{ type: 'text', text: 'Hello' }],
-      [{ type: 'text', text: 'Hello' }],
-    ]);
-    expect(response.content).toEqual([{ type: 'text', text: 'Hello' }]);
+    expect(snapshots[0]).toEqual([{ type: 'text', text: 'Hel' }]);
+    expect(snapshots.at(-1)).toEqual([{ type: 'text', text: 'Hello' }]);
+    expect((await result).content).toEqual([{ type: 'text', text: 'Hello' }]);
+    expect(turn.done).toBe(true);
   });
 
   test('keeps streamed continuation text after tool calls and results', async () => {
-    const updates: Message[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
     modelStrategies[testModel] = {
-      getResponse: async (_messages, _model, context) => {
+      getResponse: async (_messages, turn) => {
         const toolCall = {
           type: 'tool_call' as const,
           id: 'call_stream',
           name: 'ReadFile',
           arguments: { path: 'package.json' },
         };
-        context.onUpdate?.([{ type: 'text', text: 'Reading.' }, toolCall]);
+        turn.updateStream([{ type: 'text', text: 'Reading.' }, toolCall]);
         return {
           content: [{ type: 'text', text: 'Reading.' }, toolCall],
           stop_reason: 'tool_use',
           continueWithToolResults: async () => {
-            context.onUpdate?.([{ type: 'text', text: 'The package is' }]);
+            turn.updateStream([{ type: 'text', text: 'The package is' }]);
+            await gate;
             return {
               content: [{ type: 'text', text: 'The package is ready.' }],
               stop_reason: 'end_turn',
@@ -186,20 +203,18 @@ describe('getResponse', () => {
       },
     };
 
-    await getResponse(
-      [{ role: 'user', content: [{ type: 'text', text: 'Inspect it' }] }],
-      testModel,
-      'default',
-      process.cwd(),
-      undefined,
-      undefined,
-      update => updates.push(update),
-    );
+    const turn = testTurn();
+    const result = getResponse([{ role: 'user', content: [{ type: 'text', text: 'Inspect it' }] }], turn);
+    let continuation: Message | undefined;
+    for await (const snapshot of turn.changes()) {
+      const last = snapshot.content.at(-1);
+      if (last?.type === 'text' && last.text === 'The package is') {
+        continuation = snapshot;
+        release();
+      }
+    }
+    await result;
 
-    const continuation = updates.find(update => {
-      const last = update.content.at(-1);
-      return last?.type === 'text' && last.text === 'The package is';
-    });
     expect(continuation?.content.map(block => block.type)).toEqual([
       'text',
       'tool_call',
@@ -208,8 +223,7 @@ describe('getResponse', () => {
     ]);
   });
 
-  test('publishes each result while a multi-tool run is still in progress', async () => {
-    const updates: Message[] = [];
+  test('commits each result while a multi-tool run is still in progress', async () => {
     modelStrategies[testModel] = {
       getResponse: async () => ({
         content: [
@@ -224,19 +238,33 @@ describe('getResponse', () => {
       }),
     };
 
-    await getResponse(
-      [{ role: 'user', content: [{ type: 'text', text: 'Read both' }] }],
-      testModel,
-      'default',
-      process.cwd(),
-      undefined,
-      undefined,
-      update => updates.push(update),
-    );
+    const turn = testTurn();
+    const result = getResponse([{ role: 'user', content: [{ type: 'text', text: 'Read both' }] }], turn);
+    const snapshots: Message[] = [];
+    for await (const snapshot of turn.changes()) snapshots.push(snapshot);
+    await result;
 
-    expect(updates.some(update =>
-      update.content.filter(block => block.type === 'tool_call').length === 2
-      && update.content.filter(block => block.type === 'tool_result').length === 1,
+    expect(snapshots.some(snapshot =>
+      snapshot.content.filter(block => block.type === 'tool_call').length === 2
+      && snapshot.content.filter(block => block.type === 'tool_result').length === 1,
     )).toBe(true);
+  });
+
+  test('settles the turn with the provider error and ends the change stream', async () => {
+    modelStrategies[testModel] = {
+      getResponse: async () => {
+        throw new Error('provider down');
+      },
+    };
+
+    const turn = testTurn();
+    const result = getResponse([{ role: 'user', content: [{ type: 'text', text: 'Hi' }] }], turn);
+    const snapshots: Message[] = [];
+    for await (const snapshot of turn.changes()) snapshots.push(snapshot);
+
+    await expect(result).rejects.toThrow('provider down');
+    await expect(turn.result).rejects.toThrow('provider down');
+    expect(snapshots).toEqual([]);
+    expect(turn.done).toBe(true);
   });
 });

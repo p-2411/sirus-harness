@@ -2,7 +2,7 @@ import { Database } from 'bun:sqlite';
 import { existsSync, mkdirSync } from 'fs';
 import { dirname, join, resolve } from 'path';
 import * as sqliteVec from 'sqlite-vec';
-import { dataDirectory } from '../data/persistence';
+import { dataDirectory } from '../persistence';
 import { LocalEmbeddingProvider, type EmbeddingProvider } from './embeddings';
 
 export type MemoryScope = 'global' | 'project';

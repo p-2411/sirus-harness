@@ -9,8 +9,8 @@ import {
   type InputState,
 } from '../../src/frontend/chat/InputBar';
 import { moveSelection, SelectMenu } from '../../src/frontend/chat/SelectMenu';
-import type { CommandMenuItem } from '../../src/commands/command_register';
-import type { Feedback } from '../../src/feedback';
+import type { CommandMenuEntry, CommandMenuItem } from '../../src/commands/registry';
+import type { Feedback } from '../../src/commands/feedback';
 
 function render(feedback: Feedback | null): string {
   return stripAnsi(renderToString(
@@ -78,8 +78,8 @@ describe('input cursor editing', () => {
 
 describe('select menu', () => {
   const items: CommandMenuItem[] = [
-    { key: 'a', label: 'Claude · subscription', description: 'browser sign-in', command: '/login claude' },
-    { key: 'b', label: 'Anthropic · API key', description: 'paste a key', command: '/login claude api', secret: { prompt: 'Paste your Anthropic API key' } },
+    { type: 'item', key: 'a', label: 'Claude · subscription', description: 'browser sign-in', command: '/login claude' },
+    { type: 'item', key: 'b', label: 'Anthropic · API key', description: 'paste a key', command: '/login claude api', secret: { prompt: 'Paste your Anthropic API key' } },
   ];
 
   test('marks only the selected item', () => {
@@ -93,6 +93,23 @@ describe('select menu', () => {
     expect(moveSelection(0, 1, 2)).toBe(1);
     expect(moveSelection(1, 1, 2)).toBe(0);
     expect(moveSelection(0, -1, 2)).toBe(1);
+  });
+
+  test('renders headings without making them selectable', () => {
+    const grouped: CommandMenuEntry[] = [
+      { type: 'heading', key: 'anthropic', label: 'Anthropic' },
+      { type: 'item', key: 'claude', label: 'claude-sonnet-5', command: '/model claude-sonnet-5' },
+      { type: 'heading', key: 'openai', label: 'OpenAI' },
+      { type: 'item', key: 'gpt', label: 'gpt-5.6-sol', command: '/model gpt-5.6-sol' },
+    ];
+    const output = stripAnsi(renderToString(<SelectMenu items={grouped} selected={1} />, { columns: 80 }));
+    const lines = output.split('\n').filter(Boolean);
+    expect(lines).toEqual([
+      '   Anthropic',
+      '     claude-sonnet-5',
+      '   OpenAI',
+      '   › gpt-5.6-sol',
+    ]);
   });
 });
 

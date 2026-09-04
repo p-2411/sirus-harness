@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { modelStrategies, type ModelContext } from '../../src/agent/chat';
-import type { Message } from '../../src/data/data';
-import { Session } from '../../src/runtime/session';
+import { modelStrategies } from '../../src/agent_runtime/chat';
+import type { TurnContext } from '../../src/agent_runtime/turn';
+import type { Message } from '../../src/agent_runtime/types';
+import { Session } from '../../src/agent_runtime/session';
 
 const testModel = 'test-session-model';
 const secondTestModel = 'test-second-session-model';
@@ -43,8 +44,8 @@ describe('Session model', () => {
   test('setModel changes the model for that session only', () => {
     const a = new Session('A');
     const b = new Session('B');
-    a.setModel('claude-fable-5');
-    expect(a.getModel()).toBe('claude-fable-5');
+    a.setModel('claude-fable-5-1');
+    expect(a.getModel()).toBe('claude-fable-5-1');
     expect(b.getModel()).toBe('gpt-5.6-luna');
   });
 
@@ -58,7 +59,7 @@ describe('Session model', () => {
   });
 
   test('round-trips its persisted fields through a snapshot', () => {
-    const original = new Session('Saved session', 'session-123', 'claude-fable-5', [], '/projects/sirus');
+    const original = new Session('Saved session', 'session-123', 'claude-fable-5-1', [], '/projects/sirus');
     original.append({ role: 'user', content: [{ type: 'text', text: 'remember me' }] });
 
     const restored = Session.fromSnapshot(original.toSnapshot());
@@ -66,7 +67,7 @@ describe('Session model', () => {
     expect(restored.getId()).toBe('session-123');
     expect(restored.getName()).toBe('Saved session');
     expect(restored.getDirectory()).toBe('/projects/sirus');
-    expect(restored.getModel()).toBe('claude-fable-5');
+    expect(restored.getModel()).toBe('claude-fable-5-1');
     expect(restored.getMessages()).toEqual(original.getMessages());
   });
 
@@ -74,12 +75,12 @@ describe('Session model', () => {
     const session = new Session('Test', 'session-id', testModel, [], '/projects/test');
     session.setThinkingLevel('medium');
     let receivedMessages: Message[] | undefined;
-    let receivedContext: (ModelContext & { model: string }) | undefined;
+    let receivedTurn: TurnContext | undefined;
 
     modelStrategies[testModel] = {
-      getResponse: async (messages, model, context) => {
+      getResponse: async (messages, turn) => {
         receivedMessages = [...messages];
-        receivedContext = { model, ...context };
+        receivedTurn = turn;
         return {
           content: [{ type: 'text', text: 'Hello back' }],
           stop_reason: 'end_turn',
@@ -95,20 +96,19 @@ describe('Session model', () => {
     expect(receivedMessages).toEqual([
       { role: 'user', content: [{ type: 'text', text: 'Hello' }] },
     ]);
-    expect(receivedContext).toEqual({
-      model: testModel,
+    expect(receivedTurn?.agent.model).toBe(testModel);
+    expect(receivedTurn?.agent.name).toBe('sirus');
+    expect(receivedTurn?.agent.runtimeId).toBe('session-id');
+    expect(receivedTurn?.directory).toBe('/projects/test');
+    expect(receivedTurn?.agent.thinkingLevel).toBe('medium');
+    expect(receivedTurn?.permissions).toEqual({
       sessionId: 'session-id',
-      directory: '/projects/test',
-      onUpdate: expect.any(Function),
-      signal: expect.any(AbortSignal),
-      permissions: {
-        sessionId: 'session-id',
-        mode: expect.any(Function),
-        requester: { participant: 'sirus' },
-        model: testModel,
-      },
-      thinkingLevel: 'medium',
+      mode: expect.any(Function),
+      requester: { participant: 'sirus' },
+      model: testModel,
     });
+    expect(receivedTurn?.signal).toBeInstanceOf(AbortSignal);
+    expect(receivedTurn?.turnPrompt).toBeUndefined();
     expect(messages).toEqual([
       { role: 'user', content: [{ type: 'text', text: 'Hello' }] },
       {
@@ -127,8 +127,8 @@ describe('Session model', () => {
     const gate = new Promise<void>(resolve => { finish = resolve; });
 
     modelStrategies[testModel] = {
-      getResponse: async (_messages, _model, context) => {
-        context.onUpdate?.([{ type: 'text', text: 'Working' }]);
+      getResponse: async (_messages, turn) => {
+        turn.updateStream([{ type: 'text', text: 'Working' }]);
         await gate;
         return { content: [{ type: 'text', text: 'Working now.' }], stop_reason: 'end_turn' };
       },
@@ -138,7 +138,8 @@ describe('Session model', () => {
       role: 'user',
       content: [{ type: 'text', text: 'Start' }],
     });
-    await Promise.resolve();
+    // The transcript pulls snapshots from the turn; let that pull run.
+    await new Promise(resolve => setTimeout(resolve, 0));
 
     expect(session.getAssistantVersion()).toBeGreaterThan(0);
     expect(session.getMessages().at(-1)).toEqual({
@@ -161,9 +162,9 @@ describe('Session model', () => {
     const gate = new Promise<void>(resolve => { release = resolve; });
     let providerSignal: AbortSignal | undefined;
     modelStrategies[testModel] = {
-      getResponse: async (_messages, _model, context) => {
-        providerSignal = context.signal;
-        context.onUpdate?.([{ type: 'text', text: 'Partial' }]);
+      getResponse: async (_messages, turn) => {
+        providerSignal = turn.signal;
+        turn.updateStream([{ type: 'text', text: 'Partial' }]);
         await gate;
         return { content: [{ type: 'text', text: 'Too late' }], stop_reason: 'end_turn' };
       },
@@ -187,10 +188,10 @@ describe('Session model', () => {
   });
 
   test('creates a named participant from a mention and targets it thereafter', async () => {
-    const calls: Array<{ model: string; context: ModelContext; messages: Message[] }> = [];
+    const calls: Array<{ model: string; turn: TurnContext; messages: Message[] }> = [];
     modelStrategies[testModel] = {
-      getResponse: async (messages, model, context) => {
-        calls.push({ model, context, messages: [...messages] });
+      getResponse: async (messages, turn) => {
+        calls.push({ model: turn.agent.model, turn, messages: [...messages] });
         return { content: [{ type: 'text', text: 'reviewed' }], stop_reason: 'end_turn' };
       },
     };
@@ -210,14 +211,12 @@ describe('Session model', () => {
       { name: 'Reviewer', model: testModel },
     ]);
     expect(calls).toHaveLength(2);
-    expect(calls[0]).toMatchObject({
-      model: testModel,
-      context: {
-        sessionId: 'session-id/participants/reviewer',
-        directory: process.cwd(),
-        participantName: 'Reviewer',
-      },
+    expect(calls[0].model).toBe(testModel);
+    expect(calls[0].turn.agent).toMatchObject({
+      name: 'Reviewer',
+      runtimeId: 'session-id/participants/reviewer',
     });
+    expect(calls[0].turn.directory).toBe(process.cwd());
     expect(calls[0].messages[0]).toEqual({
       role: 'user',
       content: [{ type: 'text', text: '@Reviewer inspect this' }],
@@ -439,11 +438,11 @@ describe('Session model', () => {
   });
 
   test('lets agents mention existing participants across multiple delegation rounds', async () => {
-    const calls: Array<{ model: string; context: ModelContext; messages: Message[] }> = [];
+    const calls: Array<{ model: string; turn: TurnContext; messages: Message[] }> = [];
     let sirusCalls = 0;
     modelStrategies[testModel] = {
-      getResponse: async (messages, model, context) => {
-        calls.push({ model, context, messages: [...messages] });
+      getResponse: async (messages, turn) => {
+        calls.push({ model: turn.agent.model, turn, messages: [...messages] });
         sirusCalls++;
         return {
           content: [{
@@ -455,8 +454,8 @@ describe('Session model', () => {
       },
     };
     modelStrategies[secondTestModel] = {
-      getResponse: async (messages, model, context) => {
-        calls.push({ model, context, messages: [...messages] });
+      getResponse: async (messages, turn) => {
+        calls.push({ model: turn.agent.model, turn, messages: [...messages] });
         return {
           // Sirus can be invoked again for a genuine back-and-forth while the
           // verifier runs alongside it in the same next round.
@@ -466,8 +465,8 @@ describe('Session model', () => {
       },
     };
     modelStrategies[thirdTestModel] = {
-      getResponse: async (messages, model, context) => {
-        calls.push({ model, context, messages: [...messages] });
+      getResponse: async (messages, turn) => {
+        calls.push({ model: turn.agent.model, turn, messages: [...messages] });
         return {
           // Agent output cannot use the user-only creation syntax.
           content: [{ type: 'text', text: 'Verified. @new-agent test-session-model join us.' }],
@@ -486,9 +485,9 @@ describe('Session model', () => {
 
     expect(calls.map(call => call.model))
       .toEqual([testModel, secondTestModel, testModel, thirdTestModel]);
-    expect(calls[1].context.turnPrompt).toContain('@sirus mentioned you');
-    expect(calls[2].context.turnPrompt).toContain('@reviewer mentioned you');
-    expect(calls[3].context.turnPrompt).toContain('@reviewer mentioned you');
+    expect(calls[1].turn.turnPrompt).toContain('@sirus mentioned you');
+    expect(calls[2].turn.turnPrompt).toContain('@reviewer mentioned you');
+    expect(calls[3].turn.turnPrompt).toContain('@reviewer mentioned you');
     expect(calls[1].messages.at(-1)?.participant).toBe('sirus');
     expect(calls[2].messages.at(-1)?.participant).toBe('reviewer');
     expect(calls[3].messages.at(-1)?.participant).toBe('reviewer');
@@ -611,7 +610,7 @@ describe('Session subscriptions', () => {
     const session = new Session();
     let calls = 0;
     session.subscribe(() => calls++);
-    session.setModel('claude-fable-5');
+    session.setModel('claude-fable-5-1');
     expect(calls).toBe(1);
   });
 
@@ -648,7 +647,7 @@ describe('Session subscriptions', () => {
     let calls = 0;
     const unsubscribe = session.subscribe(() => calls++);
     unsubscribe();
-    session.setModel('claude-fable-5');
+    session.setModel('claude-fable-5-1');
     session.append({ role: 'user', content: [{ type: 'text', text: 'hi' }] });
     expect(calls).toBe(0);
   });
@@ -657,7 +656,7 @@ describe('Session subscriptions', () => {
     const session = new Session();
     const before = session.getVersion();
     session.append({ role: 'user', content: [{ type: 'text', text: 'hi' }] });
-    session.setModel('claude-fable-5');
+    session.setModel('claude-fable-5-1');
     expect(session.getVersion()).toBe(before + 2);
   });
 });

@@ -1,0 +1,63 @@
+import { modelCommand, thinkingCommandSpec } from './agents/commands';
+import {
+  infoCommandSpec,
+  loginCommandSpec,
+  logoutCommandSpec,
+} from './authentication/commands';
+import { memoryCommandSpec } from './memory/commands';
+import { clearCommand, permissionsCommandSpec } from './session/commands';
+import { updateCommandSpec } from './update/commands';
+import type {
+  CommandExecution,
+  CommandMenuEntry,
+  CommandMenuItem,
+  CommandResult,
+  CommandSpec,
+} from './types';
+
+export { loginMenuItems } from './authentication/behavior';
+export type {
+  CommandExecution,
+  CommandMenuEntry,
+  CommandMenuItem,
+  CommandResult,
+  CommandSpec,
+} from './types';
+
+// The input menu and executor share this registry. Definitions are assembled
+// explicitly to keep the user-visible order independent of domain grouping.
+export const commandRegistry: CommandSpec[] = [
+  modelCommand,
+  clearCommand,
+  thinkingCommandSpec,
+  loginCommandSpec,
+  logoutCommandSpec,
+  infoCommandSpec,
+  updateCommandSpec,
+  memoryCommandSpec,
+  permissionsCommandSpec,
+];
+
+// Prefix matches while a command name is being typed ('/' alone matches
+// everything); none once args have begun or the text isn't a command at all.
+export function matchCommands(input: string): CommandSpec[] {
+  if (!input.startsWith('/')) return [];
+  const typed = input.slice(1);
+  if (typed.includes(' ')) return [];
+  return commandRegistry.filter(spec => spec.name.startsWith(typed));
+}
+
+export function commandMenu(command: string, args: readonly string[]): CommandMenuEntry[] | null {
+  const spec = commandRegistry.find(spec => spec.name === command);
+  return spec?.menu ? spec.menu(args) : null;
+}
+
+export function executeCommand(
+  command: string,
+  args: string[],
+  execution: CommandExecution,
+): CommandResult {
+  const spec = commandRegistry.find(spec => spec.name === command);
+  if (!spec) throw new Error(`Unknown command: /${command}`);
+  return spec.run(args, execution);
+}

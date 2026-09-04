@@ -1,7 +1,7 @@
 import { Box, Text } from 'ink';
-import { modelStrategies } from '../../agent/chat';
-import type { Participant } from '../../runtime/session';
-import { theme } from '../theme';
+import { modelStrategies } from '../../agent_runtime/chat';
+import type { Participant } from '../../agent_runtime/session';
+import { theme } from '../styles/theme';
 import { MentionText, participantColorMap } from '../MentionText';
 
 export interface ParticipantMenuItem {

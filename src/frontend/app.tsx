@@ -2,17 +2,17 @@ import { useEffect, useState } from "react";
 import { Box, useInput, useStdout } from "ink";
 import Chat from "./chat/Chat";
 import Sidebar from "./Sidebar";
-import { DEFAULT_MODEL, Session } from "../runtime/session";
+import { DEFAULT_MODEL, Session } from "../agent_runtime/session";
 import {
   loadSessions,
   loadSirusModelPreference,
   saveSessions,
   saveSirusModelPreference,
   type PersistedSessions,
-} from "../data/persistence";
-import { useTextSelection } from "./useTextSelection";
-import { cancelAllSubagents } from '../agent/subagents';
-import { modelStrategies } from '../agent/chat';
+} from "../persistence";
+import { useTextSelection } from "./interaction/useTextSelection";
+import { cancelAllSubagents } from '../agent_runtime/tools/subagents';
+import { modelStrategies } from '../agent_runtime/chat';
 import { checkSirusUpdate } from '../updater';
 
 export function nextSessionName(sessions: readonly Session[]): string {

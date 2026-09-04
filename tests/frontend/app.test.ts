@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { Session } from '../../src/data/data';
+import { Session } from '../../src/agent_runtime/session';
 import { createWorkspace, nextSessionName, setSirusModel, startSession } from '../../src/frontend/app';
 
 describe('app workspace startup', () => {
@@ -42,7 +42,7 @@ describe('app workspace startup', () => {
   test('uses one Sirus model across saved, draft, and future sessions', () => {
     const first = new Session('First', 'first', 'gpt-5.6-luna');
     const second = new Session('Second', 'second', 'gpt-5.6-terra');
-    second.addParticipant('reviewer', 'claude-fable-5');
+    second.addParticipant('reviewer', 'claude-fable-5-1');
     let workspace = createWorkspace({
       sessions: [first, second],
       selectedSessionId: second.getId(),
@@ -51,7 +51,7 @@ describe('app workspace startup', () => {
     expect(workspace.sessions.map(session => session.getModel()))
       .toEqual(['claude-sonnet-5', 'claude-sonnet-5']);
     expect(workspace.draftSession.getModel()).toBe('claude-sonnet-5');
-    expect(second.getParticipants()[1]).toEqual({ name: 'reviewer', model: 'claude-fable-5' });
+    expect(second.getParticipants()[1]).toEqual({ name: 'reviewer', model: 'claude-fable-5-1' });
 
     workspace = setSirusModel(workspace, 'gpt-5.6-sol');
     const started = startSession(workspace, workspace.draftSession, '/projects/current');

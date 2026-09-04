@@ -2,8 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { getSystemPrompt, systemPrompt } from '../../src/agent/prompt';
-import { saveMemoryAccessPreference } from '../../src/data/persistence';
+import { getSystemPrompt, systemPrompt } from '../../src/agent_runtime/prompt';
+import { saveMemoryAccessPreference } from '../../src/persistence';
 
 describe('system prompt', () => {
   test('defines the Sirus coding-agent contract and runtime context', () => {

@@ -5,7 +5,7 @@ import {
   mentionSegments,
   participantColorMap,
 } from '../../src/frontend/MentionText';
-import { theme } from '../../src/frontend/theme';
+import { theme } from '../../src/frontend/styles/theme';
 
 describe('mention text', () => {
   test('finds every participant mention without consuming punctuation', () => {

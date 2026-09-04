@@ -2,7 +2,7 @@ import { useMemo, type ReactNode } from 'react';
 import { Box, Text } from 'ink';
 import { marked, type Token, type Tokens } from 'marked';
 import stringWidth from 'string-width';
-import { theme } from '../theme';
+import { theme } from '../styles/theme';
 import { MentionText, type ParticipantColors } from '../MentionText';
 
 interface MarkdownProps {

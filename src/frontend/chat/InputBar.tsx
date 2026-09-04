@@ -1,24 +1,24 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { Box, Text, useInput } from 'ink';
-import { theme } from '../theme';
+import { theme } from '../styles/theme';
 import { CommandMenu } from './CommandMenu';
 import { moveSelection, SelectMenu } from './SelectMenu';
-import { captureArrowKeys } from '../focus';
-import type { CommandMenuItem } from '../../commands/command_register';
-import { isMouseInput } from '../mouse';
-import { getSelectionSnapshot, subscribeSelection } from '../selection';
-import type { Feedback } from '../../feedback';
-import type { Participant } from '../../runtime/session';
+import { captureArrowKeys } from '../interaction/focus';
+import type { CommandMenuEntry, CommandMenuItem } from '../../commands/registry';
+import { isMouseInput } from '../interaction/mouse';
+import { getSelectionSnapshot, subscribeSelection } from '../interaction/selection';
+import type { Feedback } from '../../commands/feedback';
+import type { Participant } from '../../agent_runtime/session';
 import { ParticipantMenu } from './ParticipantMenu';
 import { MentionText, participantColorMap, type ParticipantColors } from '../MentionText';
-import { activeSubagentCount, getSubagentsVersion, subscribeSubagents } from '../../agent/subagents';
+import { activeSubagentCount, getSubagentsVersion, subscribeSubagents } from '../../agent_runtime/tools/subagents';
 import {
   PERMISSION_MODE_NAMES,
   describeRequester,
   type ApprovalDecision,
   type ApprovalRequest,
   type PermissionMode,
-} from '../../agent/permissions';
+} from '../../agent_runtime/permissions/permissions';
 
 // readline's backward-kill-word: drop the last word and any whitespace after it
 function deleteWordBackward(text: string): string {
@@ -93,7 +93,7 @@ export type InputMode =
   }
   | {
     type: 'menu';
-    items: readonly CommandMenuItem[];
+    items: readonly CommandMenuEntry[];
     onSelect: (item: CommandMenuItem) => void;
     onCancel: () => void;
   }
@@ -301,10 +301,11 @@ export function InputBar({
       return;
     }
     if (mode.type === 'menu') {
+      const items = mode.items.filter((entry): entry is CommandMenuItem => entry.type === 'item');
       if (key.escape) mode.onCancel();
-      else if (key.upArrow) setSelected(current => moveSelection(current, -1, mode.items.length));
-      else if (key.downArrow) setSelected(current => moveSelection(current, 1, mode.items.length));
-      else if (key.return && mode.items[selected]) mode.onSelect(mode.items[selected]);
+      else if (key.upArrow) setSelected(current => moveSelection(current, -1, items.length));
+      else if (key.downArrow) setSelected(current => moveSelection(current, 1, items.length));
+      else if (key.return && items[selected]) mode.onSelect(items[selected]);
       return;
     }
     if (mode.type === 'secret') {

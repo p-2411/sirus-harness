@@ -1,24 +1,22 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'fs';
 import os from 'os';
 import path from 'path';
-import {
-  authStatus,
-  clearApiKey,
-  findApiKey,
-  maskApiKey,
-  requireApiKey,
-  setApiKey,
-} from '../../src/agent/credentials';
-import { isSubscriptionEnabled, setSubscriptionEnabled } from '../../src/agent/subscriptions';
+import { maskApiKey } from '../../src/agent_runtime/providers/provider';
 import {
   AnthropicProvider,
+  OpenAIProvider,
+  providerFor,
+} from '../../src/agent_runtime/providers/providers';
+import {
   anthropicThinkingConfig,
   toAnthropicMessages,
-} from '../../src/agent/providers/anthropic/api';
-import { OpenAIProvider, toOpenAIContinuationInput, toOpenAIInput } from '../../src/agent/providers/openai/api';
-import { modelStrategies } from '../../src/agent/chat';
-import type { Message, ToolResultBlock } from '../../src/data/data';
+} from '../../src/agent_runtime/providers/anthropic/api';
+import { toOpenAIContinuationInput, toOpenAIInput } from '../../src/agent_runtime/providers/openai/api';
+import { modelStrategies } from '../../src/agent_runtime/chat';
+import { SessionAgent } from '../../src/agent_runtime/agent';
+import { TurnContext } from '../../src/agent_runtime/turn';
+import type { Message, ToolResultBlock } from '../../src/agent_runtime/types';
 
 const toolHistory: Message[] = [
   { role: 'user', content: [{ type: 'text', text: 'Read a file' }] },
@@ -182,43 +180,43 @@ describe('provider credentials', () => {
   });
 
   test('reports no credentials when neither a stored key nor the env var exists', () => {
-    expect(findApiKey('claude')).toBeNull();
-    expect(authStatus('claude')).toEqual({ mode: 'none' });
-    expect(() => requireApiKey('claude')).toThrow(/\/login/);
-    expect(() => requireApiKey('claude')).not.toThrow(/ANTHROPIC_API/);
+    expect(providerFor('claude').apiKey()).toBeNull();
+    expect(providerFor('claude').authStatus()).toEqual({ mode: 'none' });
+    expect(() => providerFor('claude').requireApiKey()).toThrow(/\/login/);
+    expect(() => providerFor('claude').requireApiKey()).not.toThrow(/ANTHROPIC_API/);
   });
 
   test('falls back to the environment variable', () => {
     process.env.ANTHROPIC_API = 'sk-ant-from-env-1234';
-    expect(findApiKey('claude')).toEqual({ key: 'sk-ant-from-env-1234', source: 'env' });
-    expect(authStatus('claude')).toEqual({ mode: 'api', source: 'env', masked: 'sk-ant-…1234' });
+    expect(providerFor('claude').apiKey()).toEqual({ key: 'sk-ant-from-env-1234', source: 'env', masked: 'sk-ant-…1234' });
+    expect(providerFor('claude').authStatus()).toEqual({ mode: 'api', source: 'env', masked: 'sk-ant-…1234' });
   });
 
   test('prefers a stored key over the environment variable', () => {
     process.env.ANTHROPIC_API = 'sk-ant-from-env-1234';
-    setApiKey('claude', '  sk-ant-stored-abcd  ');
-    expect(requireApiKey('claude')).toBe('sk-ant-stored-abcd');
-    expect(authStatus('claude')).toEqual({ mode: 'api', source: 'settings', masked: 'sk-ant-…abcd' });
+    providerFor('claude').setApiKey('  sk-ant-stored-abcd  ');
+    expect(providerFor('claude').requireApiKey()).toBe('sk-ant-stored-abcd');
+    expect(providerFor('claude').authStatus()).toEqual({ mode: 'api', source: 'settings', masked: 'sk-ant-…abcd' });
   });
 
   test('storing a key switches the provider off its subscription', () => {
-    setSubscriptionEnabled('claude', true);
-    expect(authStatus('claude')).toEqual({ mode: 'subscription' });
-    setApiKey('claude', 'sk-ant-stored-abcd');
-    expect(isSubscriptionEnabled('claude')).toBe(false);
+    providerFor('claude').setSource('subscription');
+    expect(providerFor('claude').authStatus()).toEqual({ mode: 'subscription' });
+    providerFor('claude').setApiKey('sk-ant-stored-abcd');
+    expect(providerFor('claude').source).toBe('api');
   });
 
   test('rejects an empty key and never stores it', () => {
-    expect(() => setApiKey('claude', '   ')).toThrow(/empty/i);
-    expect(findApiKey('claude')).toBeNull();
+    expect(() => providerFor('claude').setApiKey('   ')).toThrow(/empty/i);
+    expect(providerFor('claude').apiKey()).toBeNull();
   });
 
   test('clearing a stored key reports whether one existed and restores the env fallback', () => {
     process.env.ANTHROPIC_API = 'sk-ant-from-env-1234';
-    setApiKey('claude', 'sk-ant-stored-abcd');
-    expect(clearApiKey('claude')).toBe(true);
-    expect(clearApiKey('claude')).toBe(false);
-    expect(findApiKey('claude')).toEqual({ key: 'sk-ant-from-env-1234', source: 'env' });
+    providerFor('claude').setApiKey('sk-ant-stored-abcd');
+    expect(providerFor('claude').clearApiKey()).toBe(true);
+    expect(providerFor('claude').clearApiKey()).toBe(false);
+    expect(providerFor('claude').apiKey()).toEqual({ key: 'sk-ant-from-env-1234', source: 'env', masked: 'sk-ant-…1234' });
   });
 
   test('masks short keys without revealing them', () => {
@@ -254,10 +252,51 @@ describe('API providers without credentials', () => {
 
   test('fail before any request with a hint to /login', async () => {
     const messages: Message[] = [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }];
-    const context = { sessionId: 'test', directory: '/tmp' };
-    await expect(AnthropicProvider.getResponse(messages, 'claude-sonnet-5', context))
+    const turnFor = (model: string) => new TurnContext(
+      new SessionAgent({ name: 'sirus', model, runtimeId: 'test' }),
+      { directory: '/tmp' },
+    );
+    await expect(AnthropicProvider.getResponse(messages, turnFor('claude-sonnet-5')))
       .rejects.toThrow(/No Anthropic API key. Run \/login/);
-    await expect(OpenAIProvider.getResponse(messages, 'gpt-5.6-sol', context))
+    await expect(OpenAIProvider.getResponse(messages, turnFor('gpt-5.6-sol')))
       .rejects.toThrow(/No OpenAI API key. Run \/login/);
+  });
+});
+
+describe('Codex subscription runtime lifecycle', () => {
+  let shutdown: (() => void) | undefined;
+
+  afterEach(() => {
+    shutdown?.();
+    shutdown = undefined;
+    mock.restore();
+  });
+
+  test('closes the process-wide app-server when the frontend exits', async () => {
+    const { CodexRpc } = await import('../../src/agent_runtime/providers/openai/codex-rpc');
+    const { getCodexRpc, shutdownCodexRuntime } = await import(
+      '../../src/agent_runtime/providers/openai/codex-subscription'
+    );
+    shutdown = shutdownCodexRuntime;
+    const close = mock(() => {});
+    const rpc = {
+      isAlive: true,
+      close,
+      onNotification: mock(() => () => {}),
+      onRequest: mock(() => {}),
+    } as unknown as Awaited<ReturnType<typeof CodexRpc.start>>;
+    const start = spyOn(CodexRpc, 'start').mockResolvedValue(rpc);
+
+    await getCodexRpc();
+    shutdownCodexRuntime();
+    await Promise.resolve();
+
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(1);
+
+    // Cleanup is safe if more than one exit path observes the same shutdown.
+    shutdownCodexRuntime();
+    await Promise.resolve();
+    expect(close).toHaveBeenCalledTimes(1);
   });
 });

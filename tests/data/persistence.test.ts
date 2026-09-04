@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
-import { Session } from '../../src/data/data';
+import { Session } from '../../src/agent_runtime/session';
 import {
   loadApiKeys,
   loadSessions,
@@ -14,7 +14,7 @@ import {
   saveSirusModelPreference,
   saveSessions,
   saveSubscriptionPreferences,
-} from '../../src/data/persistence';
+} from '../../src/persistence';
 
 let directory: string;
 
@@ -28,7 +28,7 @@ afterEach(() => {
 
 describe('session persistence', () => {
   test('restores sessions, selected session, models, and complete message history', () => {
-    const first = new Session('First', 'first-id', 'claude-fable-5', [], '/projects/first');
+    const first = new Session('First', 'first-id', 'claude-fable-5-1', [], '/projects/first');
     first.append({ role: 'user', content: [{ type: 'text', text: 'Inspect this' }] });
     first.addParticipant('reviewer', 'gpt-5.6-terra');
     first.setThinkingLevel('medium');
@@ -36,7 +36,7 @@ describe('session persistence', () => {
     first.append({
       role: 'assistant',
       participant: 'sirus',
-      model: 'claude-fable-5',
+      model: 'claude-fable-5-1',
       content: [
         { type: 'tool_call', id: 'call-1', name: 'ReadFile', arguments: { path: 'README.md' } },
         { type: 'tool_result', callId: 'call-1', result: '# Sirus', isError: false },

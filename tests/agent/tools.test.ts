@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { availableTools, executeTool, findTool, runTool, toolRegistry } from '../../src/agent/tools';
-import { saveMemoryAccessPreference } from '../../src/data/persistence';
+import { availableTools, executeTool, findTool, runTool, toolRegistry } from '../../src/agent_runtime/tools';
+import { saveMemoryAccessPreference } from '../../src/persistence';
 
 let testDirectory: string;
 let previousDataDirectory: string | undefined;

@@ -1,6 +1,6 @@
 import { Box, Text } from 'ink';
-import { matchCommands } from '../../commands/command_register';
-import { theme } from '../theme';
+import { matchCommands } from '../../commands/registry';
+import { theme } from '../styles/theme';
 
 
 export function CommandMenu({ input }: { input: string }) {

@@ -1,16 +1,16 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import type { Message, MessageBlock, ToolCallBlock, ToolResultBlock } from '../../data/data';
+import type { Message, MessageBlock, ToolCallBlock, ToolResultBlock } from '../../agent_runtime/types';
 import { Box, Text, type DOMElement } from 'ink';
-import { theme } from '../theme';
+import { theme } from '../styles/theme';
 import { Markdown } from '../markdown/Markdown';
 import { participantColor, type ParticipantColors } from '../MentionText';
-import { useClickable } from '../clickable';
+import { useClickable } from '../interaction/clickable';
 import {
 	findSubagentByCall,
 	getSubagentsVersion,
 	subscribeSubagents,
 	type SubagentStatus,
-} from '../../agent/subagents';
+} from '../../agent_runtime/tools/subagents';
 import {
 	getPermissionsVersion,
 	isAwaitingApproval,
@@ -18,7 +18,7 @@ import {
 	isDeclinedResult,
 	judgeVerdictFor,
 	subscribePermissions,
-} from '../../agent/permissions';
+} from '../../agent_runtime/permissions/permissions';
 
 const argumentPreviewLength = 10;
 

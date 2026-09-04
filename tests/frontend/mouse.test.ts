@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { isMouseInput, parseMouseEvent, parseMouseWheel } from '../../src/frontend/mouse';
+import { isMouseInput, parseMouseEvent, parseMouseWheel } from '../../src/frontend/interaction/mouse';
 
 describe('terminal mouse input', () => {
   test('parses wheel up after Ink strips the escape prefix', () => {

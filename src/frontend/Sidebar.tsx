@@ -1,10 +1,10 @@
-import { Session, type SessionStatus } from '../runtime/session';
+import { Session, type SessionStatus } from '../agent_runtime/session';
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { Box, Text, useInput, type DOMElement } from 'ink';
-import { theme } from './theme';
-import { useSelectionRegion } from './useTextSelection';
-import { useClickable } from './clickable';
-import { arrowKeysCaptured } from './focus';
+import { theme } from './styles/theme';
+import { useSelectionRegion } from './interaction/useTextSelection';
+import { useClickable } from './interaction/clickable';
+import { arrowKeysCaptured } from './interaction/focus';
 
 export const SIDEBAR_WIDTH = 26;
 

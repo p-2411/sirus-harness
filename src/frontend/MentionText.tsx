@@ -1,6 +1,6 @@
 import { Text } from 'ink';
-import type { Participant } from '../runtime/session';
-import { theme } from './theme';
+import type { Participant } from '../agent_runtime/session';
+import { theme } from './styles/theme';
 
 export interface MentionSegment {
   text: string;

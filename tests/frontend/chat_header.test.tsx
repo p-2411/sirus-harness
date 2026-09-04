@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { renderToString } from 'ink';
 import stripAnsi from 'strip-ansi';
-import { Session } from '../../src/data/data';
+import { Session } from '../../src/agent_runtime/session';
 import { ChatHeader } from '../../src/frontend/chat/Chat';
 
 describe('chat header', () => {

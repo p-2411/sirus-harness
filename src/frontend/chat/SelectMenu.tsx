@@ -1,6 +1,6 @@
 import { Box, Text } from 'ink';
-import type { CommandMenuItem } from '../../commands/command_register';
-import { theme } from '../theme';
+import type { CommandMenuEntry } from '../../commands/registry';
+import { theme } from '../styles/theme';
 
 export function moveSelection(selected: number, delta: number, length: number): number {
   if (length === 0) return 0;
@@ -13,21 +13,34 @@ export function SelectMenu({
   items,
   selected,
 }: {
-  items: readonly CommandMenuItem[];
+  items: readonly CommandMenuEntry[];
   selected: number;
 }) {
   if (items.length === 0) return null;
-  const column = Math.max(...items.map(item => item.label.length)) + 2;
+  const choices = items.filter(item => item.type === 'item');
+  const column = Math.max(0, ...choices.map(item => item.label.length)) + 2;
+  let choiceIndex = -1;
 
   return (
     <Box flexDirection="column" paddingX={2} marginX={1} flexShrink={0} position="static">
-      {items.map((item, i) => (
-        <Box key={item.key}>
-          <Text color={i === selected ? theme.accent : theme.textSubtle}>{i === selected ? '› ' : '  '}</Text>
-          <Text color={i === selected ? theme.accent : theme.text}>{item.label.padEnd(column)}</Text>
-          <Text color={theme.textMuted}>{item.description}</Text>
-        </Box>
-      ))}
+      {items.map(item => {
+        if (item.type === 'heading') {
+          return (
+            <Box key={item.key} marginTop={choiceIndex >= 0 ? 1 : 0}>
+              <Text color={theme.textMuted} bold>{item.label}</Text>
+            </Box>
+          );
+        }
+        choiceIndex++;
+        const active = choiceIndex === selected;
+        return (
+          <Box key={item.key}>
+            <Text color={active ? theme.accent : theme.textSubtle}>{active ? '› ' : '  '}</Text>
+            <Text color={active ? theme.accent : theme.text}>{item.label.padEnd(column)}</Text>
+            {item.description && <Text color={theme.textMuted}>{item.description}</Text>}
+          </Box>
+        );
+      })}
     </Box>
   );
 }
