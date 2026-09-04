@@ -10,9 +10,12 @@ import {
   type CommandMenuItem,
 } from '../../commands/registry';
 import { isMouseInput } from '../interaction/mouse';
+import { isFocusInput } from '../terminal/window-focus';
 import { getSelectionSnapshot, subscribeSelection } from '../interaction/selection';
 import type { Feedback } from '../../commands/feedback';
 import type { Participant } from '../../agent_runtime/session';
+import type { ImageBlock } from '../../agent_runtime/types';
+import { describeImage } from '../../images';
 import { ParticipantMenu } from './ParticipantMenu';
 import { MentionText, participantColorMap, type ParticipantColors } from '../MentionText';
 import { activeSubagentCount, getSubagentsVersion, subscribeSubagents } from '../../agent_runtime/tools/subagents';
@@ -152,7 +155,7 @@ export type InputMode =
   };
 
 interface InputBarProps {
-  send: (input: string) => void;
+  send: (input: string, attachments?: readonly ImageBlock[]) => void;
   inputContent: string;
   setInputContent: (inputContent: string) => void;
   disabled: boolean;
@@ -162,6 +165,12 @@ interface InputBarProps {
   permissionMode?: PermissionMode;
   // shift+tab in text mode
   onCyclePermissionMode?: () => void;
+  // images waiting to go with the next message, oldest first
+  attachments?: readonly ImageBlock[];
+  // ctrl+v in text mode
+  onPasteImage?: () => void;
+  // backspace on an empty line drops the newest attachment
+  onRemoveAttachment?: () => void;
   // the session's current model, shown under the input bar
   model?: string;
   thinkingLevel?: string;
@@ -333,6 +342,20 @@ export function ApprovalPrompt({ request, waiting, selected }: {
 }
 
 const TEXT_MODE: InputMode = { type: 'text' };
+const NO_ATTACHMENTS: readonly ImageBlock[] = [];
+
+// The images that will go with the next message, above the input box.
+export function AttachmentRow({ attachments }: { attachments: readonly ImageBlock[] }) {
+  if (attachments.length === 0) return null;
+  return (
+    <Box paddingX={3} flexShrink={0}>
+      <Text color={theme.textMuted} wrap="truncate-end">
+        {attachments.map(image => `▣ ${describeImage(image)}`).join('   ')}
+      </Text>
+      <Text color={theme.textSubtle}>   backspace removes</Text>
+    </Box>
+  );
+}
 const NO_HISTORY: readonly string[] = [];
 
 export function InputBar({
@@ -345,6 +368,9 @@ export function InputBar({
   mode = TEXT_MODE,
   permissionMode,
   onCyclePermissionMode,
+  attachments = NO_ATTACHMENTS,
+  onPasteImage,
+  onRemoveAttachment,
   model,
   thinkingLevel,
   history = NO_HISTORY,
@@ -432,7 +458,8 @@ export function InputBar({
   });
 
   useInput((enteredInput, key) => {
-    if (isMouseInput(enteredInput)) return;
+    // mouse and window-focus reports are not typing
+    if (isMouseInput(enteredInput) || isFocusInput(enteredInput)) return;
 
     // Most terminals (macOS included) send DEL for the backspace key, which
     // Ink reports as key.delete rather than key.backspace.
@@ -474,6 +501,12 @@ export function InputBar({
     }
     if (key.tab && key.shift) {
       onCyclePermissionMode?.();
+      return;
+    }
+    // ctrl+v (not cmd+v, which the terminal keeps for text) attaches the
+    // clipboard image
+    if (key.ctrl && enteredInput === 'v') {
+      onPasteImage?.();
       return;
     }
     if (key.upArrow || key.downArrow) {
@@ -521,7 +554,8 @@ export function InputBar({
       return;
     }
     if (isBackspace) {
-      edit({ type: 'backspace' });
+      if (input.length === 0 && attachments.length > 0) onRemoveAttachment?.();
+      else edit({ type: 'backspace' });
       return;
     }
 
@@ -549,12 +583,14 @@ export function InputBar({
       }
       const selectedCommand = commandMatches[activeCommandNavigation.selected];
       const trimmed = selectedCommand ? `/${selectedCommand.name}` : input.trim();
-      if (!trimmed) return; // nothing to send
+      if (!trimmed && attachments.length === 0) return; // nothing to send
       if (disabled) {
-        if (!onQueue) return; // keep what's typed while sirus is thinking
+        // The session queue contains text. Keep image drafts intact until
+        // they can be sent together with their prompt.
+        if (!onQueue || attachments.length > 0) return;
         onQueue(trimmed);
       } else {
-        send(trimmed);
+        send(trimmed, attachments);
       }
       setRecall(null);
       setEditor({ text: '', cursor: 0 });
@@ -618,6 +654,7 @@ export function InputBar({
       />
       <ParticipantMenu input={input} participants={participants} />
       <InputFeedback feedback={feedback} participantColors={participantColors} />
+      <AttachmentRow attachments={attachments} />
       <Box
         borderStyle="round"
         borderColor={disabled ? theme.border : theme.accent}
@@ -642,7 +679,7 @@ export function InputBar({
                 <Text color={disabled ? theme.textSubtle : theme.accentSoft}>▌</Text>
                 <Text color={theme.textSubtle}>
                   {disabled
-                    ? onQueue ? ' agents are thinking… enter queues a message' : ' agents are thinking…'
+                    ? onQueue && attachments.length === 0 ? ' agents are thinking… enter queues a message' : ' agents are thinking…'
                     : <> message sirus or <MentionText colors={participantColors}>@mention</MentionText> an agent…</>}
                 </Text>
               </>
@@ -651,7 +688,7 @@ export function InputBar({
           <Box marginLeft={1} flexShrink={0}>
             {showCopied
               ? <Text color={theme.success}>copied ✓</Text>
-              : <Text color={theme.textSubtle}>{disabled && onQueue ? 'enter queues ↵' : 'enter ↵'}</Text>}
+              : <Text color={theme.textSubtle}>{disabled && onQueue && attachments.length === 0 ? 'enter queues ↵' : 'enter ↵'}</Text>}
           </Box>
         </Box>
       </Box>

@@ -6,6 +6,7 @@ import type { TurnContext } from '../../turn';
 import { systemPromptFor } from '../../prompt';
 import { availableTools } from '../../tools';
 import { fetchUrlCall, fetchUrlResult, webSearchCall, webSearchResult } from '../../tools/web';
+import { imageDataUrl } from '../../../images';
 
 export function openAIUsage(usage: Pick<OpenAI.Responses.ResponseUsage, 'input_tokens' | 'output_tokens'>): Usage {
   return {
@@ -73,28 +74,42 @@ export function toOpenAIInput(messages: readonly Message[]): OpenAI.Responses.Re
     if (message.role === 'assistant' && message.participant) {
       input.push({ role: 'assistant', content: `[Response from @${message.participant}]` });
     }
-    for (const block of message.content) {
-      switch (block.type) {
-        case 'text':
-          if (block.text) {
-            input.push({ role: message.role, content: block.text });
+
+    if (message.role === 'user') {
+      const content: OpenAI.Responses.ResponseInputContent[] = [];
+      for (const block of message.content) {
+        if (block.type === 'text' && block.text) {
+          content.push({ type: 'input_text', text: block.text });
+        } else if (block.type === 'image') {
+          try {
+            content.push({ type: 'input_image', image_url: imageDataUrl(block), detail: 'auto' });
+          } catch {
+            content.push({ type: 'input_text', text: '[An attached image is no longer available.]' });
           }
-          break;
-        case 'tool_call':
-          input.push({
-            type: 'function_call' as const,
-            call_id: block.id,
-            name: block.name,
-            arguments: JSON.stringify(block.arguments),
-          });
-          break;
-        case 'tool_result':
-          input.push({
-            type: 'function_call_output' as const,
-            call_id: block.callId,
-            output: block.result,
-          });
-          break;
+        }
+      }
+      if (content.length > 0) {
+        const only = content.length === 1 ? content[0] : undefined;
+        input.push({ role: 'user', content: only?.type === 'input_text' ? only.text : content });
+      }
+    }
+
+    for (const block of message.content) {
+      if (block.type === 'text' && message.role === 'assistant' && block.text) {
+        input.push({ role: 'assistant', content: block.text });
+      } else if (block.type === 'tool_call') {
+        input.push({
+          type: 'function_call' as const,
+          call_id: block.id,
+          name: block.name,
+          arguments: JSON.stringify(block.arguments),
+        });
+      } else if (block.type === 'tool_result') {
+        input.push({
+          type: 'function_call_output' as const,
+          call_id: block.callId,
+          output: block.result,
+        });
       }
     }
   }

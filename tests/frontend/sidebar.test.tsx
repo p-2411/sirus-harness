@@ -82,15 +82,15 @@ describe('sidebar session metadata', () => {
   });
 
   test('sorts sessions by latest activity without mutating the source list', () => {
-    const older = new Session('Older', 'older', undefined, [], '/projects/older', [], 'sirus', undefined, 1_000);
-    const newer = new Session('Newer', 'newer', undefined, [], '/projects/newer', [], 'sirus', undefined, 2_000);
+    const older = new Session('Older', 'older', undefined, [], '/projects/older', [], 'sirus', undefined, [], 1_000);
+    const newer = new Session('Newer', 'newer', undefined, [], '/projects/newer', [], 'sirus', undefined, [], 2_000);
     const source = [older, newer];
     expect(sessionsByRecency(source)).toEqual([newer, older]);
     expect(source).toEqual([older, newer]);
   });
 
   test('shows the owning directory basename and activity time', () => {
-    const session = new Session('Work', 'work', undefined, [], '/projects/sirus-harness', [], 'sirus', undefined, 1_000);
+    const session = new Session('Work', 'work', undefined, [], '/projects/sirus-harness', [], 'sirus', undefined, [], 1_000);
     const output = stripAnsi(renderToString(
       <SessionItem
         session={session}

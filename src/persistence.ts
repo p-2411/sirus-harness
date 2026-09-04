@@ -4,11 +4,18 @@ import os from 'os';
 import path from 'path';
 import { z } from 'zod';
 import { Session, type SessionSnapshot } from './agent_runtime/session';
-import { THINKING_LEVELS } from './agent_runtime/types';
+import { IMAGE_MEDIA_TYPES, THINKING_LEVELS } from './agent_runtime/types';
 
 const textBlockSchema = z.object({
   type: z.literal('text'),
   text: z.string(),
+});
+
+const imageBlockSchema = z.object({
+  type: z.literal('image'),
+  path: z.string().min(1),
+  mediaType: z.enum(IMAGE_MEDIA_TYPES),
+  bytes: z.number().int().nonnegative(),
 });
 
 const toolCallBlockSchema = z.object({
@@ -36,6 +43,7 @@ const messageSchema = z.object({
   role: z.enum(['user', 'assistant']),
   content: z.array(z.discriminatedUnion('type', [
     textBlockSchema,
+    imageBlockSchema,
     toolCallBlockSchema,
     toolResultBlockSchema,
   ])),
@@ -48,6 +56,13 @@ const participantSchema = z.object({
   name: z.string().min(1),
   model: z.string().min(1),
   thinkingLevel: z.enum(THINKING_LEVELS).optional(),
+});
+
+const checkpointSchema = z.object({
+  id: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i),
+  messageIndex: z.number().int().nonnegative(),
+  summary: z.string(),
+  createdAt: z.number(),
 });
 
 const sessionSchema = z.object({
@@ -65,6 +80,9 @@ const sessionSchema = z.object({
   // Unknown values fail the parse of that file; an absent one means the
   // default (auto approve).
   permissionMode: z.enum(['ask', 'auto', 'bypass']).optional(),
+  // Directory snapshots taken before each turn; absent before checkpoints
+  // existed and for sessions that never had one.
+  checkpoints: z.array(checkpointSchema).optional(),
   // When the history last changed; absent in older files.
   updatedAt: z.number().optional(),
   autoNamePending: z.boolean().optional(),
@@ -95,7 +113,13 @@ const settingsFileSchema = z.object({
   // The user's Sirus model follows them across every session. Named agents
   // keep their model in their owning session snapshot instead.
   sirusModel: z.string().min(1).optional(),
+  // When to send desktop notifications; absent means background only.
+  notifications: z.enum(['off', 'background', 'always']).optional(),
 });
+
+export type NotificationPreference = 'off' | 'background' | 'always';
+
+const DEFAULT_NOTIFICATIONS: NotificationPreference = 'background';
 
 type SettingsFile = z.infer<typeof settingsFileSchema>;
 
@@ -178,6 +202,7 @@ export function loadSessions(
           messages: snapshot.messages,
           inputContent: snapshot.inputContent ?? '',
           ...(snapshot.permissionMode ? { permissionMode: snapshot.permissionMode } : {}),
+          ...(snapshot.checkpoints ? { checkpoints: snapshot.checkpoints } : {}),
           ...(snapshot.updatedAt !== undefined ? { updatedAt: snapshot.updatedAt } : {}),
           ...(snapshot.autoNamePending !== undefined ? { autoNamePending: snapshot.autoNamePending } : {}),
         } satisfies SessionSnapshot);
@@ -191,7 +216,9 @@ export function loadSessions(
         undefined,
         undefined,
         undefined,
+        snapshot.checkpoints ?? [],
         snapshot.updatedAt ?? 0,
+        snapshot.autoNamePending ?? false,
       );
     })
     .filter(session => !session.isEmpty());
@@ -235,8 +262,20 @@ function writeSettings(directory: string, changes: Partial<Omit<SettingsFile, 'v
     memory: current?.memory,
     apiKeys: current?.apiKeys,
     sirusModel: current?.sirusModel,
+    notifications: current?.notifications,
     ...changes,
   });
+}
+
+export function loadNotificationPreference(directory: string = dataDirectory()): NotificationPreference {
+  return readSettings(directory)?.notifications ?? DEFAULT_NOTIFICATIONS;
+}
+
+export function saveNotificationPreference(
+  notifications: NotificationPreference,
+  directory: string = dataDirectory(),
+): boolean {
+  return writeSettings(directory, { notifications });
 }
 
 export function loadSubscriptionPreferences(directory: string = dataDirectory()): SubscriptionPreferences {

@@ -1,12 +1,12 @@
 import path from 'path';
 import { fileURLToPath } from 'url';
-import type { Message, MessageBlock, ToolCallBlock, Usage } from '../../types';
+import type { ImageBlock, Message, MessageBlock, ToolCallBlock, Usage } from '../../types';
 import type { Response } from '../../chat';
 import type { Transport } from '../provider';
 import type { TurnContext } from '../../turn';
 import { systemPromptFor } from '../../prompt';
 import { availableTools, runTool, type ToolArgumentSchema } from '../../tools';
-import { latestUserText, promptWithSharedHistory } from '../subscription';
+import { latestUserText, promptWithSharedHistory, unseenImages } from '../subscription';
 import { CodexRpc } from './codex-rpc';
 import { abortReason, abortable, throwIfAborted } from '../../../abort';
 import type { PermissionContext } from '../../permissions/permissions';
@@ -19,6 +19,7 @@ import {
   webSearchResult,
 } from '../../tools/web';
 import { DEFAULT_THINKING_LEVEL, type ThinkingLevel } from '../../types';
+import { validatedImagePath } from '../../../images';
 
 // Codex, reduced to a model transport: one app-server process, one thread per
 // Sirus session, every built-in tool except web search switched off, Sirus's
@@ -332,14 +333,12 @@ function toInputSchema(args: Record<string, ToolArgumentSchema>): Json {
 // Codex's own model-only threads disable every configured MCP server by
 // name; do the same so nothing from the user's ~/.codex config leaks in.
 async function disabledMcpServers(rpc: CodexRpc, directory: string): Promise<Json> {
-  try {
-    const response = await rpc.request<Json>('config/read', { includeLayers: false, cwd: directory });
-    const config = response.config as Json | undefined;
-    const servers = (config?.mcp_servers ?? (config?.additional as Json | undefined)?.mcp_servers) as Json | undefined;
-    return Object.fromEntries(Object.keys(servers ?? {}).map(name => [name, { enabled: false }]));
-  } catch {
-    return {};
-  }
+  // If configuration cannot be read, do not start a thread with unknown MCP
+  // tools that could bypass Sirus permissions and checkpoint barriers.
+  const response = await rpc.request<Json>('config/read', { includeLayers: false, cwd: directory });
+  const config = response.config as Json | undefined;
+  const servers = (config?.mcp_servers ?? (config?.additional as Json | undefined)?.mcp_servers) as Json | undefined;
+  return Object.fromEntries(Object.keys(servers ?? {}).map(name => [name, { enabled: false }]));
 }
 
 async function ensureSession(rpc: CodexRpc, turn: TurnContext): Promise<CodexSession> {
@@ -391,10 +390,24 @@ async function ensureSession(rpc: CodexRpc, turn: TurnContext): Promise<CodexSes
   return session;
 }
 
+export function codexTurnInput(text: string, images: readonly ImageBlock[]): Json[] {
+  const input: Json[] = [];
+  for (const image of images) {
+    try {
+      input.push({ type: 'localImage', path: validatedImagePath(image) });
+    } catch {
+      input.push({ type: 'text', text: '[An attached image is no longer available.]' });
+    }
+  }
+  if (text) input.push({ type: 'text', text });
+  return input;
+}
+
 async function runTurn(
   rpc: CodexRpc,
   session: CodexSession,
   text: string,
+  images: readonly ImageBlock[],
   model: string,
   signal?: AbortSignal,
   updateStream?: TurnContext['updateStream'],
@@ -438,9 +451,10 @@ async function runTurn(
   };
   signal?.addEventListener('abort', interrupt, { once: true });
   try {
+    // Codex reads attached images straight from disk.
     const starting = rpc.request<Json>('turn/start', {
       threadId: session.threadId,
-      input: [{ type: 'text', text }],
+      input: codexTurnInput(text, images),
       effort: thinkingLevel,
       ...(session.model !== model ? { model } : {}),
     });
@@ -485,6 +499,7 @@ async function getResponse(
       agent.name,
       turn.turnPrompt,
     ),
+    unseenImages(messages, !session.hasSpoken, session.seenMessageCount),
     agent.model,
     signal,
     blocks => turn.updateStream(blocks),
@@ -538,9 +553,14 @@ async function bareRequest(messages: readonly Message[], turn: TurnContext): Pro
     signal?.addEventListener('abort', onAbort, { once: true });
   });
   void answer.catch(() => void 0);
+  const textInput = latestUserText(messages);
+  const last = messages[messages.length - 1];
+  const images = last?.role === 'user'
+    ? last.content.filter((block): block is ImageBlock => block.type === 'image')
+    : [];
   await abortable(rpc.request('turn/start', {
     threadId,
-    input: [{ type: 'text', text: latestUserText(messages) }],
+    input: codexTurnInput(textInput, images),
   }), signal);
   return { content: [{ type: 'text', text: await answer }], stop_reason: 'end_turn' };
 }

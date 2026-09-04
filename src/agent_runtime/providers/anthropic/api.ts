@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
-import type { Message, MessageBlock, TextBlock, ToolCallBlock, ToolResultBlock, Usage } from '../../types';
+import type { Message, MessageBlock, ToolCallBlock, ToolResultBlock, Usage } from '../../types';
+import { imageData } from '../../../images';
 import type { Response } from '../../chat';
 import type { Transport } from '../provider';
 import type { TurnContext } from '../../turn';
@@ -165,14 +166,32 @@ function normalizeContent(
   return blocks;
 }
 
+// An attached image as the API takes it, or a note in its place when the
+// file behind it is gone.
+export function imageBlockParam(block: Extract<MessageBlock, { type: 'image' }>): Anthropic.ContentBlockParam {
+  try {
+    return {
+      type: 'image',
+      source: { type: 'base64', media_type: block.mediaType, data: imageData(block) },
+    };
+  } catch {
+    return { type: 'text', text: '[An attached image is no longer available.]' };
+  }
+}
+
 export function toAnthropicMessages(messages: readonly Message[]): Anthropic.MessageParam[] {
   const result: Anthropic.MessageParam[] = [];
 
   for (const message of messages) {
     if (message.role === 'user') {
-      const content: Anthropic.TextBlockParam[] = message.content
-        .filter((block): block is TextBlock => block.type === 'text' && Boolean(block.text))
-        .map(block => ({ type: 'text', text: block.text }));
+      const content: Anthropic.ContentBlockParam[] = [];
+      for (const block of message.content) {
+        if (block.type === 'text' && block.text) {
+          content.push({ type: 'text', text: block.text });
+        } else if (block.type === 'image') {
+          content.push(imageBlockParam(block));
+        }
+      }
       if (content.length > 0) {
         result.push({ role: 'user', content });
       }

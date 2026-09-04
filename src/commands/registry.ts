@@ -8,6 +8,10 @@ import { helpCommand } from './help/commands';
 import { memoryCommandSpec } from './memory/commands';
 import { clearCommand, permissionsCommandSpec, renameCommand } from './session/commands';
 import { updateCommandSpec } from './update/commands';
+import { rewindCommandSpec, undoCommandSpec } from './checkpoints/commands';
+import { imageCommandSpec } from './images/commands';
+import { notifyCommandSpec } from './notifications/commands';
+import type { Session } from '../agent_runtime/session';
 import type {
   CommandExecution,
   CommandMenuEntry,
@@ -37,6 +41,10 @@ export const commandRegistry: CommandSpec[] = [
   updateCommandSpec,
   memoryCommandSpec,
   permissionsCommandSpec,
+  undoCommandSpec,
+  rewindCommandSpec,
+  imageCommandSpec,
+  notifyCommandSpec,
   renameCommand,
   helpCommand(() => commandRegistry),
 ];
@@ -50,9 +58,13 @@ export function matchCommands(input: string): CommandSpec[] {
   return commandRegistry.filter(spec => spec.name.startsWith(typed));
 }
 
-export function commandMenu(command: string, args: readonly string[]): CommandMenuEntry[] | null {
+export function commandMenu(
+  command: string,
+  args: readonly string[],
+  session: Session,
+): CommandMenuEntry[] | null {
   const spec = commandRegistry.find(spec => spec.name === command);
-  return spec?.menu ? spec.menu(args) : null;
+  return spec?.menu ? spec.menu(args, session) : null;
 }
 
 export function executeCommand(

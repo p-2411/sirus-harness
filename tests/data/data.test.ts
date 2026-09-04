@@ -157,6 +157,7 @@ describe('Session model', () => {
       mode: expect.any(Function),
       requester: { participant: 'sirus' },
       model: testModel,
+      beforeMutation: expect.any(Function),
     });
     expect(receivedTurn?.signal).toBeInstanceOf(AbortSignal);
     expect(receivedTurn?.turnPrompt).toBeUndefined();
@@ -865,5 +866,47 @@ describe('Session subscriptions', () => {
     session.append({ role: 'user', content: [{ type: 'text', text: 'hi' }] });
     session.setModel('claude-fable-5-1');
     expect(session.getVersion()).toBe(before + 2);
+  });
+});
+
+describe('session-owned subagent cancellation', () => {
+  test('cancels its detached workers after the parent finishes without cancelling another session', async () => {
+    const { listAllSubagents, checkSubagent } = await import('../../src/agent_runtime/tools/subagents');
+    const workers = new Map<string, import('../../src/agent_runtime/tools/subagents').SubagentRun>();
+    let finishWorkers!: () => void;
+    const workerGate = new Promise<void>(resolve => { finishWorkers = resolve; });
+    modelStrategies[secondTestModel] = {
+      getResponse: async () => {
+        await workerGate;
+        return { content: [{ type: 'text', text: 'Worker done' }], stop_reason: 'end_turn' };
+      },
+    };
+    modelStrategies[testModel] = {
+      getResponse: async (_messages, turn) => {
+        workers.set(turn.agent.runtimeId, turn.agent.spawnSubagent('Work', secondTestModel, {
+          directory: turn.directory,
+          permissions: turn.permissions,
+        }));
+        return { content: [{ type: 'text', text: 'Worker started' }], stop_reason: 'end_turn' };
+      },
+    };
+    const first = new Session('First', 'owned-first', testModel);
+    const second = new Session('Second', 'owned-second', testModel);
+    const message: Message = { role: 'user', content: [{ type: 'text', text: 'Start' }] };
+    try {
+      await first.sendMessage(message);
+      await second.sendMessage(message);
+      expect(first.getStatus()).toBe('idle');
+      expect(first.cancel()).toBe(true);
+      await checkSubagent(workers.get(first.getId())!, true);
+      expect(workers.get(first.getId())?.status).toBe('cancelled');
+      expect(workers.get(second.getId())?.status).toBe('working');
+      expect(listAllSubagents()).toContain(workers.get(second.getId())!);
+    } finally {
+      finishWorkers();
+      first.cancel();
+      second.cancel();
+      await Promise.all([...workers.values()].map(worker => checkSubagent(worker, true)));
+    }
   });
 });

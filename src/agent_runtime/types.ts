@@ -17,7 +17,21 @@ export interface ToolResultBlock {
   isError: boolean;
 }
 
-export type MessageBlock = TextBlock | ToolCallBlock | ToolResultBlock;
+export const IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] as const;
+
+export type ImageMediaType = typeof IMAGE_MEDIA_TYPES[number];
+
+// An image the user attached to a message. The bytes live in a file under
+// the application-state directory, so the persisted history stays small and
+// each provider reads the file only when it builds a request.
+export interface ImageBlock {
+  type: 'image';
+  path: string;
+  mediaType: ImageMediaType;
+  bytes: number;
+}
+
+export type MessageBlock = TextBlock | ImageBlock | ToolCallBlock | ToolResultBlock;
 
 // Token accounting for one agent turn, as the provider reported it. Totals
 // cover every request of the turn; context is the size of the last request,
