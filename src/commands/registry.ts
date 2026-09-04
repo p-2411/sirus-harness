@@ -4,8 +4,9 @@ import {
   loginCommandSpec,
   logoutCommandSpec,
 } from './authentication/commands';
+import { helpCommand } from './help/commands';
 import { memoryCommandSpec } from './memory/commands';
-import { clearCommand, permissionsCommandSpec } from './session/commands';
+import { clearCommand, permissionsCommandSpec, renameCommand } from './session/commands';
 import { updateCommandSpec } from './update/commands';
 import type {
   CommandExecution,
@@ -36,6 +37,8 @@ export const commandRegistry: CommandSpec[] = [
   updateCommandSpec,
   memoryCommandSpec,
   permissionsCommandSpec,
+  renameCommand,
+  helpCommand(() => commandRegistry),
 ];
 
 // Prefix matches while a command name is being typed ('/' alone matches

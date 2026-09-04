@@ -146,6 +146,30 @@ describe('getResponse', () => {
     expect(continuationCount).toBe(2);
   });
 
+  test('sums usage across tool requests while retaining only the latest context', async () => {
+    modelStrategies[testModel] = {
+      getResponse: async () => ({
+        stop_reason: 'tool_use',
+        content: [{ type: 'tool_call', id: 'read', name: 'ReadFile', arguments: { path: 'package.json' } }],
+        usage: { inputTokens: 100, outputTokens: 20, contextTokens: 120, contextWindow: 200_000 },
+        continueWithToolResults: async () => ({
+          stop_reason: 'end_turn',
+          content: [{ type: 'text', text: 'Done.' }],
+          usage: { inputTokens: 300, outputTokens: 50, contextTokens: 350, contextWindow: 400_000 },
+        }),
+      }),
+    };
+    const turn = testTurn();
+    const response = await getResponse([{ role: 'user', content: [{ type: 'text', text: 'Read it' }] }], turn);
+    expect(response.usage).toEqual({
+      inputTokens: 400,
+      outputTokens: 70,
+      contextTokens: 350,
+      contextWindow: 400_000,
+    });
+    expect((await turn.result).usage).toEqual(response.usage);
+  });
+
   test('exposes streamed text on the turn before the provider finishes', async () => {
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });

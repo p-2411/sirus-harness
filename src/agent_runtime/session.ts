@@ -9,6 +9,8 @@ import {
   type PermissionContext,
   type PermissionMode,
 } from './permissions/permissions';
+import { contextWindowFor } from './providers/providers';
+import type { ContextUsage } from './usage';
 
 export type { Participant };
 
@@ -25,6 +27,28 @@ export interface SessionSnapshot {
   inputContent?: string;
   // How tool calls are approved in this session; absent in older snapshots.
   permissionMode?: PermissionMode;
+  // When the history last changed; absent in older snapshots.
+  updatedAt?: number;
+  // A newly-created session may still take its name from its first prompt.
+  autoNamePending?: boolean;
+}
+
+export interface TokenTotals {
+  inputTokens: number;
+  outputTokens: number;
+}
+
+export const SESSION_NAME_LIMIT = 40;
+
+// The first nonblank line of the prompt, cut at a word boundary when it runs
+// long. Later lines are context, not part of the sidebar label.
+export function sessionNameFromPrompt(text: string): string {
+  const firstLine = text.split(/\r\n?|\n/).find(line => line.trim().length > 0) ?? '';
+  const line = firstLine.replace(/[ \t]+/g, ' ').trim();
+  if (line.length <= SESSION_NAME_LIMIT) return line;
+  const cut = line.slice(0, SESSION_NAME_LIMIT);
+  const space = cut.lastIndexOf(' ');
+  return `${(space > SESSION_NAME_LIMIT / 2 ? cut.slice(0, space) : cut).trimEnd()}…`;
 }
 
 interface Mention {
@@ -85,6 +109,14 @@ export class Session {
   private lastStreamNotify = 0;
   private permissionMode: PermissionMode;
   private inputContent: string;
+  // When the history last changed; 0 for a restored session that predates
+  // the field, so it sorts last and shows no time.
+  private lastActivity: number;
+  private autoNamePending: boolean;
+  // Drafts typed while a turn is active belong to the session, so switching
+  // away and back does not discard them. They are intentionally not persisted.
+  private queuedMessages: string[] = [];
+  private activeTurnStartedAt: number | null = null;
 
   constructor(
     name: string = 'Session 1',
@@ -95,12 +127,16 @@ export class Session {
     participants: readonly Participant[] = [],
     defaultParticipantName: string = DEFAULT_PARTICIPANT_NAME,
     permissionMode: PermissionMode = DEFAULT_PERMISSION_MODE,
+    updatedAt: number = Date.now(),
+    autoNamePending: boolean = false,
     inputContent: string = '',
   ) {
     this.name = name;
     this.id = id;
     this.directory = directory;
     this.permissionMode = permissionMode;
+    this.lastActivity = updatedAt;
+    this.autoNamePending = autoNamePending;
     const restored = participants.map(participant => this.createAgent(participant, defaultParticipantName));
     this.defaultAgent = restored.find(agent => sameName(agent.name, defaultParticipantName))
       ?? this.createAgent({ name: defaultParticipantName, model }, defaultParticipantName);
@@ -115,7 +151,18 @@ export class Session {
     directory: string = process.cwd(),
     model: string = DEFAULT_MODEL,
   ): Session {
-    return new Session(name, undefined, model, undefined, directory);
+    return new Session(
+      name,
+      undefined,
+      model,
+      undefined,
+      directory,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
   }
 
   static fromSnapshot(snapshot: SessionSnapshot | LegacySessionSnapshot): Session {
@@ -129,14 +176,27 @@ export class Session {
         snapshot.participants,
         snapshot.defaultModel.name,
         snapshot.permissionMode ?? DEFAULT_PERMISSION_MODE,
+        snapshot.updatedAt ?? 0,
+        snapshot.autoNamePending ?? false,
         snapshot.inputContent ?? '',
       );
     }
-    return new Session(snapshot.name, snapshot.id, snapshot.model, snapshot.messages, snapshot.directory);
+    return new Session(
+      snapshot.name,
+      snapshot.id,
+      snapshot.model,
+      snapshot.messages,
+      snapshot.directory,
+      undefined,
+      undefined,
+      undefined,
+      0,
+    );
   }
 
   append(message: Message) {
     this.messages.push(message);
+    this.lastActivity = Date.now();
     this.notifyListeners();
   }
 
@@ -158,7 +218,10 @@ export class Session {
   async sendMessage(message: Message): Promise<Message[]> {
     if (message.role !== 'user') throw new Error('Only user messages can start a session turn');
 
-    if (this.activeSends === 0) this.turnFailed = false;
+    if (this.activeSends === 0) {
+      this.turnFailed = false;
+      this.activeTurnStartedAt = Date.now();
+    }
     this.activeSends++;
     this.setStatus('working');
     try {
@@ -171,7 +234,13 @@ export class Session {
       // A model following a newly introduced @name is host routing metadata,
       // not part of the conversation. Strip it before either the UI history or
       // any provider sees the turn.
-      this.append(this.withoutCreationModels(message, mentions));
+      const stored = this.withoutCreationModels(message, mentions);
+      if (this.messages.length === 0 && this.autoNamePending) {
+        const name = sessionNameFromPrompt(textOf(stored));
+        if (name) this.name = name;
+        this.autoNamePending = false;
+      }
+      this.append(stored);
       await this.runInvocations(targets.map(participant => ({ participant, mentionedBy: [] })));
       return this.messages;
     } catch (error) {
@@ -179,15 +248,17 @@ export class Session {
       throw error;
     } finally {
       this.activeSends--;
+      if (this.activeSends === 0) this.activeTurnStartedAt = null;
       this.setStatus(this.activeSends > 0
         ? 'working'
         : this.turnFailed ? 'error' : 'idle');
+      this.sendNextQueuedPrompt();
     }
   }
 
-  // Stops every participant's running turn and every subagent they spawned,
-  // this session only. True if any was running.
+  // Stops this session's turns and subagents, including detached workers.
   cancel(): boolean {
+    this.clearQueuedMessages();
     let cancelled = false;
     for (const agent of this.participants) {
       if (agent.cancel()) cancelled = true;
@@ -201,7 +272,89 @@ export class Session {
     if (this.messages.length === 0) return;
     this.messages = [];
     for (const agent of this.participants) agent.resetRuntime();
+    this.lastActivity = Date.now();
     this.notifyListeners();
+  }
+
+  setName(name: string): void {
+    const trimmed = name.replace(/\s+/g, ' ').trim();
+    if (!trimmed) throw new Error('A session name cannot be empty');
+    const wasAutoNamePending = this.autoNamePending;
+    this.autoNamePending = false;
+    if (trimmed === this.name) {
+      if (wasAutoNamePending) this.notifyListeners();
+      return;
+    }
+    this.name = trimmed;
+    this.notifyListeners();
+  }
+
+  queueMessage(message: string): void {
+    this.queuedMessages.push(message);
+    this.notifyListeners();
+  }
+
+  shiftQueuedMessage(): string | undefined {
+    const message = this.queuedMessages.shift();
+    if (message !== undefined) this.notifyListeners();
+    return message;
+  }
+
+  clearQueuedMessages(): void {
+    if (this.queuedMessages.length === 0) return;
+    this.queuedMessages = [];
+    this.notifyListeners();
+  }
+
+  // Normal prompts keep running even when this session's Chat is unmounted.
+  // Commands can open pickers or secret entry, so leave them (and anything
+  // following them) queued for the visible Chat to handle in order.
+  private sendNextQueuedPrompt(): void {
+    if (this.activeSends > 0) return;
+    const next = this.queuedMessages[0];
+    if (next === undefined || next.startsWith('/')) return;
+    this.queuedMessages.shift();
+    void this.sendMessage({ role: 'user', content: [{ type: 'text', text: next }] })
+      .catch(() => { /* sendMessage records the failure in the session status. */ });
+  }
+
+  getQueuedMessageCount(): number {
+    return this.queuedMessages.length;
+  }
+
+  getActiveTurnStartedAt(): number | null {
+    return this.activeTurnStartedAt;
+  }
+
+  getLastActivity(): number {
+    return this.lastActivity;
+  }
+
+  // The window of the latest response that reported one: what the model had
+  // in front of it when it last answered.
+  getContextUsage(): ContextUsage | null {
+    for (let index = this.messages.length - 1; index >= 0; index--) {
+      const message = this.messages[index];
+      if (message.role !== 'assistant' || !message.usage) continue;
+      const window = message.usage.contextWindow
+        ?? contextWindowFor(message.model ?? this.defaultAgent.model);
+      return { tokens: message.usage.contextTokens, ...(window ? { window } : {}) };
+    }
+    return null;
+  }
+
+  // Every token the session's responses have reported, or null before any.
+  getTotalUsage(): TokenTotals | null {
+    let reported = false;
+    let inputTokens = 0;
+    let outputTokens = 0;
+    for (const message of this.messages) {
+      if (message.role !== 'assistant' || !message.usage) continue;
+      reported = true;
+      inputTokens += message.usage.inputTokens;
+      outputTokens += message.usage.outputTokens;
+    }
+    return reported ? { inputTokens, outputTokens } : null;
   }
 
   getMessages(): Message[] {
@@ -298,6 +451,8 @@ export class Session {
       messages: [...this.messages],
       inputContent: this.inputContent,
       permissionMode: this.permissionMode,
+      updatedAt: this.lastActivity,
+      autoNamePending: this.autoNamePending,
     };
   }
 
@@ -345,6 +500,7 @@ export class Session {
 
   private notifyAssistantActivity(): void {
     this.assistantVersion++;
+    this.lastActivity = Date.now();
     this.notifyListeners();
   }
 
@@ -489,6 +645,8 @@ export class Session {
         for await (const snapshot of turn.changes()) {
           publishRound();
           liveMessages[index].content = snapshot.content;
+          if (snapshot.usage) liveMessages[index].usage = snapshot.usage;
+          else delete liveMessages[index].usage;
           this.notifyStreaming();
         }
         const response = await turn.result;
@@ -507,6 +665,8 @@ export class Session {
           const result = settled[index];
           if (result.status === 'fulfilled') {
             liveMessages[index].content = result.value.content;
+            if (result.value.usage) liveMessages[index].usage = result.value.usage;
+            else delete liveMessages[index].usage;
           } else if (liveMessages[index].content.length === 0) {
             // A turn that failed before producing anything should not leave an
             // empty assistant bubble. Streamed text and completed tool work,

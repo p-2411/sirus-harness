@@ -42,6 +42,7 @@ describe('session persistence', () => {
         { type: 'tool_result', callId: 'call-1', result: '# Sirus', isError: false },
         { type: 'text', text: 'Done.' },
       ],
+      usage: { inputTokens: 120, outputTokens: 8, contextTokens: 128, contextWindow: 200_000 },
     });
     const second = new Session('Second', 'second-id', 'gpt-5.6-sol', [], '/projects/second');
     second.append({ role: 'user', content: [{ type: 'text', text: 'Keep this too' }] });

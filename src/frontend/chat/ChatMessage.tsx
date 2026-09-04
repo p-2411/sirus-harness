@@ -14,25 +14,98 @@ import {
 import {
 	getPermissionsVersion,
 	isAwaitingApproval,
-	isAwaitingJudge,
 	isDeclinedResult,
-	judgeVerdictFor,
 	subscribePermissions,
 } from '../../agent_runtime/permissions/permissions';
 
-const argumentPreviewLength = 10;
+function singleLine(text: string): string {
+	return text.replace(/\s+/g, ' ').trim();
+}
 
-function formatToolArguments(args: Record<string, unknown>): string {
-	const firstEntry = Object.entries(args)[0];
-	if (!firstEntry) return '';
+function lineCount(text: string): number {
+	return text.length === 0 ? 0 : text.split('\n').length;
+}
 
-	const [name, value] = firstEntry;
-	const text = typeof value === 'string' ? value : JSON.stringify(value) ?? String(value);
-	const preview = text.length > argumentPreviewLength
-		? `${text.slice(0, argumentPreviewLength)}...`
-		: text;
+function textArgument(call: ToolCallBlock, name: string): string {
+	const value = call.arguments[name];
+	return typeof value === 'string' ? value : '';
+}
 
-	return `{ ${name} : ${preview}`;
+// What a tool row shows after the tool's name: the thing the call is about,
+// in full, left to the row to truncate at its own width.
+export function toolSubject(call: ToolCallBlock): string {
+	switch (call.name) {
+		case 'ReadFile':
+		case 'WriteFile':
+		case 'EditFile':
+			return textArgument(call, 'path');
+		case 'RunShell':
+			return singleLine(textArgument(call, 'command'));
+		case 'SearchFiles': {
+			const directory = textArgument(call, 'path');
+			return `${textArgument(call, 'pattern')}${directory && directory !== '.' ? ` in ${directory}` : ''}`;
+		}
+		case 'SpawnAgent':
+			return singleLine(textArgument(call, 'prompt'));
+		case 'CheckAgent':
+		case 'CancelAgent':
+			return textArgument(call, 'id');
+		case 'WebSearch':
+		case 'SearchMemories':
+			return textArgument(call, 'query');
+		case 'FetchURL':
+			return textArgument(call, 'url');
+		case 'SaveMemory':
+		case 'GetMemory':
+		case 'DeleteMemory':
+			return textArgument(call, 'name');
+		default: {
+			const first = Object.values(call.arguments)[0];
+			if (first === undefined) return '';
+			return singleLine(typeof first === 'string' ? first : JSON.stringify(first) ?? String(first));
+		}
+	}
+}
+
+// Lines added and removed by a file change, read off the text the call carries.
+export function editCounts(call: ToolCallBlock): { added: number; removed: number } | null {
+	if (call.name === 'WriteFile') return { added: lineCount(textArgument(call, 'content')), removed: 0 };
+	if (call.name === 'EditFile') {
+		return {
+			added: lineCount(textArgument(call, 'new_text')),
+			removed: lineCount(textArgument(call, 'old_text')),
+		};
+	}
+	return null;
+}
+
+export interface DiffLine {
+	sign: '+' | '-' | '…';
+	text: string;
+}
+
+const DIFF_PREVIEW_LINES = 8;
+
+function diffLines(sign: '+' | '-', text: string): DiffLine[] {
+	if (!text) return [];
+	const lines = text.split('\n');
+	const shown: DiffLine[] = lines.slice(0, DIFF_PREVIEW_LINES).map(line => ({ sign, text: line }));
+	const hidden = lines.length - DIFF_PREVIEW_LINES;
+	if (hidden > 0) shown.push({ sign: '…', text: `${hidden} more line${hidden === 1 ? '' : 's'}` });
+	return shown;
+}
+
+// The change a file call made, as removed then added lines; empty for
+// anything that is not a file change.
+export function editPreview(call: ToolCallBlock): DiffLine[] {
+	if (call.name === 'WriteFile') return diffLines('+', textArgument(call, 'content'));
+	if (call.name === 'EditFile') {
+		return [
+			...diffLines('-', textArgument(call, 'old_text')),
+			...diffLines('+', textArgument(call, 'new_text')),
+		];
+	}
+	return [];
 }
 
 interface ToolRun {
@@ -86,15 +159,13 @@ function useSubagentStatus(call: ToolCallBlock, result?: ToolResultBlock): Subag
 	return result.isError ? 'failed' : 'unknown';
 }
 
-// What the permission gate did with a call: the prompt it is waiting on, the
-// judge it is waiting on, the verdict it got, or the user's refusal.
+// User-visible permission state: only an approval that needs their input or
+// a call they declined. Internal safety checks stay internal.
 function usePermissionStatus(call: ToolCallBlock, result?: ToolResultBlock): { text: string; color: string } | null {
 	useSyncExternalStore(subscribePermissions, getPermissionsVersion);
 	if (result?.isError && isDeclinedResult(result.result)) return { text: 'declined by user', color: theme.danger };
 	if (!result && isAwaitingApproval(call.id)) return { text: 'waiting for approval', color: theme.pending };
-	if (!result && isAwaitingJudge(call.id)) return { text: 'checking', color: theme.pending };
-	const verdict = judgeVerdictFor(call.id);
-	return verdict ? { text: `judge: ${verdict}`, color: theme.textSubtle } : null;
+	return null;
 }
 
 function subagentModel(call: ToolCallBlock): string {
@@ -102,21 +173,50 @@ function subagentModel(call: ToolCallBlock): string {
 		?? (typeof call.arguments.model === 'string' ? call.arguments.model : '');
 }
 
-function ToolLine({ call, result }: { call: ToolCallBlock; result?: ToolResultBlock }) {
+// One line for one call: status dot, name, subject, and for a file change
+// the lines it added and removed. Truncated at the row's width.
+function ToolSummary({ call, result, indent = '', hovered = false, marker }: {
+	call: ToolCallBlock;
+	result?: ToolResultBlock;
+	indent?: string;
+	hovered?: boolean;
+	marker?: string;
+}) {
 	const subagent = useSubagentStatus(call, result);
 	const permission = usePermissionStatus(call, result);
 	const color = subagent
 		? subagentColors[subagent]
 		: result?.isError ? theme.danger : result ? theme.toolIndicator : theme.textSubtle;
+	const subject = toolSubject(call);
+	const counts = editCounts(call);
 	return (
-		<Text>
-			<Text color={color}>●</Text>
-			<Text color={theme.textSubtle}> {call.name}</Text>
+		<Text wrap="truncate-end">
+			<Text color={color}>{indent}●</Text>
+			<Text color={hovered ? theme.highlight : theme.textSubtle} bold={hovered}> {call.name}</Text>
 			{subagent && <Text color={theme.textSubtle} dimColor> {subagentModel(call)}</Text>}
-			<Text color={theme.textSubtle} dimColor> {formatToolArguments(call.arguments)}</Text>
+			{subject && <Text color={theme.textSubtle} dimColor> {subject}</Text>}
+			{counts && <Text color={theme.success}> +{counts.added}</Text>}
+			{counts && call.name === 'EditFile' && <Text color={theme.danger}> −{counts.removed}</Text>}
 			{subagent && subagent !== 'unknown' && <Text color={color}> · {subagent}</Text>}
 			{permission && <Text color={permission.color}> · {permission.text}</Text>}
+			{marker && <Text color={hovered ? theme.highlight : theme.textSubtle}> {marker}</Text>}
 		</Text>
+	);
+}
+
+function DiffPreview({ lines }: { lines: readonly DiffLine[] }) {
+	return (
+		<Box flexDirection="column" marginLeft={4}>
+			{lines.map((line, index) => (
+				<Text
+					key={index}
+					color={line.sign === '+' ? theme.success : line.sign === '-' ? theme.danger : theme.textSubtle}
+					wrap="truncate-end"
+				>
+					{line.sign} {line.text}
+				</Text>
+			))}
+		</Box>
 	);
 }
 
@@ -133,16 +233,22 @@ export function ToolRunGroup({ blocks, defaultExpanded = false }: {
 	blocks: readonly (ToolCallBlock | ToolResultBlock)[];
 	defaultExpanded?: boolean;
 }) {
-	const [expanded, setExpanded] = useState(defaultExpanded);
-	const toggle = useCallback(() => setExpanded(current => !current), []);
-	const ref = useRef<DOMElement>(null);
-	const hovered = useClickable(ref, toggle);
 	const calls = blocks.filter((block): block is ToolCallBlock => block.type === 'tool_call');
 	const results = new Map(
 		blocks
 			.filter((block): block is ToolResultBlock => block.type === 'tool_result')
 			.map(result => [result.callId, result]),
 	);
+	const hasCompletedEdit = calls.some(call => {
+		const result = results.get(call.id);
+		return Boolean(result && !result.isError && editPreview(call).length > 0);
+	});
+	// Follow arriving file results until the user chooses whether to expand.
+	const [expansionOverride, setExpansionOverride] = useState<boolean | null>(null);
+	const expanded = expansionOverride ?? (defaultExpanded || hasCompletedEdit);
+	const toggle = useCallback(() => setExpansionOverride(!expanded), [expanded]);
+	const ref = useRef<DOMElement>(null);
+	const hovered = useClickable(ref, toggle);
 	const complete = calls.every(call => results.has(call.id));
 	const summaryColor = hovered ? theme.highlight : theme.textMuted;
 
@@ -156,25 +262,29 @@ export function ToolRunGroup({ blocks, defaultExpanded = false }: {
 			</Box>
 			{expanded ? (
 				<Box flexDirection="column" marginLeft={2}>
-					{calls.map(call => <ToolLine key={call.id} call={call} result={results.get(call.id)} />)}
+					{calls.map(call => {
+						const result = results.get(call.id);
+						const preview = result && !result.isError ? editPreview(call) : [];
+						return (
+							<Box key={call.id} flexDirection="column">
+								<ToolSummary call={call} result={result} />
+								{preview.length > 0 && <DiffPreview lines={preview} />}
+							</Box>
+						);
+					})}
 				</Box>
 			) : null}
 		</Box>
 	);
 }
 
+// A completed lone file change shows its colored diff immediately.
 function ToolCallRow({ call, result }: { call: ToolCallBlock; result?: ToolResultBlock }) {
-	const subagent = useSubagentStatus(call, result);
-	const permission = usePermissionStatus(call, result);
-	const color = subagent ? subagentColors[subagent] : theme.toolIndicator;
+	const preview = result && !result.isError ? editPreview(call) : [];
 	return (
-		<Box padding={1}>
-			<Text color={color}>  ●</Text>
-			<Text color={theme.textSubtle}> {call.name}</Text>
-			{subagent && <Text color={theme.textSubtle} dimColor> {subagentModel(call)}</Text>}
-			<Text color={theme.textSubtle} dimColor> {formatToolArguments(call.arguments)}</Text>
-			{subagent && subagent !== 'unknown' && <Text color={color}> · {subagent}</Text>}
-			{permission && <Text color={permission.color}> · {permission.text}</Text>}
+		<Box flexDirection="column" padding={1}>
+			<ToolSummary call={call} result={result} indent="  " />
+			{preview.length > 0 && <DiffPreview lines={preview} />}
 		</Box>
 	);
 }

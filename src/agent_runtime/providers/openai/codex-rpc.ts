@@ -121,7 +121,6 @@ export class CodexRpc {
           'item/reasoning/summaryTextDelta',
           'item/reasoning/summaryPartAdded',
           'item/reasoning/textDelta',
-          'thread/tokenUsage/updated',
         ],
       },
     });

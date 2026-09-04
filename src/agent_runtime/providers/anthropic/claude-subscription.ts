@@ -8,7 +8,7 @@ import {
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import type { Message, MessageBlock, ToolCallBlock, ToolResultBlock } from '../../types';
+import type { Message, MessageBlock, ToolCallBlock, ToolResultBlock, Usage } from '../../types';
 import type { Response } from '../../chat';
 import type { Transport } from '../provider';
 import type { TurnContext } from '../../turn';
@@ -18,7 +18,7 @@ import { latestUserText, promptWithSharedHistory } from '../subscription';
 import { abortable, throwIfAborted } from '../../../abort';
 import type { PermissionContext } from '../../permissions/permissions';
 import type { ThinkingLevel } from '../../types';
-import { legacyClaudeThinkingBudget, usesLegacyClaudeThinking } from './api';
+import { anthropicUsage, legacyClaudeThinkingBudget, usesLegacyClaudeThinking } from './api';
 import { SIRUS_CLIENT_ID } from '../../../version';
 import {
   WEB_SEARCH_TOOL,
@@ -51,6 +51,8 @@ interface Turn {
   resolved: Set<string>;
   // built-in web calls whose result Claude Code has not reported yet
   pendingWeb: Map<string, ToolCallBlock>;
+  // the window size of the latest request, from its assistant message
+  contextTokens: number;
   signal?: AbortSignal;
   permissions?: PermissionContext;
 }
@@ -327,12 +329,25 @@ function createSession(turn: TurnContext): ClaudeSession {
   return session as ClaudeSession;
 }
 
+// The result's usage covers the turn's main loop; the window comes from the
+// per-model totals, which name the model's context size.
+function turnUsage(turn: Turn, result: Extract<SDKMessage, { type: 'result' }>, model: string): Usage {
+  const window = result.modelUsage?.[model]?.contextWindow
+    ?? Object.values(result.modelUsage ?? {})[0]?.contextWindow;
+  return {
+    ...anthropicUsage(result.usage),
+    contextTokens: turn.contextTokens,
+    ...(window ? { contextWindow: window } : {}),
+  };
+}
+
 function collectAssistant(turn: Turn, message: Extract<SDKMessage, { type: 'assistant' }>): void {
   if (message.parent_tool_use_id) return;
   if (message.error) {
     throw new Error(`Claude subscription request failed: ${message.error}${
       message.error === 'authentication_failed' ? ' (run /login claude)' : ''}`);
   }
+  if (message.message.usage) turn.contextTokens = anthropicUsage(message.message.usage).contextTokens;
 
   for (const block of message.message.content) {
     if (block.type === 'text') {
@@ -362,7 +377,7 @@ async function runTurn(
   signal?: AbortSignal,
   updateStream?: TurnContext['updateStream'],
   permissions?: PermissionContext,
-): Promise<MessageBlock[]> {
+): Promise<{ content: MessageBlock[]; usage: Usage }> {
   throwIfAborted(signal);
   const turn: Turn = {
     blocks: [],
@@ -370,6 +385,7 @@ async function runTurn(
     updateStream,
     resolved: new Set(),
     pendingWeb: new Map(),
+    contextTokens: 0,
     signal,
     permissions,
   };
@@ -409,7 +425,7 @@ async function runTurn(
           throw new Error(value.result || 'Claude returned an error');
         }
         session.hasSpoken = true;
-        return turn.blocks;
+        return { content: turn.blocks, usage: turnUsage(turn, value, session.model) };
       }
     }
   } catch (error) {
@@ -445,7 +461,7 @@ async function getResponse(
     sessions.set(agent.runtimeId, session);
   }
 
-  const content = await runTurn(
+  const { content, usage } = await runTurn(
     agent.runtimeId,
     session,
     promptWithSharedHistory(
@@ -460,7 +476,7 @@ async function getResponse(
     turn.permissions,
   );
   session.seenMessageCount = messages.length;
-  return { content, stop_reason: 'end_turn' };
+  return { content, stop_reason: 'end_turn', usage };
 }
 
 // A tool-less turn is one short Claude Code run: a fresh process that answers
