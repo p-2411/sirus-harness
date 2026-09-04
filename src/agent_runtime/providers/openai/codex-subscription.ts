@@ -353,7 +353,11 @@ async function ensureSession(rpc: CodexRpc, turn: TurnContext): Promise<CodexSes
     model,
     cwd: directory,
     approvalPolicy: 'never',
-    sandbox: 'read-only',
+    // Sirus executes dynamic tools itself and applies its own permission checks.
+    // The sandbox here is only what the model is told about its environment:
+    // anything narrower makes it refuse writes (outside cwd, or at all) before
+    // Sirus ever gets a chance to authorize and run them.
+    sandbox: 'danger-full-access',
     ephemeral: true,
     // no environment means no environment-bound tools (apply_patch, view_image)
     environments: [],

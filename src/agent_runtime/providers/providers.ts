@@ -23,6 +23,7 @@ export const modelStrategies: Record<string, ModelStrategy> = {
   'gpt-5.6-luna': OpenAIProvider,
   'gpt-5.6-terra': OpenAIProvider,
   'gpt-5.6-sol': OpenAIProvider,
+  'gpt-6-astra': OpenAIProvider,
   'claude-opus-5': AnthropicProvider,
   'claude-sonnet-5': AnthropicProvider,
   'claude-haiku-4.5': AnthropicProvider,

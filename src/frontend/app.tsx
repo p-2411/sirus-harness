@@ -116,13 +116,23 @@ export default function App({ launchDirectory = process.cwd() }: { launchDirecto
   }, [stdout]);
 
   useEffect(() => {
-    const persist = () => saveSessions(sessions, selectedSession?.getId() ?? null);
-    const unsubscribe = sessions.map(session => session.subscribe(persist));
+    // Include the startup draft so its first streamed turn is durable even if
+    // the process exits before React promotes it into the sidebar state.
+    const persistableSessions = [...new Set([...sessions, draftSession])];
+    const persist = () => saveSessions(persistableSessions, selectedSession?.getId() ?? null);
+    const unsubscribe = persistableSessions.map(session => session.subscribe(persist));
+    // Session messages are mutated with the latest streamed snapshot before
+    // throttled UI notifications. A synchronous exit save captures that final
+    // in-memory snapshot when the app is quit mid-response.
+    const persistOnExit = () => { persist(); };
+    process.on('exit', persistOnExit);
     persist();
     return () => {
       for (const stop of unsubscribe) stop();
+      process.off('exit', persistOnExit);
+      persist();
     };
-  }, [sessions, selectedSession]);
+  }, [sessions, selectedSession, draftSession]);
 
   function selectSession(session: Session) {
     setWorkspace(current => ({ ...current, selectedSession: session }));

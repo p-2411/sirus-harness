@@ -166,15 +166,6 @@ export function describeSubagents(subagents: readonly SubagentRun[]): Record<str
   }));
 }
 
-// Every working run in the process, whoever owns it: used when the app exits.
-export function cancelAllSubagents(): number {
-  let cancelled = 0;
-  for (const run of runs.values()) {
-    if (run.status === 'working' && run.worker.cancel()) cancelled++;
-  }
-  return cancelled;
-}
-
 async function execute(run: SubagentRun, parentSignal?: AbortSignal): Promise<void> {
   const task: Message = { role: 'user', content: [{ type: 'text', text: run.prompt }] };
   try {

@@ -650,7 +650,10 @@ export class Session {
             liveMessages[index].content = result.value.content;
             if (result.value.usage) liveMessages[index].usage = result.value.usage;
             else delete liveMessages[index].usage;
-          } else {
+          } else if (liveMessages[index].content.length === 0) {
+            // A turn that failed before producing anything should not leave an
+            // empty assistant bubble. Streamed text and completed tool work,
+            // however, remain useful history after cancellation or failure.
             const messageIndex = this.messages.indexOf(liveMessages[index]);
             if (messageIndex !== -1) this.messages.splice(messageIndex, 1);
           }
