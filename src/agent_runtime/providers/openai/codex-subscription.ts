@@ -1,6 +1,6 @@
 import path from 'path';
 import { fileURLToPath } from 'url';
-import type { Message, MessageBlock, ToolCallBlock } from '../../types';
+import type { Message, MessageBlock, ToolCallBlock, Usage } from '../../types';
 import type { Response } from '../../chat';
 import type { Transport } from '../provider';
 import type { TurnContext } from '../../turn';
@@ -77,12 +77,26 @@ const PROCESS_CONFIG: Record<string, unknown> = {
 
 const TURN_TIMEOUT_MS = 10 * 60 * 1000;
 
+// One side of Codex's thread/tokenUsage/updated notification: the thread's
+// running total, or the last request alone.
+interface TokenBreakdown {
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+}
+
+const NO_TOKENS: TokenBreakdown = { totalTokens: 0, inputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 };
+
 interface Turn {
   blocks: MessageBlock[];
   partialText: Map<string, Extract<MessageBlock, { type: 'text' }>>;
   updateStream?: TurnContext['updateStream'];
   failure: string | null;
   finish: (error?: Error) => void;
+  // the thread total when the turn started, so its own cost is the difference
+  usageBaseline: TokenBreakdown;
+  usage: Usage | null;
   signal?: AbortSignal;
   permissions?: PermissionContext;
 }
@@ -96,6 +110,8 @@ interface CodexSession {
   seenMessageCount: number;
   participantName: string;
   directory: string;
+  // the latest thread total Codex reported
+  usageTotal: TokenBreakdown;
 }
 
 type Json = Record<string, unknown>;
@@ -146,9 +162,44 @@ function sessionForThread(threadId: unknown): CodexSession | undefined {
   return undefined;
 }
 
+function tokenBreakdown(value: unknown): TokenBreakdown {
+  const json = typeof value === 'object' && value !== null ? value as Json : {};
+  const field = (name: keyof TokenBreakdown) => typeof json[name] === 'number' ? json[name] as number : 0;
+  return {
+    totalTokens: field('totalTokens'),
+    inputTokens: field('inputTokens'),
+    outputTokens: field('outputTokens'),
+    reasoningOutputTokens: field('reasoningOutputTokens'),
+  };
+}
+
+// Codex reports the thread's running total and the last request; the turn's
+// own cost is the total less what the thread had used when it started, and
+// its window is the last request less the reasoning that was not kept.
+function recordTokenUsage(session: CodexSession, params: Json): void {
+  const reported = typeof params.tokenUsage === 'object' && params.tokenUsage !== null ? params.tokenUsage as Json : {};
+  const total = tokenBreakdown(reported.total);
+  const last = tokenBreakdown(reported.last);
+  session.usageTotal = total;
+  const turn = session.turn;
+  if (!turn) return;
+  const window = typeof reported.modelContextWindow === 'number' ? reported.modelContextWindow : null;
+  turn.usage = {
+    inputTokens: Math.max(0, total.inputTokens - turn.usageBaseline.inputTokens),
+    outputTokens: Math.max(0, total.outputTokens - turn.usageBaseline.outputTokens),
+    contextTokens: Math.max(0, last.totalTokens - last.reasoningOutputTokens),
+    ...(window ? { contextWindow: window } : {}),
+  };
+}
+
 function handleNotification(method: string, params: Json): void {
   const session = sessionForThread(params.threadId);
-  const turn = session?.turn;
+  if (!session) return;
+  if (method === 'thread/tokenUsage/updated') {
+    recordTokenUsage(session, params);
+    return;
+  }
+  const turn = session.turn;
   if (!turn) return;
 
   if (method === 'item/agentMessage/delta' && typeof params.delta === 'string') {
@@ -321,6 +372,7 @@ async function ensureSession(rpc: CodexRpc, turn: TurnContext): Promise<CodexSes
     seenMessageCount: 0,
     participantName,
     directory,
+    usageTotal: NO_TOKENS,
   };
   sessions.set(sessionId, session);
   return session;
@@ -335,7 +387,7 @@ async function runTurn(
   updateStream?: TurnContext['updateStream'],
   permissions?: PermissionContext,
   thinkingLevel: ThinkingLevel = DEFAULT_THINKING_LEVEL,
-): Promise<MessageBlock[]> {
+): Promise<{ content: MessageBlock[]; usage: Usage | null }> {
   throwIfAborted(signal);
   let finish!: (error?: Error) => void;
   const completed = new Promise<void>((resolve, reject) => {
@@ -351,7 +403,17 @@ async function runTurn(
   // Cancellation can happen while turn/start is still awaiting its response.
   // Keep that early rejection observed even if we never reach `await completed`.
   void completed.catch(() => void 0);
-  const turn: Turn = { blocks: [], partialText: new Map(), updateStream, failure: null, finish, signal, permissions };
+  const turn: Turn = {
+    blocks: [],
+    partialText: new Map(),
+    updateStream,
+    failure: null,
+    finish,
+    usageBaseline: session.usageTotal,
+    usage: null,
+    signal,
+    permissions,
+  };
   session.turn = turn;
   let turnId: string | undefined;
   const interrupt = () => {
@@ -383,7 +445,7 @@ async function runTurn(
     await completed;
     session.hasSpoken = true;
     publishTurn(turn);
-    return turn.blocks;
+    return { content: turn.blocks, usage: turn.usage };
   } finally {
     signal?.removeEventListener('abort', interrupt);
     session.turn = null;
@@ -400,7 +462,7 @@ async function getResponse(
   const rpc = await abortable(getCodexRpc(), signal);
   const session = await abortable(ensureSession(rpc, turn), signal);
   throwIfAborted(signal);
-  const content = await runTurn(
+  const { content, usage } = await runTurn(
     rpc,
     session,
     promptWithSharedHistory(
@@ -417,7 +479,7 @@ async function getResponse(
     agent.thinkingLevel,
   );
   session.seenMessageCount = messages.length;
-  return { content, stop_reason: 'end_turn' };
+  return { content, stop_reason: 'end_turn', ...(usage ? { usage } : {}) };
 }
 
 // A tool-less turn is one short exchange on a throwaway thread: the turn's

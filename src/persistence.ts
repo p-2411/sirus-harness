@@ -25,6 +25,13 @@ const toolResultBlockSchema = z.object({
   isError: z.boolean(),
 });
 
+const usageSchema = z.object({
+  inputTokens: z.number(),
+  outputTokens: z.number(),
+  contextTokens: z.number(),
+  contextWindow: z.number().optional(),
+});
+
 const messageSchema = z.object({
   role: z.enum(['user', 'assistant']),
   content: z.array(z.discriminatedUnion('type', [
@@ -34,6 +41,7 @@ const messageSchema = z.object({
   ])),
   participant: z.string().min(1).optional(),
   model: z.string().min(1).optional(),
+  usage: usageSchema.optional(),
 });
 
 const participantSchema = z.object({
@@ -56,6 +64,8 @@ const sessionSchema = z.object({
   // Unknown values fail the parse of that file; an absent one means the
   // default (auto approve).
   permissionMode: z.enum(['ask', 'auto', 'bypass']).optional(),
+  // When the history last changed; absent in older files.
+  updatedAt: z.number().optional(),
 }).refine(
   session => Boolean(session.model || (session.participants && session.defaultModel)),
   { message: 'Session must contain a model or participant list' },
@@ -165,9 +175,20 @@ export function loadSessions(
           defaultModel: snapshot.defaultModel,
           messages: snapshot.messages,
           ...(snapshot.permissionMode ? { permissionMode: snapshot.permissionMode } : {}),
+          ...(snapshot.updatedAt !== undefined ? { updatedAt: snapshot.updatedAt } : {}),
         } satisfies SessionSnapshot);
       }
-      return new Session(snapshot.name, snapshot.id, snapshot.model, snapshot.messages, directory);
+      return new Session(
+        snapshot.name,
+        snapshot.id,
+        snapshot.model,
+        snapshot.messages,
+        directory,
+        undefined,
+        undefined,
+        undefined,
+        snapshot.updatedAt ?? 0,
+      );
     })
     .filter(session => !session.isEmpty());
   const selectedSessionId = sessions.some(session => session.getId() === parsed.data.selectedSessionId)

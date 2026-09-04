@@ -29,6 +29,20 @@ export const modelStrategies: Record<string, ModelStrategy> = {
   'claude-fable-5-1': AnthropicProvider,
 };
 
+// The window a model is assumed to have when its provider does not say. The
+// direct APIs report token counts but not the window, so these figures drive
+// the context gauge on that path; a subscription runtime's own figure wins.
+const ASSUMED_CONTEXT_WINDOWS: Record<Vendor, number> = {
+  claude: 200_000,
+  gpt: 400_000,
+};
+
+export function contextWindowFor(model: string): number | undefined {
+  const strategy = modelStrategies[model];
+  const vendor = (Object.keys(providers) as Vendor[]).find(candidate => providers[candidate] === strategy);
+  return vendor ? ASSUMED_CONTEXT_WINDOWS[vendor] : undefined;
+}
+
 export function resolveStrategy(model: string): ModelStrategy {
   const strategy = modelStrategies[model];
   if (!strategy) {

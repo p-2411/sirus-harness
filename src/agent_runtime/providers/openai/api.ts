@@ -211,6 +211,15 @@ async function request(
   const finalResponse: Response = {
     stop_reason: 'end_turn',
     content: [],
+    ...(response.usage
+      ? {
+        usage: {
+          inputTokens: response.usage.input_tokens,
+          outputTokens: response.usage.output_tokens,
+          contextTokens: response.usage.input_tokens,
+        },
+      }
+      : {}),
   };
   const titles = citationTitles(response.output);
 

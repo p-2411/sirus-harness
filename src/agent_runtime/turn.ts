@@ -1,7 +1,7 @@
 import { TurnCancelledError } from '../abort';
 import type { SessionAgent } from './agent';
 import type { PermissionContext } from './permissions/permissions';
-import type { Message, MessageBlock } from './types';
+import type { Message, MessageBlock, Usage } from './types';
 
 export interface TurnOptions {
   // Where the turn runs: the session's directory, or the owner's for a
@@ -47,6 +47,9 @@ export class TurnContext {
   private committed: MessageBlock[] = [];
   // The provider request in flight, replaced wholesale on every update.
   private live: readonly MessageBlock[] = [];
+  // Token usage summed over every request of the turn; absent until a
+  // provider reports some.
+  private usage: Usage | null = null;
   private settled = false;
   private changed = false;
   private wake: (() => void) | null = null;
@@ -78,7 +81,21 @@ export class TurnContext {
   }
 
   get message(): Message {
-    return { role: 'assistant', content: this.content };
+    return { role: 'assistant', content: this.content, ...(this.usage ? { usage: this.usage } : {}) };
+  }
+
+  // Provider or agent loop: one more request's worth of tokens. Totals add
+  // up; the context figure is the latest request's, as is the window.
+  addUsage(usage: Usage): void {
+    if (this.settled) return;
+    this.usage = {
+      inputTokens: (this.usage?.inputTokens ?? 0) + usage.inputTokens,
+      outputTokens: (this.usage?.outputTokens ?? 0) + usage.outputTokens,
+      contextTokens: usage.contextTokens,
+      ...((usage.contextWindow ?? this.usage?.contextWindow) !== undefined
+        ? { contextWindow: usage.contextWindow ?? this.usage?.contextWindow }
+        : {}),
+    };
   }
 
   get done(): boolean {

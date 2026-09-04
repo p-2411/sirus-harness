@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import type { Message, MessageBlock, TextBlock, ToolCallBlock, ToolResultBlock } from '../../types';
+import type { Message, MessageBlock, TextBlock, ToolCallBlock, ToolResultBlock, Usage } from '../../types';
 import type { Response } from '../../chat';
 import type { Transport } from '../provider';
 import type { TurnContext } from '../../turn';
@@ -86,6 +86,15 @@ function webToolCall(block: Anthropic.ServerToolUseBlock): ToolCallBlock | null 
 
 function describeError(code: string): string {
   return code.replace(/_/g, ' ');
+}
+
+// Cached prompt tokens are still in the window, so they count towards the
+// context figure as well as the input total.
+function usageOf(usage: Anthropic.Usage): Usage {
+  const input = usage.input_tokens
+    + (usage.cache_read_input_tokens ?? 0)
+    + (usage.cache_creation_input_tokens ?? 0);
+  return { inputTokens: input, outputTokens: usage.output_tokens, contextTokens: input };
 }
 
 function webSearchOutcome(content: Anthropic.WebSearchToolResultBlockContent): WebSearchOutcome {
@@ -276,6 +285,7 @@ async function request(
   }
   const response = await stream.finalMessage();
   const content = normalizeContent(response.content);
+  const usage = usageOf(response.usage);
 
   // A long run of web tool calls can pause the turn. Resume it with the
   // content so far, and publish what the resumed request adds after it.
@@ -286,12 +296,23 @@ async function request(
       requireApiKey,
       updateStream ? blocks => updateStream([...content, ...blocks]) : undefined,
     );
-    return { ...resumed, content: [...content, ...resumed.content] };
+    return {
+      ...resumed,
+      content: [...content, ...resumed.content],
+      usage: resumed.usage
+        ? {
+          inputTokens: usage.inputTokens + resumed.usage.inputTokens,
+          outputTokens: usage.outputTokens + resumed.usage.outputTokens,
+          contextTokens: resumed.usage.contextTokens,
+        }
+        : usage,
+    };
   }
 
   const finalResponse: Response = {
     stop_reason: response.stop_reason === 'tool_use' ? 'tool_use' : 'end_turn',
     content,
+    usage,
   };
 
   updateStream?.(finalResponse.content);

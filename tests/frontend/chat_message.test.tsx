@@ -81,7 +81,7 @@ describe('chat message', () => {
     expect(assistantLines[1]).toStartWith('   Hello');
   });
 
-  test('renders only the first tool-call argument with long values truncated to ten characters', () => {
+  test('renders the subject of a tool call in full and nothing else', () => {
     const output = stripAnsi(renderToString(
       <ChatMessage message={{
         role: 'assistant',
@@ -95,8 +95,25 @@ describe('chat message', () => {
       { columns: 120 },
     ));
 
-    expect(output).toContain('● SearchMemories { query : abcdefghij...');
+    expect(output).toContain('● SearchMemories abcdefghijk');
     expect(output).not.toContain('limit');
+  });
+
+  test('shows the lines a file change adds and removes', () => {
+    const output = stripAnsi(renderToString(
+      <ChatMessage message={{
+        role: 'assistant',
+        content: [{
+          type: 'tool_call',
+          id: 'call-1',
+          name: 'EditFile',
+          arguments: { path: 'src/app.ts', old_text: 'a\nb', new_text: 'a\nb\nc\nd' },
+        }, { type: 'tool_result', callId: 'call-1', result: '{}', isError: false }],
+      }} />,
+      { columns: 120 },
+    ));
+
+    expect(output).toContain('● EditFile src/app.ts +4 −2 ›');
   });
 
   test('collapses consecutive tool activity only when it contains multiple calls', () => {
@@ -146,8 +163,8 @@ describe('chat message', () => {
     expect(lines).toHaveLength(5);
     expect(lines[0]).toBe('');
     expect(lines[1]).toContain('Ran 2 commands');
-    expect(lines[2]).toContain('● ReadFile { path : one.ts');
-    expect(lines[3]).toContain('● RunShell { command : bun test');
+    expect(lines[2]).toContain('● ReadFile one.ts');
+    expect(lines[3]).toContain('● RunShell bun test');
     expect(lines[4]).toBe('');
     expect(lines[2].indexOf('●')).toBeGreaterThan(lines[1].indexOf('⌄'));
   });
