@@ -89,7 +89,7 @@ describe('sidebar session metadata', () => {
     expect(source).toEqual([older, newer]);
   });
 
-  test('shows the owning directory basename and activity time', () => {
+  test('shows the session name and activity time on one line without its directory', () => {
     const session = new Session('Work', 'work', undefined, [], '/projects/sirus-harness', [], 'sirus', undefined, 1_000);
     const output = stripAnsi(renderToString(
       <SessionItem
@@ -101,8 +101,10 @@ describe('sidebar session metadata', () => {
       />,
       { columns: 40 },
     ));
-    expect(output).toContain('sirus-harness');
+    expect(output).toContain('Work');
+    expect(output).not.toContain('sirus-harness');
     expect(output).toContain('1m');
+    expect(output.trim().split('\n')).toHaveLength(1);
   });
 });
 

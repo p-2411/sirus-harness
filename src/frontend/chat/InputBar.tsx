@@ -3,7 +3,6 @@ import { Box, Text, useInput, usePaste } from 'ink';
 import { theme } from '../styles/theme';
 import { CommandMenu, moveCommandMenuSelection } from './CommandMenu';
 import { moveSelection, SelectMenu } from './SelectMenu';
-import { captureArrowKeys } from '../interaction/focus';
 import {
   matchCommands,
   type CommandMenuEntry,
@@ -364,6 +363,7 @@ export function InputBar({
   // brings back whatever the user had typed.
   const [selected, setSelected] = useState(0);
   const [secret, setSecret] = useState('');
+  const [commandMenuDismissed, setCommandMenuDismissed] = useState(false);
   const [commandNavigation, setCommandNavigation] = useState({
     input: '',
     selected: 0,
@@ -372,23 +372,18 @@ export function InputBar({
   // Which earlier prompt ↑ has brought back, and the draft it replaced so ↓
   // past the newest one restores it. Editing leaves the recall.
   const [recall, setRecall] = useState<{ index: number; draft: InputState } | null>(null);
-  const commandMatches = mode.type === 'text' ? matchCommands(input) : [];
+  const commandMatches = mode.type === 'text' && !commandMenuDismissed ? matchCommands(input) : [];
   const activeCommandNavigation = commandNavigation.input === input
     ? commandNavigation
     : { input, selected: 0, offset: 0 };
   useEffect(() => {
     setCommandNavigation({ input, selected: 0, offset: 0 });
+    setCommandMenuDismissed(false);
   }, [input]);
   useEffect(() => {
     setSelected(0);
     setSecret('');
   }, [mode]);
-  // While a menu or secret prompt is open the arrows belong to it, not to
-  // the sidebar's session switching.
-  useEffect(() => {
-    captureArrowKeys(mode.type !== 'text' || commandMatches.length > 0);
-    return () => captureArrowKeys(false);
-  }, [mode.type, commandMatches.length]);
 
   // Drag-selecting text copies it automatically; acknowledge that briefly
   // where the "enter" hint normally sits.
@@ -433,6 +428,8 @@ export function InputBar({
 
   useInput((enteredInput, key) => {
     if (isMouseInput(enteredInput)) return;
+    // Session switching belongs to the sidebar in every input mode.
+    if (key.meta && (key.upArrow || key.downArrow)) return;
 
     // Most terminals (macOS included) send DEL for the backspace key, which
     // Ink reports as key.delete rather than key.backspace.
@@ -472,12 +469,16 @@ export function InputBar({
       }
       return;
     }
+    if (key.escape) {
+      setCommandMenuDismissed(true);
+      return;
+    }
     if (key.tab && key.shift) {
       onCyclePermissionMode?.();
       return;
     }
     if (key.upArrow || key.downArrow) {
-      // with a modifier the arrows switch sessions: the sidebar's business
+      // Modified arrows do not navigate the editor or prompt history.
       if (key.shift || key.ctrl || key.meta) return;
       if (commandMatches.length > 0) {
         setCommandNavigation(current => {
@@ -611,11 +612,11 @@ export function InputBar({
 
   return (
     <>
-      <CommandMenu
+      {!commandMenuDismissed && <CommandMenu
         input={input}
         selected={activeCommandNavigation.selected}
         offset={activeCommandNavigation.offset}
-      />
+      />}
       <ParticipantMenu input={input} participants={participants} />
       <InputFeedback feedback={feedback} participantColors={participantColors} />
       <Box

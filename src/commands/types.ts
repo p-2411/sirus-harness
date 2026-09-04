@@ -25,7 +25,6 @@ export type CommandMenuEntry = CommandMenuHeading | CommandMenuItem;
 // missing.
 export interface CommandExecution {
   session: Session;
-  setSirusModel: (model: string) => void;
   notify: (text: string) => void;
   signal: AbortSignal;
 }

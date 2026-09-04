@@ -113,10 +113,10 @@ function TurnStatus({ messages, awaitingApproval, startedAt }: {
   );
 }
 
-export default function Chat({ currSession, onStartSession, onSirusModelChange }: {
+export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEBAR_WIDTH }: {
   currSession: Session;
+  sidebarWidth?: number;
   onStartSession?: (session: Session) => void;
-  onSirusModelChange: (model: string) => void;
 }) {
   // Subscribe to the session: any mutation (append, setModel) bumps its
   // version and re-renders, so model and messages are read fresh below.
@@ -190,6 +190,8 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
 
   useInput((input, key) => {
     if (key.escape) {
+      setInputMode({ type: 'text' });
+      setFeedback(null);
       // an interrupted turn should not be followed by whatever was waiting
       currSession.clearQueuedMessages();
       currSession.cancel();
@@ -197,7 +199,7 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
       return;
     }
     const wheel = parseMouseWheel(input);
-    if (wheel && wheel.column > SIDEBAR_WIDTH) {
+    if (wheel && wheel.column > sidebarWidth) {
       const amount = 3;
       setScrollOffset(current => wheel.direction === 'up'
         ? Math.min(maxScroll, current + amount)
@@ -260,7 +262,6 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
       try {
         result = executeCommand(command, args, {
           session: currSession,
-          setSirusModel: onSirusModelChange,
           notify: text => setFeedback({ kind: 'info', text }),
           signal: controller.signal,
         });
@@ -361,12 +362,12 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
   );
 
   return (
-    <Box flexDirection="column" flexGrow={1} height="100%" minHeight={0}>
+    <Box flexDirection="column" flexGrow={1} flexBasis={0} minWidth={0} height="100%" minHeight={0}>
       <ChatHeader session={currSession} />
       {/* marginLeft -1 lets the rule start in the sidebar border's cell with a
           ├ junction, so the two lines meet instead of leaving a half-cell gap */}
       <Box marginLeft={-1} flexShrink={0}>
-        <Text color={theme.border} wrap="truncate">{'├' + '─'.repeat(Math.max(0, (stdout.columns ?? 80) - 26))}</Text>
+        <Text color={theme.border} wrap="truncate">{'├' + '─'.repeat(Math.max(0, (stdout.columns ?? 80) - sidebarWidth))}</Text>
       </Box>
       {/* The absolutely positioned history moves only inside this clipped
           viewport, so scrolling cannot overwrite the header or divider. */}

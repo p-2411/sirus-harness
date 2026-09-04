@@ -9,6 +9,8 @@ import type { Session } from '../../agent_runtime/session';
 import { contextPercent, formatTokens } from '../../agent_runtime/usage';
 import type { Feedback } from '../feedback';
 import type { CommandMenuItem } from '../types';
+import { abortable, throwIfAborted } from '../../abort';
+import { readSubscriptionUsage, type SubscriptionUsage } from '../../agent_runtime/providers/usage';
 
 const VENDOR_NAMES: Record<Vendor, string> = { claude: 'Claude', gpt: 'ChatGPT' };
 
@@ -109,13 +111,16 @@ async function describeVendor(vendor: Vendor, signal?: AbortSignal): Promise<str
   const status = providerFor(vendor).authStatus();
   switch (status.mode) {
     case 'subscription': {
-      let detail: string;
-      try {
-        detail = await subscriptionDetail(vendor, signal);
-      } catch (error) {
-        detail = `status unavailable: ${error instanceof Error ? error.message : String(error)}`;
-      }
-      return `${vendor}: subscription · ${detail}`;
+      const timeout = AbortSignal.timeout(10_000);
+      const bounded = signal ? AbortSignal.any([signal, timeout]) : timeout;
+      const [detail, usage] = await Promise.all([
+        abortable(subscriptionDetail(vendor, bounded), bounded).catch(() => {
+          throwIfAborted(signal);
+          return 'account status unavailable';
+        }),
+        readSubscriptionUsage(vendor, signal),
+      ]);
+      return `${vendor}: subscription · ${detail}\n${describeSubscriptionUsage(usage)}`;
     }
     case 'api':
       return `${vendor}: API key · ${status.masked}`;
@@ -124,11 +129,36 @@ async function describeVendor(vendor: Vendor, signal?: AbortSignal): Promise<str
   }
 }
 
+const RESET_TIME = new Intl.DateTimeFormat(undefined, {
+  month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
+});
+
+export function describeSubscriptionUsage(usage: SubscriptionUsage, now: number = Date.now()): string {
+  if (usage.windows.length === 0) return `  allowance unavailable · ${usage.unavailable ?? 'not reported by provider'}`;
+  const lines = usage.windows.map(window => {
+    const amount = window.usedPercent === null
+      ? 'usage unavailable'
+      : `${Number((100 - window.usedPercent).toFixed(1))}% remaining · ${Number(window.usedPercent.toFixed(1))}% used`;
+    let reset = 'reset time unavailable';
+    if (window.resetsAt !== null) {
+      const minutes = Math.max(0, Math.ceil((window.resetsAt - now) / 60_000));
+      const days = Math.floor(minutes / 1440);
+      const hours = Math.floor(minutes % 1440 / 60);
+      const remaining = minutes % 60;
+      const relative = minutes === 0 ? 'reset time passed; refresh /info'
+        : `in ${[days ? `${days}d` : '', hours ? `${hours}h` : '', remaining ? `${remaining}m` : ''].filter(Boolean).join(' ')}`;
+      reset = `resets ${RESET_TIME.format(window.resetsAt)} (${relative})`;
+    }
+    return `    ${window.label}: ${amount} · ${reset}`;
+  });
+  return ['  allowance (shared across sessions):', ...lines].join('\n');
+}
+
 // What the session has spent so far and how full its window is, when any
 // response has reported usage.
-export function describeSessionUsage(session: Session): string | null {
+export function describeSessionUsage(session: Session): string {
   const totals = session.getTotalUsage();
-  if (!totals) return null;
+  if (!totals) return 'session: token usage unavailable · no response has reported it yet';
   const context = session.getContextUsage();
   const parts = [`${formatTokens(totals.inputTokens)} in`, `${formatTokens(totals.outputTokens)} out`];
   if (context) {

@@ -123,8 +123,10 @@ its directory and how long ago it was last active.
   Shift+Enter, or end the line with `\` and press Enter). Pasted text keeps
   its line breaks.
 - ↑ and ↓ bring back earlier prompts of the session; inside a multi-line
-  prompt they move between its lines first. Shift+↑/↓ (Ctrl or Option work
-  too) switch sessions, and Ctrl+N starts a new one.
+  prompt they move between its lines first. Option+↑/↓ switches sessions,
+  and Ctrl+N starts a new one.
+- Ctrl+K collapses the sidebar to clickable session status dots, or expands
+  it again. The dots stay in place, and chat fills the remaining width.
 - Shift+Tab cycles the permission mode. Page Up/Down and Home/End scroll the
   history.
 - While a turn runs, the line at the foot of the history says what the agents
@@ -188,6 +190,9 @@ Participant names are case-insensitive and each participant responds at most
 once per message. All participants receive the same shared session history,
 and their names, model choices, and thinking levels are persisted with the
 session. Use `/model [participant] <model>` to change one participant's model.
+Changing Sirus's model in an empty session also saves it as the default for
+future sessions. Once the session has messages, model changes apply only to
+that session. Other sessions keep their own models, including after a restart.
 
 Only mentions in top-level prose invoke agents. Mentions shown as quoted
 examples, inline code, blockquotes/callouts, lists, tables, headings, fenced or

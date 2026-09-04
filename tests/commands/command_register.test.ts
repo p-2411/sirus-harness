@@ -8,25 +8,21 @@ import {
   executeCommand,
   loginMenuItems,
   matchCommands,
-  type CommandExecution,
   type CommandMenuItem,
 } from '../../src/commands/registry';
 import { Session } from '../../src/agent_runtime/session';
 import { providerFor } from '../../src/agent_runtime/providers/providers';
 import { resolveModelReference } from '../../src/commands/agents/behavior';
 import type { Feedback } from '../../src/commands/feedback';
+import { loadSirusModelPreference, saveSirusModelPreference } from '../../src/persistence';
 
 function runCommand(
   command: string,
   args: string[],
   session: Session = new Session(),
-  setSirusModel: CommandExecution['setSirusModel'] = () => {
-    throw new Error('This command unexpectedly tried to change the global Sirus model');
-  },
 ) {
   return executeCommand(command, args, {
     session,
-    setSirusModel,
     notify: () => {},
     signal: new AbortController().signal,
   });
@@ -69,36 +65,68 @@ describe('matchCommands', () => {
 });
 
 describe('executeCommand', () => {
-  test('model command changes the global Sirus model', () => {
+  let settingsDirectory: string;
+  let previousDirectory: string | undefined;
+
+  beforeEach(() => {
+    settingsDirectory = mkdtempSync(join(tmpdir(), 'sirus-model-command-'));
+    previousDirectory = process.env.SIRUS_DATA_DIR;
+    process.env.SIRUS_DATA_DIR = settingsDirectory;
+  });
+
+  afterEach(() => {
+    if (previousDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
+    else process.env.SIRUS_DATA_DIR = previousDirectory;
+    rmSync(settingsDirectory, { recursive: true, force: true });
+  });
+
+  test('model command changes only the active populated session', () => {
     const session = new Session();
-    let globalModel: string | undefined;
-    expect(runCommand('model', ['claude-fable-5-1'], session, model => { globalModel = model; })).toEqual({
+    const other = new Session();
+    session.append({ role: 'user', content: [{ type: 'text', text: 'Hello' }] });
+    saveSirusModelPreference('gpt-5.6-terra');
+    expect(runCommand('model', ['claude-fable-5-1'], session)).toEqual({
       kind: 'success',
       text: '@sirus model changed to claude-fable-5-1.',
     });
-    expect(globalModel).toBe('claude-fable-5-1');
-    expect(session.getModel()).toBe('gpt-5.6-luna');
+    expect(session.getModel()).toBe('claude-fable-5-1');
+    expect(other.getModel()).toBe('gpt-5.6-luna');
+    expect(loadSirusModelPreference()).toBe('gpt-5.6-terra');
+    runCommand('model', ['@sirus', 'sol'], session);
+    expect(session.getModel()).toBe('gpt-5.6-sol');
+    expect(loadSirusModelPreference()).toBe('gpt-5.6-terra');
+  });
+
+  test('choosing Sirus in an empty session saves the default without changing peers', () => {
+    const session = new Session();
+    const other = new Session();
+    runCommand('model', ['@Sirus', 'sol'], session);
+    expect(session.getModel()).toBe('gpt-5.6-sol');
+    expect(loadSirusModelPreference()).toBe('gpt-5.6-sol');
+    expect(other.getModel()).toBe('gpt-5.6-luna');
   });
 
   test('model command changes a named participant and accepts its @ prefix', () => {
     const session = new Session();
+    saveSirusModelPreference('gpt-5.6-terra');
     session.addParticipant('reviewer', 'gpt-5.6-terra');
     expect(runCommand('model', ['@reviewer', 'claude-fable-5-1'], session)).toEqual({
       kind: 'success',
       text: '@reviewer model changed to claude-fable-5-1.',
     });
     expect(session.getParticipants()[1]).toEqual({ name: 'reviewer', model: 'claude-fable-5-1' });
+    expect(loadSirusModelPreference()).toBe('gpt-5.6-terra');
+    expect(session.getModel()).toBe('gpt-5.6-luna');
   });
 
   test('model command accepts an unambiguous partial model name', () => {
     const session = new Session();
-    let globalModel: string | undefined;
-
-    expect(runCommand('model', ['HAIKU'], session, model => { globalModel = model; })).toEqual({
+    expect(runCommand('model', ['HAIKU'], session)).toEqual({
       kind: 'success',
       text: '@sirus model changed to claude-haiku-4.5.',
     });
-    expect(globalModel).toBe('claude-haiku-4.5');
+    expect(session.getModel()).toBe('claude-haiku-4.5');
+    expect(loadSirusModelPreference()).toBe('claude-haiku-4.5');
   });
 
   test('model references choose the latest version within one model family', () => {
@@ -346,7 +374,7 @@ describe('credential commands', () => {
     const text = (result as { text: string }).text;
     expect(text).toMatch(/claude: not configured/);
     expect(text).toMatch(/gpt: not configured/);
-    expect(text).not.toContain('session:');
+    expect(text).toContain('session: token usage unavailable');
   });
 
   test('/logout leaves the subscription when that is active', () => {

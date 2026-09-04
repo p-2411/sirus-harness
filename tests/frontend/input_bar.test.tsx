@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { render as renderInk, renderToString } from 'ink';
 import { PassThrough } from 'node:stream';
-import { useSyncExternalStore } from 'react';
+import { useState, useSyncExternalStore } from 'react';
 import stripAnsi from 'strip-ansi';
 import {
   applyInputEdit,
@@ -19,10 +19,11 @@ import { moveSelection, SelectMenu } from '../../src/frontend/chat/SelectMenu';
 import type { CommandMenuEntry, CommandMenuItem } from '../../src/commands/registry';
 import type { Feedback } from '../../src/commands/feedback';
 import { Session } from '../../src/agent_runtime/session';
+import Sidebar from '../../src/frontend/Sidebar';
 import type { ApprovalRequest } from '../../src/agent_runtime/permissions/permissions';
 
 describe('session input drafts', () => {
-  test('edits and restores drafts when switching session panes', async () => {
+  test('edits and restores drafts when switching session panes with Option+arrows', async () => {
     const first = new Session();
     const second = new Session();
     first.setInputContent('First draft');
@@ -53,7 +54,21 @@ describe('session input drafts', () => {
       />;
     }
 
-    const app = renderInk(<Pane key={first.getId()} session={first} />, {
+    function Workspace() {
+      const [session, setSession] = useState(first);
+      return <>
+        <Sidebar
+          sessions={[first, second]}
+          currSession={session}
+          selectSession={setSession}
+          addSession={() => {}}
+          deleteSession={() => {}}
+        />
+        <Pane key={session.getId()} session={session} />
+      </>;
+    }
+
+    const app = renderInk(<Workspace />, {
       stdin: stdin as unknown as NodeJS.ReadStream,
       stdout: stdout as unknown as NodeJS.WriteStream,
       debug: true,
@@ -72,19 +87,25 @@ describe('session input drafts', () => {
       expect(first.getInputContent()).toBe('First draft!');
       expect(output).toContain('First draft!▌');
 
-      app.rerender(<Pane key={second.getId()} session={second} />);
-      await flush();
+      await type('\u001b[1;3B');
       expect(output).toContain('Second draft▌');
       await type('\u007f');
       expect(second.getInputContent()).toBe('Second draf');
 
-      app.rerender(<Pane key={first.getId()} session={first} />);
-      await flush();
+      await type('\u001b[1;3A');
       expect(output).toContain('First draft!▌');
       await type('\r');
       expect(sent).toEqual(['First draft!']);
       expect(first.getInputContent()).toBe('');
       expect(second.getInputContent()).toBe('Second draf');
+
+      // An open command menu must not capture the session shortcut.
+      await type('/');
+      await type('\u001b[1;3B');
+      expect(output).toContain('Second draf▌');
+      await type('\u001b[1;3A');
+      expect(first.getInputContent()).toBe('/');
+      expect(output).toContain('/▌');
     } finally {
       app.unmount();
       stdin.destroy();

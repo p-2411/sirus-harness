@@ -23,6 +23,6 @@ export const logoutCommandSpec: CommandSpec = {
 
 export const infoCommandSpec: CommandSpec = {
   name: 'info',
-  description: 'show how each provider is signed in and what this session has used',
+  description: 'show subscription allowance, reset times, and session token usage',
   run: (_args, execution) => infoCommand(execution.signal, execution.session),
 };

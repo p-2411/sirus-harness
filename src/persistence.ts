@@ -92,8 +92,8 @@ const settingsFileSchema = z.object({
     claude: z.string().min(1).optional(),
     gpt: z.string().min(1).optional(),
   }).optional(),
-  // The user's Sirus model follows them across every session. Named agents
-  // keep their model in their owning session snapshot instead.
+  // Default Sirus model for newly created sessions. Each session retains its
+  // own model in its snapshot; changing this preference never overrides it.
   sirusModel: z.string().min(1).optional(),
 });
 

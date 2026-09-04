@@ -4,13 +4,13 @@ import type { CommandSpec } from '../types';
 export const modelCommand: CommandSpec = {
   name: 'model',
   args: '[agent] <model>',
-  description: 'set Sirus globally or a named session agent model',
+  description: 'set a session agent model; empty sessions also set the Sirus default',
   run: (args, execution) => {
     if (args.length === 1) {
-      return changeModel('sirus', args[0], execution.session, execution.setSirusModel);
+      return changeModel('sirus', args[0], execution.session);
     }
     if (args.length === 2) {
-      return changeModel(args[0], args[1], execution.session, execution.setSirusModel);
+      return changeModel(args[0], args[1], execution.session);
     }
     throw new Error('Usage: /model [name] <model>');
   },

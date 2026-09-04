@@ -1,4 +1,5 @@
 import { modelStrategies } from '../../agent_runtime/chat';
+import { saveSirusModelPreference } from '../../persistence';
 import {
   modelsFor,
   providerFor,
@@ -89,14 +90,18 @@ export function changeModel(
   participantName: string = 'sirus',
   model: string,
   session: Session,
-  setSirusModel: (model: string) => void,
 ): Feedback {
   const resolvedModel = resolveModelReference(model);
   const normalizedParticipantName = participantName.replace(/^@/, '');
-  if (normalizedParticipantName.toLocaleLowerCase() === 'sirus') {
-    setSirusModel(resolvedModel);
-  } else {
-    session.changeParticipantModel(participantName, resolvedModel);
+  session.changeParticipantModel(participantName, resolvedModel);
+  // Choosing Sirus before a conversation starts also chooses the default for
+  // future sessions. Existing sessions retain their own participant models.
+  if (session.isEmpty() && normalizedParticipantName.toLocaleLowerCase() === 'sirus'
+    && !saveSirusModelPreference(resolvedModel)) {
+    return {
+      kind: 'error',
+      text: `@${normalizedParticipantName} model changed to ${resolvedModel} for this session, but the default could not be saved.`,
+    };
   }
   return {
     kind: 'success',
