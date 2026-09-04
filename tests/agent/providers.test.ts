@@ -299,4 +299,54 @@ describe('Codex subscription runtime lifecycle', () => {
     await Promise.resolve();
     expect(close).toHaveBeenCalledTimes(1);
   });
+
+  test('starts tool-enabled threads with workspace write access', async () => {
+    const { CodexRpc } = await import('../../src/agent_runtime/providers/openai/codex-rpc');
+    const { subscriptionTransport, shutdownCodexRuntime } = await import(
+      '../../src/agent_runtime/providers/openai/codex-subscription'
+    );
+    shutdown = shutdownCodexRuntime;
+
+    let notify: (method: string, params: Record<string, unknown>) => void = () => {};
+    const request = mock(async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'config/read') return { config: {} };
+      if (method === 'thread/start') return { thread: { id: 'thread-write-test' } };
+      if (method === 'turn/start') {
+        queueMicrotask(() => notify('turn/completed', {
+          threadId: 'thread-write-test',
+          turn: { status: 'completed' },
+        }));
+        return { turn: { id: 'turn-write-test' } };
+      }
+      throw new Error(`Unexpected request: ${method}`);
+    });
+    const rpc = {
+      isAlive: true,
+      close: mock(() => {}),
+      request,
+      onNotification: mock((handler: typeof notify) => {
+        notify = handler;
+        return () => {};
+      }),
+      onRequest: mock(() => {}),
+    } as unknown as Awaited<ReturnType<typeof CodexRpc.start>>;
+    spyOn(CodexRpc, 'start').mockResolvedValue(rpc);
+
+    const turn = new TurnContext(
+      new SessionAgent({ name: 'worker', model: 'gpt-5.6-sol', runtimeId: 'write-test' }),
+      { directory: '/tmp', tools: true },
+    );
+    await subscriptionTransport.getResponse(
+      [{ role: 'user', content: [{ type: 'text', text: 'Edit the file' }] }],
+      turn,
+    );
+
+    const threadStart = request.mock.calls.find(([method]) => method === 'thread/start');
+    expect(threadStart?.[1]).toMatchObject({
+      sandbox: 'danger-full-access',
+      approvalPolicy: 'never',
+    });
+    expect((threadStart?.[1]?.dynamicTools as Array<{ name: string }>).map(tool => tool.name))
+      .toContain('WriteFile');
+  });
 });

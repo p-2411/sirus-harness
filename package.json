@@ -61,7 +61,7 @@
     "@anthropic-ai/sdk": "^0.122.0",
     "@huggingface/transformers": "^4.2.0",
     "@modelcontextprotocol/sdk": "^1.29",
-    "@openai/codex": "0.152.0",
+    "@openai/codex": "0.153.3",
     "bun": "^1.4.0",
     "ink": "^7.1.1",
     "marked": "^18.0.11",
