@@ -29,12 +29,14 @@ afterEach(() => {
 });
 
 describe('session persistence', () => {
-  test('round-trips image attachments and checkpoint history', () => {
+  test('round-trips image attachments, checkpoints, usage, and session naming metadata together', () => {
     const image = { type: 'image' as const, path: path.join(directory, 'images', 'screenshot.png'), mediaType: 'image/png' as const, bytes: 123 };
     const checkpoint = { id: 'b'.repeat(40), messageIndex: 0, summary: '[image]', createdAt: Date.now() };
     const session = new Session('With image', 'image-session', 'gpt-5.6-luna', [
       { role: 'user', content: [image, { type: 'text', text: 'Explain this screenshot' }] },
-    ], '/projects/image', [], 'sirus', 'ask', [checkpoint]);
+      { role: 'assistant', content: [{ type: 'text', text: 'Explanation' }],
+        usage: { inputTokens: 120, outputTokens: 8, contextTokens: 128, contextWindow: 200_000 } },
+    ], '/projects/image', [], 'sirus', 'ask', [checkpoint], 1_000, true);
 
     expect(saveSessions([session], session.getId(), directory)).toBe(true);
     const restored = loadSessions(directory);
@@ -57,6 +59,7 @@ describe('session persistence', () => {
         { type: 'tool_result', callId: 'call-1', result: '# Sirus', isError: false },
         { type: 'text', text: 'Done.' },
       ],
+      usage: { inputTokens: 120, outputTokens: 8, contextTokens: 128, contextWindow: 200_000 },
     });
     const second = new Session('Second', 'second-id', 'gpt-5.6-sol', [], '/projects/second');
     second.append({ role: 'user', content: [{ type: 'text', text: 'Keep this too' }] });

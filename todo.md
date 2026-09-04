@@ -4,5 +4,5 @@
 [] skills
 [] changing model in one session doesn't change the model in all sessions even for sirus
 [] create proper readme and then also update website
-[] esc should only cancel current session
+[x] esc should only cancel current session
 [] active subagent should be per session.

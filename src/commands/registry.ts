@@ -4,8 +4,9 @@ import {
   loginCommandSpec,
   logoutCommandSpec,
 } from './authentication/commands';
+import { helpCommand } from './help/commands';
 import { memoryCommandSpec } from './memory/commands';
-import { clearCommand, permissionsCommandSpec } from './session/commands';
+import { clearCommand, permissionsCommandSpec, renameCommand } from './session/commands';
 import { updateCommandSpec } from './update/commands';
 import { rewindCommandSpec, undoCommandSpec } from './checkpoints/commands';
 import { imageCommandSpec } from './images/commands';
@@ -44,6 +45,8 @@ export const commandRegistry: CommandSpec[] = [
   rewindCommandSpec,
   imageCommandSpec,
   notifyCommandSpec,
+  renameCommand,
+  helpCommand(() => commandRegistry),
 ];
 
 // Prefix matches while a command name is being typed ('/' alone matches

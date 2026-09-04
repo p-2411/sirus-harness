@@ -80,7 +80,8 @@ provider runtime only carries the model.
   `gpt`) — the text forms the picker sends, for typing directly.
 - `/info` — shows each provider and how it is signed in: the subscription plan
   and account, or the API key (masked) and whether it came from Sirus or the
-  environment.
+  environment. It also totals the tokens this session's responses have
+  reported and how full the model's context window is.
 - `/update` — checks npm for the latest published release and installs it
   globally. When one is available, green `/update` replaces the sidebar clock.
   Restart Sirus after it finishes. Source checkouts use `git pull`.
@@ -92,6 +93,9 @@ provider runtime only carries the model.
 - `/permissions [ask|auto|bypass]` — shows or sets how the session approves
   tool calls (see below).
 - `/clear` — clears the current session's message history.
+- `/rename <name>` — renames the current session. A session is named after
+  its first prompt until it is renamed.
+- `/help` — lists every command and keyboard shortcut.
 
 A pasted key takes precedence over the `ANTHROPIC_API` and `OPENAI_SECRET`
 environment variables, which still work as a fallback. Sirus never reads or
@@ -104,6 +108,37 @@ restored on startup. The data lives in the platform application-state
 directory (on macOS, `~/Library/Application Support/Sirus`), in files
 readable only by your user. Set `SIRUS_DATA_DIR` to override it.
 
+The sidebar lists sessions most recently active first, each with the name of
+its directory and how long ago it was last active.
+
+## Typing and keys
+
+- Enter sends. While an agent is working, Enter queues the message instead;
+  the row under the input box counts what is waiting, and queued messages go
+  out one at a time as soon as the turn ends, even after switching sessions.
+  Queued slash commands wait until that session is visible because they may
+  open a picker; prompts behind them wait too. Escape cancels the current
+  session's turn and subagents and drops its queue.
+- Shift+Enter starts a new line (Option+Enter on terminals that do not report
+  Shift+Enter, or end the line with `\` and press Enter). Pasted text keeps
+  its line breaks.
+- ↑ and ↓ bring back earlier prompts of the session; inside a multi-line
+  prompt they move between its lines first. Shift+↑/↓ (Ctrl or Option work
+  too) switch sessions, and Ctrl+N starts a new one.
+- Shift+Tab cycles the permission mode. Page Up/Down and Home/End scroll the
+  history.
+- While a turn runs, the line at the foot of the history says what the agents
+  are doing (thinking, writing, running a tool, or waiting for your approval)
+  and how long the turn has taken. The row under the input box shows the
+  context gauge, `ctx <tokens> · <percent>`, for the last response that
+  reported usage; it turns amber at 70% and red at 90%. The direct APIs
+  report tokens but not the window, so the percentage there assumes 200k for
+  Claude models and 400k for GPT models; subscription runtimes report their
+  own window.
+- Each tool call in the transcript shows what it acted on: the path, the
+  command, the query. A file change shows the lines it added and removed and
+  opens on click to show them.
+
 ## Permissions
 
 Each session has a permission mode, shown under the input bar and cycled
@@ -113,17 +148,15 @@ with Shift+Tab or set with `/permissions`:
   every file write, shell command, and spawned agent waits for you. The
   decision is deterministic; no model is consulted.
 - **auto approve** (the default): reads run, and so do file edits inside the
-  session directory. A static set of sensitive shell operations (`rm`,
-  `chmod`, `kill`, `sudo`, writes outside the directory, `git push`,
-  discarding changes, reading secret stores such as `~/.ssh`) waits for you.
-  Every other shell command is judged by the cheapest model of the same
-  provider (`claude-haiku-4.5` or `gpt-5.6-luna`), through whichever
-  credential that provider is using; the transcript shows the verdict, and a
-  verdict of sensitive prompts.
+  session directory. Sensitive shell operations (`rm`, `chmod`, `kill`,
+  `sudo`, writes outside the directory, `git push`, discarding changes,
+  reading secret stores such as `~/.ssh`) wait for you. Other commands run
+  automatically unless an internal safety check flags them for approval.
 - **bypass permissions**: everything runs.
 
 A prompt names the participant or subagent asking and shows the path and
-content, the diff, or the command. Answer with `y` (allow once), `a` (allow
+content, the diff (removed lines in red, added lines in green), or the
+command. Answer with `y` (allow once), `a` (allow
 this kind of operation for the rest of the session), or `n` (deny, which the
 agent is told about). Escape cancels the whole turn. Subagents follow the
 mode of the session that spawned them and prompt through the same queue.

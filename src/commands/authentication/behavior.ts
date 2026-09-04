@@ -5,6 +5,8 @@ import {
   VENDORS,
   type Vendor,
 } from '../../agent_runtime/providers/providers';
+import type { Session } from '../../agent_runtime/session';
+import { contextPercent, formatTokens } from '../../agent_runtime/usage';
 import type { Feedback } from '../feedback';
 import type { CommandMenuItem } from '../types';
 
@@ -122,7 +124,24 @@ async function describeVendor(vendor: Vendor, signal?: AbortSignal): Promise<str
   }
 }
 
-export async function infoCommand(signal?: AbortSignal): Promise<Feedback> {
+// What the session has spent so far and how full its window is, when any
+// response has reported usage.
+export function describeSessionUsage(session: Session): string | null {
+  const totals = session.getTotalUsage();
+  if (!totals) return null;
+  const context = session.getContextUsage();
+  const parts = [`${formatTokens(totals.inputTokens)} in`, `${formatTokens(totals.outputTokens)} out`];
+  if (context) {
+    const percent = contextPercent(context);
+    parts.push(`context ${formatTokens(context.tokens)}${
+      percent !== null && context.window ? ` (${percent}% of ${formatTokens(context.window)})` : ''}`);
+  }
+  return `session: ${parts.join(' · ')}`;
+}
+
+export async function infoCommand(signal?: AbortSignal, session?: Session): Promise<Feedback> {
   const lines = await Promise.all(VENDORS.map(vendor => describeVendor(vendor, signal)));
+  const usage = session ? describeSessionUsage(session) : null;
+  if (usage) lines.push(usage);
   return { kind: 'info', text: lines.join('\n'), showIcon: false };
 }

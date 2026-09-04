@@ -32,6 +32,13 @@ const toolResultBlockSchema = z.object({
   isError: z.boolean(),
 });
 
+const usageSchema = z.object({
+  inputTokens: z.number(),
+  outputTokens: z.number(),
+  contextTokens: z.number(),
+  contextWindow: z.number().optional(),
+});
+
 const messageSchema = z.object({
   role: z.enum(['user', 'assistant']),
   content: z.array(z.discriminatedUnion('type', [
@@ -42,6 +49,7 @@ const messageSchema = z.object({
   ])),
   participant: z.string().min(1).optional(),
   model: z.string().min(1).optional(),
+  usage: usageSchema.optional(),
 });
 
 const participantSchema = z.object({
@@ -74,6 +82,9 @@ const sessionSchema = z.object({
   // Directory snapshots taken before each turn; absent before checkpoints
   // existed and for sessions that never had one.
   checkpoints: z.array(checkpointSchema).optional(),
+  // When the history last changed; absent in older files.
+  updatedAt: z.number().optional(),
+  autoNamePending: z.boolean().optional(),
 }).refine(
   session => Boolean(session.model || (session.participants && session.defaultModel)),
   { message: 'Session must contain a model or participant list' },
@@ -190,9 +201,23 @@ export function loadSessions(
           messages: snapshot.messages,
           ...(snapshot.permissionMode ? { permissionMode: snapshot.permissionMode } : {}),
           ...(snapshot.checkpoints ? { checkpoints: snapshot.checkpoints } : {}),
+          ...(snapshot.updatedAt !== undefined ? { updatedAt: snapshot.updatedAt } : {}),
+          ...(snapshot.autoNamePending !== undefined ? { autoNamePending: snapshot.autoNamePending } : {}),
         } satisfies SessionSnapshot);
       }
-      return new Session(snapshot.name, snapshot.id, snapshot.model, snapshot.messages, directory);
+      return new Session(
+        snapshot.name,
+        snapshot.id,
+        snapshot.model,
+        snapshot.messages,
+        directory,
+        undefined,
+        undefined,
+        undefined,
+        snapshot.checkpoints ?? [],
+        snapshot.updatedAt ?? 0,
+        snapshot.autoNamePending ?? false,
+      );
     })
     .filter(session => !session.isEmpty());
   const selectedSessionId = sessions.some(session => session.getId() === parsed.data.selectedSessionId)

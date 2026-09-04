@@ -422,7 +422,7 @@ export function describeToolCall(call: ToolCallBlock, directory: string): string
   switch (call.name) {
     case 'WriteFile': {
       const target = path.resolve(directory, String(args.path ?? ''));
-      return [target, ...previewLines(String(args.content ?? ''), '  ')];
+      return [target, ...previewLines(String(args.content ?? ''), '  + ')];
     }
     case 'EditFile': {
       const target = path.resolve(directory, String(args.path ?? ''));

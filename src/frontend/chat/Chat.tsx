@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
-import type { ImageBlock, Message } from '../../agent_runtime/types';
+import type { ImageBlock, Message, ToolCallBlock } from '../../agent_runtime/types';
 import { Session } from '../../agent_runtime/session';
 import { attachClipboardImage, describeImage, removeStoredImage } from '../../images';
 import { Box, Text, measureElement, renderToString, useBoxMetrics, useInput, useStdout, type DOMElement } from 'ink';
@@ -50,6 +50,66 @@ export function ChatHeader({ session }: { session: Session }) {
           ))}
         </Text>
       </Box>
+    </Box>
+  );
+}
+
+// The user's earlier prompts, oldest first, without immediate repeats, for
+// the input bar's ↑/↓ recall.
+export function promptHistory(messages: readonly Message[]): string[] {
+  const prompts: string[] = [];
+  for (const message of messages) {
+    if (message.role !== 'user') continue;
+    const text = message.content
+      .filter(block => block.type === 'text')
+      .map(block => block.text)
+      .join('\n')
+      .trim();
+    if (text && prompts[prompts.length - 1] !== text) prompts.push(text);
+  }
+  return prompts;
+}
+
+// What the agents are up to, read off the end of the transcript: a tool the
+// turn is waiting on, text arriving, or nothing visible yet.
+export function turnPhase(messages: readonly Message[]): string {
+  const last = messages[messages.length - 1];
+  if (!last || last.role !== 'assistant') return 'thinking';
+  const answered = new Set(
+    last.content.flatMap(block => block.type === 'tool_result' ? [block.callId] : []),
+  );
+  const running = [...last.content]
+    .reverse()
+    .find((block): block is ToolCallBlock => block.type === 'tool_call' && !answered.has(block.id));
+  if (running) return `running ${running.name}`;
+  const tail = last.content[last.content.length - 1];
+  if (tail?.type === 'text' && tail.text) return 'writing';
+  return 'thinking';
+}
+
+export function formatElapsed(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
+// The line at the foot of the history while a turn runs: what the agents are
+// doing, or that they are waiting on the user, and for how long.
+function TurnStatus({ messages, awaitingApproval, startedAt }: {
+  messages: readonly Message[];
+  awaitingApproval: boolean;
+  startedAt: number;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  const phase = awaitingApproval ? 'waiting for your approval' : turnPhase(messages);
+  return (
+    <Box paddingX={3} marginBottom={1}>
+      <Spinner />
+      <Text color={awaitingApproval ? theme.pending : theme.textSubtle}>  {phase}</Text>
+      <Text color={theme.textSubtle} dimColor> · {formatElapsed(now - startedAt)}</Text>
     </Box>
   );
 }
@@ -120,6 +180,9 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
     if (image) removeStoredImage(image);
     replaceAttachments(attachmentsRef.current.slice(0, -1));
   };
+  const [commandStartedAt, setCommandStartedAt] = useState<number | null>(null);
+  const queued = currSession.getQueuedMessageCount();
+  const history = promptHistory(messages);
   // A tool call of this session (or of a subagent it spawned) waiting on the
   // user takes over the input bar until it is answered or the turn is cancelled.
   useSyncExternalStore(subscribePermissions, getPermissionsVersion);
@@ -175,6 +238,8 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
 
   useInput((input, key) => {
     if (key.escape) {
+      // an interrupted turn should not be followed by whatever was waiting
+      currSession.clearQueuedMessages();
       currSession.cancel();
       commandAbort.current?.abort(new TurnCancelledError());
       return;
@@ -256,6 +321,7 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
       }
       if (result instanceof Promise) {
         // a long-running command (browser login) holds the input like a turn does
+        setCommandStartedAt(Date.now());
         setCommandIsLoading(true);
         result
           .then(outcome => { if (outcome) setFeedback(outcome); })
@@ -266,6 +332,7 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
           })
           .finally(() => {
             if (commandAbort.current === controller) commandAbort.current = null;
+            setCommandStartedAt(null);
             setCommandIsLoading(false);
           });
       } else if (result) {
@@ -289,7 +356,10 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
       const turn = currSession.sendMessage(msg);
       // Validation can reject a turn before its user message is appended.
       // Keep those images available so the user can correct the prompt.
-      if (currSession.getMessages().length > previousLength) replaceAttachments([]);
+      if (currSession.getMessages().length > previousLength && images.length > 0) {
+        const sentPaths = new Set(images.map(image => image.path));
+        replaceAttachments(attachmentsRef.current.filter(image => !sentPaths.has(image.path)));
+      }
       // A startup draft becomes a real sidebar session only after the turn is
       // valid and sendMessage has appended its user message.
       if (!currSession.isEmpty()) onStartSession?.(currSession);
@@ -301,6 +371,15 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
         });
     }
   }
+
+  // Queued messages live on the session so they survive switching away and
+  // back. Send one at a time as soon as that session is free again.
+  useEffect(() => {
+    if (isLoading || currSession.getStatus() === 'working'
+      || queued === 0 || effectiveInputMode.type !== 'text') return;
+    const next = currSession.shiftQueuedMessage();
+    if (next !== undefined) send(next);
+  }, [currSession, isLoading, queued, effectiveInputMode.type]);
 
   historyContent.current = (
     <>
@@ -333,10 +412,11 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
         );
       })}
       {isLoading && (
-        <Box paddingX={3} marginBottom={1}>
-          <Spinner />
-          <Text color={theme.textSubtle}>  thinking</Text>
-        </Box>
+        <TurnStatus
+          messages={messages}
+          awaitingApproval={approvals.length > 0}
+          startedAt={currSession.getActiveTurnStartedAt() ?? commandStartedAt ?? Date.now()}
+        />
       )}
     </>
   );
@@ -384,6 +464,10 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
         onRemoveAttachment={removeAttachment}
         model={currSession.getModel()}
         thinkingLevel={currSession.getThinkingLevel()}
+        history={history}
+        queued={queued}
+        onQueue={text => currSession.queueMessage(text)}
+        contextUsage={currSession.getContextUsage()}
       />
     </Box>
   );

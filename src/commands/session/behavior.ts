@@ -13,6 +13,13 @@ export function clearSession(session: Session): Feedback {
   return { kind: 'success', text: 'Session history cleared.' };
 }
 
+export function renameSession(name: string, session: Session): Feedback {
+  const trimmed = name.replace(/\s+/g, ' ').trim();
+  if (!trimmed) throw new Error('Usage: /rename <name>');
+  session.setName(trimmed);
+  return { kind: 'success', text: `Session renamed to ${session.getName()}.` };
+}
+
 const PERMISSION_MODE_DESCRIPTIONS: Record<PermissionMode, string> = {
   ask: 'prompt before every write, shell command, and spawned agent',
   auto: 'run ordinary work; prompt only for sensitive operations',

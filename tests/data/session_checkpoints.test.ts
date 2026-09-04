@@ -80,6 +80,95 @@ describe('session checkpoint integration', () => {
     expect(session.getMessages()).toEqual([]);
   });
 
+  test('chat rewind restores history-based usage and activity while file-only rewind preserves them', async () => {
+    let turn = 0;
+    modelStrategies[model] = {
+      getResponse: async () => {
+        turn++;
+        return {
+          content: [{ type: 'text', text: `Response ${turn}` }],
+          stop_reason: 'end_turn',
+          usage: { inputTokens: turn * 100, outputTokens: turn * 10, contextTokens: turn * 110, contextWindow: 200_000 },
+        };
+      },
+    };
+    await session.sendMessage(prompt);
+    await session.sendMessage(prompt);
+    session = Session.fromSnapshot({ ...session.toSnapshot(), updatedAt: 1_000 });
+    const checkpoints = session.getCheckpoints();
+    expect(session.getTotalUsage()).toEqual({ inputTokens: 300, outputTokens: 30 });
+    expect(session.getContextUsage()).toEqual({ tokens: 220, window: 200_000 });
+
+    await session.rewind(checkpoints[1].id, { files: true, chat: false });
+    expect(session.getTotalUsage()).toEqual({ inputTokens: 300, outputTokens: 30 });
+    expect(session.getContextUsage()).toEqual({ tokens: 220, window: 200_000 });
+    expect(session.getLastActivity()).toBe(1_000);
+
+    await session.rewind(checkpoints[1].id, { files: false, chat: true });
+    expect(session.getTotalUsage()).toEqual({ inputTokens: 100, outputTokens: 10 });
+    expect(session.getContextUsage()).toEqual({ tokens: 110, window: 200_000 });
+    expect(session.getLastActivity()).toBeGreaterThan(1_000);
+
+    await session.rewind(checkpoints[0].id, { files: false, chat: true });
+    expect(session.getTotalUsage()).toBeNull();
+    expect(session.getContextUsage()).toBeNull();
+  });
+
+  test('queued prompts capture their own pre-turn files and history position with matching usage', async () => {
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+    let turnNumber = 0;
+    modelStrategies[model] = {
+      getResponse: async (_history, turn) => {
+        const number = ++turnNumber;
+        if (number === 1) await firstGate;
+        const result = await runTool({
+          type: 'tool_call', id: `write-${number}`, name: 'WriteFile',
+          arguments: { path: 'file.txt', content: `edit ${number}` },
+        }, turn.directory, turn.signal, turn.permissions, turn.agent);
+        expect(result.isError).toBe(false);
+        return {
+          content: [{ type: 'text', text: `Response ${number}` }],
+          stop_reason: 'end_turn',
+          usage: { inputTokens: number * 100, outputTokens: number * 10, contextTokens: number * 110, contextWindow: 200_000 },
+        };
+      },
+    };
+    let unsubscribe = () => {};
+    const completed = new Promise<void>(resolve => {
+      unsubscribe = session.subscribe(() => {
+        if (session.getStatus() === 'idle' && session.getCheckpoints().length === 2) resolve();
+      });
+    });
+    try {
+      const first = session.sendMessage(prompt);
+      session.queueMessage('Second queued change');
+      releaseFirst();
+      await first;
+      await completed;
+    } finally {
+      unsubscribe();
+    }
+
+    const checkpoints = session.getCheckpoints();
+    expect(checkpoints.map(checkpoint => checkpoint.messageIndex)).toEqual([0, 2]);
+    expect(checkpoints.map(checkpoint => checkpoint.summary)).toEqual(['Change the file', 'Second queued change']);
+    expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('edit 2');
+    expect(session.getQueuedMessageCount()).toBe(0);
+    expect(session.getTotalUsage()).toEqual({ inputTokens: 300, outputTokens: 30 });
+
+    await session.rewind(checkpoints[1].id, { files: true, chat: true });
+    expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('edit 1');
+    expect(session.getMessages()).toHaveLength(2);
+    expect(session.getTotalUsage()).toEqual({ inputTokens: 100, outputTokens: 10 });
+    expect(session.getContextUsage()).toEqual({ tokens: 110, window: 200_000 });
+
+    await session.rewind(checkpoints[0].id, { files: true, chat: true });
+    expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('user draft');
+    expect(session.getMessages()).toHaveLength(0);
+    expect(session.getTotalUsage()).toBeNull();
+  });
+
   test.each([new Error('provider failed'), new TurnCancelledError()])(
     'settles a snapshot before a failed or cancelled turn can be cleared: %s', async error => {
       modelStrategies[model] = { getResponse: async () => { throw error; } };

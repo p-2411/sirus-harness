@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { modelStrategies } from '../../src/agent_runtime/chat';
 import type { TurnContext } from '../../src/agent_runtime/turn';
 import type { Message } from '../../src/agent_runtime/types';
+import type { SubagentRun } from '../../src/agent_runtime/tools/subagents';
 import { Session } from '../../src/agent_runtime/session';
 
 const testModel = 'test-session-model';
@@ -39,6 +40,56 @@ describe('Session model', () => {
   test('is owned by the directory where it was created', () => {
     expect(new Session().getDirectory()).toBe(process.cwd());
     expect(Session.create('Owned', '/projects/owned').getDirectory()).toBe('/projects/owned');
+  });
+
+  test('auto-names a default session from its first prompt but preserves a custom name', async () => {
+    modelStrategies[testModel] = {
+      getResponse: async () => ({
+        content: [{ type: 'text', text: 'Done' }],
+        stop_reason: 'end_turn',
+      }),
+    };
+    const automatic = Session.create('Session 3', process.cwd(), testModel);
+    await automatic.sendMessage({
+      role: 'user',
+      content: [{ type: 'text', text: '\n  Implement the queued message workflow with tests  \nDo not use this line' }],
+    });
+    expect(automatic.getName()).toBe('Implement the queued message workflow…');
+
+    const custom = new Session('Session 9', 'custom-name', testModel);
+    await custom.sendMessage({
+      role: 'user',
+      content: [{ type: 'text', text: 'This must not replace the name' }],
+    });
+    expect(custom.getName()).toBe('Session 9');
+
+    const explicitlyNamed = Session.create('Session 10', process.cwd(), testModel);
+    explicitlyNamed.setName('Session 10');
+    const restored = Session.fromSnapshot(explicitlyNamed.toSnapshot());
+    await restored.sendMessage({
+      role: 'user',
+      content: [{ type: 'text', text: 'Keep the explicit numeric name' }],
+    });
+    expect(restored.getName()).toBe('Session 10');
+  });
+
+  test('reports latest context usage and aggregates session token totals', () => {
+    const session = new Session('Usage', 'usage', testModel, [
+      {
+        role: 'assistant',
+        model: 'claude-sonnet-5',
+        content: [{ type: 'text', text: 'First' }],
+        usage: { inputTokens: 100, outputTokens: 20, contextTokens: 120, contextWindow: 200_000 },
+      },
+      {
+        role: 'assistant',
+        model: 'gpt-5.6-sol',
+        content: [{ type: 'text', text: 'Second' }],
+        usage: { inputTokens: 250, outputTokens: 50, contextTokens: 300, contextWindow: 400_000 },
+      },
+    ]);
+    expect(session.getContextUsage()).toEqual({ tokens: 300, window: 400_000 });
+    expect(session.getTotalUsage()).toEqual({ inputTokens: 350, outputTokens: 70 });
   });
 
   test('setModel changes the model for that session only', () => {
@@ -131,7 +182,11 @@ describe('Session model', () => {
       getResponse: async (_messages, turn) => {
         turn.updateStream([{ type: 'text', text: 'Working' }]);
         await gate;
-        return { content: [{ type: 'text', text: 'Working now.' }], stop_reason: 'end_turn' };
+        return {
+          content: [{ type: 'text', text: 'Working now.' }],
+          stop_reason: 'end_turn',
+          usage: { inputTokens: 120, outputTokens: 8, contextTokens: 128, contextWindow: 400_000 },
+        };
       },
     };
 
@@ -152,9 +207,146 @@ describe('Session model', () => {
 
     finish();
     await turn;
-    expect(session.getMessages().at(-1)?.content).toEqual([
-      { type: 'text', text: 'Working now.' },
-    ]);
+    expect(session.getMessages().at(-1)).toMatchObject({
+      content: [{ type: 'text', text: 'Working now.' }],
+      usage: { inputTokens: 120, outputTokens: 8, contextTokens: 128, contextWindow: 400_000 },
+    });
+    expect(session.getContextUsage()).toEqual({ tokens: 128, window: 400_000 });
+  });
+
+  test('keeps queued messages on the session in FIFO order', () => {
+    const session = new Session('Queue');
+    session.queueMessage('first');
+    session.queueMessage('second');
+
+    expect(session.getQueuedMessageCount()).toBe(2);
+    expect(session.shiftQueuedMessage()).toBe('first');
+    expect(session.getQueuedMessageCount()).toBe(1);
+    session.clearQueuedMessages();
+    expect(session.getQueuedMessageCount()).toBe(0);
+    expect(Session.fromSnapshot(session.toSnapshot()).getQueuedMessageCount()).toBe(0);
+  });
+
+  test('drains queued prompts in order without a mounted chat', async () => {
+    const pending: Array<() => void> = [];
+    const prompts: string[] = [];
+    modelStrategies[testModel] = {
+      getResponse: async messages => {
+        const block = messages.at(-1)!.content[0];
+        if (block.type === 'text') prompts.push(block.text);
+        await new Promise<void>(resolve => pending.push(resolve));
+        return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
+      },
+    };
+    const session = new Session('Queue', 'background-queue', testModel);
+    const first = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'first' }] });
+    session.queueMessage('second');
+    session.queueMessage('third');
+    pending.shift()!();
+    await first;
+    expect(prompts).toEqual(['first', 'second']);
+    expect(session.getStatus()).toBe('working');
+    expect(session.getQueuedMessageCount()).toBe(1);
+    pending.shift()!();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(prompts).toEqual(['first', 'second', 'third']);
+    expect(session.getQueuedMessageCount()).toBe(0);
+    pending.shift()!();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(session.getStatus()).toBe('idle');
+  });
+
+  test('pauses the background queue at commands that may need user input', async () => {
+    let finish!: () => void;
+    modelStrategies[testModel] = {
+      getResponse: async () => {
+        await new Promise<void>(resolve => { finish = resolve; });
+        return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
+      },
+    };
+    const session = new Session('Queue', 'command-queue', testModel);
+    const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'first' }] });
+    session.queueMessage('/login');
+    session.queueMessage('after login');
+    finish();
+    await turn;
+    expect(session.getStatus()).toBe('idle');
+    expect(session.shiftQueuedMessage()).toBe('/login');
+    expect(session.shiftQueuedMessage()).toBe('after login');
+  });
+
+  test('cancelling discards only that session queue and leaves other sessions running', async () => {
+    let finish!: () => void;
+    const gate = new Promise<void>(resolve => { finish = resolve; });
+    modelStrategies[testModel] = {
+      getResponse: async () => {
+        await gate;
+        return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
+      },
+    };
+    const first = new Session('First', 'cancel-first', testModel);
+    const second = new Session('Second', 'cancel-second', testModel);
+    const message: Message = { role: 'user', content: [{ type: 'text', text: 'start' }] };
+    const firstTurn = first.sendMessage(message);
+    const secondTurn = second.sendMessage(message);
+    first.queueMessage('discard');
+    second.queueMessage('keep');
+    expect(first.cancel()).toBe(true);
+    await expect(firstTurn).rejects.toThrow();
+    expect(first.getQueuedMessageCount()).toBe(0);
+    expect(second.getStatus()).toBe('working');
+    expect(second.getQueuedMessageCount()).toBe(1);
+    finish();
+    await secondTurn;
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(second.getMessages().filter(message => message.role === 'user')).toHaveLength(2);
+  });
+
+  test('cancels its detached subagents after the parent turn has finished', async () => {
+    let finish!: () => void;
+    const gate = new Promise<void>(resolve => { finish = resolve; });
+    const workers: SubagentRun[] = [];
+    modelStrategies[testModel] = {
+      getResponse: async (_messages, turn) => {
+        if (turn.agent.subagent) await gate;
+        else workers.push(turn.agent.spawnSubagent('background task', testModel, {
+          directory: process.cwd(),
+          signal: turn.signal,
+        }));
+        return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
+      },
+    };
+    const first = new Session('First', 'detached-first', testModel);
+    const second = new Session('Second', 'detached-second', testModel);
+    const message: Message = { role: 'user', content: [{ type: 'text', text: 'start' }] };
+    await first.sendMessage(message);
+    await second.sendMessage(message);
+    expect(first.getStatus()).toBe('idle');
+    expect(workers.map(run => run.status)).toEqual(['working', 'working']);
+    expect(first.cancel()).toBe(true);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(workers.map(run => run.status)).toEqual(['cancelled', 'working']);
+    finish();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(workers[1].status).toBe('done');
+  });
+
+  test('tracks the active turn start independently of the chat view', async () => {
+    let finish!: () => void;
+    const gate = new Promise<void>(resolve => { finish = resolve; });
+    modelStrategies[testModel] = {
+      getResponse: async () => {
+        await gate;
+        return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
+      },
+    };
+    const session = new Session('Elapsed', 'elapsed-session', testModel);
+
+    const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Start' }] });
+    expect(session.getActiveTurnStartedAt()).toBeNumber();
+    finish();
+    await turn;
+    expect(session.getActiveTurnStartedAt()).toBeNull();
   });
 
   test('cancels the whole active turn even when a provider ignores its signal', async () => {

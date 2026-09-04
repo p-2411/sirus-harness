@@ -69,6 +69,11 @@ function createChat(session: Session) {
   return {
     flush,
     output: () => stripAnsi(output),
+    async press(input: string) {
+      await flush();
+      stdin.write(input);
+      await flush();
+    },
     async submit(text: string) {
       await flush();
       stdin.write(text);
@@ -123,6 +128,98 @@ describe('chat attachment lifecycle', () => {
       await chat.close();
     }
     expect(sentPath && existsSync(sentPath)).toBe(true);
+  });
+
+  test('keeps a busy image draft intact while queued text runs, then sends the draft with its image', async () => {
+    let release = () => {};
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let calls = 0;
+    modelStrategies[testModel] = {
+      getResponse: async messages => {
+        calls++;
+        received = [...messages];
+        if (calls === 1) await gate;
+        return { content: [{ type: 'text', text: 'Done.' }], stop_reason: 'end_turn' };
+      },
+    };
+    const session = Session.create('Queued image draft', directory, testModel);
+    const chat = createChat(session);
+    let activeTurn: Promise<Message[]> | undefined;
+    let sentPath: string | undefined;
+    try {
+      await chat.submit(`/image ${imagePath}`);
+      await chat.waitFor(() => chat.output().includes('Attached image'));
+      sentPath = storedImages()[0];
+      activeTurn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Running task' }] });
+      await chat.waitFor(() => calls === 1);
+
+      await chat.submit('Describe attached image');
+      expect(session.getQueuedMessageCount()).toBe(0);
+      expect(session.getMessages().filter(message => message.role === 'user')).toHaveLength(1);
+      session.queueMessage('Queued text');
+      release();
+      await activeTurn;
+      await chat.waitFor(() => session.getStatus() === 'idle' && calls === 2);
+      expect(storedImages()).toEqual([sentPath!]);
+      expect(session.getMessages().filter(message => message.role === 'user')[1].content)
+        .toEqual([{ type: 'text', text: 'Queued text' }]);
+
+      // The busy submit retained both the text draft and its attachment.
+      await chat.press('\r');
+      await chat.waitFor(() => session.getStatus() === 'idle' && calls === 3);
+      expect(session.getMessages().filter(message => message.role === 'user')[2].content)
+        .toEqual([
+          expect.objectContaining({ type: 'image', path: sentPath }),
+          { type: 'text', text: 'Describe attached image' },
+        ]);
+    } finally {
+      release();
+      await activeTurn;
+      await chat.close();
+    }
+    expect(sentPath && existsSync(sentPath)).toBe(true);
+  });
+
+  test('combines image attachments with history recall, multiline paste and focus reports', async () => {
+    const session = Session.create('Draft editing', directory, testModel);
+    session.append({ role: 'user', content: [{ type: 'text', text: 'Earlier prompt' }] });
+    session.append({ role: 'assistant', content: [{ type: 'text', text: 'Earlier reply' }] });
+    const chat = createChat(session);
+    try {
+      await chat.submit(`/image ${imagePath}`);
+      await chat.waitFor(() => chat.output().includes('Attached image'));
+      await chat.press('draft ');
+      await chat.press('\x1b[A');
+      await chat.press('\x1b[B');
+      await chat.press('\x1b[O');
+      await chat.press('\x1b[I');
+      await chat.press('\x1b[200~first\r\nsecond\x1b[201~');
+      await chat.press('\x1b[D');
+      await chat.press('!');
+      await chat.press('\r');
+      await chat.waitFor(() => session.getStatus() === 'idle' && received.length > 0);
+      expect(session.getMessages().filter(message => message.role === 'user')[1].content)
+        .toEqual([
+          expect.objectContaining({ type: 'image' }),
+          { type: 'text', text: 'draft first\nsecon!d' },
+        ]);
+    } finally {
+      await chat.close();
+    }
+  });
+
+  test('sends an image without text when idle', async () => {
+    const session = Session.create('Image only', directory, testModel);
+    const chat = createChat(session);
+    try {
+      await chat.submit(`/image ${imagePath}`);
+      await chat.waitFor(() => chat.output().includes('Attached image'));
+      await chat.press('\r');
+      await chat.waitFor(() => session.getStatus() === 'idle' && received.length > 0);
+      expect(session.getMessages()[0].content).toEqual([expect.objectContaining({ type: 'image' })]);
+    } finally {
+      await chat.close();
+    }
   });
 
   test('removes an unsent stored attachment when leaving the chat', async () => {

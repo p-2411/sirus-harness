@@ -33,6 +33,17 @@ export interface ImageBlock {
 
 export type MessageBlock = TextBlock | ImageBlock | ToolCallBlock | ToolResultBlock;
 
+// Token accounting for one agent turn, as the provider reported it. Totals
+// cover every request of the turn; context is the size of the last request,
+// which is what the model had in its window when it finished.
+export interface Usage {
+  inputTokens: number;
+  outputTokens: number;
+  contextTokens: number;
+  // The model's window, when the provider states it.
+  contextWindow?: number;
+}
+
 export interface Message {
   role: 'user' | 'assistant';
   content: MessageBlock[];
@@ -43,6 +54,8 @@ export interface Message {
   // Captured on agent responses so the UI can show the model that produced a
   // historical message even if that participant changes models later.
   model?: string;
+  // Present on agent responses whose provider reported token usage.
+  usage?: Usage;
 }
 
 // The reasoning depth a user picks per agent. Providers translate the shared

@@ -5,8 +5,10 @@ import { modelStrategies } from '../../src/agent_runtime/chat';
 import { Session } from '../../src/agent_runtime/session';
 import {
   SESSION_STATUS_APPEARANCE,
+  formatRelativeTime,
   formatSidebarTime,
   sessionStatusAppearance,
+  sessionsByRecency,
   SessionItem,
 } from '../../src/frontend/Sidebar';
 import Sidebar from '../../src/frontend/Sidebar';
@@ -66,6 +68,41 @@ describe('sidebar header', () => {
     expect(stripAnsi(output)).toMatch(/^ sirus\s+\/update │$/m);
     expect(stripAnsi(output)).not.toMatch(/\d{1,2}:\d{2} (?:AM|PM)/);
     expect(theme.success).toBe('#00C853');
+  });
+});
+
+describe('sidebar session metadata', () => {
+  test('formats recent activity compactly', () => {
+    const now = Date.UTC(2026, 8, 4, 12, 0, 0);
+    expect(formatRelativeTime(now - 20_000, now)).toBe('now');
+    expect(formatRelativeTime(now - 5 * 60_000, now)).toBe('5m');
+    expect(formatRelativeTime(now - 3 * 60 * 60_000, now)).toBe('3h');
+    expect(formatRelativeTime(now - 2 * 24 * 60 * 60_000, now)).toBe('2d');
+    expect(formatRelativeTime(0, now)).toBe('');
+  });
+
+  test('sorts sessions by latest activity without mutating the source list', () => {
+    const older = new Session('Older', 'older', undefined, [], '/projects/older', [], 'sirus', undefined, [], 1_000);
+    const newer = new Session('Newer', 'newer', undefined, [], '/projects/newer', [], 'sirus', undefined, [], 2_000);
+    const source = [older, newer];
+    expect(sessionsByRecency(source)).toEqual([newer, older]);
+    expect(source).toEqual([older, newer]);
+  });
+
+  test('shows the owning directory basename and activity time', () => {
+    const session = new Session('Work', 'work', undefined, [], '/projects/sirus-harness', [], 'sirus', undefined, [], 1_000);
+    const output = stripAnsi(renderToString(
+      <SessionItem
+        session={session}
+        isSelected={false}
+        onSelect={noOp}
+        onDelete={noOp}
+        now={61_000}
+      />,
+      { columns: 40 },
+    ));
+    expect(output).toContain('sirus-harness');
+    expect(output).toContain('1m');
   });
 });
 
