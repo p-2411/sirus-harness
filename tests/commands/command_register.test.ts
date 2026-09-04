@@ -24,12 +24,13 @@ function runCommand(
   return executeCommand(command, args, {
     session,
     notify: () => {},
+    attachImage: () => {},
     signal: new AbortController().signal,
   });
 }
 
 function menuItems(command: string, args: readonly string[]): CommandMenuItem[] {
-  return commandMenu(command, args)?.filter(
+  return commandMenu(command, args, new Session())?.filter(
     (entry): entry is CommandMenuItem => entry.type === 'item',
   ) ?? [];
 }
@@ -144,7 +145,7 @@ describe('executeCommand', () => {
   });
 
   test('model command groups selectable models under provider headings', () => {
-    const menu = commandMenu('model', [])!;
+    const menu = commandMenu('model', [], new Session())!;
     expect(menu.filter(entry => entry.type === 'heading').map(entry => entry.label)).toEqual([
       'Anthropic',
       'OpenAI',
@@ -160,7 +161,7 @@ describe('executeCommand', () => {
       '/model gpt-6-astra',
     ]);
     expect(menuItems('model', ['@reviewer'])[0].command).toBe('/model @reviewer claude-opus-5');
-    expect(commandMenu('model', ['gpt-5.6-sol'])).toBeNull();
+    expect(commandMenu('model', ['gpt-5.6-sol'], new Session())).toBeNull();
   });
 
   test('clear command empties only the current session history', () => {
@@ -193,6 +194,10 @@ describe('executeCommand', () => {
     expect(result.showIcon).toBe(false);
     expect(result.text).toContain('/help');
     expect(result.text).toContain('/rename <name>');
+    expect(result.text).toContain('/undo');
+    expect(result.text).toContain('/rewind');
+    expect(result.text).toContain('/image [path]');
+    expect(result.text).toContain('/notify');
     expect(result.text).toContain('shift+enter');
     expect(result.text).toContain('switch session');
     expect(() => runCommand('help', ['extra'])).toThrow('Usage: /help');
@@ -231,7 +236,7 @@ describe('executeCommand', () => {
       '/thinking max',
     ]);
     expect(menuItems('thinking', ['@reviewer'])[2].command).toBe('/thinking @reviewer high');
-    expect(commandMenu('thinking', ['low'])).toBeNull();
+    expect(commandMenu('thinking', ['low'], new Session())).toBeNull();
   });
 
   test('memory command reports and persists on/off access', () => {

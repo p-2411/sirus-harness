@@ -2,7 +2,7 @@ import type { SessionAgent } from '../agent';
 import type { ToolCallBlock, ToolResultBlock } from '../types';
 import { abortReason, throwIfAborted } from '../../abort';
 import { isMemoryAccessEnabled } from '../memory-access';
-import { authorizeToolCall, type PermissionContext } from '../permissions/permissions';
+import { authorizeToolCall, classifyToolCall, type PermissionContext } from '../permissions/permissions';
 import { errorMessage } from './arguments';
 import type { Tool, ToolAudience, ToolCallContext } from './types';
 
@@ -78,6 +78,12 @@ export function createToolRuntime(
     }
 
     if (permissions) {
+      // Shell commands classified as reads can still write through flags
+      // such as find -delete or sort -o. Always wait for their snapshot.
+      if (permissions.beforeMutation && (toolCall.name === 'RunShell' || classifyToolCall(toolCall, directory) !== 'read')) {
+        await permissions.beforeMutation();
+        throwIfAborted(signal);
+      }
       const declined = await authorizeToolCall(toolCall, directory, permissions, signal);
       if (declined) {
         return { type: 'tool_result', callId: toolCall.id, result: declined, isError: true };

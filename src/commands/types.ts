@@ -1,4 +1,5 @@
 import type { Session } from '../agent_runtime/session';
+import type { ImageBlock } from '../agent_runtime/types';
 import type { Feedback } from './feedback';
 
 export type CommandResult = void | Feedback | Promise<void | Feedback>;
@@ -26,6 +27,8 @@ export type CommandMenuEntry = CommandMenuHeading | CommandMenuItem;
 export interface CommandExecution {
   session: Session;
   notify: (text: string) => void;
+  // Adds an image to the message the user is composing.
+  attachImage: (image: ImageBlock) => void;
   signal: AbortSignal;
 }
 
@@ -37,6 +40,7 @@ export interface CommandSpec {
   // while a long command such as browser login is still running.
   run: (args: string[], execution: CommandExecution) => CommandResult;
   // Picking a menu item sends its command text, plus any secret entered.
-  // Null means the command should run directly.
-  menu?: (args: readonly string[]) => CommandMenuEntry[] | null;
+  // Null means the command should run directly. The session is the one the
+  // command would run in, for menus that list its state.
+  menu?: (args: readonly string[], session: Session) => CommandMenuEntry[] | null;
 }

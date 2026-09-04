@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import path from 'path';
 import { modelStrategies } from './chat';
 import { SessionAgent, type Participant } from './agent';
 import type { Message, ThinkingLevel } from './types';
@@ -9,10 +10,32 @@ import {
   type PermissionContext,
   type PermissionMode,
 } from './permissions/permissions';
+import {
+  captureCheckpoint,
+  checkpointSummary,
+  restoreCheckpoint,
+  type Checkpoint,
+  type RestoredFiles,
+} from '../checkpoints';
 import { contextWindowFor } from './providers/providers';
 import type { ContextUsage } from './usage';
 
 export type { Participant };
+export type { Checkpoint };
+
+// What a rewind is asked to put back.
+export interface RewindOptions {
+  files: boolean;
+  chat: boolean;
+}
+
+export interface RewindResult {
+  checkpoint: Checkpoint;
+  // Null when files were not restored.
+  files: RestoredFiles | null;
+  // How many messages the chat lost; zero when the chat was kept.
+  droppedMessages: number;
+}
 
 export type SessionStatus = 'idle' | 'working' | 'error';
 
@@ -27,6 +50,8 @@ export interface SessionSnapshot {
   inputContent?: string;
   // How tool calls are approved in this session; absent in older snapshots.
   permissionMode?: PermissionMode;
+  // Directory snapshots taken before turns, oldest first; absent when none.
+  checkpoints?: Checkpoint[];
   // When the history last changed; absent in older snapshots.
   updatedAt?: number;
   // A newly-created session may still take its name from its first prompt.
@@ -91,6 +116,10 @@ function textOf(message: Message): string {
 // re-renders the transcript, so partials reach listeners at most this often
 // (the first one immediately) to keep the event loop free for input.
 const STREAM_NOTIFY_MS = 50;
+// Sessions can share a working directory. A file rewind must not overlap
+// another session's turn, even when the session being rewound is idle.
+const directoryTurns = new Map<string, number>();
+const restoringDirectories = new Set<string>();
 
 export class Session {
   private id: string;
@@ -105,9 +134,12 @@ export class Session {
   private activeSends = 0;
   private status: SessionStatus = 'idle';
   private turnFailed: boolean = false;
+  private lastTurnCancelled: boolean = false;
   private streamNotify: ReturnType<typeof setTimeout> | null = null;
   private lastStreamNotify = 0;
   private permissionMode: PermissionMode;
+  private checkpoints: Checkpoint[];
+  private rewinding = false;
   private inputContent: string;
   // When the history last changed; 0 for a restored session that predates
   // the field, so it sorts last and shows no time.
@@ -127,6 +159,7 @@ export class Session {
     participants: readonly Participant[] = [],
     defaultParticipantName: string = DEFAULT_PARTICIPANT_NAME,
     permissionMode: PermissionMode = DEFAULT_PERMISSION_MODE,
+    checkpoints: readonly Checkpoint[] = [],
     updatedAt: number = Date.now(),
     autoNamePending: boolean = false,
     inputContent: string = '',
@@ -135,6 +168,7 @@ export class Session {
     this.id = id;
     this.directory = directory;
     this.permissionMode = permissionMode;
+    this.checkpoints = [...checkpoints];
     this.lastActivity = updatedAt;
     this.autoNamePending = autoNamePending;
     const restored = participants.map(participant => this.createAgent(participant, defaultParticipantName));
@@ -161,6 +195,7 @@ export class Session {
       undefined,
       undefined,
       undefined,
+      undefined,
       true,
     );
   }
@@ -176,6 +211,7 @@ export class Session {
         snapshot.participants,
         snapshot.defaultModel.name,
         snapshot.permissionMode ?? DEFAULT_PERMISSION_MODE,
+        snapshot.checkpoints ?? [],
         snapshot.updatedAt ?? 0,
         snapshot.autoNamePending ?? false,
         snapshot.inputContent ?? '',
@@ -187,6 +223,7 @@ export class Session {
       snapshot.model,
       snapshot.messages,
       snapshot.directory,
+      undefined,
       undefined,
       undefined,
       undefined,
@@ -217,13 +254,20 @@ export class Session {
 
   async sendMessage(message: Message): Promise<Message[]> {
     if (message.role !== 'user') throw new Error('Only user messages can start a session turn');
+    const directoryKey = path.resolve(this.directory);
+    if (this.rewinding || restoringDirectories.has(directoryKey)) {
+      throw new Error('Wait for the rewind to finish before sending a message.');
+    }
 
     if (this.activeSends === 0) {
       this.turnFailed = false;
+      this.lastTurnCancelled = false;
       this.activeTurnStartedAt = Date.now();
     }
     this.activeSends++;
+    directoryTurns.set(directoryKey, (directoryTurns.get(directoryKey) ?? 0) + 1);
     this.setStatus('working');
+    let checkpointBarrier: Promise<void> = Promise.resolve();
     try {
       const messageText = textOf(message);
       const mentions = this.parseMentions(messageText);
@@ -241,13 +285,27 @@ export class Session {
         this.autoNamePending = false;
       }
       this.append(stored);
-      await this.runInvocations(targets.map(participant => ({ participant, mentionedBy: [] })));
+      // Start the provider immediately, while the pre-turn snapshot is taken
+      // in parallel. Every mutating tool call waits for this barrier, so agent
+      // writes cannot race ahead of the checkpoint.
+      checkpointBarrier = this.checkpoint(this.messages.length - 1, messageText || '[image]');
+      await this.runInvocations(
+        targets.map(participant => ({ participant, mentionedBy: [] })),
+        checkpointBarrier,
+      );
       return this.messages;
     } catch (error) {
-      if (!isAbortError(error)) this.turnFailed = true;
+      if (isAbortError(error)) this.lastTurnCancelled = true;
+      else this.turnFailed = true;
       throw error;
     } finally {
+      // Failed and cancelled providers must also finish their snapshot before
+      // the session becomes available for clearing or rewinding its history.
+      await checkpointBarrier;
       this.activeSends--;
+      const remaining = (directoryTurns.get(directoryKey) ?? 1) - 1;
+      if (remaining > 0) directoryTurns.set(directoryKey, remaining);
+      else directoryTurns.delete(directoryKey);
       if (this.activeSends === 0) this.activeTurnStartedAt = null;
       this.setStatus(this.activeSends > 0
         ? 'working'
@@ -268,11 +326,60 @@ export class Session {
   }
 
   // A provider-side conversation must not outlive the history it mirrors.
+  // Checkpoints go with it: they point into the history that was cleared.
   clear(): void {
+    if (this.activeSends > 0 || this.rewinding) throw new Error('Wait for the current operation to finish before clearing the session.');
     if (this.messages.length === 0) return;
     this.messages = [];
+    this.checkpoints = [];
     for (const agent of this.participants) agent.resetRuntime();
     this.lastActivity = Date.now();
+    this.notifyListeners();
+  }
+
+  getCheckpoints(): Checkpoint[] {
+    return [...this.checkpoints];
+  }
+
+  // Puts the directory, the chat, or both back to a checkpoint. Restoring
+  // the chat drops that checkpoint and every later one, since the messages
+  // they belong to are gone; restoring only files keeps them all.
+  async rewind(checkpointId: string, options: RewindOptions): Promise<RewindResult> {
+    if (!options.files && !options.chat) throw new Error('Nothing to restore: choose files, chat, or both.');
+    if (this.rewinding) throw new Error('Wait for the current rewind to finish.');
+    if (this.activeSends > 0) throw new Error('Wait for the current turn to finish before rewinding.');
+    const directoryKey = path.resolve(this.directory);
+    if (options.files && (directoryTurns.has(directoryKey) || restoringDirectories.has(directoryKey))) {
+      throw new Error('Another session is working in this directory. Wait for it to finish before restoring files.');
+    }
+    const index = this.checkpoints.findIndex(candidate => candidate.id === checkpointId);
+    if (index === -1) throw new Error('That checkpoint no longer exists in this session.');
+    const checkpoint = this.checkpoints[index];
+
+    this.rewinding = true;
+    if (options.files) restoringDirectories.add(directoryKey);
+    try {
+      const files = options.files ? await restoreCheckpoint(this.directory, checkpoint.id) : null;
+      let droppedMessages = 0;
+      if (options.chat) {
+        droppedMessages = Math.max(0, this.messages.length - checkpoint.messageIndex);
+        this.messages = this.messages.slice(0, checkpoint.messageIndex);
+        this.checkpoints = this.checkpoints.slice(0, index);
+        this.lastActivity = Date.now();
+        for (const agent of this.participants) agent.resetRuntime();
+      }
+      this.notifyListeners();
+      return { checkpoint, files, droppedMessages };
+    } finally {
+      this.rewinding = false;
+      if (options.files) restoringDirectories.delete(directoryKey);
+    }
+  }
+
+  private async checkpoint(messageIndex: number, text: string): Promise<void> {
+    const captured = await captureCheckpoint(this.directory, checkpointSummary(text));
+    if (!captured) return;
+    this.checkpoints.push({ ...captured, messageIndex, summary: checkpointSummary(text) });
     this.notifyListeners();
   }
 
@@ -399,6 +506,10 @@ export class Session {
     return this.status;
   }
 
+  wasLastTurnCancelled(): boolean {
+    return this.lastTurnCancelled;
+  }
+
   getAssistantVersion(): number {
     return this.assistantVersion;
   }
@@ -451,6 +562,7 @@ export class Session {
       messages: [...this.messages],
       inputContent: this.inputContent,
       permissionMode: this.permissionMode,
+      ...(this.checkpoints.length > 0 ? { checkpoints: [...this.checkpoints] } : {}),
       updatedAt: this.lastActivity,
       autoNamePending: this.autoNamePending,
     };
@@ -607,7 +719,10 @@ export class Session {
     return { ...message, content };
   }
 
-  private async runInvocations(initial: readonly Invocation[]): Promise<void> {
+  private async runInvocations(
+    initial: readonly Invocation[],
+    beforeMutation: Promise<void> = Promise.resolve(),
+  ): Promise<void> {
     let pending = [...initial];
     let firstFailure: unknown;
     let hasFailure = false;
@@ -639,7 +754,7 @@ export class Session {
           : undefined;
         const turn = participant.respond(history, {
           directory: this.directory,
-          permissions: this.permissionContextFor(participant),
+          permissions: this.permissionContextFor(participant, beforeMutation),
           ...(turnPrompt ? { turnPrompt } : {}),
         });
         for await (const snapshot of turn.changes()) {
@@ -753,12 +868,13 @@ export class Session {
     });
   }
 
-  private permissionContextFor(agent: SessionAgent): PermissionContext {
+  private permissionContextFor(agent: SessionAgent, beforeMutation: Promise<void>): PermissionContext {
     return {
       sessionId: this.id,
       mode: () => this.permissionMode,
       requester: { participant: agent.name },
       model: agent.model,
+      beforeMutation: () => beforeMutation,
     };
   }
 

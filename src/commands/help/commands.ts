@@ -2,12 +2,14 @@ import type { CommandSpec } from '../types';
 
 // Every key the app answers to, in the words the status hints use.
 export const KEY_BINDINGS: ReadonlyArray<readonly [keys: string, action: string]> = [
-  ['enter', 'send · while an agent is working the message is queued'],
+  ['enter', 'send · busy text messages queue; image drafts wait for the turn to finish'],
   ['shift+enter · \\ + enter', 'new line (option+enter where shift+enter is not reported)'],
   ['↑ / ↓', 'previous / next prompt · move between the lines of a long one'],
   ['option+↑ / ↓', 'switch session'],
   ['ctrl+n', 'new session'],
   ['ctrl+k', 'toggle the sidebar between names and status dots'],
+  ['ctrl+v', 'attach a clipboard image to the next message'],
+  ['backspace on empty input', 'remove the newest image attachment'],
   ['shift+tab', 'cycle the permission mode'],
   ['esc', 'close menus and help · cancel the turn and drop queued messages'],
   ['pgup / pgdn · home / end', 'scroll the history'],

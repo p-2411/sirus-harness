@@ -1,4 +1,5 @@
-import type { Message } from '../types';
+import path from 'path';
+import type { ImageBlock, Message } from '../types';
 
 // What the subscription transports share. A subscription runtime (a Claude
 // Code process, a Codex thread) keeps its own conversation memory and only
@@ -27,6 +28,8 @@ export function transcript(messages: readonly Message[]): string {
     for (const block of message.content) {
       if (block.type === 'text') {
         if (block.text) lines.push(`${speaker}: ${block.text}`);
+      } else if (block.type === 'image') {
+        lines.push(`${speaker}: [attached image ${path.basename(block.path)}]`);
       } else if (block.type === 'tool_call') {
         lines.push(`${speaker} called tool ${block.name} with ${JSON.stringify(block.arguments)}`);
       } else {
@@ -35,6 +38,19 @@ export function transcript(messages: readonly Message[]): string {
     }
   }
   return lines.join('\n');
+}
+
+// The images the runtime has not seen: those in user messages added since
+// this participant's previous turn (all of them on its first). The replayed
+// transcript names each one; these go along as the pictures themselves.
+export function unseenImages(
+  messages: readonly Message[],
+  isFirstTurn: boolean,
+  seenMessageCount: number,
+): ImageBlock[] {
+  return (isFirstTurn ? messages : messages.slice(seenMessageCount))
+    .filter(message => message.role === 'user')
+    .flatMap(message => message.content.filter((block): block is ImageBlock => block.type === 'image'));
 }
 
 // Long-lived subscription runtimes already remember their own turns. Replay

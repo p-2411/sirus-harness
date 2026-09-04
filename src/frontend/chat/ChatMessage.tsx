@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import type { Message, MessageBlock, ToolCallBlock, ToolResultBlock } from '../../agent_runtime/types';
+import type { ImageBlock, Message, MessageBlock, ToolCallBlock, ToolResultBlock } from '../../agent_runtime/types';
 import { Box, Text, type DOMElement } from 'ink';
 import { theme } from '../styles/theme';
 import { Markdown } from '../markdown/Markdown';
+import { describeImage } from '../../images';
 import { participantColor, type ParticipantColors } from '../MentionText';
 import { useClickable } from '../interaction/clickable';
 import {
@@ -119,14 +120,14 @@ export type MessageSegment = MessageBlock | ToolRun;
 export function messageSegments(content: readonly MessageBlock[]): MessageSegment[] {
 	const segments: MessageSegment[] = [];
 	for (let index = 0; index < content.length;) {
-		if (content[index].type === 'text') {
+		if (content[index].type === 'text' || content[index].type === 'image') {
 			segments.push(content[index]);
 			index++;
 			continue;
 		}
 
 		const blocks: Array<ToolCallBlock | ToolResultBlock> = [];
-		while (index < content.length && content[index].type !== 'text') {
+		while (index < content.length && content[index].type !== 'text' && content[index].type !== 'image') {
 			blocks.push(content[index] as ToolCallBlock | ToolResultBlock);
 			index++;
 		}
@@ -289,6 +290,11 @@ function ToolCallRow({ call, result }: { call: ToolCallBlock; result?: ToolResul
 	);
 }
 
+// An attached image: the terminal cannot show it, so its row says what it is.
+export function ImageLine({ image }: { image: ImageBlock }) {
+	return <Text color={theme.textMuted}>▣ {describeImage(image)}</Text>;
+}
+
 function renderToolBlock(
 	block: ToolCallBlock | ToolResultBlock,
 	key: number,
@@ -342,6 +348,9 @@ export function ChatMessage({
 			{messageSegments(message.content).map((block, index) => {
 				if (block.type === 'text') {
 					return <Markdown key={index} participantColors={participantColors}>{block.text}</Markdown>;
+				}
+				if (block.type === 'image') {
+					return <ImageLine key={index} image={block} />;
 				}
 				if (block.type === 'tool_run') {
 					return <ToolRunGroup key={index} blocks={block.blocks} />;
