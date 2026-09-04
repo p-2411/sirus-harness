@@ -13,6 +13,7 @@ import {
 } from '../../src/commands/registry';
 import { Session } from '../../src/agent_runtime/session';
 import { providerFor } from '../../src/agent_runtime/providers/providers';
+import { resolveModelReference } from '../../src/commands/agents/behavior';
 
 function runCommand(
   command: string,
@@ -86,6 +87,31 @@ describe('executeCommand', () => {
       text: '@reviewer model changed to claude-fable-5-1.',
     });
     expect(session.getParticipants()[1]).toEqual({ name: 'reviewer', model: 'claude-fable-5-1' });
+  });
+
+  test('model command accepts an unambiguous partial model name', () => {
+    const session = new Session();
+    let globalModel: string | undefined;
+
+    expect(runCommand('model', ['HAIKU'], session, model => { globalModel = model; })).toEqual({
+      kind: 'success',
+      text: '@sirus model changed to claude-haiku-4.5.',
+    });
+    expect(globalModel).toBe('claude-haiku-4.5');
+  });
+
+  test('model references choose the latest version within one model family', () => {
+    const models = ['claude-haiku-4.5', 'claude-haiku-5'];
+
+    expect(resolveModelReference('haiku', models)).toBe('claude-haiku-5');
+    expect(resolveModelReference('claude-haiku-5', models)).toBe('claude-haiku-5');
+    expect(resolveModelReference('luna', ['gpt-5.6-luna', 'gpt-5.7-luna']))
+      .toBe('gpt-5.7-luna');
+  });
+
+  test('model command rejects a partial name matching different model families', () => {
+    expect(() => runCommand('model', ['claude'])).toThrow(/ambiguous model/i);
+    expect(() => runCommand('model', ['claude'])).toThrow(/claude-opus-5/);
   });
 
   test('model command groups selectable models under provider headings', () => {

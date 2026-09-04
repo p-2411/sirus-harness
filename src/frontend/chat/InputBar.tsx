@@ -1,10 +1,14 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { theme } from '../styles/theme';
-import { CommandMenu } from './CommandMenu';
+import { CommandMenu, moveCommandMenuSelection } from './CommandMenu';
 import { moveSelection, SelectMenu } from './SelectMenu';
 import { captureArrowKeys } from '../interaction/focus';
-import type { CommandMenuEntry, CommandMenuItem } from '../../commands/registry';
+import {
+  matchCommands,
+  type CommandMenuEntry,
+  type CommandMenuItem,
+} from '../../commands/registry';
 import { isMouseInput } from '../interaction/mouse';
 import { getSelectionSnapshot, subscribeSelection } from '../interaction/selection';
 import type { Feedback } from '../../commands/feedback';
@@ -259,6 +263,18 @@ export function InputBar({
   // brings back whatever the user had typed.
   const [selected, setSelected] = useState(0);
   const [secret, setSecret] = useState('');
+  const [commandNavigation, setCommandNavigation] = useState({
+    input: '',
+    selected: 0,
+    offset: 0,
+  });
+  const commandMatches = mode.type === 'text' ? matchCommands(input) : [];
+  const activeCommandNavigation = commandNavigation.input === input
+    ? commandNavigation
+    : { input, selected: 0, offset: 0 };
+  useEffect(() => {
+    setCommandNavigation({ input, selected: 0, offset: 0 });
+  }, [input]);
   useEffect(() => {
     setSelected(0);
     setSecret('');
@@ -266,9 +282,9 @@ export function InputBar({
   // While a menu or secret prompt is open the arrows belong to it, not to
   // the sidebar's session switching.
   useEffect(() => {
-    captureArrowKeys(mode.type !== 'text');
+    captureArrowKeys(mode.type !== 'text' || commandMatches.length > 0);
     return () => captureArrowKeys(false);
-  }, [mode.type]);
+  }, [mode.type, commandMatches.length]);
 
   // Drag-selecting text copies it automatically; acknowledge that briefly
   // where the "enter" hint normally sits.
@@ -326,6 +342,22 @@ export function InputBar({
       onCyclePermissionMode?.();
       return;
     }
+    if (commandMatches.length > 0 && (key.upArrow || key.downArrow)) {
+      setCommandNavigation(current => {
+        const navigation = current.input === input
+          ? current
+          : { input, selected: 0, offset: 0 };
+        return {
+          input,
+          ...moveCommandMenuSelection(
+            navigation,
+            key.upArrow ? -1 : 1,
+            commandMatches.length,
+          ),
+        };
+      });
+      return;
+    }
     // cmd+backspace: reported with the super modifier under the kitty keyboard
     // protocol; other terminals map it to ctrl+u, readline's kill-line
     if ((isBackspace && key.super) || (key.ctrl && enteredInput === 'u')) {
@@ -353,7 +385,8 @@ export function InputBar({
 
     if (key.return) {
       if (disabled) return; // keep what's typed while sirus is thinking
-      const trimmed = input.trim();
+      const selectedCommand = commandMatches[activeCommandNavigation.selected];
+      const trimmed = selectedCommand ? `/${selectedCommand.name}` : input.trim();
       if (!trimmed) return; // nothing to send
       send(trimmed);
       setEditor({ text: '', cursor: 0 });
@@ -404,7 +437,11 @@ export function InputBar({
 
   return (
     <>
-      <CommandMenu input={input} />
+      <CommandMenu
+        input={input}
+        selected={activeCommandNavigation.selected}
+        offset={activeCommandNavigation.offset}
+      />
       <ParticipantMenu input={input} participants={participants} />
       <InputFeedback feedback={feedback} participantColors={participantColors} />
       <Box

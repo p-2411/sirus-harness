@@ -14,6 +14,58 @@ import {
 import type { Feedback } from '../feedback';
 import type { CommandMenuEntry, CommandMenuItem } from '../types';
 
+function modelFamily(model: string): string {
+  return model
+    .toLocaleLowerCase()
+    .split('-')
+    .filter(part => !/^\d+(?:\.\d+)*$/.test(part))
+    .join('-');
+}
+
+function modelVersion(model: string): number[] {
+  return model
+    .split('-')
+    .filter(part => /^\d+(?:\.\d+)*$/.test(part))
+    .flatMap(part => part.split('.').map(Number));
+}
+
+function compareModelVersions(left: string, right: string): number {
+  const leftVersion = modelVersion(left);
+  const rightVersion = modelVersion(right);
+  const length = Math.max(leftVersion.length, rightVersion.length);
+  for (let index = 0; index < length; index++) {
+    const difference = (leftVersion[index] ?? 0) - (rightVersion[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+  return left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' });
+}
+
+export function resolveModelReference(
+  reference: string,
+  availableModels: readonly string[] = Object.keys(modelStrategies),
+): string {
+  const normalized = reference.toLocaleLowerCase();
+  const exact = availableModels.find(model => model.toLocaleLowerCase() === normalized);
+  if (exact) return exact;
+
+  const matches = availableModels.filter(model =>
+    model.toLocaleLowerCase().includes(normalized),
+  );
+  if (matches.length === 0) {
+    throw new Error(`Unknown model "${reference}". Try: ${availableModels.join(', ')}`);
+  }
+  if (matches.length === 1) return matches[0];
+
+  const families = new Set(matches.map(modelFamily));
+  if (families.size === 1) {
+    return matches.reduce((latest, model) =>
+      compareModelVersions(model, latest) > 0 ? model : latest,
+    );
+  }
+
+  throw new Error(`Ambiguous model "${reference}". Matches: ${matches.join(', ')}`);
+}
+
 export function modelMenuItems(args: readonly string[] = []): CommandMenuEntry[] | null {
   if (args.length > 1 || (args.length === 1 && !args[0].startsWith('@'))) return null;
   const participant = args[0]?.replace(/^@/, '');
@@ -39,18 +91,16 @@ export function changeModel(
   session: Session,
   setSirusModel: (model: string) => void,
 ): Feedback {
-  if (!modelStrategies[model]) {
-    throw new Error(`Unknown model. Try: ${Object.keys(modelStrategies).join(', ')}`);
-  }
+  const resolvedModel = resolveModelReference(model);
   const normalizedParticipantName = participantName.replace(/^@/, '');
   if (normalizedParticipantName.toLocaleLowerCase() === 'sirus') {
-    setSirusModel(model);
+    setSirusModel(resolvedModel);
   } else {
-    session.changeParticipantModel(participantName, model);
+    session.changeParticipantModel(participantName, resolvedModel);
   }
   return {
     kind: 'success',
-    text: `@${normalizedParticipantName} model changed to ${model}.`,
+    text: `@${normalizedParticipantName} model changed to ${resolvedModel}.`,
   };
 }
 
