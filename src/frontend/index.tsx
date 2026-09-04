@@ -3,9 +3,13 @@ import App from "./app";
 import { render } from "ink";
 import { installFrameCapture } from "./terminal/screen";
 import { shutdownCodexRuntime } from "../agent_runtime/providers/openai/codex-subscription";
+import { enableCheckpoints } from "../checkpoints";
 
 // Frame capture must see Ink's writes, so it wraps stdout before anything else.
 installFrameCapture();
+// Interactive sessions snapshot their directory before each turn so /undo
+// and /rewind can put it back.
+enableCheckpoints();
 // The app is a fixed full-screen frame, so the alternate screen costs nothing
 // and gives the user their previous terminal contents back on exit.
 // The kitty keyboard protocol, where the terminal supports it, reports cmd and

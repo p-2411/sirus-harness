@@ -9,8 +9,30 @@ import {
   type PermissionContext,
   type PermissionMode,
 } from './permissions/permissions';
+import {
+  captureCheckpoint,
+  checkpointSummary,
+  restoreCheckpoint,
+  type Checkpoint,
+  type RestoredFiles,
+} from '../checkpoints';
 
 export type { Participant };
+export type { Checkpoint };
+
+// What a rewind is asked to put back.
+export interface RewindOptions {
+  files: boolean;
+  chat: boolean;
+}
+
+export interface RewindResult {
+  checkpoint: Checkpoint;
+  // Null when files were not restored.
+  files: RestoredFiles | null;
+  // How many messages the chat lost; zero when the chat was kept.
+  droppedMessages: number;
+}
 
 export type SessionStatus = 'idle' | 'working' | 'error';
 
@@ -23,6 +45,8 @@ export interface SessionSnapshot {
   messages: Message[];
   // How tool calls are approved in this session; absent in older snapshots.
   permissionMode?: PermissionMode;
+  // Directory snapshots taken before turns, oldest first; absent when none.
+  checkpoints?: Checkpoint[];
 }
 
 interface Mention {
@@ -82,6 +106,7 @@ export class Session {
   private streamNotify: ReturnType<typeof setTimeout> | null = null;
   private lastStreamNotify = 0;
   private permissionMode: PermissionMode;
+  private checkpoints: Checkpoint[];
 
   constructor(
     name: string = 'Session 1',
@@ -92,11 +117,13 @@ export class Session {
     participants: readonly Participant[] = [],
     defaultParticipantName: string = DEFAULT_PARTICIPANT_NAME,
     permissionMode: PermissionMode = DEFAULT_PERMISSION_MODE,
+    checkpoints: readonly Checkpoint[] = [],
   ) {
     this.name = name;
     this.id = id;
     this.directory = directory;
     this.permissionMode = permissionMode;
+    this.checkpoints = [...checkpoints];
     const restored = participants.map(participant => this.createAgent(participant, defaultParticipantName));
     this.defaultAgent = restored.find(agent => sameName(agent.name, defaultParticipantName))
       ?? this.createAgent({ name: defaultParticipantName, model }, defaultParticipantName);
@@ -124,6 +151,7 @@ export class Session {
         snapshot.participants,
         snapshot.defaultModel.name,
         snapshot.permissionMode ?? DEFAULT_PERMISSION_MODE,
+        snapshot.checkpoints ?? [],
       );
     }
     return new Session(snapshot.name, snapshot.id, snapshot.model, snapshot.messages, snapshot.directory);
@@ -166,6 +194,9 @@ export class Session {
       // not part of the conversation. Strip it before either the UI history or
       // any provider sees the turn.
       this.append(this.withoutCreationModels(message, mentions));
+      // The directory as it stands before any agent touches it, so the turn
+      // can be undone. The message is already on screen while git works.
+      await this.checkpoint(this.messages.length - 1, messageText || '[image]');
       await this.runInvocations(targets.map(participant => ({ participant, mentionedBy: [] })));
       return this.messages;
     } catch (error) {
@@ -189,10 +220,45 @@ export class Session {
   }
 
   // A provider-side conversation must not outlive the history it mirrors.
+  // Checkpoints go with it: they point into the history that was cleared.
   clear(): void {
     if (this.messages.length === 0) return;
     this.messages = [];
+    this.checkpoints = [];
     for (const agent of this.participants) agent.resetRuntime();
+    this.notifyListeners();
+  }
+
+  getCheckpoints(): Checkpoint[] {
+    return [...this.checkpoints];
+  }
+
+  // Puts the directory, the chat, or both back to a checkpoint. Restoring
+  // the chat drops that checkpoint and every later one, since the messages
+  // they belong to are gone; restoring only files keeps them all.
+  async rewind(checkpointId: string, options: RewindOptions): Promise<RewindResult> {
+    if (!options.files && !options.chat) throw new Error('Nothing to restore: choose files, chat, or both.');
+    if (this.activeSends > 0) throw new Error('Wait for the current turn to finish before rewinding.');
+    const index = this.checkpoints.findIndex(candidate => candidate.id === checkpointId);
+    if (index === -1) throw new Error('That checkpoint no longer exists in this session.');
+    const checkpoint = this.checkpoints[index];
+
+    const files = options.files ? await restoreCheckpoint(this.directory, checkpoint.id) : null;
+    let droppedMessages = 0;
+    if (options.chat) {
+      droppedMessages = Math.max(0, this.messages.length - checkpoint.messageIndex);
+      this.messages = this.messages.slice(0, checkpoint.messageIndex);
+      this.checkpoints = this.checkpoints.slice(0, index);
+      for (const agent of this.participants) agent.resetRuntime();
+    }
+    this.notifyListeners();
+    return { checkpoint, files, droppedMessages };
+  }
+
+  private async checkpoint(messageIndex: number, text: string): Promise<void> {
+    const captured = await captureCheckpoint(this.directory, checkpointSummary(text));
+    if (!captured) return;
+    this.checkpoints.push({ ...captured, messageIndex, summary: checkpointSummary(text) });
     this.notifyListeners();
   }
 
@@ -279,6 +345,7 @@ export class Session {
       defaultModel: this.getDefaultParticipant(),
       messages: [...this.messages],
       permissionMode: this.permissionMode,
+      ...(this.checkpoints.length > 0 ? { checkpoints: [...this.checkpoints] } : {}),
     };
   }
 

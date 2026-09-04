@@ -85,6 +85,11 @@ export function findSubagentByCall(callId: string): SubagentRun | undefined {
   return undefined;
 }
 
+// Every run of the process, whoever owns it, for the UI.
+export function listAllSubagents(): SubagentRun[] {
+  return [...runs.values()];
+}
+
 export function activeSubagentCount(): number {
   let count = 0;
   for (const run of runs.values()) {
@@ -363,6 +368,8 @@ export function renderTranscript(content: readonly MessageBlock[]): string {
   for (const block of content) {
     if (block.type === 'text') {
       if (block.text) lines.push(block.text);
+    } else if (block.type === 'image') {
+      lines.push(`[image ${path.basename(block.path)}]`);
     } else if (block.type === 'tool_call') {
       lines.push(`▸ ${block.name} ${previewArguments(block)}`);
     } else {

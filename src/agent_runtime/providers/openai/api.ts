@@ -6,6 +6,7 @@ import type { TurnContext } from '../../turn';
 import { systemPromptFor } from '../../prompt';
 import { availableTools } from '../../tools';
 import { fetchUrlCall, fetchUrlResult, webSearchCall, webSearchResult } from '../../tools/web';
+import { imageDataUrl } from '../../../images';
 
 // The Responses API runs web search inside the request and reports the action
 // the model took: a search and the pages it consulted, a page it opened, or a
@@ -70,6 +71,16 @@ export function toOpenAIInput(messages: readonly Message[]): OpenAI.Responses.Re
         case 'text':
           if (block.text) {
             input.push({ role: message.role, content: block.text });
+          }
+          break;
+        case 'image':
+          try {
+            input.push({
+              role: 'user',
+              content: [{ type: 'input_image', image_url: imageDataUrl(block), detail: 'auto' }],
+            });
+          } catch {
+            input.push({ role: 'user', content: `[An attached image is no longer available: ${block.path}]` });
           }
           break;
         case 'tool_call':

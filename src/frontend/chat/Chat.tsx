@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
-import type { Message } from '../../agent_runtime/types';
+import type { ImageBlock, Message } from '../../agent_runtime/types';
 import { Session } from '../../agent_runtime/session';
+import { attachClipboardImage, describeImage } from '../../images';
 import { Box, Text, measureElement, renderToString, useBoxMetrics, useInput, useStdout, type DOMElement } from 'ink';
 import { theme } from '../styles/theme';
 import { HORSE } from '../branding/horse';
@@ -72,6 +73,21 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
   const isLoading = commandIsLoading || currSession.getStatus() === 'working';
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [inputMode, setInputMode] = useState<InputMode>({ type: 'text' });
+  // Images attached to the message being composed, until it is sent.
+  const [attachments, setAttachments] = useState<ImageBlock[]>([]);
+  const attachImage = (image: ImageBlock) => setAttachments(current => [...current, image]);
+  const pasteImage = () => {
+    setFeedback({ kind: 'info', text: 'Reading the clipboard…' });
+    attachClipboardImage()
+      .then(image => {
+        attachImage(image);
+        setFeedback({ kind: 'success', text: `Attached ${describeImage(image)}. It goes with your next message.` });
+      })
+      .catch((caught: unknown) => {
+        setFeedback({ kind: 'error', text: caught instanceof Error ? caught.message : 'Could not read the clipboard.' });
+      });
+  };
+  const removeAttachment = () => setAttachments(current => current.slice(0, -1));
   // A tool call of this session (or of a subagent it spawned) waiting on the
   // user takes over the input bar until it is answered or the turn is cancelled.
   useSyncExternalStore(subscribePermissions, getPermissionsVersion);
@@ -172,14 +188,15 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
     setInputMode({ type: 'menu', items, onSelect: choose, onCancel: close });
   };
 
-  const send = (text: string) => {
+  // A command leaves any attachments waiting for the next real message.
+  const send = (text: string, images: readonly ImageBlock[] = []) => {
     if (text.startsWith('/')) {
       const command: string = text.split(' ')[0].slice(1);
       const args: string[] = text.split(' ').slice(1).filter(Boolean);
       setFeedback(null);
       let menu: CommandMenuEntry[] | null;
       try {
-        menu = commandMenu(command, args);
+        menu = commandMenu(command, args, currSession);
       } catch (e) {
         commandAbort.current = null;
         setFeedback({ kind: 'error', text: e instanceof Error ? e.message : 'Something went wrong.' });
@@ -197,6 +214,7 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
           session: currSession,
           setSirusModel: onSirusModelChange,
           notify: text => setFeedback({ kind: 'info', text }),
+          attachImage,
           signal: controller.signal,
         });
       } catch (e) {
@@ -225,7 +243,12 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
         commandAbort.current = null;
       }
     } else {
-      const msg: Message = { role: 'user', content: [{ type: 'text', text }] };
+      // Images go first so the text can refer to them.
+      const msg: Message = {
+        role: 'user',
+        content: [...images, ...(text ? [{ type: 'text' as const, text }] : [])],
+      };
+      setAttachments([]);
       setScrollOffset(0);
       setFeedback(null);
       // Chat is remounted per session (key={session id}), so if the user
@@ -321,6 +344,9 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
         mode={effectiveInputMode}
         permissionMode={currSession.getPermissionMode()}
         onCyclePermissionMode={cyclePermissionMode}
+        attachments={attachments}
+        onPasteImage={pasteImage}
+        onRemoveAttachment={removeAttachment}
         model={currSession.getModel()}
         thinkingLevel={currSession.getThinkingLevel()}
       />

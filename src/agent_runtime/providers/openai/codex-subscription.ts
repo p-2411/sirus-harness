@@ -1,12 +1,12 @@
 import path from 'path';
 import { fileURLToPath } from 'url';
-import type { Message, MessageBlock, ToolCallBlock } from '../../types';
+import type { ImageBlock, Message, MessageBlock, ToolCallBlock } from '../../types';
 import type { Response } from '../../chat';
 import type { Transport } from '../provider';
 import type { TurnContext } from '../../turn';
 import { systemPromptFor } from '../../prompt';
 import { availableTools, runTool, type ToolArgumentSchema } from '../../tools';
-import { latestUserText, promptWithSharedHistory } from '../subscription';
+import { latestUserText, promptWithSharedHistory, unseenImages } from '../subscription';
 import { CodexRpc } from './codex-rpc';
 import { abortReason, abortable, throwIfAborted } from '../../../abort';
 import type { PermissionContext } from '../../permissions/permissions';
@@ -330,6 +330,7 @@ async function runTurn(
   rpc: CodexRpc,
   session: CodexSession,
   text: string,
+  images: readonly ImageBlock[],
   model: string,
   signal?: AbortSignal,
   updateStream?: TurnContext['updateStream'],
@@ -363,9 +364,13 @@ async function runTurn(
   };
   signal?.addEventListener('abort', interrupt, { once: true });
   try {
+    // Codex reads attached images straight from disk.
     const starting = rpc.request<Json>('turn/start', {
       threadId: session.threadId,
-      input: [{ type: 'text', text }],
+      input: [
+        { type: 'text', text },
+        ...images.map(image => ({ type: 'localImage', path: image.path })),
+      ],
       effort: thinkingLevel,
       ...(session.model !== model ? { model } : {}),
     });
@@ -410,6 +415,7 @@ async function getResponse(
       agent.name,
       turn.turnPrompt,
     ),
+    unseenImages(messages, !session.hasSpoken, session.seenMessageCount),
     agent.model,
     signal,
     blocks => turn.updateStream(blocks),

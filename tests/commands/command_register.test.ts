@@ -27,12 +27,13 @@ function runCommand(
     session,
     setSirusModel,
     notify: () => {},
+    attachImage: () => {},
     signal: new AbortController().signal,
   });
 }
 
 function menuItems(command: string, args: readonly string[]): CommandMenuItem[] {
-  return commandMenu(command, args)?.filter(
+  return commandMenu(command, args, new Session())?.filter(
     (entry): entry is CommandMenuItem => entry.type === 'item',
   ) ?? [];
 }
@@ -115,7 +116,7 @@ describe('executeCommand', () => {
   });
 
   test('model command groups selectable models under provider headings', () => {
-    const menu = commandMenu('model', [])!;
+    const menu = commandMenu('model', [], new Session())!;
     expect(menu.filter(entry => entry.type === 'heading').map(entry => entry.label)).toEqual([
       'Anthropic',
       'OpenAI',
@@ -130,7 +131,7 @@ describe('executeCommand', () => {
       '/model gpt-5.6-sol',
     ]);
     expect(menuItems('model', ['@reviewer'])[0].command).toBe('/model @reviewer claude-opus-5');
-    expect(commandMenu('model', ['gpt-5.6-sol'])).toBeNull();
+    expect(commandMenu('model', ['gpt-5.6-sol'], new Session())).toBeNull();
   });
 
   test('clear command empties only the current session history', () => {
@@ -180,7 +181,7 @@ describe('executeCommand', () => {
       '/thinking max',
     ]);
     expect(menuItems('thinking', ['@reviewer'])[2].command).toBe('/thinking @reviewer high');
-    expect(commandMenu('thinking', ['low'])).toBeNull();
+    expect(commandMenu('thinking', ['low'], new Session())).toBeNull();
   });
 
   test('memory command reports and persists on/off access', () => {

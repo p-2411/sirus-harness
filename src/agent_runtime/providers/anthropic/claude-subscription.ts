@@ -8,13 +8,14 @@ import {
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import type { Message, MessageBlock, ToolCallBlock, ToolResultBlock } from '../../types';
+import type { ImageBlock, Message, MessageBlock, ToolCallBlock, ToolResultBlock } from '../../types';
 import type { Response } from '../../chat';
 import type { Transport } from '../provider';
 import type { TurnContext } from '../../turn';
 import { systemPromptFor } from '../../prompt';
 import { availableTools, runTool, type ToolArgumentSchema } from '../../tools';
-import { latestUserText, promptWithSharedHistory } from '../subscription';
+import { latestUserText, promptWithSharedHistory, unseenImages } from '../subscription';
+import { imageBlockParam } from './api';
 import { abortable, throwIfAborted } from '../../../abort';
 import type { PermissionContext } from '../../permissions/permissions';
 import type { ThinkingLevel } from '../../types';
@@ -58,7 +59,7 @@ interface Turn {
 interface ClaudeSession {
   query: Query;
   iterator: AsyncIterator<SDKMessage>;
-  send: (text: string) => void;
+  send: (text: string, images?: readonly ImageBlock[]) => void;
   agent: TurnContext['agent'];
   model: string;
   thinkingLevel: ThinkingLevel;
@@ -319,9 +320,15 @@ function createSession(turn: TurnContext): ClaudeSession {
 
   session.query = q;
   session.iterator = q[Symbol.asyncIterator]();
-  session.send = (text: string) => inbox.push({
+  // Attached images ride along as content blocks beside the turn's text.
+  session.send = (text: string, images: readonly ImageBlock[] = []) => inbox.push({
     type: 'user',
-    message: { role: 'user', content: text },
+    message: {
+      role: 'user',
+      content: images.length === 0
+        ? text
+        : [...(text ? [{ type: 'text' as const, text }] : []), ...images.map(imageBlockParam)],
+    },
     parent_tool_use_id: null,
   } as SDKUserMessage);
   return session as ClaudeSession;
@@ -359,6 +366,7 @@ async function runTurn(
   sessionId: string,
   session: ClaudeSession,
   text: string,
+  images: readonly ImageBlock[],
   signal?: AbortSignal,
   updateStream?: TurnContext['updateStream'],
   permissions?: PermissionContext,
@@ -377,7 +385,7 @@ async function runTurn(
   const interrupt = () => { void session.query.interrupt().catch(() => void 0); };
   signal?.addEventListener('abort', interrupt, { once: true });
   try {
-    session.send(text);
+    session.send(text, images);
     while (true) {
       const { value, done } = await abortable(session.iterator.next(), signal);
       if (done) {
@@ -455,6 +463,7 @@ async function getResponse(
       agent.name,
       turn.turnPrompt,
     ),
+    unseenImages(messages, !session.hasSpoken, session.seenMessageCount),
     signal,
     blocks => turn.updateStream(blocks),
     turn.permissions,

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Box, useInput, useStdout } from "ink";
 import Chat from "./chat/Chat";
 import Sidebar from "./Sidebar";
@@ -11,6 +11,8 @@ import {
   type PersistedSessions,
 } from "../persistence";
 import { useTextSelection } from "./interaction/useTextSelection";
+import { useTerminalFocus } from "./interaction/useTerminalFocus";
+import { useNotifications } from "./useNotifications";
 import { cancelAllSubagents } from '../agent_runtime/tools/subagents';
 import { modelStrategies } from '../agent_runtime/chat';
 import { checkSirusUpdate } from '../updater';
@@ -83,6 +85,9 @@ export default function App({ launchDirectory = process.cwd() }: { launchDirecto
   const [, setTerminalWidth] = useState(() => stdout.columns ?? 80);
   // mouse tracking and drag-to-copy live for the whole app, not per chat
   useTextSelection();
+  // focus reporting and the notifications that depend on it, likewise
+  useTerminalFocus();
+  useNotifications(useMemo(() => [...sessions, draftSession], [sessions, draftSession]));
   useInput((_input, key) => {
     if (!key.escape) return;
     for (const session of new Set([...sessions, draftSession])) session.cancel();
