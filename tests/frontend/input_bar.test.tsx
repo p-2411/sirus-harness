@@ -1,8 +1,11 @@
 import { describe, expect, test } from 'bun:test';
-import { renderToString } from 'ink';
+import { render as renderInk, renderToString } from 'ink';
+import { PassThrough } from 'node:stream';
+import { useSyncExternalStore } from 'react';
 import stripAnsi from 'strip-ansi';
 import {
   applyInputEdit,
+  InputBar,
   InputFeedback,
   SecretInput,
   SubagentStatusRow,
@@ -11,6 +14,79 @@ import {
 import { moveSelection, SelectMenu } from '../../src/frontend/chat/SelectMenu';
 import type { CommandMenuEntry, CommandMenuItem } from '../../src/commands/registry';
 import type { Feedback } from '../../src/commands/feedback';
+import { Session } from '../../src/agent_runtime/session';
+
+describe('session input drafts', () => {
+  test('edits and restores drafts when switching session panes', async () => {
+    const first = new Session();
+    const second = new Session();
+    first.setInputContent('First draft');
+    second.setInputContent('Second draft');
+    const sent: string[] = [];
+    const stdin = Object.assign(new PassThrough(), {
+      isTTY: true,
+      setRawMode() {},
+      ref() {},
+      unref() {},
+    });
+    const stdout = Object.assign(new PassThrough(), { columns: 100, rows: 30 });
+    let output = '';
+    stdout.on('data', chunk => {
+      const frame = stripAnsi(chunk.toString());
+      if (frame.trim()) output = frame;
+    });
+
+    function Pane({ session }: { session: Session }) {
+      useSyncExternalStore(cb => session.subscribe(cb), () => session.getVersion());
+      return <InputBar
+        inputContent={session.getInputContent()}
+        setInputContent={value => session.setInputContent(value)}
+        send={value => sent.push(value)}
+        disabled={false}
+        feedback={null}
+        participants={[]}
+      />;
+    }
+
+    const app = renderInk(<Pane key={first.getId()} session={first} />, {
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      stdout: stdout as unknown as NodeJS.WriteStream,
+      debug: true,
+      patchConsole: false,
+      exitOnCtrlC: false,
+    });
+    const flush = async () => {
+      await new Promise(resolve => setImmediate(resolve));
+      await app.waitUntilRenderFlush();
+    };
+    const type = async (input: string) => { stdin.write(input); await flush(); };
+    try {
+      await flush();
+      expect(output).toContain('First draft▌');
+      await type('!');
+      expect(first.getInputContent()).toBe('First draft!');
+      expect(output).toContain('First draft!▌');
+
+      app.rerender(<Pane key={second.getId()} session={second} />);
+      await flush();
+      expect(output).toContain('Second draft▌');
+      await type('\u007f');
+      expect(second.getInputContent()).toBe('Second draf');
+
+      app.rerender(<Pane key={first.getId()} session={first} />);
+      await flush();
+      expect(output).toContain('First draft!▌');
+      await type('\r');
+      expect(sent).toEqual(['First draft!']);
+      expect(first.getInputContent()).toBe('');
+      expect(second.getInputContent()).toBe('Second draf');
+    } finally {
+      app.unmount();
+      stdin.destroy();
+      stdout.destroy();
+    }
+  });
+});
 
 function render(feedback: Feedback | null): string {
   return stripAnsi(renderToString(

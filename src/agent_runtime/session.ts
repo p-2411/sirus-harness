@@ -21,6 +21,8 @@ export interface SessionSnapshot {
   participants: Participant[];
   defaultModel: Participant;
   messages: Message[];
+  // Absent in snapshots saved before session drafts were supported.
+  inputContent?: string;
   // How tool calls are approved in this session; absent in older snapshots.
   permissionMode?: PermissionMode;
 }
@@ -82,6 +84,7 @@ export class Session {
   private streamNotify: ReturnType<typeof setTimeout> | null = null;
   private lastStreamNotify = 0;
   private permissionMode: PermissionMode;
+  private inputContent: string;
 
   constructor(
     name: string = 'Session 1',
@@ -92,6 +95,7 @@ export class Session {
     participants: readonly Participant[] = [],
     defaultParticipantName: string = DEFAULT_PARTICIPANT_NAME,
     permissionMode: PermissionMode = DEFAULT_PERMISSION_MODE,
+    inputContent: string = '',
   ) {
     this.name = name;
     this.id = id;
@@ -103,6 +107,7 @@ export class Session {
     this.participants = restored.length > 0 ? restored : [this.defaultAgent];
     if (!this.participants.includes(this.defaultAgent)) this.participants.unshift(this.defaultAgent);
     this.messages = [...messages];
+    this.inputContent = inputContent;
   }
 
   static create(
@@ -124,6 +129,7 @@ export class Session {
         snapshot.participants,
         snapshot.defaultModel.name,
         snapshot.permissionMode ?? DEFAULT_PERMISSION_MODE,
+        snapshot.inputContent ?? '',
       );
     }
     return new Session(snapshot.name, snapshot.id, snapshot.model, snapshot.messages, snapshot.directory);
@@ -272,6 +278,16 @@ export class Session {
     this.notifyListeners();
   }
 
+  getInputContent(): string {
+    return this.inputContent;
+  }
+
+  setInputContent(inputContent: string): void {
+    if (this.inputContent === inputContent) return;
+    this.inputContent = inputContent;
+    this.notifyListeners();
+  }
+
   toSnapshot(): SessionSnapshot {
     return {
       id: this.id,
@@ -280,6 +296,7 @@ export class Session {
       participants: this.getParticipants(),
       defaultModel: this.getDefaultParticipant(),
       messages: [...this.messages],
+      inputContent: this.inputContent,
       permissionMode: this.permissionMode,
     };
   }
@@ -584,4 +601,5 @@ export class Session {
       model: agent.model,
     };
   }
+
 }

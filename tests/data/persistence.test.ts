@@ -45,6 +45,8 @@ describe('session persistence', () => {
     });
     const second = new Session('Second', 'second-id', 'gpt-5.6-sol', [], '/projects/second');
     second.append({ role: 'user', content: [{ type: 'text', text: 'Keep this too' }] });
+    first.setInputContent('Unfinished first message');
+    second.setInputContent('  Unfinished second message\nwith whitespace  ');
 
     expect(saveSessions([first, second], second.getId(), directory)).toBe(true);
     const restored = loadSessions(directory);
@@ -56,6 +58,29 @@ describe('session persistence', () => {
     ]);
     expect(restored.sessions[0].getThinkingLevel()).toBe('medium');
     expect(restored.sessions[0].getThinkingLevel('reviewer')).toBe('xhigh');
+    expect(restored.sessions[0].getInputContent()).toBe('Unfinished first message');
+    expect(restored.sessions[1].getInputContent()).toBe('  Unfinished second message\nwith whitespace  ');
+  });
+
+  test('restores older participant snapshots with an empty draft', () => {
+    const { inputContent, ...snapshot } = new Session().toSnapshot();
+    expect(Session.fromSnapshot(snapshot).getInputContent()).toBe('');
+  });
+
+  test('draft edits notify subscribers and leave other sessions unchanged', () => {
+    const first = new Session();
+    const second = new Session();
+    const drafts: string[] = [];
+    const version = first.getVersion();
+    const unsubscribe = first.subscribe(() => drafts.push(first.getInputContent()));
+    first.setInputContent('Draft');
+    first.setInputContent('Draft');
+    first.setInputContent('');
+    unsubscribe();
+
+    expect(drafts).toEqual(['Draft', '']);
+    expect(first.getVersion()).toBe(version + 2);
+    expect(second.getInputContent()).toBe('');
   });
 
   test('falls back safely when the session file is corrupt or from an unknown version', () => {

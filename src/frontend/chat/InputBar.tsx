@@ -110,6 +110,8 @@ export type InputMode =
 
 interface InputBarProps {
   send: (input: string) => void;
+  inputContent: string;
+  setInputContent: (inputContent: string) => void;
   disabled: boolean;
   feedback: Feedback | null;
   participants: readonly Participant[];
@@ -247,6 +249,8 @@ const TEXT_MODE: InputMode = { type: 'text' };
 
 export function InputBar({
   send,
+  inputContent,
+  setInputContent,
   disabled,
   feedback,
   participants,
@@ -256,8 +260,13 @@ export function InputBar({
   model,
   thinkingLevel,
 }: InputBarProps) {
-  const [editor, setEditor] = useState<InputState>({ text: '', cursor: 0 });
-  const input = editor.text;
+  const [cursor, setCursor] = useState(inputContent.length);
+  const input = inputContent;
+  function editInput(edit: InputEdit): void {
+    const next = applyInputEdit({ text: inputContent, cursor }, edit);
+    setCursor(next.cursor);
+    setInputContent(next.text);
+  }
   const participantColors = participantColorMap(participants);
   // Menu and secret state live apart from the draft so leaving either mode
   // brings back whatever the user had typed.
@@ -361,25 +370,25 @@ export function InputBar({
     // cmd+backspace: reported with the super modifier under the kitty keyboard
     // protocol; other terminals map it to ctrl+u, readline's kill-line
     if ((isBackspace && key.super) || (key.ctrl && enteredInput === 'u')) {
-      setEditor(state => applyInputEdit(state, { type: 'clear' }));
+      editInput({ type: 'clear' });
       return;
     }
     // option+backspace: ESC DEL when option acts as meta, ctrl+w otherwise
     if ((isBackspace && key.meta) || (key.ctrl && enteredInput === 'w')) {
-      setEditor(state => applyInputEdit(state, { type: 'delete-word-backward' }));
+      editInput({ type: 'delete-word-backward' });
       return;
     }
     if (isBackspace) {
-      setEditor(state => applyInputEdit(state, { type: 'backspace' }));
+      editInput({ type: 'backspace' });
       return;
     }
 
     if (key.leftArrow) {
-      setEditor(state => applyInputEdit(state, { type: 'left' }));
+      editInput({ type: 'left' });
       return;
     }
     if (key.rightArrow) {
-      setEditor(state => applyInputEdit(state, { type: 'right' }));
+      editInput({ type: 'right' });
       return;
     }
 
@@ -389,14 +398,14 @@ export function InputBar({
       const trimmed = selectedCommand ? `/${selectedCommand.name}` : input.trim();
       if (!trimmed) return; // nothing to send
       send(trimmed);
-      setEditor({ text: '', cursor: 0 });
+      editInput({ type: 'clear' });
       return;
     }
 
     if (!key.ctrl && !key.meta && !key.escape && !key.tab
       && !key.upArrow && !key.downArrow && !key.leftArrow && !key.rightArrow
       && !key.pageUp && !key.pageDown && !key.home && !key.end) {
-      setEditor(state => applyInputEdit(state, { type: 'insert', text: enteredInput }));
+      editInput({ type: 'insert', text: enteredInput });
     }
   });
 
@@ -459,9 +468,9 @@ export function InputBar({
             </Text>
             {input ? (
               <Text color={theme.text} wrap="wrap">
-                <MentionText colors={participantColors}>{input.slice(0, editor.cursor)}</MentionText>
+                <MentionText colors={participantColors}>{input.slice(0, cursor)}</MentionText>
                 <Text color={theme.accentSoft}>▌</Text>
-                <MentionText colors={participantColors}>{input.slice(editor.cursor)}</MentionText>
+                <MentionText colors={participantColors}>{input.slice(cursor)}</MentionText>
               </Text>
             ) : (
               <>
