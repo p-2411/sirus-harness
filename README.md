@@ -1,4 +1,6 @@
-# Sirus
+coming soon...
+
+<!--# Sirus
 
 A desktop/terminal client for running AI coding agents. Connects to external
 agents over the Agent Client Protocol (Claude Code, Gemini CLI, custom agents)
@@ -255,4 +257,4 @@ bun run release:check
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE)-->
