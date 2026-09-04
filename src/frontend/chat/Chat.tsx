@@ -93,12 +93,12 @@ export function formatElapsed(ms: number): string {
 
 // The line at the foot of the history while a turn runs: what the agents are
 // doing, or that they are waiting on the user, and for how long.
-function TurnStatus({ messages, awaitingApproval }: {
+function TurnStatus({ messages, awaitingApproval, startedAt }: {
   messages: readonly Message[];
   awaitingApproval: boolean;
+  startedAt: number;
 }) {
-  const [startedAt] = useState(() => Date.now());
-  const [now, setNow] = useState(startedAt);
+  const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
@@ -129,12 +129,11 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
   const participantColors = participantColorMap(participants);
 
   const [commandIsLoading, setCommandIsLoading] = useState(false);
+  const [commandStartedAt, setCommandStartedAt] = useState<number | null>(null);
   const isLoading = commandIsLoading || currSession.getStatus() === 'working';
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [inputMode, setInputMode] = useState<InputMode>({ type: 'text' });
-  // Messages typed while the agents were busy, oldest first. They belong to
-  // this chat: switching sessions leaves them behind with it.
-  const [queued, setQueued] = useState<string[]>([]);
+  const queued = currSession.getQueuedMessageCount();
   const history = promptHistory(messages);
   // A tool call of this session (or of a subagent it spawned) waiting on the
   // user takes over the input bar until it is answered or the turn is cancelled.
@@ -192,7 +191,7 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
   useInput((input, key) => {
     if (key.escape) {
       // an interrupted turn should not be followed by whatever was waiting
-      setQueued([]);
+      currSession.clearQueuedMessages();
       currSession.cancel();
       commandAbort.current?.abort(new TurnCancelledError());
       return;
@@ -272,6 +271,7 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
       }
       if (result instanceof Promise) {
         // a long-running command (browser login) holds the input like a turn does
+        setCommandStartedAt(Date.now());
         setCommandIsLoading(true);
         result
           .then(outcome => { if (outcome) setFeedback(outcome); })
@@ -282,6 +282,7 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
           })
           .finally(() => {
             if (commandAbort.current === controller) commandAbort.current = null;
+            setCommandStartedAt(null);
             setCommandIsLoading(false);
           });
       } else if (result) {
@@ -310,13 +311,14 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
     }
   }
 
-  // Queued messages go out one at a time as soon as the input is free again.
+  // Queued messages live on the session so they survive switching away and
+  // back. Send one at a time as soon as that session is free again.
   useEffect(() => {
-    if (isLoading || queued.length === 0 || effectiveInputMode.type !== 'text') return;
-    const [next, ...rest] = queued;
-    setQueued(rest);
-    send(next);
-  }, [isLoading, queued, effectiveInputMode.type]);
+    if (isLoading || currSession.getStatus() === 'working'
+      || queued === 0 || effectiveInputMode.type !== 'text') return;
+    const next = currSession.shiftQueuedMessage();
+    if (next !== undefined) send(next);
+  }, [currSession, isLoading, queued, effectiveInputMode.type]);
 
   historyContent.current = (
     <>
@@ -348,7 +350,13 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
           />
         );
       })}
-      {isLoading && <TurnStatus messages={messages} awaitingApproval={approvals.length > 0} />}
+      {isLoading && (
+        <TurnStatus
+          messages={messages}
+          awaitingApproval={approvals.length > 0}
+          startedAt={currSession.getActiveTurnStartedAt() ?? commandStartedAt ?? Date.now()}
+        />
+      )}
     </>
   );
 
@@ -393,8 +401,8 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
         model={currSession.getModel()}
         thinkingLevel={currSession.getThinkingLevel()}
         history={history}
-        queued={queued.length}
-        onQueue={text => setQueued(current => [...current, text])}
+        queued={queued}
+        onQueue={text => currSession.queueMessage(text)}
         contextUsage={currSession.getContextUsage()}
       />
     </Box>

@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test';
-import { renderToString } from 'ink';
+import { render, renderToString } from 'ink';
+import { PassThrough } from 'node:stream';
+import { pressAt, releaseAt } from '../../src/frontend/interaction/clickable';
 import stripAnsi from 'strip-ansi';
 import {
   ChatMessage,
@@ -113,7 +115,71 @@ describe('chat message', () => {
       { columns: 120 },
     ));
 
-    expect(output).toContain('● EditFile src/app.ts +4 −2 ›');
+    expect(output).toContain('● EditFile src/app.ts +4 −2');
+    expect(output).toContain('- a');
+    expect(output).toContain('- b');
+    expect(output).toContain('+ c');
+    expect(output).toContain('+ d');
+  });
+
+  test('shows completed file diffs inside grouped tool activity', () => {
+    const edit: ToolCallBlock = {
+      type: 'tool_call',
+      id: 'edit-1',
+      name: 'WriteFile',
+      arguments: { path: 'src/new.ts', content: 'first\nsecond' },
+    };
+    const output = stripAnsi(renderToString(
+      <ToolRunGroup blocks={[
+        calls[0],
+        edit,
+        results[0],
+        { type: 'tool_result', callId: 'edit-1', result: '{}', isError: false },
+      ]} />,
+      { columns: 120 },
+    ));
+
+    expect(output).toContain('● WriteFile src/new.ts +2');
+    expect(output).toContain('+ first');
+    expect(output).toContain('+ second');
+  });
+
+  test('reveals a file diff when a running group completes and respects manual collapse', async () => {
+    const edit: ToolCallBlock = {
+      type: 'tool_call', id: 'live-edit', name: 'WriteFile',
+      arguments: { path: 'new.ts', content: 'new content' },
+    };
+    const pending = [calls[0], edit, results[0]];
+    const completed = [...pending, {
+      type: 'tool_result' as const, callId: edit.id, result: '{}', isError: false,
+    }];
+    const stdout = Object.assign(new PassThrough(), { columns: 120 }) as unknown as NodeJS.WriteStream;
+    const frames: string[] = [];
+    stdout.on('data', data => frames.push(stripAnsi(data.toString())));
+    const app = render(<ToolRunGroup blocks={pending} />, {
+      stdout, debug: true, patchConsole: false, exitOnCtrlC: false,
+    });
+    try {
+      await app.waitUntilRenderFlush();
+      expect(frames.at(-1)).not.toContain('+ new content');
+      app.rerender(<ToolRunGroup blocks={completed} />);
+      await app.waitUntilRenderFlush();
+      expect(frames.at(-1)).toContain('+ new content');
+
+      await new Promise<void>(resolve => setImmediate(resolve));
+      const summary = { col: 3, line: 1 };
+      expect(pressAt(summary)).toBe(true);
+      expect(releaseAt(summary)).toBe(true);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      await app.waitUntilRenderFlush();
+      expect(frames.at(-1)).not.toContain('+ new content');
+      app.rerender(<ToolRunGroup blocks={[...completed]} />);
+      await app.waitUntilRenderFlush();
+      expect(frames.at(-1)).not.toContain('+ new content');
+    } finally {
+      app.unmount();
+      await app.waitUntilExit();
+    }
   });
 
   test('collapses consecutive tool activity only when it contains multiple calls', () => {

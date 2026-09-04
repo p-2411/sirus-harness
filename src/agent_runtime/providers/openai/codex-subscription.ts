@@ -79,7 +79,7 @@ const TURN_TIMEOUT_MS = 10 * 60 * 1000;
 
 // One side of Codex's thread/tokenUsage/updated notification: the thread's
 // running total, or the last request alone.
-interface TokenBreakdown {
+export interface TokenBreakdown {
   totalTokens: number;
   inputTokens: number;
   outputTokens: number;
@@ -173,9 +173,23 @@ function tokenBreakdown(value: unknown): TokenBreakdown {
   };
 }
 
+export function codexTurnUsage(
+  total: TokenBreakdown,
+  last: TokenBreakdown,
+  baseline: TokenBreakdown,
+  contextWindow?: number,
+): Usage {
+  return {
+    inputTokens: Math.max(0, total.inputTokens - baseline.inputTokens),
+    outputTokens: Math.max(0, total.outputTokens - baseline.outputTokens),
+    contextTokens: Math.max(0, last.totalTokens),
+    ...(contextWindow ? { contextWindow } : {}),
+  };
+}
+
 // Codex reports the thread's running total and the last request; the turn's
-// own cost is the total less what the thread had used when it started, and
-// its window is the last request less the reasoning that was not kept.
+// own cost is the total less what the thread had used when it started, while
+// the last request's total is the active context size.
 function recordTokenUsage(session: CodexSession, params: Json): void {
   const reported = typeof params.tokenUsage === 'object' && params.tokenUsage !== null ? params.tokenUsage as Json : {};
   const total = tokenBreakdown(reported.total);
@@ -184,12 +198,7 @@ function recordTokenUsage(session: CodexSession, params: Json): void {
   const turn = session.turn;
   if (!turn) return;
   const window = typeof reported.modelContextWindow === 'number' ? reported.modelContextWindow : null;
-  turn.usage = {
-    inputTokens: Math.max(0, total.inputTokens - turn.usageBaseline.inputTokens),
-    outputTokens: Math.max(0, total.outputTokens - turn.usageBaseline.outputTokens),
-    contextTokens: Math.max(0, last.totalTokens - last.reasoningOutputTokens),
-    ...(window ? { contextWindow: window } : {}),
-  };
+  turn.usage = codexTurnUsage(total, last, turn.usageBaseline, window ?? undefined);
 }
 
 function handleNotification(method: string, params: Json): void {

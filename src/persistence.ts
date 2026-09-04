@@ -66,6 +66,7 @@ const sessionSchema = z.object({
   permissionMode: z.enum(['ask', 'auto', 'bypass']).optional(),
   // When the history last changed; absent in older files.
   updatedAt: z.number().optional(),
+  autoNamePending: z.boolean().optional(),
 }).refine(
   session => Boolean(session.model || (session.participants && session.defaultModel)),
   { message: 'Session must contain a model or participant list' },
@@ -176,6 +177,7 @@ export function loadSessions(
           messages: snapshot.messages,
           ...(snapshot.permissionMode ? { permissionMode: snapshot.permissionMode } : {}),
           ...(snapshot.updatedAt !== undefined ? { updatedAt: snapshot.updatedAt } : {}),
+          ...(snapshot.autoNamePending !== undefined ? { autoNamePending: snapshot.autoNamePending } : {}),
         } satisfies SessionSnapshot);
       }
       return new Session(

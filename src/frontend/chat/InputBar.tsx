@@ -66,22 +66,29 @@ function nextCharacter(text: string, cursor: number): number {
     : cursor + 1;
 }
 
-// The cursor one line up or down, keeping its column where the line allows.
+// The cursor one line up or down, keeping its character column where the
+// line allows. Count whole characters so movement cannot split a surrogate pair.
 function lineMove(text: string, cursor: number, delta: -1 | 1): number {
-  const lineStart = text.lastIndexOf('\n', cursor - 1) + 1;
-  const column = cursor - lineStart;
+  const lineStart = cursor === 0 ? 0 : text.lastIndexOf('\n', cursor - 1) + 1;
+  const column = [...text.slice(lineStart, cursor)].length;
+  let targetStart: number;
+  let targetEnd: number;
   if (delta < 0) {
     if (lineStart === 0) return cursor;
-    const previousStart = lineStart >= 2 ? text.lastIndexOf('\n', lineStart - 2) + 1 : 0;
-    const previousLength = lineStart - 1 - previousStart;
-    return previousStart + Math.min(column, previousLength);
+    targetStart = lineStart >= 2 ? text.lastIndexOf('\n', lineStart - 2) + 1 : 0;
+    targetEnd = lineStart - 1;
+  } else {
+    const lineEnd = text.indexOf('\n', cursor);
+    if (lineEnd === -1) return cursor;
+    targetStart = lineEnd + 1;
+    const nextEnd = text.indexOf('\n', targetStart);
+    targetEnd = nextEnd === -1 ? text.length : nextEnd;
   }
-  const lineEnd = text.indexOf('\n', cursor);
-  if (lineEnd === -1) return cursor;
-  const nextStart = lineEnd + 1;
-  const nextEnd = text.indexOf('\n', nextStart);
-  const nextLength = (nextEnd === -1 ? text.length : nextEnd) - nextStart;
-  return nextStart + Math.min(column, nextLength);
+  let target = targetStart;
+  for (let index = 0; index < column && target < targetEnd; index++) {
+    target = nextCharacter(text, target);
+  }
+  return target;
 }
 
 export function onFirstLine(state: InputState): boolean {

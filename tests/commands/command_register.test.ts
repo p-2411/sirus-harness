@@ -14,6 +14,7 @@ import {
 import { Session } from '../../src/agent_runtime/session';
 import { providerFor } from '../../src/agent_runtime/providers/providers';
 import { resolveModelReference } from '../../src/commands/agents/behavior';
+import type { Feedback } from '../../src/commands/feedback';
 
 function runCommand(
   command: string,
@@ -145,6 +146,27 @@ describe('executeCommand', () => {
     });
     expect(current.getMessages()).toEqual([]);
     expect(other.getMessages()).toHaveLength(1);
+  });
+
+  test('rename command updates the current session and rejects an empty name', () => {
+    const session = new Session('Session 1');
+    expect(runCommand('rename', ['UX', 'work'], session)).toEqual({
+      kind: 'success',
+      text: 'Session renamed to UX work.',
+    });
+    expect(session.getName()).toBe('UX work');
+    expect(() => runCommand('rename', [], session)).toThrow('Usage: /rename <name>');
+  });
+
+  test('help command lists commands and keyboard shortcuts', () => {
+    const result = runCommand('help', []) as Feedback;
+    expect(result.kind).toBe('info');
+    expect(result.showIcon).toBe(false);
+    expect(result.text).toContain('/help');
+    expect(result.text).toContain('/rename <name>');
+    expect(result.text).toContain('shift+enter');
+    expect(result.text).toContain('switch session');
+    expect(() => runCommand('help', ['extra'])).toThrow('Usage: /help');
   });
 
   test('model command rejects unknown models', () => {
@@ -303,11 +325,27 @@ describe('credential commands', () => {
     expect(text).not.toContain('OPENAI_SECRET');
   });
 
+  test('/info includes session totals and the latest context', async () => {
+    const session = new Session('Usage', 'usage', 'gpt-5.6-luna', [
+      {
+        role: 'assistant', content: [{ type: 'text', text: 'First.' }],
+        usage: { inputTokens: 1_000, outputTokens: 200, contextTokens: 1_200, contextWindow: 200_000 },
+      },
+      {
+        role: 'assistant', content: [{ type: 'text', text: 'Second.' }],
+        usage: { inputTokens: 2_000, outputTokens: 400, contextTokens: 2_400, contextWindow: 400_000 },
+      },
+    ]);
+    const result = await runCommand('info', [], session);
+    expect((result as Feedback).text).toContain('session: 3k in · 600 out · context 2.4k (1% of 400k)');
+  });
+
   test('/info says when a provider has nothing configured', async () => {
     const result = await runCommand('info', []);
     const text = (result as { text: string }).text;
     expect(text).toMatch(/claude: not configured/);
     expect(text).toMatch(/gpt: not configured/);
+    expect(text).not.toContain('session:');
   });
 
   test('/logout leaves the subscription when that is active', () => {

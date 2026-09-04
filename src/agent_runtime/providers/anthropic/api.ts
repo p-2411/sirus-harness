@@ -89,12 +89,14 @@ function describeError(code: string): string {
 }
 
 // Cached prompt tokens are still in the window, so they count towards the
-// context figure as well as the input total.
-function usageOf(usage: Anthropic.Usage): Usage {
+// context figure as well as the input total. Completed output also occupies
+// the window when the request finishes.
+export function anthropicUsage(usage: Pick<Anthropic.Usage,
+  'input_tokens' | 'output_tokens' | 'cache_read_input_tokens' | 'cache_creation_input_tokens'>): Usage {
   const input = usage.input_tokens
     + (usage.cache_read_input_tokens ?? 0)
     + (usage.cache_creation_input_tokens ?? 0);
-  return { inputTokens: input, outputTokens: usage.output_tokens, contextTokens: input };
+  return { inputTokens: input, outputTokens: usage.output_tokens, contextTokens: input + usage.output_tokens };
 }
 
 function webSearchOutcome(content: Anthropic.WebSearchToolResultBlockContent): WebSearchOutcome {
@@ -285,7 +287,7 @@ async function request(
   }
   const response = await stream.finalMessage();
   const content = normalizeContent(response.content);
-  const usage = usageOf(response.usage);
+  const usage = anthropicUsage(response.usage);
 
   // A long run of web tool calls can pause the turn. Resume it with the
   // content so far, and publish what the resumed request adds after it.

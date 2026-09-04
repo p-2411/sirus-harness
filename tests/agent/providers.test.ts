@@ -10,9 +10,11 @@ import {
 } from '../../src/agent_runtime/providers/providers';
 import {
   anthropicThinkingConfig,
+  anthropicUsage,
   toAnthropicMessages,
 } from '../../src/agent_runtime/providers/anthropic/api';
-import { toOpenAIContinuationInput, toOpenAIInput } from '../../src/agent_runtime/providers/openai/api';
+import { openAIUsage, toOpenAIContinuationInput, toOpenAIInput } from '../../src/agent_runtime/providers/openai/api';
+import { codexTurnUsage } from '../../src/agent_runtime/providers/openai/codex-subscription';
 import { modelStrategies } from '../../src/agent_runtime/chat';
 import { SessionAgent } from '../../src/agent_runtime/agent';
 import { TurnContext } from '../../src/agent_runtime/turn';
@@ -124,6 +126,38 @@ describe('provider tool history', () => {
         output: 'hello',
       },
     ]);
+  });
+
+  test('Anthropic counts cached input and the completed output in context', () => {
+    expect(anthropicUsage({
+      input_tokens: 100,
+      cache_read_input_tokens: 900,
+      cache_creation_input_tokens: 200,
+      output_tokens: 300,
+    })).toEqual({ inputTokens: 1_200, outputTokens: 300, contextTokens: 1_500 });
+    expect(anthropicUsage({
+      input_tokens: 100, output_tokens: 300, cache_read_input_tokens: null, cache_creation_input_tokens: null,
+    }))
+      .toEqual({ inputTokens: 100, outputTokens: 300, contextTokens: 400 });
+  });
+
+  test('OpenAI counts the completed output in context', () => {
+    expect(openAIUsage({ input_tokens: 100, output_tokens: 300 }))
+      .toEqual({ inputTokens: 100, outputTokens: 300, contextTokens: 400 });
+  });
+
+  test('Codex keeps the complete latest request as active context', () => {
+    expect(codexTurnUsage(
+      { totalTokens: 1_000, inputTokens: 800, outputTokens: 200, reasoningOutputTokens: 75 },
+      { totalTokens: 350, inputTokens: 250, outputTokens: 100, reasoningOutputTokens: 75 },
+      { totalTokens: 400, inputTokens: 300, outputTokens: 100, reasoningOutputTokens: 20 },
+      400_000,
+    )).toEqual({
+      inputTokens: 500,
+      outputTokens: 100,
+      contextTokens: 350,
+      contextWindow: 400_000,
+    });
   });
 
   test('Anthropic receives tool use and matching tool results', () => {

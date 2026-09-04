@@ -18,7 +18,7 @@ import { latestUserText, promptWithSharedHistory } from '../subscription';
 import { abortable, throwIfAborted } from '../../../abort';
 import type { PermissionContext } from '../../permissions/permissions';
 import type { ThinkingLevel } from '../../types';
-import { legacyClaudeThinkingBudget, usesLegacyClaudeThinking } from './api';
+import { anthropicUsage, legacyClaudeThinkingBudget, usesLegacyClaudeThinking } from './api';
 import { SIRUS_CLIENT_ID } from '../../../version';
 import {
   WEB_SEARCH_TOOL,
@@ -329,20 +329,13 @@ function createSession(turn: TurnContext): ClaudeSession {
   return session as ClaudeSession;
 }
 
-// Cached prompt tokens are still in the window, so they count towards the
-// context figure as well as the input total.
-function promptTokens(usage: { input_tokens: number; cache_read_input_tokens?: number | null; cache_creation_input_tokens?: number | null }): number {
-  return usage.input_tokens + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
-}
-
 // The result's usage covers the turn's main loop; the window comes from the
 // per-model totals, which name the model's context size.
 function turnUsage(turn: Turn, result: Extract<SDKMessage, { type: 'result' }>, model: string): Usage {
   const window = result.modelUsage?.[model]?.contextWindow
     ?? Object.values(result.modelUsage ?? {})[0]?.contextWindow;
   return {
-    inputTokens: promptTokens(result.usage),
-    outputTokens: result.usage.output_tokens,
+    ...anthropicUsage(result.usage),
     contextTokens: turn.contextTokens,
     ...(window ? { contextWindow: window } : {}),
   };
@@ -354,7 +347,7 @@ function collectAssistant(turn: Turn, message: Extract<SDKMessage, { type: 'assi
     throw new Error(`Claude subscription request failed: ${message.error}${
       message.error === 'authentication_failed' ? ' (run /login claude)' : ''}`);
   }
-  if (message.message.usage) turn.contextTokens = promptTokens(message.message.usage);
+  if (message.message.usage) turn.contextTokens = anthropicUsage(message.message.usage).contextTokens;
 
   for (const block of message.message.content) {
     if (block.type === 'text') {

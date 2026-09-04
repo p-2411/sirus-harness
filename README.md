@@ -115,8 +115,10 @@ its directory and how long ago it was last active.
 
 - Enter sends. While an agent is working, Enter queues the message instead;
   the row under the input box counts what is waiting, and queued messages go
-  out one at a time as soon as the turn ends. Escape cancels the turn and
-  drops the queue.
+  out one at a time as soon as the turn ends, even after switching sessions.
+  Queued slash commands wait until that session is visible because they may
+  open a picker; prompts behind them wait too. Escape cancels the current
+  session's turn and subagents and drops its queue.
 - Shift+Enter starts a new line (Option+Enter on terminals that do not report
   Shift+Enter, or end the line with `\` and press Enter). Pasted text keeps
   its line breaks.
@@ -146,13 +148,10 @@ with Shift+Tab or set with `/permissions`:
   every file write, shell command, and spawned agent waits for you. The
   decision is deterministic; no model is consulted.
 - **auto approve** (the default): reads run, and so do file edits inside the
-  session directory. A static set of sensitive shell operations (`rm`,
-  `chmod`, `kill`, `sudo`, writes outside the directory, `git push`,
-  discarding changes, reading secret stores such as `~/.ssh`) waits for you.
-  Every other shell command is judged by the cheapest model of the same
-  provider (`claude-haiku-4.5` or `gpt-5.6-luna`), through whichever
-  credential that provider is using; the transcript shows `checking` while
-  it is consulted, and a verdict of sensitive prompts.
+  session directory. Sensitive shell operations (`rm`, `chmod`, `kill`,
+  `sudo`, writes outside the directory, `git push`, discarding changes,
+  reading secret stores such as `~/.ssh`) wait for you. Other commands run
+  automatically unless an internal safety check flags them for approval.
 - **bypass permissions**: everything runs.
 
 A prompt names the participant or subagent asking and shows the path and

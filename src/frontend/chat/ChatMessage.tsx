@@ -14,7 +14,6 @@ import {
 import {
 	getPermissionsVersion,
 	isAwaitingApproval,
-	isAwaitingJudge,
 	isDeclinedResult,
 	subscribePermissions,
 } from '../../agent_runtime/permissions/permissions';
@@ -160,13 +159,12 @@ function useSubagentStatus(call: ToolCallBlock, result?: ToolResultBlock): Subag
 	return result.isError ? 'failed' : 'unknown';
 }
 
-// What the permission gate is doing with a call: waiting on the user,
-// checking it, or recording the user's refusal.
+// User-visible permission state: only an approval that needs their input or
+// a call they declined. Internal safety checks stay internal.
 function usePermissionStatus(call: ToolCallBlock, result?: ToolResultBlock): { text: string; color: string } | null {
 	useSyncExternalStore(subscribePermissions, getPermissionsVersion);
 	if (result?.isError && isDeclinedResult(result.result)) return { text: 'declined by user', color: theme.danger };
 	if (!result && isAwaitingApproval(call.id)) return { text: 'waiting for approval', color: theme.pending };
-	if (!result && isAwaitingJudge(call.id)) return { text: 'checking', color: theme.pending };
 	return null;
 }
 
@@ -235,16 +233,22 @@ export function ToolRunGroup({ blocks, defaultExpanded = false }: {
 	blocks: readonly (ToolCallBlock | ToolResultBlock)[];
 	defaultExpanded?: boolean;
 }) {
-	const [expanded, setExpanded] = useState(defaultExpanded);
-	const toggle = useCallback(() => setExpanded(current => !current), []);
-	const ref = useRef<DOMElement>(null);
-	const hovered = useClickable(ref, toggle);
 	const calls = blocks.filter((block): block is ToolCallBlock => block.type === 'tool_call');
 	const results = new Map(
 		blocks
 			.filter((block): block is ToolResultBlock => block.type === 'tool_result')
 			.map(result => [result.callId, result]),
 	);
+	const hasCompletedEdit = calls.some(call => {
+		const result = results.get(call.id);
+		return Boolean(result && !result.isError && editPreview(call).length > 0);
+	});
+	// Follow arriving file results until the user chooses whether to expand.
+	const [expansionOverride, setExpansionOverride] = useState<boolean | null>(null);
+	const expanded = expansionOverride ?? (defaultExpanded || hasCompletedEdit);
+	const toggle = useCallback(() => setExpansionOverride(!expanded), [expanded]);
+	const ref = useRef<DOMElement>(null);
+	const hovered = useClickable(ref, toggle);
 	const complete = calls.every(call => results.has(call.id));
 	const summaryColor = hovered ? theme.highlight : theme.textMuted;
 
@@ -258,35 +262,29 @@ export function ToolRunGroup({ blocks, defaultExpanded = false }: {
 			</Box>
 			{expanded ? (
 				<Box flexDirection="column" marginLeft={2}>
-					{calls.map(call => <ToolSummary key={call.id} call={call} result={results.get(call.id)} />)}
+					{calls.map(call => {
+						const result = results.get(call.id);
+						const preview = result && !result.isError ? editPreview(call) : [];
+						return (
+							<Box key={call.id} flexDirection="column">
+								<ToolSummary call={call} result={result} />
+								{preview.length > 0 && <DiffPreview lines={preview} />}
+							</Box>
+						);
+					})}
 				</Box>
 			) : null}
 		</Box>
 	);
 }
 
-// A lone call. A file change opens on click to show what it wrote.
+// A completed lone file change shows its colored diff immediately.
 function ToolCallRow({ call, result }: { call: ToolCallBlock; result?: ToolResultBlock }) {
-	const preview = editPreview(call);
-	const expandable = preview.length > 0;
-	const [expanded, setExpanded] = useState(false);
-	const toggle = useCallback(() => {
-		if (expandable) setExpanded(current => !current);
-	}, [expandable]);
-	const ref = useRef<DOMElement>(null);
-	const hovered = useClickable(ref, toggle) && expandable;
+	const preview = result && !result.isError ? editPreview(call) : [];
 	return (
 		<Box flexDirection="column" padding={1}>
-			<Box ref={ref}>
-				<ToolSummary
-					call={call}
-					result={result}
-					indent="  "
-					hovered={hovered}
-					{...(expandable ? { marker: expanded ? '⌄' : '›' } : {})}
-				/>
-			</Box>
-			{expanded && <DiffPreview lines={preview} />}
+			<ToolSummary call={call} result={result} indent="  " />
+			{preview.length > 0 && <DiffPreview lines={preview} />}
 		</Box>
 	);
 }
