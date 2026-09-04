@@ -35,8 +35,8 @@ export function notificationMode(): NotificationMode {
 }
 
 export function setNotificationMode(next: NotificationMode): void {
+  if (!saveNotificationPreference(next)) throw new Error('Could not save notification settings.');
   mode = next;
-  saveNotificationPreference(next);
 }
 
 // Whether a notification would be shown right now. In background mode a
@@ -53,7 +53,7 @@ export function shouldNotify(): boolean {
 // Control characters would end or corrupt the sequence; a notification is
 // one line of plain text.
 function plain(text: string): string {
-  return text.replace(/[\x00-\x1f\x7f]+/g, ' ').trim();
+  return text.replace(/[\x00-\x1f\x7f-\x9f]+/g, ' ').trim();
 }
 
 // The escape sequence this terminal understands, or null when it has none
@@ -82,7 +82,7 @@ export function terminalNotificationSequence(
 function nativeNotify(title: string, body: string): void {
   const command = process.platform === 'darwin'
     ? ['osascript', '-e', `display notification ${JSON.stringify(plain(body))} with title ${JSON.stringify(plain(title))}`]
-    : process.platform === 'linux' ? ['notify-send', plain(title), plain(body)]
+    : process.platform === 'linux' ? ['notify-send', '--', plain(title), plain(body)]
     : null;
   if (!command) return;
   try {

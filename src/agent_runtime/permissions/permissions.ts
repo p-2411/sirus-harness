@@ -44,6 +44,9 @@ export interface PermissionContext {
   mode: () => PermissionMode;
   requester: Requester;
   model: string;
+  // A turn may start the provider while its pre-turn checkpoint is still
+  // being captured. Mutating tools wait here so no write can beat the snapshot.
+  beforeMutation?: () => Promise<void>;
 }
 
 export type ApprovalDecision = 'allow' | 'allow-session' | 'deny';

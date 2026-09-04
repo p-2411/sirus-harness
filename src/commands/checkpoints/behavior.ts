@@ -27,8 +27,8 @@ export function parseRewindScope(value: unknown): RewindScope | null {
   return value === 'all' || value === 'files' || value === 'chat' ? value : null;
 }
 
-function noCheckpoints(): Error {
-  const failure = checkpointFailure();
+function noCheckpoints(session: Session): Error {
+  const failure = checkpointFailure(session.getDirectory());
   if (failure) return new Error(`No checkpoints: the last capture failed. ${failure}`);
   if (!checkpointsEnabled()) return new Error('Checkpoints are not enabled in this process.');
   return new Error('No checkpoints yet: one is taken before each turn.');
@@ -36,7 +36,7 @@ function noCheckpoints(): Error {
 
 function requireCheckpoints(session: Session): Checkpoint[] {
   const checkpoints = session.getCheckpoints();
-  if (checkpoints.length === 0) throw noCheckpoints();
+  if (checkpoints.length === 0) throw noCheckpoints(session);
   return checkpoints;
 }
 
@@ -129,7 +129,7 @@ export function describeRewind(result: RewindResult): Feedback {
 
 async function rewindTo(checkpoint: Checkpoint, scope: RewindScope, session: Session): Promise<Feedback> {
   const files = scope !== 'chat';
-  if (files && activeSubagentCount() > 0) {
+  if (files && activeSubagentCount(session.getDirectory()) > 0) {
     throw new Error('Subagents are still working in this directory. Wait for them or press escape to cancel them, then rewind.');
   }
   return describeRewind(await session.rewind(checkpoint.id, { files, chat: scope !== 'files' }));

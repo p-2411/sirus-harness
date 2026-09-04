@@ -25,6 +25,7 @@ export function turnSummary(session: Session, status: SessionStatus): string {
   const messages = session.getMessages();
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index];
+    if (message.role === 'user' && message.content.some(block => block.type === 'text' || block.type === 'image')) break;
     if (message.role !== 'assistant') continue;
     const text = message.content
       .filter((block): block is Extract<typeof block, { type: 'text' }> => block.type === 'text')
@@ -36,6 +37,43 @@ export function turnSummary(session: Session, status: SessionStatus): string {
   return 'Turn finished.';
 }
 
+// Keep subscriptions separate from React so each event source owns its cleanup.
+export function subscribeSessionNotifications(sessions: readonly Session[], send = notify): () => void {
+  const statuses = new Map<Session, SessionStatus>();
+  const unsubscribes = sessions.map(session => {
+    statuses.set(session, session.getStatus());
+    return session.subscribe(() => {
+      const previous = statuses.get(session);
+      const current = session.getStatus();
+      if (previous === current) return;
+      statuses.set(session, current);
+      if (previous === 'working' && current !== 'working' && !session.wasLastTurnCancelled()) {
+        send(`Sirus · ${session.getName()}`, turnSummary(session, current));
+      }
+    });
+  });
+  return () => {
+    for (const stop of unsubscribes) stop();
+  };
+}
+
+export function subscribeApprovalNotifications(getSessions: () => readonly Session[], send = notify): () => void {
+  let seen = new Set(pendingApprovals().map(request => request.id));
+  return subscribePermissions(() => {
+    const current = pendingApprovals();
+    for (const request of current) {
+      if (seen.has(request.id)) continue;
+      const session = getSessions().find(candidate => candidate.getId() === request.sessionId);
+      const detail = request.detail[0] ? `: ${firstLine(request.detail[0])}` : '';
+      send(
+        `Sirus · ${session?.getName() ?? 'approval needed'}`,
+        `${describeRequester(request.requester)} wants to run ${request.call.name}${detail}`,
+      );
+    }
+    seen = new Set(current.map(request => request.id));
+  });
+}
+
 // Watches every session, the approval queue, and the subagent runs, and
 // raises a desktop notification when something finishes or needs the user.
 // Whether a notification actually shows is the notification module's call.
@@ -43,41 +81,8 @@ export function useNotifications(sessions: readonly Session[]) {
   const latestSessions = useRef(sessions);
   latestSessions.current = sessions;
 
-  useEffect(() => {
-    const statuses = new Map<Session, SessionStatus>();
-    const unsubscribes = sessions.map(session => {
-      statuses.set(session, session.getStatus());
-      return session.subscribe(() => {
-        const previous = statuses.get(session);
-        const current = session.getStatus();
-        if (previous === current) return;
-        statuses.set(session, current);
-        if (previous === 'working' && current !== 'working') {
-          notify(`Sirus · ${session.getName()}`, turnSummary(session, current));
-        }
-      });
-    });
-    return () => {
-      for (const stop of unsubscribes) stop();
-    };
-  }, [sessions]);
-
-  useEffect(() => {
-    let seen = new Set(pendingApprovals().map(request => request.id));
-    return subscribePermissions(() => {
-      const current = pendingApprovals();
-      for (const request of current) {
-        if (seen.has(request.id)) continue;
-        const session = latestSessions.current.find(candidate => candidate.getId() === request.sessionId);
-        const detail = request.detail[0] ? `: ${firstLine(request.detail[0])}` : '';
-        notify(
-          `Sirus · ${session?.getName() ?? 'approval needed'}`,
-          `${describeRequester(request.requester)} wants to run ${request.call.name}${detail}`,
-        );
-      }
-      seen = new Set(current.map(request => request.id));
-    });
-  }, []);
+  useEffect(() => subscribeSessionNotifications(sessions), [sessions]);
+  useEffect(() => subscribeApprovalNotifications(() => latestSessions.current), []);
 
   useEffect(() => {
     const statuses = new Map<string, SubagentStatus>();

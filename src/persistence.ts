@@ -51,7 +51,7 @@ const participantSchema = z.object({
 });
 
 const checkpointSchema = z.object({
-  id: z.string().min(1),
+  id: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i),
   messageIndex: z.number().int().nonnegative(),
   summary: z.string(),
   createdAt: z.number(),

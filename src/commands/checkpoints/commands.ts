@@ -5,7 +5,10 @@ export const undoCommandSpec: CommandSpec = {
   name: 'undo',
   args: '[all|files|chat]',
   description: 'put the directory and chat back to before the last turn',
-  run: (args, execution) => undoCommand(args[0], execution.session),
+  run: (args, execution) => {
+    if (args.length > 1) throw new Error('Usage: /undo [all|files|chat]');
+    return undoCommand(args[0], execution.session);
+  },
   menu: undoMenuItems,
 };
 

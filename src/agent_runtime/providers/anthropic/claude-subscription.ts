@@ -265,6 +265,30 @@ function createInbox() {
   };
 }
 
+function userMessage(text: string, images: readonly ImageBlock[]): SDKUserMessage {
+  return {
+    type: 'user',
+    message: {
+      role: 'user',
+      content: images.length === 0
+        ? text
+        : [...images.map(imageBlockParam), ...(text ? [{ type: 'text' as const, text }] : [])],
+    },
+    parent_tool_use_id: null,
+  } as SDKUserMessage;
+}
+
+async function* oneShotPrompt(text: string, images: readonly ImageBlock[]): AsyncGenerator<SDKUserMessage> {
+  yield userMessage(text, images);
+}
+
+function latestUserImages(messages: readonly Message[]): ImageBlock[] {
+  const last = messages[messages.length - 1];
+  return last?.role === 'user'
+    ? last.content.filter((block): block is ImageBlock => block.type === 'image')
+    : [];
+}
+
 function createSession(turn: TurnContext): ClaudeSession {
   const { agent, directory } = turn;
   const { model, thinkingLevel, subagent } = agent;
@@ -321,16 +345,9 @@ function createSession(turn: TurnContext): ClaudeSession {
   session.query = q;
   session.iterator = q[Symbol.asyncIterator]();
   // Attached images ride along as content blocks beside the turn's text.
-  session.send = (text: string, images: readonly ImageBlock[] = []) => inbox.push({
-    type: 'user',
-    message: {
-      role: 'user',
-      content: images.length === 0
-        ? text
-        : [...(text ? [{ type: 'text' as const, text }] : []), ...images.map(imageBlockParam)],
-    },
-    parent_tool_use_id: null,
-  } as SDKUserMessage);
+  session.send = (text: string, images: readonly ImageBlock[] = []) => inbox.push(
+    userMessage(text, images),
+  );
   return session as ClaudeSession;
 }
 
@@ -476,8 +493,10 @@ async function getResponse(
 // the latest user message and exits, keeping nothing for the runtime id.
 async function bareRequest(messages: readonly Message[], turn: TurnContext): Promise<Response> {
   const { agent, signal } = turn;
+  const text = latestUserText(messages);
+  const images = latestUserImages(messages);
   const q = query({
-    prompt: latestUserText(messages),
+    prompt: images.length > 0 ? oneShotPrompt(text, images) : text,
     options: {
       model: agent.model,
       cwd: turn.directory,
@@ -485,6 +504,7 @@ async function bareRequest(messages: readonly Message[], turn: TurnContext): Pro
       tools: [],
       maxTurns: 1,
       settingSources: [],
+      strictMcpConfig: true,
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
       persistSession: false,

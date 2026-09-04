@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import type { ImageBlock, Message } from '../../agent_runtime/types';
 import { Session } from '../../agent_runtime/session';
-import { attachClipboardImage, describeImage } from '../../images';
+import { attachClipboardImage, describeImage, removeStoredImage } from '../../images';
 import { Box, Text, measureElement, renderToString, useBoxMetrics, useInput, useStdout, type DOMElement } from 'ink';
 import { theme } from '../styles/theme';
 import { HORSE } from '../branding/horse';
@@ -70,24 +70,56 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
   const participantColors = participantColorMap(participants);
 
   const [commandIsLoading, setCommandIsLoading] = useState(false);
-  const isLoading = commandIsLoading || currSession.getStatus() === 'working';
+  const [imageIsLoading, setImageIsLoading] = useState(false);
+  const isLoading = commandIsLoading || imageIsLoading || currSession.getStatus() === 'working';
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [inputMode, setInputMode] = useState<InputMode>({ type: 'text' });
   // Images attached to the message being composed, until it is sent.
   const [attachments, setAttachments] = useState<ImageBlock[]>([]);
-  const attachImage = (image: ImageBlock) => setAttachments(current => [...current, image]);
+  const attachmentsRef = useRef<ImageBlock[]>([]);
+  const mounted = useRef(true);
+  const replaceAttachments = (next: ImageBlock[]) => {
+    attachmentsRef.current = next;
+    setAttachments(next);
+  };
+  const attachImage = (image: ImageBlock) => {
+    if (!mounted.current) {
+      removeStoredImage(image);
+      return;
+    }
+    replaceAttachments([...attachmentsRef.current, image]);
+  };
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      for (const image of attachmentsRef.current) removeStoredImage(image);
+      attachmentsRef.current = [];
+    };
+  }, []);
   const pasteImage = () => {
+    if (imageIsLoading) return;
+    setImageIsLoading(true);
     setFeedback({ kind: 'info', text: 'Reading the clipboard…' });
     attachClipboardImage()
       .then(image => {
+        if (!mounted.current) {
+          removeStoredImage(image);
+          return;
+        }
         attachImage(image);
         setFeedback({ kind: 'success', text: `Attached ${describeImage(image)}. It goes with your next message.` });
       })
       .catch((caught: unknown) => {
-        setFeedback({ kind: 'error', text: caught instanceof Error ? caught.message : 'Could not read the clipboard.' });
-      });
+        if (mounted.current) setFeedback({ kind: 'error', text: caught instanceof Error ? caught.message : 'Could not read the clipboard.' });
+      })
+      .finally(() => { if (mounted.current) setImageIsLoading(false); });
   };
-  const removeAttachment = () => setAttachments(current => current.slice(0, -1));
+  const removeAttachment = () => {
+    const image = attachmentsRef.current.at(-1);
+    if (image) removeStoredImage(image);
+    replaceAttachments(attachmentsRef.current.slice(0, -1));
+  };
   // A tool call of this session (or of a subagent it spawned) waiting on the
   // user takes over the input bar until it is answered or the turn is cancelled.
   useSyncExternalStore(subscribePermissions, getPermissionsVersion);
@@ -248,13 +280,16 @@ export default function Chat({ currSession, onStartSession, onSirusModelChange }
         role: 'user',
         content: [...images, ...(text ? [{ type: 'text' as const, text }] : [])],
       };
-      setAttachments([]);
       setScrollOffset(0);
       setFeedback(null);
       // Chat is remounted per session (key={session id}), so if the user
       // navigates away mid-request the unmounted Chat no longer repaints its
       // history. The session-owned status still updates its sidebar row.
+      const previousLength = currSession.getMessages().length;
       const turn = currSession.sendMessage(msg);
+      // Validation can reject a turn before its user message is appended.
+      // Keep those images available so the user can correct the prompt.
+      if (currSession.getMessages().length > previousLength) replaceAttachments([]);
       // A startup draft becomes a real sidebar session only after the turn is
       // valid and sendMessage has appended its user message.
       if (!currSession.isEmpty()) onStartSession?.(currSession);

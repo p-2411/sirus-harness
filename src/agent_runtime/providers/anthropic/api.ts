@@ -164,7 +164,7 @@ export function imageBlockParam(block: Extract<MessageBlock, { type: 'image' }>)
       source: { type: 'base64', media_type: block.mediaType, data: imageData(block) },
     };
   } catch {
-    return { type: 'text', text: `[An attached image is no longer available: ${block.path}]` };
+    return { type: 'text', text: '[An attached image is no longer available.]' };
   }
 }
 

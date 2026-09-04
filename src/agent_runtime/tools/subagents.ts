@@ -90,10 +90,11 @@ export function listAllSubagents(): SubagentRun[] {
   return [...runs.values()];
 }
 
-export function activeSubagentCount(): number {
+export function activeSubagentCount(directory?: string): number {
+  const target = directory ? path.resolve(directory) : null;
   let count = 0;
   for (const run of runs.values()) {
-    if (run.status === 'working') count++;
+    if (run.status === 'working' && (!target || path.resolve(run.directory) === target)) count++;
   }
   return count;
 }

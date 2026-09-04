@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import { execFile } from 'child_process';
-import { copyFileSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'fs';
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { dataDirectory } from './persistence';
@@ -60,17 +60,31 @@ function storeImage(bytes: Buffer, source: string): ImageBlock {
   const directory = imagesDirectory();
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const target = path.join(directory, `${crypto.randomUUID()}.${EXTENSIONS[mediaType]}`);
-  copyFileSync(source, target);
+  // Write the bytes that were validated rather than copying the source path,
+  // which may have changed between reading and storage. Attachments are private.
+  writeFileSync(target, bytes, { mode: 0o600 });
   return { type: 'image', path: target, mediaType, bytes: bytes.length };
 }
 
 // Attaches an image file from disk (a saved screenshot, a dragged-in path).
 export function attachImageFile(file: string, directory: string = process.cwd()): ImageBlock {
-  const expanded = file.startsWith('~') ? path.join(os.homedir(), file.slice(1)) : file;
+  const expanded = file === '~' || file.startsWith('~/')
+    ? path.join(os.homedir(), file.slice(1))
+    : file;
   const resolved = path.resolve(directory, expanded);
+  let size: number;
+  try {
+    const stat = statSync(resolved);
+    if (!stat.isFile()) throw new Error('not a file');
+    size = stat.size;
+  } catch {
+    throw new Error(`Could not read ${resolved}.`);
+  }
+  if (size > MAX_IMAGE_BYTES) {
+    throw new Error(`${resolved} is ${formatBytes(size)}; images are limited to ${formatBytes(MAX_IMAGE_BYTES)}.`);
+  }
   let bytes: Buffer;
   try {
-    if (!statSync(resolved).isFile()) throw new Error('not a file');
     bytes = readFileSync(resolved);
   } catch {
     throw new Error(`Could not read ${resolved}.`);
@@ -78,9 +92,43 @@ export function attachImageFile(file: string, directory: string = process.cwd())
   return storeImage(bytes, resolved);
 }
 
+function readStoredImage(image: ImageBlock): { resolved: string; bytes: Buffer } {
+  const root = path.resolve(imagesDirectory());
+  const resolved = path.resolve(image.path);
+  // Stored attachments are direct children. Reject nested paths too, since
+  // an intermediate directory could be a symlink outside the store.
+  if (path.dirname(resolved) !== root) {
+    throw new Error('Attached image path is outside the Sirus image store.');
+  }
+  const stat = lstatSync(resolved);
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Attached image is not a regular stored file.');
+  if (stat.size > MAX_IMAGE_BYTES || stat.size !== image.bytes) {
+    throw new Error('Attached image no longer matches its stored metadata.');
+  }
+  const bytes = readFileSync(resolved);
+  if (bytes.length > MAX_IMAGE_BYTES || bytes.length !== image.bytes || detectImageType(bytes) !== image.mediaType) {
+    throw new Error('Attached image no longer matches its stored metadata.');
+  }
+  return { resolved, bytes };
+}
+
+export function validatedImagePath(image: ImageBlock): string {
+  return readStoredImage(image).resolved;
+}
+
 // The bytes of an attached image, base64-encoded for a provider request.
+// Revalidate persisted metadata before reading so a modified sessions file
+// cannot turn an image attachment into an arbitrary local-file read.
 export function imageData(image: ImageBlock): string {
-  return readFileSync(image.path).toString('base64');
+  return readStoredImage(image).bytes.toString('base64');
+}
+
+export function removeStoredImage(image: ImageBlock): void {
+  try {
+    unlinkSync(validatedImagePath(image));
+  } catch {
+    // Missing, invalid, or already-removed draft attachments need no cleanup.
+  }
 }
 
 export function imageDataUrl(image: ImageBlock): string {
@@ -98,8 +146,8 @@ function run(command: string, args: readonly string[]): Promise<Buffer> {
 
 // The system clipboard's image, written to a temporary PNG by the platform's
 // own tooling: AppleScript on macOS, wl-paste or xclip on Linux.
-async function clipboardImageFile(): Promise<string> {
-  const target = path.join(os.tmpdir(), `sirus-clipboard-${process.pid}-${Date.now()}.png`);
+async function clipboardImageFile(directory: string): Promise<string> {
+  const target = path.join(directory, 'clipboard.png');
   if (process.platform === 'darwin') {
     try {
       await run('osascript', [
@@ -110,6 +158,7 @@ async function clipboardImageFile(): Promise<string> {
         '-e', 'close access f',
       ]);
     } catch {
+      try { unlinkSync(target); } catch { /* nothing was written */ }
       throw new Error('The clipboard does not contain an image.');
     }
     return target;
@@ -123,7 +172,7 @@ async function clipboardImageFile(): Promise<string> {
       try {
         const bytes = await run(command, args);
         if (bytes.length === 0) continue;
-        writeFileSync(target, bytes);
+        writeFileSync(target, bytes, { mode: 0o600 });
         return target;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') missing++;
@@ -137,12 +186,15 @@ async function clipboardImageFile(): Promise<string> {
 }
 
 export async function attachClipboardImage(): Promise<ImageBlock> {
-  const file = await clipboardImageFile();
+  // The native clipboard tool may use its default file permissions, so keep
+  // its output inside a private temporary directory until it is stored.
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-clipboard-'));
   try {
+    const file = await clipboardImageFile(directory);
     return storeImage(readFileSync(file), 'The clipboard image');
   } finally {
     try {
-      unlinkSync(file);
+      rmSync(directory, { recursive: true, force: true });
     } catch {
       // the temporary file is gone already
     }

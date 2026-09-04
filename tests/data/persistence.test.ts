@@ -14,6 +14,8 @@ import {
   saveSirusModelPreference,
   saveSessions,
   saveSubscriptionPreferences,
+  loadNotificationPreference,
+  saveNotificationPreference,
 } from '../../src/persistence';
 
 let directory: string;
@@ -27,6 +29,19 @@ afterEach(() => {
 });
 
 describe('session persistence', () => {
+  test('round-trips image attachments and checkpoint history', () => {
+    const image = { type: 'image' as const, path: path.join(directory, 'images', 'screenshot.png'), mediaType: 'image/png' as const, bytes: 123 };
+    const checkpoint = { id: 'b'.repeat(40), messageIndex: 0, summary: '[image]', createdAt: Date.now() };
+    const session = new Session('With image', 'image-session', 'gpt-5.6-luna', [
+      { role: 'user', content: [image, { type: 'text', text: 'Explain this screenshot' }] },
+    ], '/projects/image', [], 'sirus', 'ask', [checkpoint]);
+
+    expect(saveSessions([session], session.getId(), directory)).toBe(true);
+    const restored = loadSessions(directory);
+    expect(restored.selectedSessionId).toBe(session.getId());
+    expect(restored.sessions[0].toSnapshot()).toEqual(session.toSnapshot());
+  });
+
   test('restores sessions, selected session, models, and complete message history', () => {
     const first = new Session('First', 'first-id', 'claude-fable-5-1', [], '/projects/first');
     first.append({ role: 'user', content: [{ type: 'text', text: 'Inspect this' }] });
@@ -107,6 +122,22 @@ describe('session persistence', () => {
 });
 
 describe('subscription preference persistence', () => {
+  test('notification preferences survive updates to the other settings', () => {
+    expect(loadNotificationPreference(directory)).toBe('background');
+    expect(saveNotificationPreference('always', directory)).toBe(true);
+    saveSubscriptionPreferences({ claude: true, gpt: false }, directory);
+    saveMemoryAccessPreference(false, directory);
+    saveApiKeys({ gpt: 'test-key' }, directory);
+    saveSirusModelPreference('gpt-5.6-sol', directory);
+    expect(loadNotificationPreference(directory)).toBe('always');
+    expect(saveNotificationPreference('off', directory)).toBe(true);
+    expect(loadApiKeys(directory)).toEqual({ gpt: 'test-key' });
+    expect(loadMemoryAccessPreference(directory)).toBe(false);
+    expect(loadSubscriptionPreferences(directory)).toEqual({ claude: true, gpt: false });
+    expect(loadSirusModelPreference(directory)).toBe('gpt-5.6-sol');
+    expect(loadNotificationPreference(directory)).toBe('off');
+  });
+
   test('defaults to API keys and restores enabled providers', () => {
     expect(loadSubscriptionPreferences(directory)).toEqual({ claude: false, gpt: false });
     expect(saveSubscriptionPreferences({ claude: true, gpt: false }, directory)).toBe(true);
