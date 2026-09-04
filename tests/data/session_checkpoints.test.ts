@@ -5,6 +5,7 @@ import path from 'path';
 import { Session } from '../../src/agent_runtime/session';
 import { modelStrategies } from '../../src/agent_runtime/chat';
 import { runTool } from '../../src/agent_runtime/tools';
+import { checkSubagent, type SubagentRun } from '../../src/agent_runtime/tools/subagents';
 import { enableCheckpoints } from '../../src/checkpoints';
 import { TurnCancelledError } from '../../src/abort';
 import type { Message } from '../../src/agent_runtime/types';
@@ -232,5 +233,78 @@ describe('session checkpoint integration', () => {
     await expect(other.sendMessage(prompt)).rejects.toThrow('Wait for the rewind');
     await restore;
     expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('user draft');
+  });
+
+  test.each(['same session', 'another session'])(
+    'blocks file rewind while a detached worker from %s is still running', async ownerScope => {
+      writeResponse();
+      await session.sendMessage(prompt);
+      const [checkpoint] = session.getCheckpoints();
+      const owner = ownerScope === 'same session'
+        ? session : new Session('Other session', 'detached-other', model, [], project);
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      let worker!: SubagentRun;
+      modelStrategies[model] = {
+        getResponse: async (_history, turn) => {
+          if (turn.agent.subagent) await gate;
+          else worker = turn.agent.spawnSubagent('Keep working', model, {
+            directory: turn.directory, permissions: turn.permissions,
+          });
+          return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
+        },
+      };
+      try {
+        await owner.sendMessage(prompt);
+        expect(owner.getStatus()).toBe('idle');
+        expect(worker.status).toBe('working');
+        await expect(session.rewind(checkpoint.id, { files: true, chat: false }))
+          .rejects.toThrow('Subagents are working in this directory');
+        expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('agent edit');
+        if (owner === session) {
+          await expect(session.rewind(checkpoint.id, { files: false, chat: true }))
+            .rejects.toThrow('subagents to finish');
+        }
+        expect(worker.status).toBe('working');
+      } finally {
+        release();
+        if (worker) await checkSubagent(worker, true);
+      }
+      await session.rewind(checkpoint.id, { files: true, chat: true });
+      expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('user draft');
+      expect(session.getMessages()).toEqual([]);
+    },
+  );
+
+  test('allows rewind while another session has a detached worker in a different directory', async () => {
+    writeResponse();
+    await session.sendMessage(prompt);
+    const [checkpoint] = session.getCheckpoints();
+    const otherProject = path.join(root, 'other-project');
+    mkdirSync(otherProject);
+    const other = new Session('Other project', 'detached-unrelated', model, [], otherProject);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let worker!: SubagentRun;
+    modelStrategies[model] = {
+      getResponse: async (_history, turn) => {
+        if (turn.agent.subagent) await gate;
+        else worker = turn.agent.spawnSubagent('Keep working', model, {
+          directory: turn.directory, permissions: turn.permissions,
+        });
+        return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
+      },
+    };
+    try {
+      await other.sendMessage(prompt);
+      expect(other.getStatus()).toBe('idle');
+      await session.rewind(checkpoint.id, { files: true, chat: true });
+      expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('user draft');
+      expect(session.getMessages()).toEqual([]);
+      expect(worker.status).toBe('working');
+    } finally {
+      release();
+      if (worker) await checkSubagent(worker, true);
+    }
   });
 });

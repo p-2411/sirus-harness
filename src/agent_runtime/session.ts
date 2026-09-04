@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import path from 'path';
 import { modelStrategies } from './chat';
 import { SessionAgent, type Participant } from './agent';
+import { activeSubagentCount } from './tools/subagents';
 import type { Message, ThinkingLevel } from './types';
 import { rootTextRanges } from '../mentions';
 import { isAbortError } from '../abort';
@@ -348,7 +349,16 @@ export class Session {
     if (!options.files && !options.chat) throw new Error('Nothing to restore: choose files, chat, or both.');
     if (this.rewinding) throw new Error('Wait for the current rewind to finish.');
     if (this.activeSends > 0) throw new Error('Wait for the current turn to finish before rewinding.');
+    if (options.chat && this.participants.some(agent =>
+      agent.listSubagents().some(run => run.status === 'working'))) {
+      throw new Error('Wait for this session’s subagents to finish before rewinding its chat.');
+    }
     const directoryKey = path.resolve(this.directory);
+    // Detached workers outlive their parent turn, so the session turn count
+    // alone does not tell us whether files in this directory are still in use.
+    if (options.files && activeSubagentCount(directoryKey) > 0) {
+      throw new Error('Subagents are working in this directory. Wait for them to finish before restoring files.');
+    }
     if (options.files && (directoryTurns.has(directoryKey) || restoringDirectories.has(directoryKey))) {
       throw new Error('Another session is working in this directory. Wait for it to finish before restoring files.');
     }

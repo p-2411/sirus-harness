@@ -126,7 +126,9 @@ export function SessionItem({ session, isSelected, onSelect, onDelete, now = Dat
     <Box ref={ref} flexDirection="column" height={1} flexShrink={0}>
       <Box justifyContent="space-between">
         <Box flexShrink={1}>
-          <Text color={status.color}>{status.symbol}</Text>
+          <Box width={1} flexShrink={0}>
+            <Text color={status.color}>{status.symbol}</Text>
+          </Box>
           {!collapsed && <Text color={hovered ? theme.highlight : isSelected ? theme.text : theme.textMuted} bold={isSelected} wrap="truncate-end"> {session.getName()}</Text>}
         </Box>
         {!collapsed && activity && (

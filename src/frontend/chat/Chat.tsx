@@ -7,7 +7,7 @@ import { theme } from '../styles/theme';
 import { HORSE } from '../branding/horse';
 import { ChatMessage } from './ChatMessage';
 import { Spinner } from './Spinner';
-import { InputBar, type InputMode } from './InputBar';
+import { InputBar, InputFeedback, type InputMode } from './InputBar';
 import {
   commandMenu,
   executeCommand,
@@ -18,7 +18,7 @@ import { parseMouseWheel } from '../interaction/mouse';
 import { SIDEBAR_WIDTH } from '../Sidebar';
 import { useSelectionRegion } from '../interaction/useTextSelection';
 import type { Feedback } from '../../commands/feedback';
-import { participantColorMap } from '../MentionText';
+import { participantColorMap, type ParticipantColors } from '../MentionText';
 import { isAbortError, TurnCancelledError } from '../../abort';
 import {
   getPermissionsVersion,
@@ -114,6 +114,60 @@ function TurnStatus({ messages, awaitingApproval, startedAt }: {
   );
 }
 
+// Long command output borrows the history area, leaving the editor available.
+// Its scroll position is independent from the conversation underneath it.
+function CommandFeedbackPanel({ feedback, participantColors, sidebarWidth }: {
+  feedback: Feedback;
+  participantColors: ParticipantColors;
+  sidebarWidth: number;
+}) {
+  const viewportRef = useRef<DOMElement>(null);
+  const contentRef = useRef<DOMElement>(null);
+  const { height: viewportHeight } = useBoxMetrics(viewportRef);
+  const { height: contentHeight } = useBoxMetrics(contentRef);
+  const [offset, setOffset] = useState(0);
+  const maxScroll = Math.max(0, contentHeight - viewportHeight);
+  const pageSize = Math.max(1, viewportHeight - 2);
+  const visibleOffset = Math.min(offset, maxScroll);
+  const text = useCallback(() => {
+    const width = contentRef.current ? measureElement(contentRef.current).width : 0;
+    if (width <= 0) return [];
+    return renderToString(
+      <InputFeedback feedback={feedback} participantColors={participantColors} />,
+      { columns: width },
+    ).split('\n');
+  }, [feedback, participantColors]);
+  useSelectionRegion(viewportRef, { follows: contentRef, text });
+
+  useInput((input, key) => {
+    const wheel = parseMouseWheel(input);
+    if (wheel && wheel.column > sidebarWidth) {
+      setOffset(Math.max(0, Math.min(maxScroll, visibleOffset + (wheel.direction === 'up' ? -3 : 3))));
+    } else if (key.pageUp) {
+      setOffset(Math.max(0, visibleOffset - pageSize));
+    } else if (key.pageDown) {
+      setOffset(Math.min(maxScroll, visibleOffset + pageSize));
+    } else if (key.home) {
+      setOffset(0);
+    } else if (key.end) {
+      setOffset(maxScroll);
+    }
+  });
+
+  return (
+    <Box flexDirection="column" flexGrow={1} minHeight={0}>
+      <Box ref={viewportRef} position="relative" flexGrow={1} minHeight={0} overflow="hidden">
+        <Box ref={contentRef} position="absolute" top={-visibleOffset} width="100%" flexDirection="column" flexShrink={0}>
+          <InputFeedback feedback={feedback} participantColors={participantColors} />
+        </Box>
+      </Box>
+      <Box paddingX={3} height={1} flexShrink={0}>
+        <Text color={theme.textSubtle}>pgup / pgdn · home / end · esc closes</Text>
+      </Box>
+    </Box>
+  );
+}
+
 export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEBAR_WIDTH }: {
   currSession: Session;
   sidebarWidth?: number;
@@ -133,6 +187,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   const [imageIsLoading, setImageIsLoading] = useState(false);
   const isLoading = commandIsLoading || imageIsLoading || currSession.getStatus() === 'working';
   const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const panelFeedback = feedback?.text.includes('\n') ? feedback : null;
   const [inputMode, setInputMode] = useState<InputMode>({ type: 'text' });
   // Images attached to the message being composed, until it is sent.
   const [attachments, setAttachments] = useState<ImageBlock[]>([]);
@@ -227,6 +282,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   const pageSize = Math.max(1, viewportHeight - 2);
 
   useEffect(() => {
+    if (panelFeedback || viewportHeight === 0) return;
     const addedHeight = Math.max(0, contentHeight - previousContentHeight.current);
     previousContentHeight.current = contentHeight;
 
@@ -234,7 +290,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       const next = current > 0 ? current + addedHeight : 0;
       return Math.min(next, maxScroll);
     });
-  }, [contentHeight, maxScroll]);
+  }, [contentHeight, maxScroll, panelFeedback, viewportHeight]);
 
   useInput((input, key) => {
     if (key.escape) {
@@ -246,6 +302,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       commandAbort.current?.abort(new TurnCancelledError());
       return;
     }
+    if (panelFeedback) return;
     const wheel = parseMouseWheel(input);
     if (wheel && wheel.column > sidebarWidth) {
       const amount = 3;
@@ -432,8 +489,17 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       </Box>
       {/* The absolutely positioned history moves only inside this clipped
           viewport, so scrolling cannot overwrite the header or divider. */}
+      {panelFeedback && (
+        <CommandFeedbackPanel
+          key={panelFeedback.text}
+          feedback={panelFeedback}
+          participantColors={participantColors}
+          sidebarWidth={sidebarWidth}
+        />
+      )}
       <Box
         ref={viewportRef}
+        display={panelFeedback ? 'none' : 'flex'}
         position="relative"
         flexDirection="column"
         flexGrow={1}
@@ -457,7 +523,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         inputContent={currSession.getInputContent()}
         setInputContent={inputContent => currSession.setInputContent(inputContent)}
         disabled={isLoading}
-        feedback={feedback}
+        feedback={panelFeedback ? null : feedback}
         participants={participants}
         mode={effectiveInputMode}
         permissionMode={currSession.getPermissionMode()}
