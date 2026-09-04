@@ -179,11 +179,13 @@ export class Session {
     }
   }
 
-  // Stops every participant's running turn. True if any was running.
+  // Stops every participant's running turn and every subagent they spawned,
+  // this session only. True if any was running.
   cancel(): boolean {
     let cancelled = false;
     for (const agent of this.participants) {
       if (agent.cancel()) cancelled = true;
+      if (agent.cancelSubagents() > 0) cancelled = true;
     }
     return cancelled;
   }
@@ -488,7 +490,10 @@ export class Session {
           const result = settled[index];
           if (result.status === 'fulfilled') {
             liveMessages[index].content = result.value.content;
-          } else {
+          } else if (liveMessages[index].content.length === 0) {
+            // A turn that failed before producing anything should not leave an
+            // empty assistant bubble. Streamed text and completed tool work,
+            // however, remain useful history after cancellation or failure.
             const messageIndex = this.messages.indexOf(liveMessages[index]);
             if (messageIndex !== -1) this.messages.splice(messageIndex, 1);
           }

@@ -182,6 +182,12 @@ describe('Session model', () => {
     expect(session.getStatus()).toBe('idle');
     expect(session.getMessages()).toEqual([
       { role: 'user', content: [{ type: 'text', text: 'Start' }] },
+      {
+        role: 'assistant',
+        participant: 'sirus',
+        model: testModel,
+        content: [{ type: 'text', text: 'Partial' }],
+      },
     ]);
     expect(session.cancel()).toBe(false);
     release();
@@ -581,9 +587,12 @@ describe('Session subscriptions', () => {
     let finish!: () => void;
     let shouldFail = false;
     modelStrategies[testModel] = {
-      getResponse: async () => {
+      getResponse: async (_messages, turn) => {
         await new Promise<void>(resolve => { finish = resolve; });
-        if (shouldFail) throw new Error('provider failed');
+        if (shouldFail) {
+          turn.updateStream([{ type: 'text', text: 'Partial before failure' }]);
+          throw new Error('provider failed');
+        }
         return { content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn' };
       },
     };
@@ -604,6 +613,12 @@ describe('Session subscriptions', () => {
     finish();
     await expect(failedTurn).rejects.toThrow('provider failed');
     expect(session.getStatus()).toBe('error');
+    expect(session.getMessages().at(-1)).toEqual({
+      role: 'assistant',
+      participant: 'sirus',
+      model: testModel,
+      content: [{ type: 'text', text: 'Partial before failure' }],
+    });
   });
 
   test('notifies subscribers when the model changes', () => {
