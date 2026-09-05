@@ -11,3 +11,4 @@ debug.log
 *.sqlite
 .env
 .env.*
+marketing/private/

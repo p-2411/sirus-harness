@@ -1,0 +1,46 @@
+name: First session feedback
+description: Tell us what helped or where you got stuck trying Sirus.
+title: "First session: "
+body:
+  - type: markdown
+    attributes:
+      value: "This issue is public; remove keys, tokens, private code, and personal information before submitting."
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: How far did you get?
+      options:
+        - Installation failed
+        - Installed but could not connect a provider
+        - Connected but could not complete my task
+        - Completed a useful task
+        - Returned for another task
+    validations:
+      required: true
+  - type: textarea
+    id: task
+    attributes:
+      label: What were you trying to do, and what happened?
+      description: Include expected behavior and a short error or useful result.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Operating system, terminal, and Sirus version
+      description: Find the installed version with npm list -g sirus-harness --depth=0.
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: Provider and model, if relevant
+      description: Names only; never share credentials.
+  - type: input
+    id: source
+    attributes:
+      label: Where did you hear about Sirus?
+  - type: textarea
+    id: next
+    attributes:
+      label: What would make you use Sirus for your next task?

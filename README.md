@@ -37,6 +37,8 @@ Find why the tests are failing, fix the underlying issue, and run the relevant t
 
 Type `/` to browse commands, or `/help` for the full command and keyboard reference. Provider access and model availability depend on the account you connect.
 
+**Trying Sirus for the first time?** [Bring one small task, then ask another model to review it](docs/first-session.md). The walkthrough covers setup, your first useful result, and how to share feedback.
+
 ## What you can do with it
 
 | When you need to… | Try asking Sirus… |
