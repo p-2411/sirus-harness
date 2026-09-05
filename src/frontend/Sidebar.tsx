@@ -40,9 +40,10 @@ export function formatRelativeTime(then: number, now: number = Date.now()): stri
   return SIDEBAR_DATE_FORMAT.format(then);
 }
 
-// The most recently active session first. Ties keep their creation order.
+// The most recently started conversation first. Replies within a conversation
+// update the displayed time without moving its row. Ties keep creation order.
 export function sessionsByRecency(sessions: readonly Session[]): Session[] {
-  return [...sessions].sort((left, right) => right.getLastActivity() - left.getLastActivity());
+  return [...sessions].sort((left, right) => right.getConversationStartedAt() - left.getConversationStartedAt());
 }
 
 // The wall clock, refreshed on the minute, for the header and relative times.

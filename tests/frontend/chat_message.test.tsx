@@ -101,7 +101,7 @@ describe('chat message', () => {
     expect(output).not.toContain('limit');
   });
 
-  test('shows the lines a file change adds and removes', () => {
+  test('shows a file change as its line counts until expanded', () => {
     const output = stripAnsi(renderToString(
       <ChatMessage message={{
         role: 'assistant',
@@ -116,13 +116,12 @@ describe('chat message', () => {
     ));
 
     expect(output).toContain('● EditFile src/app.ts +4 −2');
-    expect(output).toContain('- a');
-    expect(output).toContain('- b');
-    expect(output).toContain('+ c');
-    expect(output).toContain('+ d');
+    expect(output).not.toMatch(/[›⌄]/);
+    expect(output).not.toContain('- a');
+    expect(output).not.toContain('+ c');
   });
 
-  test('shows completed file diffs inside grouped tool activity', () => {
+  test('shows file changes inside grouped tool activity as line counts', () => {
     const edit: ToolCallBlock = {
       type: 'tool_call',
       id: 'edit-1',
@@ -140,11 +139,11 @@ describe('chat message', () => {
     ));
 
     expect(output).toContain('● WriteFile src/new.ts +2');
-    expect(output).toContain('+ first');
-    expect(output).toContain('+ second');
+    expect(output).not.toMatch(/[›⌄]/);
+    expect(output).not.toContain('+ first');
   });
 
-  test('reveals a file diff when a running group completes and respects manual collapse', async () => {
+  test('reveals file rows when a running group completes, diffs on click, and respects manual collapse', async () => {
     const edit: ToolCallBlock = {
       type: 'tool_call', id: 'live-edit', name: 'WriteFile',
       arguments: { path: 'new.ts', content: 'new content' },
@@ -161,21 +160,32 @@ describe('chat message', () => {
     });
     try {
       await app.waitUntilRenderFlush();
-      expect(frames.at(-1)).not.toContain('+ new content');
+      expect(frames.at(-1)).not.toContain('WriteFile');
       app.rerender(<ToolRunGroup blocks={completed} />);
       await app.waitUntilRenderFlush();
-      expect(frames.at(-1)).toContain('+ new content');
+      expect(frames.at(-1)).toContain('● WriteFile new.ts +1');
+      expect(frames.at(-1)).not.toMatch(/[›⌄]/);
+      expect(frames.at(-1)).not.toContain('+ new content');
 
       await new Promise<void>(resolve => setImmediate(resolve));
+      const row = { col: 5, line: 3 };
+      expect(pressAt(row)).toBe(true);
+      expect(releaseAt(row)).toBe(true);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      await app.waitUntilRenderFlush();
+      expect(frames.at(-1)).toContain('● WriteFile new.ts +1');
+      expect(frames.at(-1)).not.toMatch(/[›⌄]/);
+      expect(frames.at(-1)).toContain('+ new content');
+
       const summary = { col: 3, line: 1 };
       expect(pressAt(summary)).toBe(true);
       expect(releaseAt(summary)).toBe(true);
       await new Promise<void>(resolve => setImmediate(resolve));
       await app.waitUntilRenderFlush();
-      expect(frames.at(-1)).not.toContain('+ new content');
+      expect(frames.at(-1)).not.toContain('WriteFile');
       app.rerender(<ToolRunGroup blocks={[...completed]} />);
       await app.waitUntilRenderFlush();
-      expect(frames.at(-1)).not.toContain('+ new content');
+      expect(frames.at(-1)).not.toContain('WriteFile');
     } finally {
       app.unmount();
       await app.waitUntilExit();
@@ -232,6 +242,7 @@ describe('chat message', () => {
     expect(lines[2]).toContain('● ReadFile one.ts');
     expect(lines[3]).toContain('● RunShell bun test');
     expect(lines[4]).toBe('');
-    expect(lines[2].indexOf('●')).toBeGreaterThan(lines[1].indexOf('⌄'));
+    expect(lines[2].indexOf('●')).toBeGreaterThan(lines[1].indexOf('Ran'));
+    expect(output).not.toMatch(/[›⌄]/);
   });
 });

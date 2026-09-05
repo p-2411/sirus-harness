@@ -36,7 +36,7 @@ export function SelectMenu({
         return (
           <Box key={item.key}>
             <Text color={active ? theme.accent : theme.textSubtle}>{active ? '› ' : '  '}</Text>
-            <Text color={active ? theme.accent : theme.text}>{item.label.padEnd(column)}</Text>
+            <Text color={active ? theme.accent : theme.text}>{item.description ? item.label.padEnd(column) : item.label}</Text>
             {item.description && <Text color={theme.textMuted}>{item.description}</Text>}
           </Box>
         );

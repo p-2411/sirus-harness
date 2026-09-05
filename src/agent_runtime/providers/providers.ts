@@ -39,6 +39,7 @@ const ASSUMED_CONTEXT_WINDOWS: Record<Vendor, number> = {
 };
 
 export function contextWindowFor(model: string): number | undefined {
+  if (model === 'gpt-6-astra') return 1_050_000;
   const strategy = modelStrategies[model];
   const vendor = (Object.keys(providers) as Vendor[]).find(candidate => providers[candidate] === strategy);
   return vendor ? ASSUMED_CONTEXT_WINDOWS[vendor] : undefined;

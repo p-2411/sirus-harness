@@ -4,7 +4,7 @@ import type { CommandSpec } from '../types';
 export const modelCommand: CommandSpec = {
   name: 'model',
   args: '[agent] <model>',
-  description: 'set a session agent model; empty sessions also set the Sirus default',
+  description: 'set an agent\'s model',
   run: (args, execution) => {
     if (args.length === 1) {
       return changeModel('sirus', args[0], execution.session);
@@ -20,7 +20,7 @@ export const modelCommand: CommandSpec = {
 export const thinkingCommandSpec: CommandSpec = {
   name: 'thinking',
   args: '[agent] [low|medium|high|xhigh|max]',
-  description: 'show or set reasoning depth for a participant',
+  description: 'show or set an agent\'s reasoning depth',
   run: (args, execution) => thinkingCommand(args, execution.session),
   menu: thinkingMenuItems,
 };

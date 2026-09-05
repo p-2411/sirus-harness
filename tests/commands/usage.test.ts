@@ -6,12 +6,12 @@ import { Session } from '../../src/agent_runtime/session';
 import { CodexRpc } from '../../src/agent_runtime/providers/openai/codex-rpc';
 import { shutdownCodexRuntime } from '../../src/agent_runtime/providers/openai/codex-subscription';
 import { providerFor } from '../../src/agent_runtime/providers/providers';
-import { infoCommand } from '../../src/commands/authentication/behavior';
+import { usageCommand } from '../../src/commands/authentication/behavior';
 import { cachedSubscriptionRemaining, readSubscriptionUsage } from '../../src/agent_runtime/providers/usage';
 import { loadSubscriptionLimitCache, saveSubscriptionLimitCache } from '../../src/persistence';
 import { TurnCancelledError } from '../../src/abort';
 
-describe('/info subscription allowance', () => {
+describe('/usage subscription allowance', () => {
   let directory: string;
   let previous: string | undefined;
 
@@ -52,20 +52,19 @@ describe('/info subscription allowance', () => {
     const session = new Session('Usage');
     session.append({ role: 'assistant', content: [{ type: 'text', text: 'Done' }],
       usage: { inputTokens: 1000, outputTokens: 200, contextTokens: 1200, contextWindow: 400_000 } });
-    const result = await infoCommand(undefined, session);
-    expect(result.text).toContain('gpt: subscription · default');
-    expect(result.text).toContain('5 hour: 70%');
-    expect(result.text).toContain('session: 1k in · 200 out · context 1.2k');
+    const result = await usageCommand(undefined, session);
+    // A login recorded before accounts were labelled is identified by asking the provider.
+    expect(result.text).toContain('gpt · plus plan · 5h 70%');
+    expect(result.text).toContain('session · 1k in · 200 out · ctx 1.2k');
     expect(request.mock.calls.map(([method]) => method).sort())
-      .toEqual(['account/rateLimits/read']);
+      .toEqual(['account/rateLimits/read', 'account/read']);
   });
 
   test('a quota read failure displays unavailable without hiding session data', async () => {
     fakeRuntime(() => { throw new Error('Unavailable'); });
-    const result = await infoCommand(undefined, new Session());
-    expect(result.text).toContain('gpt: subscription');
-    expect(result.text).toContain('5 hour: unavailable');
-    expect(result.text).toContain('session: token usage unavailable');
+    const result = await usageCommand(undefined, new Session());
+    expect(result.text).toContain('gpt · plus plan · 5h unavailable');
+    expect(result.text).toContain('session · no usage reported yet');
     expect(result.text).not.toContain('100% remaining');
   });
 

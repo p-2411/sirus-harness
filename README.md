@@ -1,322 +1,196 @@
-coming soon...
+# Sirus
 
-<!--# Sirus
+**Your terminal. Your models. A team that can get the work done.**
 
-A desktop/terminal client for running AI coding agents. Connects to external
-agents over the Agent Client Protocol (Claude Code, Gemini CLI, custom agents)
-or runs its own agent loop against API providers directly. Persistent
-local-first memory (SQLite + vector search) shared across sessions and agents,
-with a graph view for browsing it. Tool chaining: multi-step tool sequences
-authored by the LLM or by hand.
+Sirus is a local-first terminal harness for AI coding agents. Bring Claude and GPT into the same conversation, give them access to your project, and move from a question to an inspected, implemented, and tested change without leaving your terminal.
 
-## Requirements
+**Bring the subscriptions you already pay for.** Connect as many Claude and ChatGPT subscription accounts as you want, use an Anthropic or OpenAI API key, or combine both. Your existing access powers the agents in one place.
 
-- [Node.js](https://nodejs.org/) 18 or newer with npm (used only to install and launch)
-- macOS or Linux
-- A Claude or ChatGPT subscription, or an Anthropic or OpenAI API key
-- On macOS, Homebrew SQLite (`brew install sqlite`) for persistent vector memory
+Use it as a daily coding partner or assemble a team for a larger task. Sirus combines shared conversations, autonomous subagents, persistent memory, and automatic checkpoints so you can build, review, and explore with context you can keep and changes you can rewind.
 
-## Install
+## Get started
 
-Install the public npm package globally:
+Install with Node.js 18 or later and npm:
+
+```sh
+npm install -g sirus-harness
+sirus /path/to/your/project
+```
+
+Run `sirus` on its own to open the current directory. The npm package includes the Bun runtime; Git must be available for file checkpoints.
+
+Inside Sirus:
+
+1. Type `/login` and choose Claude or ChatGPT, then sign in with an existing subscription or enter an API key through the masked input. Repeat `/login` to connect more accounts—as many as you want.
+2. Type `/model` and select a model from the provider you connected.
+3. Give Sirus a task:
+
+```text
+Explore this project, explain how it fits together, and show me where to start.
+```
+
+Or go straight to a change:
+
+```text
+Find why the tests are failing, fix the underlying issue, and run the relevant tests.
+```
+
+Type `/` to browse commands, or `/help` for the full command and keyboard reference. Provider access and model availability depend on the account you connect.
+
+## What you can do with it
+
+| When you need to… | Try asking Sirus… |
+| --- | --- |
+| Understand an unfamiliar codebase | “Trace a request from the entry point to the database. Explain the main components and where changes usually belong.” |
+| Ship a feature | “Add pagination to this endpoint, follow the existing conventions, and test the edge cases.” |
+| Debug a stubborn problem | “Reproduce this failure, find the root cause, and make the smallest fix that addresses it.” |
+| Get another perspective | “Review the changes above for correctness and regressions. Point to concrete issues in the code.” |
+| Divide up a larger task | “Delegate an inspection of the API and an inspection of its tests to separate subagents, then combine their findings into a plan.” |
+| Work from visual context | Attach a screenshot and ask: “Find the component responsible for this layout and fix the spacing.” |
+| Carry decisions into future sessions | “Remember for this project: database changes need a migration and a rollback plan.” |
+
+Agents can read, search, create, and edit files, run shell commands and tests, and use provider-supported web search and page access. Your prompts set the scope: ask for an explanation, a review, or an implementation.
+
+## What makes Sirus different
+
+### Claude and GPT, in one conversation
+
+Choose the model for each participant and adjust its reasoning depth. Bring in a second model to review an implementation or challenge a design while keeping the conversation in one place.
+
+Create a named participant by mentioning a new name followed by a supported model and a prompt:
+
+```text
+@reviewer claude-sonnet-5 Review the changes above for bugs and missing tests.
+```
+
+Then address that participant by name:
+
+```text
+@reviewer Check whether the latest fix resolves the issues you found.
+```
+
+Participants share the session history and can mention each other to request input. Set a participant's model with `/model @reviewer <model>` and reasoning depth with `/thinking @reviewer high`. Use `/model` to see the model names supported by your installation.
+
+### Delegate work, follow the results
+
+For work that can be split into independent tasks, Sirus can spawn autonomous subagents and collect their findings. Each receives a focused assignment and returns a final report with a summary of its changes. You can follow their activity in the interface while the parent agent coordinates the work.
+
+Named participants are collaborators in the shared conversation; subagents receive only their delegated task. Subagents work in the same project directory, so assignments should avoid overlapping edits.
+
+### Explore with an undo button
+
+Sirus captures a checkpoint before each turn. Use `/undo` for the last turn or `/rewind` to choose an earlier checkpoint, then restore files, chat, or both.
+
+```text
+/undo files
+```
+
+This restores the files while keeping the conversation, letting you discuss what happened and try another approach. Checkpoints live in a separate Git repository in Sirus's local data directory, leaving your project's Git history and staging area untouched.
+
+File restoration covers the checkpointed directory, including your own edits since the snapshot. It respects Git's tracked and ignored file rules; it does not undo external effects such as deployments or database changes.
+
+### Memory that survives a new chat
+
+Sirus can remember durable preferences and project decisions, then retrieve them by meaning in later sessions. Global memories carry preferences across projects; project memories stay scoped to the session's directory.
+
+Memory is enabled by default. Ask Sirus to remember, update, or forget something, or use `/memory off` to disable agent access. Memories are stored locally.
+
+### Keep several tasks moving
+
+Create sessions, name them, and switch between them from the sidebar. Each session retains its working directory, conversation, participants, model choices, and permission mode. Existing sessions keep their model settings when you change models elsewhere.
+
+Send a follow-up while an agent is busy to queue it. Session history is saved automatically, including partial responses when you quit. Reopen Sirus to return to your conversations, and enable desktop notifications with `/notify background` to hear when attention is needed while you're away from the terminal.
+
+### Put the right context in the prompt
+
+Type `@` to find agents and files in one menu. The menu opens at the bottom, with the closest matches nearest the input. Agent names and the new-name option sit below file results; use ↑/↓ and Tab or Enter to select either. File search also accepts relative paths such as `@../proj/file.tsx`. Sirus includes the selected text files in your message, making it easy to point at the code you want to discuss.
+
+Attach an image with `Ctrl+V` or `/image /path/to/screenshot.png` to work from a screenshot, mockup, or visual bug report. Clipboard and notification support depend on your operating system and terminal.
+
+### Choose how much approval you want
+
+Permission settings apply to the session's participants and subagents:
+
+| Mode | Behavior |
+| --- | --- |
+| `auto` — default | Allows ordinary work, checks shell commands, and prompts for operations classified as sensitive or requiring review. |
+| `ask` | Prompts before file writes, shell commands, and spawning agents. |
+| `bypass` | Runs tool calls without approval prompts. |
+
+Use `/permissions` to choose a mode, or `Shift+Tab` to cycle through them. At an approval prompt, allow once, allow eligible operations for the session, or deny. These are tool approval controls, not an operating-system sandbox.
+
+### Your subscriptions, as many as you want—or an API key
+
+Put your existing Claude and ChatGPT subscriptions to work in Sirus. Connect as many subscription accounts as you want, use an Anthropic or OpenAI API key, or mix subscriptions and keys. Add each account through `/login`; Sirus keeps them available together.
+
+Sirus can fall back to another configured source for the same provider when a request fails. If that source is an API key, its API usage is billed by that provider.
+
+Use `/usage` to see reported subscription allowance, session token usage, and context usage. `/logout` lets you choose a saved account or key to remove.
+
+GPT-6 Astra requests a 1,050,000-token Codex window with automatic compaction at 900,000 tokens. Codex reserves headroom, so its usable window can be smaller; the context gauge always prefers the runtime's reported limit. Other models retain their existing settings. Restart Sirus after upgrading to apply the new thread configuration. Local configuration does not override provider-side availability or limits.
+
+## Everyday controls
+
+| Control | What it does |
+| --- | --- |
+| `Ctrl+N` | Start a new session. |
+| `Option+↑` / `Option+↓` | Switch sessions. |
+| `Ctrl+K` | Collapse or expand the sidebar. |
+| `Enter` | Send a message, or queue it while agents are busy. |
+| `Shift+Enter` or `\` then `Enter` | Insert a new line. |
+| `Esc` | Close a menu or cancel the current session's turn. |
+| `/rename <name>` | Give the current session a useful name. |
+| `/thinking` | Show or change reasoning depth. |
+| `/undo` / `/rewind` | Choose what to restore from a checkpoint. |
+| `/notify` | Configure desktop notifications. |
+| `/update` | Install the latest release. |
+| `/help` | Show all commands and shortcuts. |
+| `/exit` | Quit Sirus. |
+
+## Local data and configuration
+
+Sessions, settings, checkpoints, and memories are stored on your machine. Model requests still go to your chosen provider, including conversation content, attachments, tool results, and any memories used as context.
+
+| Platform | Default data directory |
+| --- | --- |
+| macOS | `~/Library/Application Support/Sirus` |
+| Linux | `$XDG_STATE_HOME/sirus`, or `~/.local/state/sirus` |
+| Windows | `%APPDATA%\Sirus` |
+
+Set `SIRUS_DATA_DIR` to use another location. API keys entered through Sirus are saved in local settings with restricted file permissions. For environment-based API setup, Sirus reads `ANTHROPIC_API` for Anthropic and `OPENAI_SECRET` for OpenAI.
+
+On macOS, if memory reports that it cannot load `sqlite-vec`, install SQLite with `brew install sqlite`, or set `SIRUS_SQLITE_LIBRARY` to your SQLite dynamic library path.
+
+## Install & run
+
+Choose npm or Bun to install Sirus. Node.js 18 or later is required by the `sirus` launcher with either option.
+
+**With npm:**
 
 ```sh
 npm install -g sirus-harness
 ```
 
-Then launch Sirus in the current directory:
+The npm package includes the Bun runtime, so a separate Bun installation is not required.
+
+**With Bun 1.3.12 or later:**
+
+```sh
+bun install -g sirus-harness
+```
+
+**Run in your current directory:**
 
 ```sh
 sirus
 ```
 
-To try a release without installing it globally:
+**Or open a specific project:**
 
 ```sh
-npx sirus-harness
+sirus /path/to/your/project
 ```
 
-Sirus runs on [Bun](https://bun.sh/). You do not need to install Bun yourself:
-the package depends on the `bun` npm package, so npm downloads a matching Bun
-binary during install and the `sirus` command uses that copy. If you already
-use Bun, `bun add --global sirus-harness` and `bunx sirus-harness` work too;
-the launcher falls back to whichever `bun` is on your PATH when the bundled
-copy is unavailable (for example after an install with `--ignore-scripts`).
+Keep Git available for automatic file checkpoints. Once Sirus opens, use `/login` to connect your subscriptions or API keys, then `/model` to choose a model.
 
-## Launching Sirus
-
-The Sirus package installs a `sirus` executable automatically. It is part of
-the package manifest, so users do not need to create a shell alias or configure
-a path specific to their machine. Open Sirus in the current directory or name
-a directory explicitly:
-
-```sh
-sirus
-sirus /path/to/project
-```
-
-Contributors running directly from a source checkout can expose that same
-packaged command with `bun link`; this is only a development convenience, not
-a step required by a distributed Sirus installation.
-
-The launch directory owns every new session created while that Sirus process
-is open. Quitting and launching `sirus` from another directory assigns new
-sessions to the new launch directory. Existing sessions keep their original
-directory.
-
-## Signing in: subscription or API key
-
-Sirus can drive Claude models through your Claude Pro/Max login and GPT
-models through your ChatGPT login, or through an API key you paste in.
-Nothing else changes: Sirus keeps its own prompt, tools, and history; the
-provider runtime only carries the model.
-
-- `/login` — opens a picker in the input bar: first Claude or ChatGPT, then
-  Subscription or API key. Choosing Subscription runs the provider's browser
-  flow (or detects an existing login for the first source). Repeat to add another
-  subscription account. Choosing API key adds a key and asks for it
-  with its characters hidden.
-- `/login claude` / `/login gpt` — skips straight to the second step.
-- `/login claude subscription` / `/login claude api <key>` (likewise for
-  `gpt`) — add a source directly. Repeat to save multiple keys or subscriptions.
-- `/info` — lists saved sources and their IDs, with API keys masked. Each
-  subscription shows only `5 hour: <percent>%` and `7-day: <percent>%`, both
-  remaining allowance. Unreported limits show `unavailable`. Session token
-  totals and context usage appear below the provider sources.
-- `/update` — checks npm for the latest published release and installs it
-  globally. When one is available, green `/update` replaces the sidebar clock.
-  Restart Sirus after it finishes. Source checkouts use `git pull`.
-- `/logout claude|gpt [source-id]` — removes one source. Copy an ID from `/info`
-  to select it; omit the ID to remove the first source of the preferred type.
-  Other saved sources stay available. Environment keys are managed in your shell.
-- `/memory [on|off]` — shows or toggles agent access to persistent memory.
-- `/thinking [participant] [low|medium|high|xhigh|max]` — opens a picker or
-  sets one participant's reasoning depth. The default is `high`.
-- `/permissions [ask|auto|bypass]` — shows or sets how the session approves
-  tool calls (see below).
-- `/clear` — clears the current session's message history.
-- `/rename <name>` — renames the current session. A session is named after
-  its first prompt until it is renamed.
-- `/help` — lists every command and keyboard shortcut.
-
-Newly added sources are tried first within their type. The latest login chooses
-whether subscriptions or API keys are preferred; other types remain available
-as fallbacks. Requests try each remaining source when one fails, including tool
-continuations. Successful fallback sources stay preferred for that agent runtime.
-Cancellation stops immediately. A subscription tool with an unknown outcome
-stops the turn to avoid repeating work. If all sources fail, Sirus reports the
-failures with credentials masked.
-
-The `ANTHROPIC_API` and `OPENAI_SECRET` environment keys remain final API
-fallbacks, with duplicates skipped. Existing saved keys and subscription logins
-are retained. Additional subscription accounts use separate provider-managed
-credential stores under Sirus's `subscriptions` directory, following
-[Claude's account configuration](https://code.claude.com/docs/en/env-vars) and
-[Codex's credential storage](https://developers.openai.com/codex/auth/).
-Sirus does not read subscription tokens.
-
-Under the sidebar header, each provider shows only its currently used
-subscription's remaining allowance: seven-day for Codex and five-hour for
-Claude, such as `codex: 75%` and `claude: 40%`. Before the first request,
-this is the preferred source; with
-concurrent sessions, it follows the most recently started request. Fallback
-switches the displayed account immediately. Providers using an API key have
-no subscription row. Limits refresh every minute and when sources change,
-without sending model prompts. The last known limits are cached per account
-across restarts and shown while fresh limits load. Cached values expire at
-the reported reset (or after one limit window when no reset is reported).
-
-Sessions, their complete message history, the selected session, each
-provider's subscription choice, and any pasted API keys are saved locally and
-restored on startup. The data lives in the platform application-state
-directory (on macOS, `~/Library/Application Support/Sirus`), in files
-readable only by your user. Set `SIRUS_DATA_DIR` to override it.
-
-The sidebar lists sessions most recently active first, each with the name of
-its directory and how long ago it was last active.
-
-## Typing and keys
-
-- Enter sends. While an agent is working, Enter queues the message instead;
-  the row under the input box counts what is waiting, and queued messages go
-  out one at a time as soon as the turn ends, even after switching sessions.
-  Queued slash commands wait until that session is visible because they may
-  open a picker; prompts behind them wait too. Escape cancels the current
-  session's turn and subagents and drops its queue.
-- Shift+Enter starts a new line (Option+Enter on terminals that do not report
-  Shift+Enter, or end the line with `\` and press Enter). Pasted text keeps
-  its line breaks.
-- ↑ and ↓ bring back earlier prompts of the session; inside a multi-line
-  prompt they move between its lines first. Option+↑/↓ switches sessions,
-  and Ctrl+N starts a new one.
-- Ctrl+K collapses the sidebar to clickable session status dots, or expands
-  it again. The dots stay in place, and chat fills the remaining width.
-- Shift+Tab cycles the permission mode. Page Up/Down and Home/End scroll the
-  history.
-- While a turn runs, the line at the foot of the history says what the agents
-  are doing (thinking, writing, running a tool, or waiting for your approval)
-  and how long the turn has taken. The row under the input box shows the
-  context gauge, `ctx <tokens> · <percent>`, for the last response that
-  reported usage; it turns amber at 70% and red at 90%. The direct APIs
-  report tokens but not the window, so the percentage there assumes 200k for
-  Claude models and 400k for GPT models; subscription runtimes report their
-  own window.
-- Each tool call in the transcript shows what it acted on: the path, the
-  command, the query. A file change shows the lines it added and removed and
-  opens on click to show them.
-
-## Permissions
-
-Each session has a permission mode, shown under the input bar and cycled
-with Shift+Tab or set with `/permissions`:
-
-- **ask for approval**: reads, memory, and web activity run;
-  every file write, shell command, and spawned agent waits for you. The
-  decision is deterministic; no model is consulted.
-- **auto approve** (the default): reads run, and so do file edits inside the
-  session directory. Sensitive shell operations (`rm`, `chmod`, `kill`,
-  `sudo`, writes outside the directory, `git push`, discarding changes,
-  reading secret stores such as `~/.ssh`) wait for you. Other commands run
-  automatically unless an internal safety check flags them for approval.
-- **bypass permissions**: everything runs.
-
-A prompt names the participant or subagent asking and shows the path and
-content, the diff (removed lines in red, added lines in green), or the
-command. Answer with `y` (allow once), `a` (allow
-this kind of operation for the rest of the session), or `n` (deny, which the
-agent is told about). Escape cancels the whole turn. Subagents follow the
-mode of the session that spawned them and prompt through the same queue.
-The mode is saved with the session; session allowances are forgotten when
-Sirus quits.
-
-## Multi-participant sessions
-
-Every session starts with one participant, `@sirus`. A message without a
-mention is sent to `@sirus`. Create and address another participant by putting
-its name and model in a message:
-
-```text
-@reviewer claude-sonnet-5 review the authentication changes
-```
-
-The model is routing metadata used only while creating the participant. It is
-removed from the stored and provider-facing message, so the new agent receives
-`@reviewer review the authentication changes`.
-
-After creation, mention only the name to address it. Mention several names in
-one message to run those agents in parallel:
-
-```text
-@sirus @reviewer compare your approaches and identify any security gaps
-```
-
-Participant names are case-insensitive and each participant responds at most
-once per message. All participants receive the same shared session history,
-and their names, model choices, and thinking levels are persisted with the
-session. Use `/model [participant] <model>` to change one participant's model.
-Changing Sirus's model in an empty session also saves it as the default for
-future sessions. Once the session has messages, model changes apply only to
-that session. Other sessions keep their own models, including after a restart.
-
-Only mentions in top-level prose invoke agents. Mentions shown as quoted
-examples, inline code, blockquotes/callouts, lists, tables, headings, fenced or
-indented code, and other Markdown blocks remain inert.
-
-Agents can also mention existing participants in their responses. Those
-participants run in the next parallel round and may delegate to other existing
-participants in turn. An agent cannot create a participant; only the user's
-`@name <model> <prompt>` syntax can do that. Agents may mention one another
-repeatedly for a back-and-forth exchange; delegation ends when a round produces
-no further mentions. Self-mentions are ignored.
-
-## Subagents
-
-An agent can delegate a self-contained task with the `SpawnAgent` tool,
-giving it a prompt and a model. The subagent runs in the background in the
-session's directory with the same file, shell, and memory tools, sees only its
-prompt, cannot ask questions, and cannot spawn agents of its own. `SpawnAgent`
-returns at once with the subagent's id and the path of a temporary file where
-its transcript streams while it works, so the calling agent can keep going and
-look in on progress by reading that file or calling `CheckAgent`. Calling
-`CheckAgent` with `wait` set blocks until the subagent finishes (up to a minute
-per call) and returns its final message together with a summary of the files
-it created or edited, the commands it ran, and the memories it changed. The
-temporary file is deleted as soon as the subagent finishes.
-
-`ListAgents` lists every subagent spawned in the running Sirus process with
-its status, and `CancelAgent` stops a working one, waits for it to wind down,
-and reports the changes it had already made. Pressing Escape to cancel a turn
-also cancels the subagents that turn started, and quitting Sirus cancels them
-all.
-
-In the chat, the `SpawnAgent` call shows an amber dot while the subagent is
-working, green once it has finished, red if it failed, and a muted dot if it
-was cancelled. The row under the input box counts the subagents still working.
-
-## Web access
-
-Agents can search the web and read pages. Sirus does not run searches or
-fetches itself: every runtime brings its own web capability and executes it,
-and Sirus translates what the runtime reports into two tools that appear in
-the transcript under one shape regardless of runtime.
-
-- `WebSearch` records a query and the pages it found.
-- `FetchURL` records a page the agent read, with its content when the runtime
-  provides it (kept to the first 100,000 characters in the transcript).
-
-What each runtime provides:
-
-| Runtime | Native capability | Normalized output |
-| --- | --- | --- |
-| Anthropic API | `web_search` and `web_fetch` server tools | Search hits with titles, URLs, and page age; full page text for fetches |
-| Claude subscription (Claude Code) | Built-in `WebSearch` and `WebFetch` | Search hits plus Claude Code's summary; for fetches, Claude Code's answer to the prompt it gave the page |
-| OpenAI API | `web_search` tool | The query and the URLs consulted; pages the model opened appear as `FetchURL` without content |
-| GPT subscription (Codex) | Codex's live web search | The query, or the page opened; results stay inside the provider |
-
-The Anthropic and OpenAI APIs and Codex read search results inside the model
-request, so the model always sees more than the transcript records. Web use is
-part of every model's tool set; no key or setting is needed beyond the
-runtime's own access.
-
-## Persistent memory
-
-Sirus stores named memories in `sirus.db` inside the same application-state
-directory and keeps their vector embeddings in that database. Global memories
-are shared by every session and project. Project memories are tied to the
-owning session's canonical directory and are visible only to sessions owned by
-that same directory. Agents can select global, current-project, or both
-available scopes, but cannot name or access another project's directory.
-Existing memories created before scopes were introduced migrate to global.
-The agent can save, fetch, delete, and semantically search memories through its
-memory tools. Memory text remains the source of truth; the vector index is
-rebuilt whenever a memory is updated.
-
-Embeddings run locally with the quantized `all-MiniLM-L6-v2` model and produce
-384-dimensional vectors. No embedding API or API key is required. The model is
-downloaded from Hugging Face the first time an embedding is needed, cached in
-the application-state directory, and reused offline afterward. When the
-configured embedding model changes, Sirus preserves the memory text and
-rebuilds the vector index automatically.
-
-`sqlite-vec` requires a SQLite build that supports loadable extensions. On
-macOS, install it with `brew install sqlite`; Sirus automatically checks the
-standard Homebrew paths. Set `SIRUS_SQLITE_LIBRARY` to the full path of another
-compatible SQLite dynamic library when needed.
-
-## Testing
-
-Tests live under `tests/`, mirroring the structure of `src/`. Run the suite with:
-
-```sh
-bun test
-```
-
-Run the complete pre-release validation with:
-
-```sh
-bun run release:check
-```
-
-## License
-
-[MIT](LICENSE)-->
+Sirus is open source under the [MIT license](LICENSE).

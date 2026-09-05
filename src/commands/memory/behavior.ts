@@ -19,6 +19,6 @@ export function memoryCommand(mode: string | undefined): Feedback {
   if (changed) resetAllRuntimes();
   return {
     kind: 'success',
-    text: `Memory access ${enabled ? 'enabled' : 'disabled'}. Stored memories were not changed.`,
+    text: `Memory access set to ${mode}.`,
   };
 }

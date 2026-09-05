@@ -16,7 +16,7 @@ describe('command menu', () => {
 
     expect(lines).toHaveLength(6);
     expect(output).toContain('/model');
-    expect(output).toContain('/info');
+    expect(output).toContain('/usage');
     expect(output).not.toContain('/update');
   });
 

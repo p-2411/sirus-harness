@@ -1,6 +1,7 @@
 import { Text } from 'ink';
 import type { Participant } from '../agent_runtime/session';
 import { theme } from './styles/theme';
+import { parseFileMentions } from '../fileMentions';
 
 export interface MentionSegment {
   text: string;
@@ -8,6 +9,7 @@ export interface MentionSegment {
 }
 
 const mentionPattern = /(?<![\w@])@[A-Za-z][A-Za-z0-9_-]*(?![A-Za-z0-9_\/-])/g;
+const filenamePattern = /(?<![\w@])@(?:[A-Za-z0-9_.-]+\/)*(?=[A-Za-z0-9_.-]*\.[A-Za-z0-9_-])[A-Za-z0-9_.-]+(?![A-Za-z0-9_\/-])/g;
 
 // Sirus keeps the original soft grey. Additional participants are ordered by
 // creation and receive stable shades from the restrained blue-purple family.
@@ -54,12 +56,26 @@ export function participantColor(name: string, colors?: ParticipantColors): stri
 
 export function mentionSegments(text: string): MentionSegment[] {
   const segments: MentionSegment[] = [];
+  const explicitFiles = parseFileMentions(text);
+  // Relative file paths need no ./ prefix. Match the complete path and
+  // extension so it never inherits the colour of a partial agent name.
+  const files = [
+    ...explicitFiles,
+    ...Array.from(text.matchAll(filenamePattern), match => ({
+      start: match.index!, end: match.index! + match[0].replace(/\.+$/, '').length,
+    })).filter(mention => !explicitFiles.some(file => mention.start < file.end && mention.end > file.start)),
+  ];
+  const mentions = [
+    ...files,
+    ...Array.from(text.matchAll(mentionPattern), match => ({
+      start: match.index!, end: match.index! + match[0].length,
+    })).filter(mention => !files.some(file => mention.start < file.end && mention.end > file.start)),
+  ].sort((left, right) => left.start - right.start);
   let offset = 0;
-  for (const match of text.matchAll(mentionPattern)) {
-    const index = match.index ?? 0;
-    if (index > offset) segments.push({ text: text.slice(offset, index), isMention: false });
-    segments.push({ text: match[0], isMention: true });
-    offset = index + match[0].length;
+  for (const mention of mentions) {
+    if (mention.start > offset) segments.push({ text: text.slice(offset, mention.start), isMention: false });
+    segments.push({ text: text.slice(mention.start, mention.end), isMention: true });
+    offset = mention.end;
   }
   if (offset < text.length) segments.push({ text: text.slice(offset), isMention: false });
   return segments;
@@ -73,6 +89,7 @@ export function MentionText({
   colors?: ParticipantColors;
 }) {
   return mentionSegments(children).map((segment, index) => segment.isMention
-    ? <Text key={index} color={participantColor(segment.text, colors)}>{segment.text}</Text>
+    ? <Text key={index} color={segment.text.includes('.') || /^@(?:\/|")/.test(segment.text)
+      ? theme.textMuted : participantColor(segment.text, colors)}>{segment.text}</Text>
     : segment.text);
 }

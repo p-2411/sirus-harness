@@ -81,9 +81,9 @@ describe('sidebar session metadata', () => {
     expect(formatRelativeTime(0, now)).toBe('');
   });
 
-  test('sorts sessions by latest activity without mutating the source list', () => {
-    const older = new Session('Older', 'older', undefined, [], '/projects/older', [], 'sirus', undefined, [], 1_000);
-    const newer = new Session('Newer', 'newer', undefined, [], '/projects/newer', [], 'sirus', undefined, [], 2_000);
+  test('sorts by conversation start rather than latest activity without mutating the source list', () => {
+    const older = Session.fromSnapshot({ ...new Session('Older').toSnapshot(), updatedAt: 9_000, conversationStartedAt: 1_000 });
+    const newer = Session.fromSnapshot({ ...new Session('Newer').toSnapshot(), updatedAt: 2_000, conversationStartedAt: 2_000 });
     const source = [older, newer];
     expect(sessionsByRecency(source)).toEqual([newer, older]);
     expect(source).toEqual([older, newer]);

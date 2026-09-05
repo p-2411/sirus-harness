@@ -23,6 +23,26 @@ describe('mention text', () => {
       .toEqual([{ text: 'user@example.com uses @scope/package', isMention: false }]);
   });
 
+  test('styles explicit file paths as whole mentions alongside agent names', () => {
+    expect(mentionSegments('Ask @reviewer about @../proj/file.tsx and @"./@reviewer notes.txt"')).toEqual([
+      { text: 'Ask ', isMention: false },
+      { text: '@reviewer', isMention: true },
+      { text: ' about ', isMention: false },
+      { text: '@../proj/file.tsx', isMention: true },
+      { text: ' and ', isMention: false },
+      { text: '@"./@reviewer notes.txt"', isMention: true },
+    ]);
+    const rendered = MentionText({ children: '@../proj/file.tsx' });
+    expect(isValidElement(rendered[0])).toBe(true);
+    expect((rendered[0] as ReactElement<{ color: string }>).props.color).toBe(theme.textMuted);
+    const filename = MentionText({ children: '@README.md' });
+    expect((filename[0] as ReactElement<{ color: string; children: string }>).props)
+      .toMatchObject({ color: theme.textMuted, children: '@README.md' });
+    const nested = MentionText({ children: '@src/file.tsx' });
+    expect((nested[0] as ReactElement<{ color: string; children: string }>).props)
+      .toMatchObject({ color: theme.textMuted, children: '@src/file.tsx' });
+  });
+
   test('renders mentions with their participant color', () => {
     const colors = participantColorMap([
       { name: 'sirus', model: 'gpt' },

@@ -78,6 +78,14 @@ const PROCESS_CONFIG: Record<string, unknown> = {
   model_catalog_json: MODEL_CATALOG_PATH,
 };
 
+// Thread-local: a large-window Astra thread must not change other models'
+// budgets on the shared account runtime.
+function contextConfig(model: string): Record<string, number> {
+  return model === 'gpt-6-astra'
+    ? { model_context_window: 1_050_000, model_auto_compact_token_limit: 900_000 }
+    : {};
+}
+
 const TURN_TIMEOUT_MS = 10 * 60 * 1000;
 
 // One side of Codex's thread/tokenUsage/updated notification: the thread's
@@ -364,7 +372,7 @@ function createCodexRuntime(profile: string) {
     const { model, subagent, runtimeId: sessionId } = agent;
     const participantName = agent.name;
     const existing = sessions.get(sessionId);
-    if (existing) return existing;
+    if (existing && existing.model === model) return existing;
 
     const response = await rpc.request<Json>('thread/start', {
       model,
@@ -382,6 +390,7 @@ function createCodexRuntime(profile: string) {
       baseInstructions: systemPromptFor(turn),
       config: {
         ...MODEL_ONLY_CONFIG,
+        ...contextConfig(model),
         ...(turn.tools ? {} : { web_search: 'disabled' }),
         mcp_servers: await disabledMcpServers(rpc, directory),
       },
@@ -533,7 +542,7 @@ function createCodexRuntime(profile: string) {
       environments: [],
       serviceName: CODEX_CLIENT_INFO.name,
       baseInstructions: systemPromptFor(turn),
-      config: { ...MODEL_ONLY_CONFIG, web_search: 'disabled', mcp_servers: await disabledMcpServers(rpc, directory) },
+      config: { ...MODEL_ONLY_CONFIG, ...contextConfig(agent.model), web_search: 'disabled', mcp_servers: await disabledMcpServers(rpc, directory) },
       dynamicTools: [],
     }), signal);
     const threadId = String((started.thread as Json).id);

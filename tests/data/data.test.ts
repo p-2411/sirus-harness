@@ -275,7 +275,7 @@ describe('Session model', () => {
     expect(session.shiftQueuedMessage()).toBe('after login');
   });
 
-  test('cancelling discards only that session queue and leaves other sessions running', async () => {
+  test('cancelling sends that session queue next and leaves other sessions running', async () => {
     let finish!: () => void;
     const gate = new Promise<void>(resolve => { finish = resolve; });
     modelStrategies[testModel] = {
@@ -289,17 +289,22 @@ describe('Session model', () => {
     const message: Message = { role: 'user', content: [{ type: 'text', text: 'start' }] };
     const firstTurn = first.sendMessage(message);
     const secondTurn = second.sendMessage(message);
-    first.queueMessage('discard');
+    first.queueMessage('after cancel');
     second.queueMessage('keep');
     expect(first.cancel()).toBe(true);
     await expect(firstTurn).rejects.toThrow();
+    // the cancelled turn is followed by what was waiting behind it
     expect(first.getQueuedMessageCount()).toBe(0);
+    expect(first.getMessages().filter(message => message.role === 'user').map(message => message.content))
+      .toEqual([message.content, [{ type: 'text', text: 'after cancel' }]]);
     expect(second.getStatus()).toBe('working');
     expect(second.getQueuedMessageCount()).toBe(1);
     finish();
     await secondTurn;
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(second.getMessages().filter(message => message.role === 'user')).toHaveLength(2);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(first.getStatus()).toBe('idle');
   });
 
   test('cancels its detached subagents after the parent turn has finished', async () => {

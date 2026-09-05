@@ -25,6 +25,7 @@ function runCommand(
     session,
     notify: () => {},
     attachImage: () => {},
+    exit: () => {},
     signal: new AbortController().signal,
   });
 }
@@ -88,7 +89,7 @@ describe('executeCommand', () => {
     saveSirusModelPreference('gpt-5.6-terra');
     expect(runCommand('model', ['claude-fable-5-1'], session)).toEqual({
       kind: 'success',
-      text: '@sirus model changed to claude-fable-5-1.',
+      text: '@sirus model set to claude-fable-5-1.',
     });
     expect(session.getModel()).toBe('claude-fable-5-1');
     expect(other.getModel()).toBe('gpt-5.6-luna');
@@ -113,7 +114,7 @@ describe('executeCommand', () => {
     session.addParticipant('reviewer', 'gpt-5.6-terra');
     expect(runCommand('model', ['@reviewer', 'claude-fable-5-1'], session)).toEqual({
       kind: 'success',
-      text: '@reviewer model changed to claude-fable-5-1.',
+      text: '@reviewer model set to claude-fable-5-1.',
     });
     expect(session.getParticipants()[1]).toEqual({ name: 'reviewer', model: 'claude-fable-5-1' });
     expect(loadSirusModelPreference()).toBe('gpt-5.6-terra');
@@ -124,7 +125,7 @@ describe('executeCommand', () => {
     const session = new Session();
     expect(runCommand('model', ['HAIKU'], session)).toEqual({
       kind: 'success',
-      text: '@sirus model changed to claude-haiku-4.5.',
+      text: '@sirus model set to claude-haiku-4.5.',
     });
     expect(session.getModel()).toBe('claude-haiku-4.5');
     expect(loadSirusModelPreference()).toBe('claude-haiku-4.5');
@@ -172,7 +173,7 @@ describe('executeCommand', () => {
 
     expect(runCommand('clear', [], current)).toEqual({
       kind: 'success',
-      text: 'Session history cleared.',
+      text: 'History cleared.',
     });
     expect(current.getMessages()).toEqual([]);
     expect(other.getMessages()).toHaveLength(1);
@@ -182,7 +183,7 @@ describe('executeCommand', () => {
     const session = new Session('Session 1');
     expect(runCommand('rename', ['UX', 'work'], session)).toEqual({
       kind: 'success',
-      text: 'Session renamed to UX work.',
+      text: 'Renamed to UX work.',
     });
     expect(session.getName()).toBe('UX work');
     expect(() => runCommand('rename', [], session)).toThrow('Usage: /rename <name>');
@@ -215,11 +216,11 @@ describe('executeCommand', () => {
     expect(session.getThinkingLevel()).toBe('high');
     expect(runCommand('thinking', ['low'], session)).toEqual({
       kind: 'success',
-      text: '@sirus thinking level changed to low.',
+      text: '@sirus thinking set to low.',
     });
     expect(runCommand('thinking', ['@reviewer', 'max'], session)).toEqual({
       kind: 'success',
-      text: '@reviewer thinking level changed to max.',
+      text: '@reviewer thinking set to max.',
     });
     expect(session.getThinkingLevel()).toBe('low');
     expect(session.getThinkingLevel('reviewer')).toBe('max');
@@ -251,7 +252,7 @@ describe('executeCommand', () => {
       });
       expect(runCommand('memory', ['off'], session)).toEqual({
         kind: 'success',
-        text: 'Memory access disabled. Stored memories were not changed.',
+        text: 'Memory access set to off.',
       });
       expect(runCommand('memory', [], session)).toEqual({
         kind: 'info',
@@ -320,7 +321,7 @@ describe('credential commands', () => {
     expect(() => loginMenuItems(['bing'])).toThrow(/unknown provider/i);
     expect(runCommand('login', ['gpt'])).toEqual({
       kind: 'info',
-      text: expect.stringMatching(/\/login gpt subscription, \/login gpt api/),
+      text: expect.stringMatching(/\/login gpt subscription · \/login gpt api/),
     });
   });
 
@@ -335,7 +336,7 @@ describe('credential commands', () => {
     const result = runCommand('login', ['claude', 'api', 'sk-ant-pasted-key-9876']);
     expect(result).toEqual({
       kind: 'success',
-      text: expect.stringContaining('claude-* models try it first'),
+      text: 'Saved Anthropic API key sk-ant-…9876.',
     });
     expect((result as { text: string }).text).not.toContain('sk-ant-pasted-key-9876');
     expect((result as { text: string }).text).toContain('9876');
@@ -347,19 +348,38 @@ describe('credential commands', () => {
     expect(() => runCommand('login', ['gpt', 'browser'])).toThrow(/\/login gpt subscription/);
   });
 
-  test('/info reports each provider and how it is authenticated', async () => {
+  test('/usage reports each provider and how it is authenticated', async () => {
     process.env.OPENAI_SECRET = 'sk-proj-from-env-4321';
     runCommand('login', ['claude', 'api', 'sk-ant-pasted-key-9876']);
-    const result = await runCommand('info', []);
+    const result = await runCommand('usage', []);
     expect(result).toMatchObject({ kind: 'info', showIcon: false });
     const text = (result as { text: string }).text;
-    expect(text).toMatch(/claude: API key · sk-ant-…9876/);
-    expect(text).toMatch(/gpt: API key · sk-proj-…4321/);
+    expect(text).toContain('claude · sk-ant-…9876 · API key');
+    expect(text).toContain('gpt · sk-proj-…4321 · API key (env)');
     expect(text).not.toContain('pasted-key');
     expect(text).not.toContain('OPENAI_SECRET');
+    expect(() => runCommand('usage', ['now'])).toThrow('Usage: /usage');
   });
 
-  test('/info includes session totals and the latest context', async () => {
+  test('/logout lists removable sources by account and removes the chosen one', () => {
+    process.env.OPENAI_SECRET = 'sk-proj-from-env-4321';
+    runCommand('login', ['claude', 'api', 'sk-ant-pasted-key-9876']);
+    const items = menuItems('logout', []);
+    expect(items.map(item => item.label)).toEqual(['claude · sk-ant-…9876']);
+    expect(runCommand('logout', items[0].command.split(' ').slice(1))).toEqual({
+      kind: 'success',
+      text: 'Removed claude · sk-ant-…9876.',
+    });
+    expect(commandMenu('logout', [], new Session())).toBeNull();
+    expect(runCommand('logout', [])).toEqual({ kind: 'info', text: 'Nothing to sign out of.' });
+  });
+
+  test('/version shows the installed version', () => {
+    expect(runCommand('version', [])).toMatchObject({ kind: 'info', text: expect.stringMatching(/^sirus \d+\.\d+\.\d+/) });
+    expect(() => runCommand('version', ['latest'])).toThrow('Usage: /version');
+  });
+
+  test('/usage includes session totals and the latest context', async () => {
     const session = new Session('Usage', 'usage', 'gpt-5.6-luna', [
       {
         role: 'assistant', content: [{ type: 'text', text: 'First.' }],
@@ -370,16 +390,16 @@ describe('credential commands', () => {
         usage: { inputTokens: 2_000, outputTokens: 400, contextTokens: 2_400, contextWindow: 400_000 },
       },
     ]);
-    const result = await runCommand('info', [], session);
-    expect((result as Feedback).text).toContain('session: 3k in · 600 out · context 2.4k (1% of 400k)');
+    const result = await runCommand('usage', [], session);
+    expect((result as Feedback).text).toContain('session · 3k in · 600 out · ctx 2.4k (1% of 400k)');
   });
 
-  test('/info says when a provider has nothing configured', async () => {
-    const result = await runCommand('info', []);
+  test('/usage says when a provider has nothing configured', async () => {
+    const result = await runCommand('usage', []);
     const text = (result as { text: string }).text;
-    expect(text).toMatch(/claude: not configured/);
-    expect(text).toMatch(/gpt: not configured/);
-    expect(text).toContain('session: token usage unavailable');
+    expect(text).toContain('claude · not configured');
+    expect(text).toContain('gpt · not configured');
+    expect(text).toContain('session · no usage reported yet');
   });
 
   test('/logout leaves the subscription when that is active', () => {
@@ -389,7 +409,7 @@ describe('credential commands', () => {
     expect(providerFor('gpt').source).toBe('api');
     expect(result).toEqual({
       kind: 'success',
-      text: 'Removed gpt subscription source.',
+      text: 'Removed gpt · subscription.',
     });
   });
 
@@ -399,7 +419,7 @@ describe('credential commands', () => {
     expect(providerFor('claude').apiKey()).toBeNull();
     expect(result).toEqual({
       kind: 'success',
-      text: 'Removed claude api source. 0 source(s) remaining.',
+      text: 'Removed claude · sk-ant-…9876.',
     });
   });
 

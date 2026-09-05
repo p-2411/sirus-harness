@@ -9,6 +9,7 @@ import { IMAGE_MEDIA_TYPES, THINKING_LEVELS } from './agent_runtime/types';
 const textBlockSchema = z.object({
   type: z.literal('text'),
   text: z.string(),
+  filePath: z.string().optional(),
 });
 
 const imageBlockSchema = z.object({
@@ -85,6 +86,8 @@ const sessionSchema = z.object({
   checkpoints: z.array(checkpointSchema).optional(),
   // When the history last changed; absent in older files.
   updatedAt: z.number().optional(),
+  conversationStartedAt: z.number().optional(),
+  lastResponseFinishedAt: z.number().nullable().optional(),
   autoNamePending: z.boolean().optional(),
 }).refine(
   session => Boolean(session.model || (session.participants && session.defaultModel)),
@@ -215,6 +218,8 @@ export function loadSessions(
           ...(snapshot.permissionMode ? { permissionMode: snapshot.permissionMode } : {}),
           ...(snapshot.checkpoints ? { checkpoints: snapshot.checkpoints } : {}),
           ...(snapshot.updatedAt !== undefined ? { updatedAt: snapshot.updatedAt } : {}),
+          ...(snapshot.conversationStartedAt !== undefined ? { conversationStartedAt: snapshot.conversationStartedAt } : {}),
+          ...(snapshot.lastResponseFinishedAt !== undefined ? { lastResponseFinishedAt: snapshot.lastResponseFinishedAt } : {}),
           ...(snapshot.autoNamePending !== undefined ? { autoNamePending: snapshot.autoNamePending } : {}),
         } satisfies SessionSnapshot);
       }
@@ -230,6 +235,9 @@ export function loadSessions(
         snapshot.checkpoints ?? [],
         snapshot.updatedAt ?? 0,
         snapshot.autoNamePending ?? false,
+        snapshot.inputContent ?? '',
+        snapshot.conversationStartedAt,
+        snapshot.lastResponseFinishedAt,
       );
     })
     .filter(session => !session.isEmpty());

@@ -5,6 +5,7 @@ import { SessionAgent, type Participant } from './agent';
 import { activeSubagentCount } from './tools/subagents';
 import type { Message, ThinkingLevel } from './types';
 import { rootTextRanges } from '../mentions';
+import { parseFileMentions, resolveFileMentions } from '../fileMentions';
 import { isAbortError } from '../abort';
 import {
   DEFAULT_PERMISSION_MODE,
@@ -40,6 +41,11 @@ export interface RewindResult {
 
 export type SessionStatus = 'idle' | 'working' | 'error';
 
+export interface QueuedMessage {
+  readonly id: string;
+  readonly text: string;
+}
+
 export interface SessionSnapshot {
   id: string;
   name: string;
@@ -55,6 +61,8 @@ export interface SessionSnapshot {
   checkpoints?: Checkpoint[];
   // When the history last changed; absent in older snapshots.
   updatedAt?: number;
+  conversationStartedAt?: number;
+  lastResponseFinishedAt?: number | null;
   // A newly-created session may still take its name from its first prompt.
   autoNamePending?: boolean;
 }
@@ -145,10 +153,12 @@ export class Session {
   // When the history last changed; 0 for a restored session that predates
   // the field, so it sorts last and shows no time.
   private lastActivity: number;
+  private conversationStartedAt: number;
+  private lastResponseFinishedAt: number | null;
   private autoNamePending: boolean;
   // Drafts typed while a turn is active belong to the session, so switching
   // away and back does not discard them. They are intentionally not persisted.
-  private queuedMessages: string[] = [];
+  private queuedMessages: QueuedMessage[] = [];
   private activeTurnStartedAt: number | null = null;
 
   constructor(
@@ -164,6 +174,8 @@ export class Session {
     updatedAt: number = Date.now(),
     autoNamePending: boolean = false,
     inputContent: string = '',
+    conversationStartedAt: number = updatedAt,
+    lastResponseFinishedAt: number | null = messages.length > 0 ? updatedAt : null,
   ) {
     this.name = name;
     this.id = id;
@@ -171,6 +183,8 @@ export class Session {
     this.permissionMode = permissionMode;
     this.checkpoints = [...checkpoints];
     this.lastActivity = updatedAt;
+    this.conversationStartedAt = conversationStartedAt;
+    this.lastResponseFinishedAt = lastResponseFinishedAt;
     this.autoNamePending = autoNamePending;
     const restored = participants.map(participant => this.createAgent(participant, defaultParticipantName));
     this.defaultAgent = restored.find(agent => sameName(agent.name, defaultParticipantName))
@@ -216,6 +230,8 @@ export class Session {
         snapshot.updatedAt ?? 0,
         snapshot.autoNamePending ?? false,
         snapshot.inputContent ?? '',
+        snapshot.conversationStartedAt,
+        snapshot.lastResponseFinishedAt,
       );
     }
     return new Session(
@@ -232,9 +248,19 @@ export class Session {
     );
   }
 
+  private startConversationIfNeeded(now: number): void {
+    const finishedAt = this.lastResponseFinishedAt ?? this.lastActivity;
+    if (this.messages.length === 0 || now - finishedAt > 5 * 60_000) {
+      this.conversationStartedAt = now;
+    }
+  }
+
   append(message: Message) {
+    const now = Date.now();
+    if (message.role === 'user' && this.activeSends === 0) this.startConversationIfNeeded(now);
+    if (message.role === 'assistant') this.lastResponseFinishedAt = now;
     this.messages.push(message);
-    this.lastActivity = Date.now();
+    this.lastActivity = now;
     this.notifyListeners();
   }
 
@@ -269,9 +295,17 @@ export class Session {
     directoryTurns.set(directoryKey, (directoryTurns.get(directoryKey) ?? 0) + 1);
     this.setStatus('working');
     let checkpointBarrier: Promise<void> = Promise.resolve();
+    let accepted = false;
     try {
       const messageText = textOf(message);
-      const mentions = this.parseMentions(messageText);
+      let routingText = messageText;
+      for (const file of parseFileMentions(messageText, this.directory).reverse()) {
+        routingText = routingText.slice(0, file.start) + ' '.repeat(file.end - file.start) + routingText.slice(file.end);
+      }
+      const mentions = this.parseMentions(routingText);
+      // Resolve every attachment before creating participants or adding history.
+      // Keep this synchronous so the input can observe acceptance immediately.
+      const resolved = resolveFileMentions(message, this.directory);
       const targets = mentions.length > 0
         ? this.resolveMentions(mentions)
         : [this.defaultAgent];
@@ -279,12 +313,14 @@ export class Session {
       // A model following a newly introduced @name is host routing metadata,
       // not part of the conversation. Strip it before either the UI history or
       // any provider sees the turn.
-      const stored = this.withoutCreationModels(message, mentions);
+      const stored = this.withoutCreationModels(resolved, mentions);
       if (this.messages.length === 0 && this.autoNamePending) {
         const name = sessionNameFromPrompt(textOf(stored));
         if (name) this.name = name;
         this.autoNamePending = false;
       }
+      if (this.activeSends === 1) this.startConversationIfNeeded(Date.now());
+      accepted = true;
       this.append(stored);
       // Start the provider immediately, while the pre-turn snapshot is taken
       // in parallel. Every mutating tool call waits for this barrier, so agent
@@ -300,6 +336,9 @@ export class Session {
       else this.turnFailed = true;
       throw error;
     } finally {
+      // Measure the reply gap from the end of model work, not streamed chunks
+      // or a checkpoint that may still be finishing in the background.
+      if (accepted) this.lastResponseFinishedAt = Date.now();
       // Failed and cancelled providers must also finish their snapshot before
       // the session becomes available for clearing or rewinding its history.
       await checkpointBarrier;
@@ -315,9 +354,13 @@ export class Session {
     }
   }
 
+  getActiveSubagentCount(): number {
+    return this.participants.reduce((count, agent) =>
+      count + agent.listSubagents().filter(run => run.status === 'working').length, 0);
+  }
+
   // Stops this session's turns and subagents, including detached workers.
   cancel(): boolean {
-    this.clearQueuedMessages();
     let cancelled = false;
     for (const agent of this.participants) {
       if (agent.cancel()) cancelled = true;
@@ -407,14 +450,14 @@ export class Session {
   }
 
   queueMessage(message: string): void {
-    this.queuedMessages.push(message);
+    this.queuedMessages.push({ id: crypto.randomUUID(), text: message });
     this.notifyListeners();
   }
 
   shiftQueuedMessage(): string | undefined {
     const message = this.queuedMessages.shift();
     if (message !== undefined) this.notifyListeners();
-    return message;
+    return message?.text;
   }
 
   clearQueuedMessages(): void {
@@ -429,14 +472,26 @@ export class Session {
   private sendNextQueuedPrompt(): void {
     if (this.activeSends > 0) return;
     const next = this.queuedMessages[0];
-    if (next === undefined || next.startsWith('/')) return;
+    if (next === undefined || next.text.startsWith('/')) return;
     this.queuedMessages.shift();
-    void this.sendMessage({ role: 'user', content: [{ type: 'text', text: next }] })
+    void this.sendMessage({ role: 'user', content: [{ type: 'text', text: next.text }] })
       .catch(() => { /* sendMessage records the failure in the session status. */ });
   }
 
   getQueuedMessageCount(): number {
     return this.queuedMessages.length;
+  }
+
+  getQueuedMessages(): readonly QueuedMessage[] {
+    return this.queuedMessages;
+  }
+
+  updateQueuedMessage(id: string, text: string): void {
+    const index = this.queuedMessages.findIndex(message => message.id === id);
+    if (index === -1 || this.queuedMessages[index].text === text) return;
+    if (text.length === 0) this.queuedMessages.splice(index, 1);
+    else this.queuedMessages[index] = { id, text };
+    this.notifyListeners();
   }
 
   getActiveTurnStartedAt(): number | null {
@@ -445,6 +500,10 @@ export class Session {
 
   getLastActivity(): number {
     return this.lastActivity;
+  }
+
+  getConversationStartedAt(): number {
+    return this.conversationStartedAt;
   }
 
   // The window of the latest response that reported one: what the model had
@@ -574,6 +633,8 @@ export class Session {
       permissionMode: this.permissionMode,
       ...(this.checkpoints.length > 0 ? { checkpoints: [...this.checkpoints] } : {}),
       updatedAt: this.lastActivity,
+      conversationStartedAt: this.conversationStartedAt,
+      lastResponseFinishedAt: this.lastResponseFinishedAt,
       autoNamePending: this.autoNamePending,
     };
   }

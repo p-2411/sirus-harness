@@ -27,6 +27,12 @@ function lineCount(text: string): number {
 	return text.length === 0 ? 0 : text.split('\n').length;
 }
 
+// Ink measures a tab as zero columns, so a truncated line can still carry
+// tabs the terminal expands past the row's edge and wraps into the sidebar.
+function expandTabs(text: string): string {
+	return text.replace(/\t/g, '    ');
+}
+
 function textArgument(call: ToolCallBlock, name: string): string {
 	const value = call.arguments[name];
 	return typeof value === 'string' ? value : '';
@@ -81,13 +87,13 @@ export function editCounts(call: ToolCallBlock): { added: number; removed: numbe
 }
 
 export interface DiffLine {
-	sign: '+' | '-' | '…';
+	sign: '+' | '-' | '$' | ' ' | '…';
 	text: string;
 }
 
 const DIFF_PREVIEW_LINES = 8;
 
-function diffLines(sign: '+' | '-', text: string): DiffLine[] {
+function diffLines(sign: '+' | '-' | ' ', text: string): DiffLine[] {
 	if (!text) return [];
 	const lines = text.split('\n');
 	const shown: DiffLine[] = lines.slice(0, DIFF_PREVIEW_LINES).map(line => ({ sign, text: line }));
@@ -107,6 +113,24 @@ export function editPreview(call: ToolCallBlock): DiffLine[] {
 		];
 	}
 	return [];
+}
+
+function argumentLines(name: string, value: unknown): DiffLine[] {
+	const text = typeof value === 'string' ? value : JSON.stringify(value) ?? String(value);
+	if (!text.includes('\n')) return [{ sign: ' ', text: `${name}: ${text}` }];
+	return [{ sign: ' ', text: `${name}:` }, ...diffLines(' ', text)];
+}
+
+// What a row reveals when expanded: the diff of a file change, the full
+// command of a shell call, otherwise every argument in full. Long values
+// are cut the same way a diff is.
+export function callDetail(call: ToolCallBlock): DiffLine[] {
+	if (call.name === 'WriteFile' || call.name === 'EditFile') return editPreview(call);
+	if (call.name === 'RunShell') {
+		const [first, ...rest] = diffLines(' ', textArgument(call, 'command'));
+		return first ? [{ ...first, sign: '$' }, ...rest] : [];
+	}
+	return Object.entries(call.arguments).flatMap(([name, value]) => argumentLines(name, value));
 }
 
 interface ToolRun {
@@ -151,10 +175,10 @@ const subagentColors: Record<SubagentIndicator, string> = {
 	unknown: theme.textSubtle,
 };
 
-function useSubagentStatus(call: ToolCallBlock, result?: ToolResultBlock): SubagentIndicator | null {
+function useSubagentStatus(call: ToolCallBlock, result?: ToolResultBlock, sessionId?: string): SubagentIndicator | null {
 	useSyncExternalStore(subscribeSubagents, getSubagentsVersion);
 	if (call.name !== 'SpawnAgent') return null;
-	const run = findSubagentByCall(call.id);
+	const run = sessionId === undefined ? undefined : findSubagentByCall(call.id, sessionId);
 	if (run) return run.status;
 	if (!result) return 'working';
 	return result.isError ? 'failed' : 'unknown';
@@ -162,29 +186,29 @@ function useSubagentStatus(call: ToolCallBlock, result?: ToolResultBlock): Subag
 
 // User-visible permission state: only an approval that needs their input or
 // a call they declined. Internal safety checks stay internal.
-function usePermissionStatus(call: ToolCallBlock, result?: ToolResultBlock): { text: string; color: string } | null {
+function usePermissionStatus(call: ToolCallBlock, result?: ToolResultBlock, sessionId?: string): { text: string; color: string } | null {
 	useSyncExternalStore(subscribePermissions, getPermissionsVersion);
 	if (result?.isError && isDeclinedResult(result.result)) return { text: 'declined by user', color: theme.danger };
-	if (!result && isAwaitingApproval(call.id)) return { text: 'waiting for approval', color: theme.pending };
+	if (!result && sessionId !== undefined && isAwaitingApproval(call.id, sessionId)) return { text: 'waiting for approval', color: theme.pending };
 	return null;
 }
 
-function subagentModel(call: ToolCallBlock): string {
-	return findSubagentByCall(call.id)?.model
+function subagentModel(call: ToolCallBlock, sessionId?: string): string {
+	return (sessionId === undefined ? undefined : findSubagentByCall(call.id, sessionId))?.model
 		?? (typeof call.arguments.model === 'string' ? call.arguments.model : '');
 }
 
 // One line for one call: status dot, name, subject, and for a file change
 // the lines it added and removed. Truncated at the row's width.
-function ToolSummary({ call, result, indent = '', hovered = false, marker }: {
+function ToolSummary({ call, result, indent = '', hovered = false, sessionId }: {
+	sessionId?: string;
 	call: ToolCallBlock;
 	result?: ToolResultBlock;
 	indent?: string;
 	hovered?: boolean;
-	marker?: string;
 }) {
-	const subagent = useSubagentStatus(call, result);
-	const permission = usePermissionStatus(call, result);
+	const subagent = useSubagentStatus(call, result, sessionId);
+	const permission = usePermissionStatus(call, result, sessionId);
 	const color = subagent
 		? subagentColors[subagent]
 		: result?.isError ? theme.danger : result ? theme.toolIndicator : theme.textSubtle;
@@ -193,30 +217,62 @@ function ToolSummary({ call, result, indent = '', hovered = false, marker }: {
 	return (
 		<Text wrap="truncate-end">
 			<Text color={color}>{indent}●</Text>
-			<Text color={hovered ? theme.highlight : theme.textSubtle} bold={hovered}> {call.name}</Text>
-			{subagent && <Text color={theme.textSubtle} dimColor> {subagentModel(call)}</Text>}
+			<Text color={hovered ? theme.textMuted : theme.textSubtle}> {call.name}</Text>
+			{subagent && <Text color={theme.textSubtle} dimColor> {subagentModel(call, sessionId)}</Text>}
 			{subject && <Text color={theme.textSubtle} dimColor> {subject}</Text>}
 			{counts && <Text color={theme.success}> +{counts.added}</Text>}
 			{counts && call.name === 'EditFile' && <Text color={theme.danger}> −{counts.removed}</Text>}
 			{subagent && subagent !== 'unknown' && <Text color={color}> · {subagent}</Text>}
 			{permission && <Text color={permission.color}> · {permission.text}</Text>}
-			{marker && <Text color={hovered ? theme.highlight : theme.textSubtle}> {marker}</Text>}
 		</Text>
 	);
 }
+
+const detailColors: Record<DiffLine['sign'], string> = {
+	'+': theme.success,
+	'-': theme.danger,
+	'$': theme.text,
+	' ': theme.textMuted,
+	'…': theme.textSubtle,
+};
 
 function DiffPreview({ lines }: { lines: readonly DiffLine[] }) {
 	return (
 		<Box flexDirection="column" marginLeft={4}>
 			{lines.map((line, index) => (
-				<Text
-					key={index}
-					color={line.sign === '+' ? theme.success : line.sign === '-' ? theme.danger : theme.textSubtle}
-					wrap="truncate-end"
-				>
-					{line.sign} {line.text}
+				<Text key={index} color={detailColors[line.sign]} wrap="truncate-end">
+					{line.sign} {expandTabs(line.text)}
 				</Text>
 			))}
+		</Box>
+	);
+}
+
+// One call, collapsed to its summary line until clicked; expanded, it also
+// shows what the call carried.
+function ToolCallEntry({ call, result, indent, sessionId }: {
+	sessionId?: string;
+	call: ToolCallBlock;
+	result?: ToolResultBlock;
+	indent?: string;
+}) {
+	const [expanded, setExpanded] = useState(false);
+	const toggle = useCallback(() => setExpanded(current => !current), []);
+	const ref = useRef<DOMElement>(null);
+	const hovered = useClickable(ref, toggle);
+	const detail = expanded ? callDetail(call) : [];
+	return (
+		<Box flexDirection="column">
+			<Box ref={ref}>
+				<ToolSummary
+					sessionId={sessionId}
+					call={call}
+					result={result}
+					indent={indent}
+					hovered={hovered}
+				/>
+			</Box>
+			{detail.length > 0 && <DiffPreview lines={detail} />}
 		</Box>
 	);
 }
@@ -230,7 +286,8 @@ function AnimatedCommandStatus({ count }: { count: number }) {
 	return <>Running {count} commands{'.'.repeat(dots)}</>;
 }
 
-export function ToolRunGroup({ blocks, defaultExpanded = false }: {
+export function ToolRunGroup({ blocks, defaultExpanded = false, sessionId }: {
+	sessionId?: string;
 	blocks: readonly (ToolCallBlock | ToolResultBlock)[];
 	defaultExpanded?: boolean;
 }) {
@@ -251,41 +308,30 @@ export function ToolRunGroup({ blocks, defaultExpanded = false }: {
 	const ref = useRef<DOMElement>(null);
 	const hovered = useClickable(ref, toggle);
 	const complete = calls.every(call => results.has(call.id));
-	const summaryColor = hovered ? theme.highlight : theme.textMuted;
+	const summaryColor = hovered ? theme.accentSoft : theme.textMuted;
 
 	return (
 		<Box flexDirection="column" marginLeft={2} marginY={1}>
 			<Box ref={ref} flexDirection="row" flexWrap="nowrap">
-				<Text color={summaryColor} bold={hovered}>{expanded ? '⌄' : '›'}</Text>
-				<Text color={summaryColor} bold={hovered} wrap="truncate-end">
-					{' '}{complete ? `Ran ${calls.length} commands` : <AnimatedCommandStatus count={calls.length} />}
+				<Text color={summaryColor} wrap="truncate-end">
+					{complete ? `Ran ${calls.length} commands` : <AnimatedCommandStatus count={calls.length} />}
 				</Text>
 			</Box>
 			{expanded ? (
 				<Box flexDirection="column" marginLeft={2}>
-					{calls.map(call => {
-						const result = results.get(call.id);
-						const preview = result && !result.isError ? editPreview(call) : [];
-						return (
-							<Box key={call.id} flexDirection="column">
-								<ToolSummary call={call} result={result} />
-								{preview.length > 0 && <DiffPreview lines={preview} />}
-							</Box>
-						);
-					})}
+					{calls.map(call => (
+						<ToolCallEntry key={call.id} call={call} result={results.get(call.id)} sessionId={sessionId} />
+					))}
 				</Box>
 			) : null}
 		</Box>
 	);
 }
 
-// A completed lone file change shows its colored diff immediately.
-function ToolCallRow({ call, result }: { call: ToolCallBlock; result?: ToolResultBlock }) {
-	const preview = result && !result.isError ? editPreview(call) : [];
+function ToolCallRow({ call, result, sessionId }: { call: ToolCallBlock; result?: ToolResultBlock; sessionId?: string }) {
 	return (
 		<Box flexDirection="column" padding={1}>
-			<ToolSummary call={call} result={result} indent="  " />
-			{preview.length > 0 && <DiffPreview lines={preview} />}
+			<ToolCallEntry call={call} result={result} indent="  " sessionId={sessionId} />
 		</Box>
 	);
 }
@@ -299,9 +345,10 @@ function renderToolBlock(
 	block: ToolCallBlock | ToolResultBlock,
 	key: number,
 	results: ReadonlyMap<string, ToolResultBlock>,
+	sessionId?: string,
 ) {
 	if (block.type === 'tool_call') {
-		return <ToolCallRow key={key} call={block} result={results.get(block.id)} />;
+		return <ToolCallRow key={key} call={block} result={results.get(block.id)} sessionId={sessionId} />;
 	}
 	return (
 		<Text key={key} color={block.isError ? theme.danger : theme.success}>
@@ -314,7 +361,9 @@ export function ChatMessage({
 	message,
 	model,
 	participantColors,
+	sessionId,
 }: {
+	sessionId?: string;
 	message: Message;
 	model?: string;
 	participantColors?: ParticipantColors;
@@ -347,15 +396,16 @@ export function ChatMessage({
 			</Text>
 			{messageSegments(message.content).map((block, index) => {
 				if (block.type === 'text') {
+					if (block.filePath) return null;
 					return <Markdown key={index} participantColors={participantColors}>{block.text}</Markdown>;
 				}
 				if (block.type === 'image') {
 					return <ImageLine key={index} image={block} />;
 				}
 				if (block.type === 'tool_run') {
-					return <ToolRunGroup key={index} blocks={block.blocks} />;
+					return <ToolRunGroup key={index} blocks={block.blocks} sessionId={sessionId} />;
 				}
-				return renderToolBlock(block, index, results);
+				return renderToolBlock(block, index, results, sessionId);
 			})}
 		</Box>
 	);

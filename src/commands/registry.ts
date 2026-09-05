@@ -1,13 +1,13 @@
 import { modelCommand, thinkingCommandSpec } from './agents/commands';
 import {
-  infoCommandSpec,
   loginCommandSpec,
   logoutCommandSpec,
+  usageCommandSpec,
 } from './authentication/commands';
 import { helpCommand } from './help/commands';
 import { memoryCommandSpec } from './memory/commands';
-import { clearCommand, permissionsCommandSpec, renameCommand } from './session/commands';
-import { updateCommandSpec } from './update/commands';
+import { clearCommand, exitCommand, permissionsCommandSpec, renameCommand } from './session/commands';
+import { updateCommandSpec, versionCommandSpec } from './update/commands';
 import { rewindCommandSpec, undoCommandSpec } from './checkpoints/commands';
 import { imageCommandSpec } from './images/commands';
 import { notifyCommandSpec } from './notifications/commands';
@@ -37,8 +37,9 @@ export const commandRegistry: CommandSpec[] = [
   thinkingCommandSpec,
   loginCommandSpec,
   logoutCommandSpec,
-  infoCommandSpec,
+  usageCommandSpec,
   updateCommandSpec,
+  versionCommandSpec,
   memoryCommandSpec,
   permissionsCommandSpec,
   undoCommandSpec,
@@ -47,6 +48,7 @@ export const commandRegistry: CommandSpec[] = [
   notifyCommandSpec,
   renameCommand,
   helpCommand(() => commandRegistry),
+  exitCommand,
 ];
 
 // Prefix matches while a command name is being typed ('/' alone matches

@@ -517,8 +517,9 @@ export function isAwaitingJudge(callId: string): boolean {
   return checking.has(callId);
 }
 
-export function isAwaitingApproval(callId: string): boolean {
-  return pending.some(entry => entry.request.call.id === callId);
+export function isAwaitingApproval(callId: string, sessionId?: string): boolean {
+  return pending.some(entry => entry.request.call.id === callId
+    && (sessionId === undefined || entry.request.sessionId === sessionId));
 }
 
 export const DECLINED_PREFIX = 'The user declined to allow';

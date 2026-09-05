@@ -137,6 +137,7 @@ describe('updateSirus', () => {
 
     let call = 0;
     await expect(updateSirus(undefined, undefined, {
+      currentVersion: '0.0.3',
       packageRoot: packageRoot(),
       run: async () => ++call === 1
         ? { code: 0, stdout: '"0.1.0"', stderr: '' }

@@ -78,9 +78,9 @@ export function getSubagentsVersion(): number {
   return version;
 }
 
-export function findSubagentByCall(callId: string): SubagentRun | undefined {
+export function findSubagentByCall(callId: string, sessionId?: string): SubagentRun | undefined {
   for (const run of runs.values()) {
-    if (run.callId === callId) return run;
+    if (run.callId === callId && (sessionId === undefined || run.permissions?.sessionId === sessionId)) return run;
   }
   return undefined;
 }

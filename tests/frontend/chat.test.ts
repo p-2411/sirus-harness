@@ -6,7 +6,7 @@ import stripAnsi from 'strip-ansi';
 import { Session } from '../../src/agent_runtime/session';
 import type { Message } from '../../src/agent_runtime/types';
 import Chat, { formatElapsed, promptHistory, turnPhase } from '../../src/frontend/chat/Chat';
-import { infoCommandSpec } from '../../src/commands/authentication/commands';
+import { usageCommandSpec } from '../../src/commands/authentication/commands';
 
 test('Escape dismisses help, command suggestions, login stages and secret entry', async () => {
   const session = new Session();
@@ -44,17 +44,17 @@ test('Escape dismisses help, command suggestions, login stages and secret entry'
     await flush();
     await type('/help');
     await type('\r');
-    expect(output).toContain('keyboard shortcuts');
+    expect(output).toContain('list commands and keys');
     await type('\u001b');
-    expect(output).not.toContain('keyboard shortcuts');
+    expect(output).not.toContain('list commands and keys');
 
     await type('/log');
-    expect(output).toContain('sign in with a subscription');
+    expect(output).toContain('add a subscription or API key');
     await type('\u001b');
-    expect(output).not.toContain('sign in with a subscription');
+    expect(output).not.toContain('add a subscription or API key');
     expect(session.getInputContent()).toBe('/log');
     await type('i');
-    expect(output).toContain('sign in with a subscription');
+    expect(output).toContain('add a subscription or API key');
     await type('\r');
     expect(output).toContain('ChatGPT');
     await type('\u001b');
@@ -72,10 +72,10 @@ test('Escape dismisses help, command suggestions, login stages and secret entry'
     await type('\r');
     await type('\u001b[B');
     await type('\r');
-    expect(output).toContain('Paste your Anthropic API key');
+    expect(output).toContain('Anthropic API key');
     await type('not-a-real-key');
     await type('\u001b');
-    expect(output).not.toContain('Paste your Anthropic API key');
+    expect(output).not.toContain('Anthropic API key');
     expect(session.getMessages()).toEqual([]);
   } finally {
     app.unmount();
@@ -126,11 +126,10 @@ test('help and usage stay scrollable above the editor in an 80 by 24 terminal', 
     expect(output).toContain('esc closes');
   };
   // The command layer has separate provider tests. Keep this rendering test
-  // offline while exercising the same asynchronous /info completion path.
-  const info = spyOn(infoCommandSpec, 'run').mockImplementation(() => Promise.resolve({
+  // offline while exercising the same asynchronous /usage completion path.
+  const usage = spyOn(usageCommandSpec, 'run').mockImplementation(() => Promise.resolve({
     kind: 'info' as const, showIcon: false,
-    text: ['claude: subscription', ...Array.from({ length: 24 }, (_, i) => `window ${i}: 70% remaining`),
-      'gpt: resets in 2h', 'session: 100 in · 20 out'].join('\n'),
+    text: ['claude · you@example.com · 5h 70% · 7d 45%', 'session · 100 in · 20 out'].join('\n'),
   }));
   try {
     await flush();
@@ -157,21 +156,23 @@ test('help and usage stay scrollable above the editor in an 80 by 24 terminal', 
     expect(output).toContain('Conversation remains available.');
     expect(output).not.toContain('esc closes');
 
-    await type('/info');
+    // Short output stays pinned above the editor instead of taking the panel.
+    await type('/usage');
     await type('\r');
-    expect(info).toHaveBeenCalledTimes(1);
-    expect(output).toContain('claude: subscription');
-    expect(output).not.toContain('session: 100 in');
-    expectEditor();
+    expect(usage).toHaveBeenCalledTimes(1);
+    expect(output).toContain('claude · you@example.com · 5h 70% · 7d 45%');
+    expect(output).toContain('session · 100 in · 20 out');
+    expect(output).toContain('enter ↵');
+    expect(output).not.toContain('esc closes');
     await type('\u001b[F');
-    expect(output).toContain('gpt: resets in 2h');
-    expect(output).toContain('session: 100 in · 20 out');
-    expectEditor();
+    // End scrolls the history behind the pinned output.
+    expect(output).toContain('Conversation row 23.');
+    expect(output).toContain('session · 100 in · 20 out');
     await type('\u001b');
-    expect(output).toContain('Conversation remains available.');
+    expect(output).not.toContain('session · 100 in');
     expect(session.getMessages()).toEqual(originalMessages);
   } finally {
-    info.mockRestore();
+    usage.mockRestore();
     app.unmount();
     stdin.destroy();
     stdout.destroy();

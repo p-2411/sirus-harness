@@ -103,7 +103,7 @@ export function claudeSubscriptionUsage(response: unknown): SubscriptionUsage {
 }
 
 // Reading allowance never sends a model prompt or consumes a reset credit.
-// Bound both runtime startup and the read so /info cannot wait indefinitely.
+// Bound both runtime startup and the read so /usage cannot wait indefinitely.
 export async function readSubscriptionUsage(vendor: Vendor, signal?: AbortSignal, profile = 'default'): Promise<SubscriptionUsage> {
   throwIfAborted(signal);
   const directory = dataDirectory();
@@ -134,7 +134,7 @@ export async function readSubscriptionUsage(vendor: Vendor, signal?: AbortSignal
     return usage;
   } catch {
     throwIfAborted(signal);
-    return { windows: [], unavailable: timeout.aborted ? 'request timed out; try /info again' : 'could not read provider limits; try /info again' };
+    return { windows: [], unavailable: timeout.aborted ? 'request timed out; try /usage again' : 'could not read provider limits; try /usage again' };
   }
 }
 

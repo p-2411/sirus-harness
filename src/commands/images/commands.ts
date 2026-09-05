@@ -6,12 +6,12 @@ import type { CommandSpec } from '../types';
 export const imageCommandSpec: CommandSpec = {
   name: 'image',
   args: '[path]',
-  description: 'attach the clipboard image, or an image file, to your next message',
+  description: 'attach the clipboard image or an image file',
   run: async (args, execution) => {
     const image = args.length === 0
       ? await attachClipboardImage()
       : attachImageFile(args.join(' '), execution.session.getDirectory());
     execution.attachImage(image);
-    return { kind: 'success', text: `Attached ${describeImage(image)}. It goes with your next message.` };
+    return { kind: 'success', text: `Attached ${describeImage(image)}.` };
   },
 };

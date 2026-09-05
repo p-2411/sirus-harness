@@ -100,12 +100,12 @@ export function changeModel(
     && !saveSirusModelPreference(resolvedModel)) {
     return {
       kind: 'error',
-      text: `@${normalizedParticipantName} model changed to ${resolvedModel} for this session, but the default could not be saved.`,
+      text: `@${normalizedParticipantName} model set to ${resolvedModel}, but the default could not be saved.`,
     };
   }
   return {
     kind: 'success',
-    text: `@${normalizedParticipantName} model changed to ${resolvedModel}.`,
+    text: `@${normalizedParticipantName} model set to ${resolvedModel}.`,
   };
 }
 
@@ -120,7 +120,7 @@ export function changeThinkingLevel(
   session.setThinkingLevel(level, normalizedParticipantName);
   return {
     kind: 'success',
-    text: `@${normalizedParticipantName} thinking level changed to ${level}.`,
+    text: `@${normalizedParticipantName} thinking set to ${level}.`,
   };
 }
 
@@ -140,7 +140,7 @@ export function thinkingMenuItems(args: readonly string[] = []): CommandMenuItem
 
 export function thinkingCommand(args: readonly string[], session: Session): Feedback {
   if (args.length === 0) {
-    return { kind: 'info', text: `@sirus thinking level is ${session.getThinkingLevel()}.` };
+    return { kind: 'info', text: `@sirus thinking is ${session.getThinkingLevel()}.` };
   }
   if (args.length === 1) {
     const level = parseThinkingLevel(args[0]);
@@ -150,7 +150,7 @@ export function thinkingCommand(args: readonly string[], session: Session): Feed
     }
     return {
       kind: 'info',
-      text: `@${args[0].replace(/^@/, '')} thinking level is ${session.getThinkingLevel(args[0])}.`,
+      text: `@${args[0].replace(/^@/, '')} thinking is ${session.getThinkingLevel(args[0])}.`,
     };
   }
   if (args.length === 2) return changeThinkingLevel(args[0], args[1], session);

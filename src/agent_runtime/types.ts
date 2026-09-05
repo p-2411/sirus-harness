@@ -1,6 +1,8 @@
 export interface TextBlock {
   type: 'text';
   text: string;
+  // Snapshot of a mentioned file; render compactly while providers receive text.
+  filePath?: string;
 }
 
 export interface ToolCallBlock {

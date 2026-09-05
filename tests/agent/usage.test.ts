@@ -61,22 +61,22 @@ describe('allowance display', () => {
       codex: { limitName: 'Coding', primary: { usedPercent: 12.5, windowDurationMins: 300 },
         secondary: { usedPercent: 45, windowDurationMins: 10080 } },
     } });
-    expect(describeSubscriptionUsage(usage)).toBe('  5 hour: 87.5%\n  7-day: 55%');
+    expect(describeSubscriptionUsage(usage)).toBe('5h 87.5% · 7d 55%');
   });
   test('shows only the two overall remaining percentages', () => {
     expect(describeSubscriptionUsage({ windows: [
       { label: '5-hour', usedPercent: 25, resetsAt: 1234 },
       { label: '7-day', usedPercent: 100, resetsAt: 1234 },
       { label: '7-day Sonnet', usedPercent: 50, resetsAt: 1234 },
-    ] })).toBe('  5 hour: 75%\n  7-day: 0%');
+    ] })).toBe('5h 75% · 7d 0%');
   });
 
   test('distinguishes missing data from unused allowance', () => {
     expect(describeSubscriptionUsage({ windows: [
       { label: '5-hour', usedPercent: null, resetsAt: null },
       { label: '7-day', usedPercent: 0, resetsAt: 1000 },
-    ] })).toBe('  5 hour: unavailable\n  7-day: 100%');
+    ] })).toBe('5h unavailable · 7d 100%');
     expect(describeSubscriptionUsage({ windows: [], unavailable: 'request timed out' }))
-      .toBe('  5 hour: unavailable\n  7-day: unavailable');
+      .toBe('5h unavailable · 7d unavailable');
   });
 });

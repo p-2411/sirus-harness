@@ -110,14 +110,14 @@ function claudePlan(status: ClaudeAuthStatus): string {
 }
 
 function describeClaude(status: ClaudeAuthStatus): string {
-  return `Claude: signed in with ${claudePlan(status)}${status.email ? ` as ${status.email}` : ''}`;
+  return `Signed in to Claude${status.email ? ` as ${status.email}` : ''} (${claudePlan(status)}).`;
 }
 
 export async function loginClaude(notify: Notify, signal?: AbortSignal): Promise<string> {
   const profile = nextProfile('claude');
   let status = await claudeStatus(signal, profile);
   if (!(status.loggedIn && status.authMethod === 'claude.ai')) {
-    notify('Opening your browser to sign in to Claude…');
+    notify('Opening the browser…');
     const { code, stderr } = await runClaude(['auth', 'login', '--claudeai'], line => {
       // surface the login URL for terminals where the browser can't open
       if (line.includes('http')) notify(line);
@@ -131,7 +131,7 @@ export async function loginClaude(notify: Notify, signal?: AbortSignal): Promise
     }
   }
   providerFor('claude').addSubscription(profile, status.email);
-  return `${describeClaude(status)}. claude-* models now use your subscription.`;
+  return describeClaude(status);
 }
 
 type Json = Record<string, unknown>;
@@ -153,7 +153,7 @@ function gptPlan(account: CodexAccount): string {
 }
 
 function describeGpt(account: CodexAccount): string {
-  return `ChatGPT: signed in with ${gptPlan(account)}${account.email ? ` as ${account.email}` : ''}`;
+  return `Signed in to ChatGPT${account.email ? ` as ${account.email}` : ''} (${gptPlan(account)}).`;
 }
 
 function openInBrowser(url: string): void {
@@ -176,7 +176,7 @@ export async function loginGpt(notify: Notify, signal?: AbortSignal): Promise<st
     const start = await abortable(rpc.request<Json>('account/login/start', { type: 'chatgpt' }), signal);
     const loginId = start.loginId;
     const authUrl = String(start.authUrl);
-    notify(`Sign in to ChatGPT in your browser: ${authUrl}`);
+    notify(`Sign in at ${authUrl}`);
     openInBrowser(authUrl);
     const cancelLogin = () => {
       void rpc.request('account/login/cancel', { loginId }).catch(() => void 0);
@@ -202,14 +202,14 @@ export async function loginGpt(notify: Notify, signal?: AbortSignal): Promise<st
     }
   }
   providerFor('gpt').addSubscription(profile, account.email ?? undefined);
-  return `${describeGpt(account)}. gpt-* models now use your subscription.`;
+  return describeGpt(account);
 }
 
 export async function login(vendor: Vendor, notify: Notify, signal?: AbortSignal): Promise<string> {
   return vendor === 'claude' ? loginClaude(notify, signal) : loginGpt(notify, signal);
 }
 
-// Plan and account for a provider already in subscription mode, for /info.
+// Plan and account for a provider already in subscription mode, for /usage.
 export async function subscriptionDetail(vendor: Vendor, signal?: AbortSignal, profile = 'default'): Promise<string> {
   if (vendor === 'claude') {
     const status = await claudeStatus(signal, profile);

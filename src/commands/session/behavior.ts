@@ -10,14 +10,14 @@ import type { CommandMenuItem } from '../types';
 
 export function clearSession(session: Session): Feedback {
   session.clear();
-  return { kind: 'success', text: 'Session history cleared.' };
+  return { kind: 'success', text: 'History cleared.' };
 }
 
 export function renameSession(name: string, session: Session): Feedback {
   const trimmed = name.replace(/\s+/g, ' ').trim();
   if (!trimmed) throw new Error('Usage: /rename <name>');
   session.setName(trimmed);
-  return { kind: 'success', text: `Session renamed to ${session.getName()}.` };
+  return { kind: 'success', text: `Renamed to ${session.getName()}.` };
 }
 
 const PERMISSION_MODE_DESCRIPTIONS: Record<PermissionMode, string> = {

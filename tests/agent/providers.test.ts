@@ -14,7 +14,7 @@ import {
   toAnthropicMessages,
 } from '../../src/agent_runtime/providers/anthropic/api';
 import { openAIUsage, toOpenAIContinuationInput, toOpenAIInput } from '../../src/agent_runtime/providers/openai/api';
-import { codexTurnUsage } from '../../src/agent_runtime/providers/openai/codex-subscription';
+import { codexTurnUsage, shutdownCodexRuntime } from '../../src/agent_runtime/providers/openai/codex-subscription';
 import { modelStrategies } from '../../src/agent_runtime/chat';
 import { SessionAgent } from '../../src/agent_runtime/agent';
 import { TurnContext } from '../../src/agent_runtime/turn';
@@ -298,11 +298,15 @@ describe('API providers without credentials', () => {
 });
 
 describe('Codex subscription runtime lifecycle', () => {
-  let shutdown: (() => void) | undefined;
+  beforeEach(async () => {
+    // Other tests can populate the process-wide runtime before this suite runs.
+    shutdownCodexRuntime();
+    await Promise.resolve();
+  });
 
-  afterEach(() => {
-    shutdown?.();
-    shutdown = undefined;
+  afterEach(async () => {
+    shutdownCodexRuntime();
+    await Promise.resolve();
     mock.restore();
   });
 
@@ -311,7 +315,6 @@ describe('Codex subscription runtime lifecycle', () => {
     const { getCodexRpc, shutdownCodexRuntime } = await import(
       '../../src/agent_runtime/providers/openai/codex-subscription'
     );
-    shutdown = shutdownCodexRuntime;
     const close = mock(() => {});
     const rpc = {
       isAlive: true,
@@ -339,7 +342,6 @@ describe('Codex subscription runtime lifecycle', () => {
     const { subscriptionTransport, shutdownCodexRuntime } = await import(
       '../../src/agent_runtime/providers/openai/codex-subscription'
     );
-    shutdown = shutdownCodexRuntime;
 
     let notify: (method: string, params: Record<string, unknown>) => void = () => {};
     const request = mock(async (method: string, params: Record<string, unknown> = {}) => {

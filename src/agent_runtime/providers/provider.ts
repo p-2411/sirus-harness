@@ -49,7 +49,7 @@ export interface ApiKey {
   masked: string;
 }
 
-// What the provider is signed in with, for /info.
+// What the provider is signed in with.
 export type AuthStatus =
   | { mode: 'subscription' }
   | { mode: 'api'; source: ApiKeySource; masked: string }

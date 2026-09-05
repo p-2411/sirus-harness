@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { Box, Text, useInput, usePaste } from 'ink';
 import { theme } from '../styles/theme';
 import { CommandMenu, moveCommandMenuSelection } from './CommandMenu';
@@ -12,12 +12,20 @@ import { isMouseInput } from '../interaction/mouse';
 import { isFocusInput } from '../terminal/window-focus';
 import { getSelectionSnapshot, subscribeSelection } from '../interaction/selection';
 import type { Feedback } from '../../commands/feedback';
-import type { Participant } from '../../agent_runtime/session';
-import type { ImageBlock } from '../../agent_runtime/types';
+import type { Participant, QueuedMessage } from '../../agent_runtime/session';
+import type { ImageBlock, MessageBlock } from '../../agent_runtime/types';
 import { describeImage } from '../../images';
-import { ParticipantMenu } from './ParticipantMenu';
+import {
+  composeContent,
+  imagePlaceholder,
+  imagePlaceholders,
+  isImagePlaceholder,
+  removedPlaceholders,
+  stripPlaceholders,
+} from './draft';
+import { useFileSuggestions } from './FileMenu';
+import { MentionMenu, mentionMenuItems, MENTION_MENU_VISIBLE_ITEMS } from './MentionMenu';
 import { MentionText, participantColorMap, type ParticipantColors } from '../MentionText';
-import { activeSubagentCount, getSubagentsVersion, subscribeSubagents } from '../../agent_runtime/tools/subagents';
 import { contextPercent, formatTokens, type ContextUsage } from '../../agent_runtime/usage';
 import {
   PERMISSION_MODE_NAMES,
@@ -154,12 +162,14 @@ export type InputMode =
   };
 
 interface InputBarProps {
-  send: (input: string, attachments?: readonly ImageBlock[]) => void;
+  send: (input: string, attachments?: readonly ImageBlock[], content?: MessageBlock[]) => void;
   inputContent: string;
   setInputContent: (inputContent: string) => void;
   disabled: boolean;
   feedback: Feedback | null;
   participants: readonly Participant[];
+  activeSubagents?: number;
+  directory?: string;
   mode?: InputMode;
   permissionMode?: PermissionMode;
   // shift+tab in text mode
@@ -168,18 +178,20 @@ interface InputBarProps {
   attachments?: readonly ImageBlock[];
   // ctrl+v in text mode
   onPasteImage?: () => void;
-  // backspace on an empty line drops the newest attachment
-  onRemoveAttachment?: () => void;
+  // backspace over an image in the draft drops it
+  onRemoveAttachment?: (image: ImageBlock) => void;
   // the session's current model, shown under the input bar
   model?: string;
   thinkingLevel?: string;
   // the session's earlier prompts, oldest first, for ↑/↓ recall
   history?: readonly string[];
-  // messages waiting to go out once the agents are free
-  queued?: number;
+  // messages waiting to go out once the agents are free, oldest first
+  queuedMessages?: readonly QueuedMessage[];
   // where a message sent while the agents are working goes; without it the
   // draft simply stays put
   onQueue?: (text: string) => void;
+  // Edits a waiting message in place; empty text removes it.
+  onUpdateQueued?: (id: string, text: string) => void;
   contextUsage?: ContextUsage | null;
 }
 
@@ -230,24 +242,22 @@ export function ContextGauge({ usage }: { usage: ContextUsage }) {
       : percent >= 70 ? theme.pending : theme.textSubtle;
   return (
     <Text color={color} dimColor={percent === null || percent < 70}>
-      ctx {formatTokens(usage.tokens)}{percent !== null ? ` · ${percent}%` : ''}
+      ctx {formatTokens(usage.tokens)}{percent !== null ? ` (${percent}%)` : ''}
     </Text>
   );
 }
 
-// The line under the input box: the session's permission mode, messages
-// waiting to be sent, then how many spawned subagents are still at work; the
-// context gauge and the session's model stay on the far right. It keeps its
-// height when there is nothing to say so the layout stays put.
-export function SubagentStatusRow({ permissionMode, model, thinkingLevel, queued = 0, contextUsage }: {
+// The line under the input box: the session's permission mode, then how many
+// spawned subagents are still at work; the context gauge and the session's
+// model stay on the far right. It keeps its height when there is nothing to
+// say so the layout stays put.
+export function SubagentStatusRow({ permissionMode, model, thinkingLevel, contextUsage, activeSubagents: active = 0 }: {
   permissionMode?: PermissionMode;
   model?: string;
   thinkingLevel?: string;
-  queued?: number;
   contextUsage?: ContextUsage | null;
+  activeSubagents?: number;
 }) {
-  useSyncExternalStore(subscribeSubagents, getSubagentsVersion);
-  const active = activeSubagentCount();
   return (
     <Box paddingX={3} height={1} flexShrink={0} justifyContent="space-between">
       <Box>
@@ -257,14 +267,8 @@ export function SubagentStatusRow({ permissionMode, model, thinkingLevel, queued
             <Text color={theme.textSubtle}> · shift+tab</Text>
           </Text>
         )}
-        {queued > 0 && (
-          <Text color={theme.textMuted}>
-            {permissionMode ? ' · ' : ''}{queued} queued
-            <Text color={theme.textSubtle}> · esc discards</Text>
-          </Text>
-        )}
         {active > 0 && (
-          <Text color={theme.textMuted}>{permissionMode || queued > 0 ? ' · ' : ''}{active} active subagent{active === 1 ? '' : 's'}</Text>
+          <Text color={theme.textMuted}>{permissionMode ? ' · ' : ''}{active} active subagent{active === 1 ? '' : 's'}</Text>
         )}
       </Box>
       <Box>
@@ -343,19 +347,72 @@ export function ApprovalPrompt({ request, waiting, selected }: {
 const TEXT_MODE: InputMode = { type: 'text' };
 const NO_ATTACHMENTS: readonly ImageBlock[] = [];
 
-// The images that will go with the next message, above the input box.
-export function AttachmentRow({ attachments }: { attachments: readonly ImageBlock[] }) {
-  if (attachments.length === 0) return null;
+export function imageChip(image: ImageBlock): string {
+  return `[${describeImage(image)}]`;
+}
+
+// Draft text with each image placeholder drawn as a chip where it sits.
+function DraftText({ text, imageFor, participantColors }: {
+  text: string;
+  imageFor: (placeholder: string) => ImageBlock | undefined;
+  participantColors?: ParticipantColors;
+}) {
+  const parts: ReactNode[] = [];
+  let buffer = '';
+  const flush = () => {
+    if (buffer) parts.push(<MentionText key={parts.length} colors={participantColors}>{buffer}</MentionText>);
+    buffer = '';
+  };
+  for (const character of text) {
+    if (!isImagePlaceholder(character)) {
+      buffer += character;
+      continue;
+    }
+    const image = imageFor(character);
+    if (!image) {
+      buffer += character;
+      continue;
+    }
+    flush();
+    parts.push(<Text key={parts.length} color={theme.textMuted}>{imageChip(image)}</Text>);
+  }
+  flush();
+  return <>{parts}</>;
+}
+
+// Images the draft no longer places (its text was replaced by a recall, or
+// the message was refused): they go at the end.
+function TrailingImages({ images, after }: { images: readonly ImageBlock[]; after: boolean }) {
+  if (images.length === 0) return null;
+  const chips = images.map(imageChip).join(' ');
+  return <Text color={theme.textMuted}>{after ? ` ${chips}` : `${chips} `}</Text>;
+}
+
+// Waiting messages, with the one being edited highlighted.
+export function QueuedRow({ messages, selected = null, participantColors }: {
+  messages: readonly string[];
+  selected?: number | null;
+  participantColors?: ParticipantColors;
+}) {
+  if (messages.length === 0) return null;
   return (
-    <Box paddingX={3} flexShrink={0}>
-      <Text color={theme.textMuted} wrap="truncate-end">
-        {attachments.map(image => `▣ ${describeImage(image)}`).join('   ')}
-      </Text>
-      <Text color={theme.textSubtle}>   backspace removes</Text>
+    <Box paddingX={3} flexDirection="column" flexShrink={0}>
+      {messages.map((message, index) => {
+        const active = index === selected;
+        return (
+          <Box key={index} justifyContent="space-between">
+            <Text color={active ? theme.text : theme.textMuted} wrap="truncate-end">
+              <Text color={active ? theme.accent : theme.textSubtle}>{active ? '› ' : '⋮ '}</Text>
+              <MentionText colors={participantColors}>{message.replace(/\s+/g, ' ').trim()}</MentionText>
+            </Text>
+          </Box>
+        );
+      })}
     </Box>
   );
 }
 const NO_HISTORY: readonly string[] = [];
+const NO_QUEUE: readonly QueuedMessage[] = [];
 
 export function InputBar({
   send,
@@ -364,6 +421,8 @@ export function InputBar({
   disabled,
   feedback,
   participants,
+  activeSubagents = 0,
+  directory,
   mode = TEXT_MODE,
   permissionMode,
   onCyclePermissionMode,
@@ -373,23 +432,119 @@ export function InputBar({
   model,
   thinkingLevel,
   history = NO_HISTORY,
-  queued = 0,
+  queuedMessages = NO_QUEUE,
   onQueue,
+  onUpdateQueued,
   contextUsage,
 }: InputBarProps) {
+  // Identity survives edits and earlier messages draining from the queue.
+  const [queueSelection, setQueueSelection] = useState<string | null>(null);
+  const selectedQueued = queuedMessages.find(message => message.id === queueSelection);
+  const selectedQueueIndex = selectedQueued ? queuedMessages.indexOf(selectedQueued) : null;
+  const draftCursor = useRef(inputContent.length);
   const [cursor, setCursor] = useState(inputContent.length);
-  const input = inputContent;
-  const editor: InputState = { text: inputContent, cursor };
-  function setEditor(next: InputState): void {
-    setCursor(next.cursor);
-    setInputContent(next.text);
+  const previousInputContent = useRef(inputContent);
+  useEffect(() => {
+    // A rejected attachment restores the cleared draft from Chat. Resume
+    // editing at its end, just as when recalling a previous prompt.
+    if (!previousInputContent.current && inputContent && cursor === 0 && queueSelection === null) {
+      setCursor(inputContent.length);
+    }
+    previousInputContent.current = inputContent;
+  }, [inputContent, cursor, queueSelection]);
+  const input = selectedQueued?.text ?? inputContent;
+  const editor: InputState = { text: input, cursor: Math.min(cursor, input.length) };
+  function leaveQueue(): void {
+    setQueueSelection(null);
+    setCursor(Math.min(draftCursor.current, inputContent.length));
   }
+  function selectQueued(message: QueuedMessage): void {
+    if (!selectedQueued) draftCursor.current = editor.cursor;
+    setQueueSelection(message.id);
+    setRecall(null);
+    setCursor(message.text.length);
+  }
+  function setEditor(next: InputState): void {
+    if (selectedQueued) {
+      onUpdateQueued?.(selectedQueued.id, next.text);
+      if (next.text.length === 0) {
+        leaveQueue();
+        return;
+      }
+    } else {
+      setInputContent(next.text);
+    }
+    setCursor(next.cursor);
+  }
+  useEffect(() => {
+    if (queueSelection !== null && !selectedQueued) leaveQueue();
+  }, [queueSelection, selectedQueued]);
+  useEffect(() => {
+    if (mode.type !== 'text' && queueSelection !== null) leaveQueue();
+  }, [mode]);
   const participantColors = participantColorMap(participants);
+  // Which placeholder character stands for which attached image. New images
+  // land at the cursor; placeholders whose image is gone are stripped.
+  const placeholderPaths = useRef(new Map<string, string>());
+  const allocated = useRef(0);
+  const seenAttachments = useRef<readonly ImageBlock[] | null>(null);
+  const imageFor = (placeholder: string): ImageBlock | undefined => {
+    const path = placeholderPaths.current.get(placeholder);
+    return path === undefined ? undefined : attachments.find(image => image.path === path);
+  };
+  const placedImages = imagePlaceholders(input).flatMap(placeholder => imageFor(placeholder) ?? []);
+  const trailingImages = attachments.filter(image => !placedImages.includes(image));
+  useEffect(() => {
+    const previous = seenAttachments.current;
+    seenAttachments.current = attachments;
+    const draft = { text: inputContent, cursor: selectedQueued ? draftCursor.current : editor.cursor };
+    let next = stripPlaceholders(draft, placeholder => !placeholderPaths.current.has(placeholder) || imageFor(placeholder) !== undefined);
+    const added = previous === null ? [] : attachments.filter(image => !previous.some(item => item.path === image.path));
+    if (added.length > 0) {
+      const placeholders = added.map(image => {
+        let placeholder = imagePlaceholder(allocated.current++);
+        while (placeholderPaths.current.has(placeholder) || next.text.includes(placeholder)) {
+          placeholder = imagePlaceholder(allocated.current++);
+        }
+        placeholderPaths.current.set(placeholder, image.path);
+        return placeholder;
+      });
+      next = applyInputEdit(next, { type: 'insert', text: placeholders.join('') });
+    }
+    if (next.text !== draft.text || next.cursor !== draft.cursor) {
+      setInputContent(next.text);
+      if (selectedQueued) draftCursor.current = next.cursor;
+      else setCursor(next.cursor);
+    }
+  }, [attachments]);
+  const draftMessage = () => {
+    const content = composeContent(input.trim(), imageFor, trailingImages);
+    const text = content.flatMap(block => block.type === 'text' ? [block.text] : []).join('');
+    return { text, images: [...placedImages, ...trailingImages], content };
+  };
   // Menu and secret state live apart from the draft so leaving either mode
   // brings back whatever the user had typed.
   const [selected, setSelected] = useState(0);
   const [secret, setSecret] = useState('');
   const [commandMenuDismissed, setCommandMenuDismissed] = useState(false);
+  const [mentionNavigation, setMentionNavigation] = useState({ key: '', selected: '', bottomGap: 0 });
+  const fileSuggestions = useFileSuggestions(
+    mode.type === 'text' && !commandMenuDismissed && !input.startsWith('/') ? directory : undefined,
+    input,
+    editor.cursor,
+  );
+  const mentionActive = mode.type === 'text' && !commandMenuDismissed
+    && !input.startsWith('/') && fileSuggestions.mention !== null;
+  const mentionItems = mentionActive
+    ? mentionMenuItems(input.slice(0, editor.cursor), participants, fileSuggestions.files) : [];
+  const mentionKey = `${input}\0${editor.cursor}`;
+  // Open at the closest match at the bottom. Track the window from its bottom
+  // so arriving file results above the agents do not move the user's selection.
+  const savedMentionIndex = mentionNavigation.key === mentionKey
+    ? mentionItems.findIndex(item => item.key === mentionNavigation.selected) : -1;
+  const mentionSelected = savedMentionIndex >= 0 ? savedMentionIndex : Math.max(0, mentionItems.length - 1);
+  const mentionOffset = Math.max(0, mentionItems.length - MENTION_MENU_VISIBLE_ITEMS
+    - (savedMentionIndex >= 0 ? mentionNavigation.bottomGap : 0));
   const [commandNavigation, setCommandNavigation] = useState({
     input: '',
     selected: 0,
@@ -398,7 +553,7 @@ export function InputBar({
   // Which earlier prompt ↑ has brought back, and the draft it replaced so ↓
   // past the newest one restores it. Editing leaves the recall.
   const [recall, setRecall] = useState<{ index: number; draft: InputState } | null>(null);
-  const commandMatches = mode.type === 'text' && !commandMenuDismissed ? matchCommands(input) : [];
+  const commandMatches = mode.type === 'text' && !selectedQueued && !commandMenuDismissed ? matchCommands(input) : [];
   const activeCommandNavigation = commandNavigation.input === input
     ? commandNavigation
     : { input, selected: 0, offset: 0 };
@@ -424,7 +579,12 @@ export function InputBar({
 
   const edit = (change: InputEdit) => {
     setRecall(null);
-    setEditor(applyInputEdit(editor, change));
+    const next = applyInputEdit(editor, change);
+    for (const placeholder of removedPlaceholders(editor.text, next.text)) {
+      const image = imageFor(placeholder);
+      if (image) onRemoveAttachment?.(image);
+    }
+    setEditor(next);
   };
   const insertText = (text: string) => edit({ type: 'insert', text: normalizeNewlines(text) });
   const recallPrevious = () => {
@@ -498,15 +658,37 @@ export function InputBar({
     }
     if (key.escape) {
       setCommandMenuDismissed(true);
+      if (queueSelection !== null) leaveQueue();
       return;
     }
     if (key.tab && key.shift) {
       onCyclePermissionMode?.();
       return;
     }
+    if (mentionActive && fileSuggestions.loading && mentionItems[mentionSelected]?.kind !== 'participant'
+      && (key.tab || key.return) && !key.shift && !key.meta) return;
+    if (mentionActive && fileSuggestions.mention && mentionItems.length > 0 && !key.ctrl && !key.meta && !key.shift) {
+      if (key.upArrow || key.downArrow) {
+        const selected = (mentionSelected + (key.upArrow ? -1 : 1) + mentionItems.length) % mentionItems.length;
+        const offset = selected < mentionOffset ? selected
+          : selected >= mentionOffset + MENTION_MENU_VISIBLE_ITEMS ? selected - MENTION_MENU_VISIBLE_ITEMS + 1
+          : mentionOffset;
+        setMentionNavigation({ key: mentionKey, selected: mentionItems[selected].key,
+          bottomGap: Math.max(0, mentionItems.length - MENTION_MENU_VISIBLE_ITEMS - offset) });
+        return;
+      }
+      if (key.tab || key.return) {
+        const { start, end } = fileSuggestions.mention;
+        const replacement = mentionItems[mentionSelected].replacement;
+        setRecall(null);
+        setEditor({ text: input.slice(0, start) + replacement + input.slice(end), cursor: start + replacement.length });
+        return;
+      }
+    }
     // ctrl+v (not cmd+v, which the terminal keeps for text) attaches the
     // clipboard image
     if (key.ctrl && enteredInput === 'v') {
+      if (selectedQueued) leaveQueue();
       onPasteImage?.();
       return;
     }
@@ -539,6 +721,16 @@ export function InputBar({
         setEditor(applyInputEdit(editor, { type: 'down' }));
         return;
       }
+      if (onUpdateQueued && queuedMessages.length > 0 && (selectedQueued || key.upArrow)) {
+        if (key.upArrow) {
+          selectQueued(queuedMessages[selectedQueueIndex === null ? queuedMessages.length - 1 : Math.max(0, selectedQueueIndex - 1)]);
+        } else if (selectedQueueIndex === queuedMessages.length - 1) {
+          leaveQueue();
+        } else if (selectedQueueIndex !== null) {
+          selectQueued(queuedMessages[selectedQueueIndex + 1]);
+        }
+        return;
+      }
       if (key.upArrow) recallPrevious();
       else recallNext();
       return;
@@ -555,7 +747,7 @@ export function InputBar({
       return;
     }
     if (isBackspace) {
-      if (input.length === 0 && attachments.length > 0) onRemoveAttachment?.();
+      if (!selectedQueued && input.length === 0 && trailingImages.length > 0) onRemoveAttachment?.(trailingImages[trailingImages.length - 1]);
       else edit({ type: 'backspace' });
       return;
     }
@@ -582,16 +774,21 @@ export function InputBar({
         setEditor({ text: `${input.slice(0, -1)}\n`, cursor: input.length });
         return;
       }
+      if (selectedQueued) {
+        leaveQueue();
+        return;
+      }
       const selectedCommand = commandMatches[activeCommandNavigation.selected];
-      const trimmed = selectedCommand ? `/${selectedCommand.name}` : input.trim();
-      if (!trimmed && attachments.length === 0) return; // nothing to send
+      const draft = draftMessage();
+      const trimmed = selectedCommand ? `/${selectedCommand.name}` : draft.text.trim();
+      if (!trimmed && draft.images.length === 0) return; // nothing to send
       if (disabled) {
         // The session queue contains text. Keep image drafts intact until
         // they can be sent together with their prompt.
-        if (!onQueue || attachments.length > 0) return;
+        if (!onQueue || draft.images.length > 0) return;
         onQueue(trimmed);
       } else {
-        send(trimmed, attachments);
+        send(trimmed, draft.images, draft.content);
       }
       setRecall(null);
       setEditor({ text: '', cursor: 0 });
@@ -613,6 +810,7 @@ export function InputBar({
           <ApprovalPrompt request={mode.request} waiting={mode.waiting} selected={selected} />
         )}
         <InputFeedback feedback={feedback} participantColors={participantColors} />
+        <QueuedRow messages={queuedMessages.map(message => message.text)} participantColors={participantColors} />
         <Box
           borderStyle="round"
           borderColor={theme.accent}
@@ -636,10 +834,10 @@ export function InputBar({
           </Box>
         </Box>
         <SubagentStatusRow
+          activeSubagents={activeSubagents}
           permissionMode={permissionMode}
           model={model}
           thinkingLevel={thinkingLevel}
-          queued={queued}
           contextUsage={contextUsage}
         />
       </>
@@ -648,14 +846,21 @@ export function InputBar({
 
   return (
     <>
-      {!commandMenuDismissed && <CommandMenu
+      {!selectedQueued && !commandMenuDismissed && <CommandMenu
         input={input}
         selected={activeCommandNavigation.selected}
         offset={activeCommandNavigation.offset}
       />}
-      <ParticipantMenu input={input} participants={participants} />
+      {mentionActive && <MentionMenu
+        items={mentionItems}
+        participants={participants}
+        selected={mentionSelected}
+        offset={mentionOffset}
+        loading={fileSuggestions.loading}
+        error={fileSuggestions.error}
+      />}
       <InputFeedback feedback={feedback} participantColors={participantColors} />
-      <AttachmentRow attachments={attachments} />
+      <QueuedRow messages={queuedMessages.map(message => message.text)} selected={selectedQueueIndex} participantColors={participantColors} />
       <Box
         borderStyle="round"
         borderColor={disabled ? theme.border : theme.accent}
@@ -666,38 +871,44 @@ export function InputBar({
       >
         <Box justifyContent="space-between">
           <Box flexShrink={1}>
-            <Text color={disabled ? theme.textSubtle : theme.accentSoft}>
-              ›{' '}
-            </Text>
-            {input ? (
-              <Text color={theme.text} wrap="wrap">
-                <MentionText colors={participantColors}>{input.slice(0, cursor)}</MentionText>
-                <Text color={theme.accentSoft}>▌</Text>
-                <MentionText colors={participantColors}>{input.slice(cursor)}</MentionText>
+            <Box flexShrink={0}>
+              <Text color={disabled ? theme.textSubtle : theme.accentSoft}>
+                ›{' '}
               </Text>
-            ) : (
-              <>
-                <Text color={disabled ? theme.textSubtle : theme.accentSoft}>▌</Text>
-                <Text color={theme.textSubtle}>
-                  {disabled
-                    ? onQueue && attachments.length === 0 ? ' agents are thinking… enter queues a message' : ' agents are thinking…'
-                    : <> message sirus or <MentionText colors={participantColors}>@mention</MentionText> an agent…</>}
-                </Text>
-              </>
-            )}
+            </Box>
+            <Text color={theme.text} wrap="wrap">
+              {!selectedQueued && !input && <TrailingImages images={trailingImages} after={false} />}
+              {input ? (
+                <>
+                  <DraftText text={input.slice(0, cursor)} imageFor={imageFor} participantColors={participantColors} />
+                  <Text color={theme.accentSoft}>▌</Text>
+                  <DraftText text={input.slice(cursor)} imageFor={imageFor} participantColors={participantColors} />
+                  {!selectedQueued && <TrailingImages images={trailingImages} after />}
+                </>
+              ) : (
+                <>
+                  <Text color={disabled ? theme.textSubtle : theme.accentSoft}>▌</Text>
+                  <Text color={theme.textSubtle}>
+                    {disabled
+                      ? ' agents are thinking…'
+                      : <> message sirus or <MentionText colors={participantColors}>@mention</MentionText> an agent…</>}
+                  </Text>
+                </>
+              )}
+            </Text>
           </Box>
           <Box marginLeft={1} flexShrink={0}>
             {showCopied
               ? <Text color={theme.success}>copied ✓</Text>
-              : <Text color={theme.textSubtle}>{disabled && onQueue && attachments.length === 0 ? 'enter queues ↵' : 'enter ↵'}</Text>}
+              : <Text color={theme.textSubtle}>enter ↵</Text>}
           </Box>
         </Box>
       </Box>
       <SubagentStatusRow
+        activeSubagents={activeSubagents}
         permissionMode={permissionMode}
         model={model}
         thinkingLevel={thinkingLevel}
-        queued={queued}
         contextUsage={contextUsage}
       />
     </>

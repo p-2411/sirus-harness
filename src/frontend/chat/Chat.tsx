@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
-import type { ImageBlock, Message, ToolCallBlock } from '../../agent_runtime/types';
+import type { ImageBlock, Message, MessageBlock, ToolCallBlock } from '../../agent_runtime/types';
 import { Session } from '../../agent_runtime/session';
 import { attachClipboardImage, describeImage, removeStoredImage } from '../../images';
-import { Box, Text, measureElement, renderToString, useBoxMetrics, useInput, useStdout, type DOMElement } from 'ink';
+import { Box, Text, measureElement, renderToString, useApp, useBoxMetrics, useInput, useStdout, type DOMElement } from 'ink';
 import { theme } from '../styles/theme';
 import { HORSE } from '../branding/horse';
 import { ChatMessage } from './ChatMessage';
@@ -28,6 +28,7 @@ import {
   subscribePermissions,
 } from '../../agent_runtime/permissions/permissions';
 import { permissionsCommand } from '../../commands/session/behavior';
+import { getSubagentsVersion, subscribeSubagents } from '../../agent_runtime/tools/subagents';
 // import { AppState, useModel } from '../../state';
 
 export function ChatHeader({ session }: { session: Session }) {
@@ -62,6 +63,7 @@ export function promptHistory(messages: readonly Message[]): string[] {
     if (message.role !== 'user') continue;
     const text = message.content
       .filter(block => block.type === 'text')
+      .filter(block => !block.filePath)
       .map(block => block.text)
       .join('\n')
       .trim();
@@ -179,6 +181,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     (cb) => currSession.subscribe(cb),
     () => currSession.getVersion(),
   );
+  useSyncExternalStore(subscribeSubagents, getSubagentsVersion);
   const messages = currSession.getMessages();
   const participants = currSession.getParticipants();
   const participantColors = participantColorMap(participants);
@@ -187,7 +190,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   const [imageIsLoading, setImageIsLoading] = useState(false);
   const isLoading = commandIsLoading || imageIsLoading || currSession.getStatus() === 'working';
   const [feedback, setFeedback] = useState<Feedback | null>(null);
-  const panelFeedback = feedback?.text.includes('\n') ? feedback : null;
+  const panelFeedback = feedback?.panel ? feedback : null;
   const [inputMode, setInputMode] = useState<InputMode>({ type: 'text' });
   // Images attached to the message being composed, until it is sent.
   const [attachments, setAttachments] = useState<ImageBlock[]>([]);
@@ -223,17 +226,16 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
           return;
         }
         attachImage(image);
-        setFeedback({ kind: 'success', text: `Attached ${describeImage(image)}. It goes with your next message.` });
+        setFeedback({ kind: 'success', text: `Attached ${describeImage(image)}.` });
       })
       .catch((caught: unknown) => {
         if (mounted.current) setFeedback({ kind: 'error', text: caught instanceof Error ? caught.message : 'Could not read the clipboard.' });
       })
       .finally(() => { if (mounted.current) setImageIsLoading(false); });
   };
-  const removeAttachment = () => {
-    const image = attachmentsRef.current.at(-1);
-    if (image) removeStoredImage(image);
-    replaceAttachments(attachmentsRef.current.slice(0, -1));
+  const removeAttachment = (image: ImageBlock) => {
+    removeStoredImage(image);
+    replaceAttachments(attachmentsRef.current.filter(item => item.path !== image.path));
   };
   const [commandStartedAt, setCommandStartedAt] = useState<number | null>(null);
   const queued = currSession.getQueuedMessageCount();
@@ -257,6 +259,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   const [scrollOffset, setScrollOffset] = useState(0);
   const commandAbort = useRef<AbortController | null>(null);
   const { stdout } = useStdout();
+  const { exit } = useApp();
 
   const viewportRef = useRef<DOMElement>(null);
   const contentRef = useRef<DOMElement>(null);
@@ -296,8 +299,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     if (key.escape) {
       setInputMode({ type: 'text' });
       setFeedback(null);
-      // an interrupted turn should not be followed by whatever was waiting
-      currSession.clearQueuedMessages();
+      // queued messages stay: the next one goes out once the turn has stopped
       currSession.cancel();
       commandAbort.current?.abort(new TurnCancelledError());
       return;
@@ -345,7 +347,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   };
 
   // A command leaves any attachments waiting for the next real message.
-  const send = (text: string, images: readonly ImageBlock[] = []) => {
+  const send = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[]) => {
     if (text.startsWith('/')) {
       const command: string = text.split(' ')[0].slice(1);
       const args: string[] = text.split(' ').slice(1).filter(Boolean);
@@ -370,6 +372,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
           session: currSession,
           notify: text => setFeedback({ kind: 'info', text }),
           attachImage,
+          exit: () => exit(),
           signal: controller.signal,
         });
       } catch (e) {
@@ -400,10 +403,10 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         commandAbort.current = null;
       }
     } else {
-      // Images go first so the text can refer to them.
+      // Images sit where the draft placed them.
       const msg: Message = {
         role: 'user',
-        content: [...images, ...(text ? [{ type: 'text' as const, text }] : [])],
+        content: content ?? [...images, ...(text ? [{ type: 'text' as const, text }] : [])],
       };
       setScrollOffset(0);
       setFeedback(null);
@@ -411,6 +414,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       // navigates away mid-request the unmounted Chat no longer repaints its
       // history. The session-owned status still updates its sidebar row.
       const previousLength = currSession.getMessages().length;
+      const previousDraft = currSession.getInputContent();
       const turn = currSession.sendMessage(msg);
       // Validation can reject a turn before its user message is appended.
       // Keep those images available so the user can correct the prompt.
@@ -423,6 +427,9 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       if (!currSession.isEmpty()) onStartSession?.(currSession);
       turn
         .catch((caught: unknown) => {
+          if (currSession.getMessages().length === previousLength && !currSession.getInputContent()) {
+            currSession.setInputContent(previousDraft);
+          }
           setFeedback(isAbortError(caught)
             ? null
             : { kind: 'error', text: caught instanceof Error ? caught.message : 'Something went wrong.' });
@@ -463,6 +470,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         return (
           <ChatMessage
             key={i}
+            sessionId={currSession.getId()}
             message={message}
             model={message.model ?? participant?.model}
             participantColors={participantColors}
@@ -525,6 +533,8 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         disabled={isLoading}
         feedback={panelFeedback ? null : feedback}
         participants={participants}
+        activeSubagents={currSession.getActiveSubagentCount()}
+        directory={currSession.getDirectory()}
         mode={effectiveInputMode}
         permissionMode={currSession.getPermissionMode()}
         onCyclePermissionMode={cyclePermissionMode}
@@ -534,8 +544,9 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         model={currSession.getModel()}
         thinkingLevel={currSession.getThinkingLevel()}
         history={history}
-        queued={queued}
+        queuedMessages={currSession.getQueuedMessages()}
         onQueue={text => currSession.queueMessage(text)}
+        onUpdateQueued={(id, text) => currSession.updateQueuedMessage(id, text)}
         contextUsage={currSession.getContextUsage()}
       />
     </Box>

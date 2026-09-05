@@ -29,6 +29,8 @@ export interface CommandExecution {
   notify: (text: string) => void;
   // Adds an image to the message the user is composing.
   attachImage: (image: ImageBlock) => void;
+  // Quits the app, saving sessions as ctrl+c does.
+  exit: () => void;
   signal: AbortSignal;
 }
 

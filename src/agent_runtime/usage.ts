@@ -1,4 +1,4 @@
-// How full an agent's context window is, for the status row and /info.
+// How full an agent's context window is, for the status row and /usage.
 export interface ContextUsage {
   tokens: number;
   // Absent when neither the provider nor Sirus knows the model's window.

@@ -12,6 +12,7 @@ import {
   onFirstLine,
   onLastLine,
   SecretInput,
+  QueuedRow,
   SubagentStatusRow,
   type InputState,
 } from '../../src/frontend/chat/InputBar';
@@ -155,17 +156,28 @@ describe('input status', () => {
     expect(output).toContain('gpt-5.6-sol · high');
   });
 
-  test('shows queued messages and context usage', () => {
+  test('shows context usage beside the model', () => {
     const output = stripAnsi(renderToString(
       <SubagentStatusRow
-        queued={2}
         contextUsage={{ tokens: 150_000, window: 200_000 }}
         model="claude-sonnet-5"
       />,
       { columns: 100 },
     ));
-    expect(output).toContain('2 queued · esc discards');
-    expect(output).toContain('ctx 150k · 75% · claude-sonnet-5');
+    expect(output).toContain('ctx 150k (75%) · claude-sonnet-5');
+  });
+
+  test('lists queued messages in order on single lines', () => {
+    const output = stripAnsi(renderToString(
+      <QueuedRow messages={['fix the test', 'then update\nthe readme']} />,
+      { columns: 100 },
+    ));
+    const lines = output.split('\n').filter(Boolean);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain('⋮ fix the test');
+    expect(lines[1]).toContain('⋮ then update the readme');
+    expect(output).not.toContain('queued');
+    expect(renderToString(<QueuedRow messages={[]} />, { columns: 100 })).toBe('');
   });
 });
 

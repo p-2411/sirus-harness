@@ -113,11 +113,20 @@ describe('chat attachment lifecycle', () => {
       sentPath = storedImages()[0];
       expect(session.getMessages()).toHaveLength(0);
 
-      await chat.submit('@missing look at this');
+      // Keep a separator after the image chip so word deletion can correct the
+      // rejected route without deleting the attachment placeholder.
+      await chat.submit(' @missing look at this');
       await chat.waitFor(() => session.getStatus() === 'error');
       expect(session.getMessages()).toHaveLength(0);
       expect(storedImages()).toEqual([sentPath]);
 
+      // Rejected sends restore their draft. Remove the invalid route while
+      // retaining the image, then submit the corrected message.
+      await chat.press('\x17');
+      await chat.press('\x17');
+      await chat.press('\x17');
+      await chat.press('\x17');
+      await chat.press('\x7f');
       await chat.submit('Describe the image');
       await chat.waitFor(() => session.getStatus() === 'idle' && received.length > 0);
       const attached = session.getMessages()[0].content.find(block => block.type === 'image');
