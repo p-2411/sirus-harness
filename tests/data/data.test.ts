@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
+import * as naming from '../../src/agent_runtime/session/naming';
 import { boundTransports } from '../../src/agent_runtime/providers';
 import type { TurnContext } from '../../src/agent_runtime/turn';
 import type { Message } from '../../src/agent_runtime/types';
@@ -50,28 +51,34 @@ describe('Session model', () => {
         stop_reason: 'end_turn',
       }),
     };
-    const automatic = new Session({ name: 'Session 3', directory: process.cwd(), model: testModel, autoNamePending: true });
-    await automatic.sendMessage({
-      role: 'user',
-      content: [{ type: 'text', text: '\n  Implement the queued message workflow with tests  \nDo not use this line' }],
-    });
-    expect(automatic.getName()).toBe('Implement the queued message workflow…');
+    const generate = spyOn(naming, 'generateSessionName').mockResolvedValue('Queued message workflow');
+    try {
+      const automatic = new Session({ name: 'Session 3', directory: process.cwd(), model: testModel, autoNamePending: true });
+      await automatic.sendMessage({
+        role: 'user',
+        content: [{ type: 'text', text: '\n  Implement the queued message workflow with tests  \nDo not use this line' }],
+      });
+      expect(automatic.getName()).toBe('Queued message workflow');
 
-    const custom = new Session({ id: 'custom-name', name: 'Session 9', model: testModel });
-    await custom.sendMessage({
-      role: 'user',
-      content: [{ type: 'text', text: 'This must not replace the name' }],
-    });
-    expect(custom.getName()).toBe('Session 9');
+      const custom = new Session({ id: 'custom-name', name: 'Session 9', model: testModel });
+      await custom.sendMessage({
+        role: 'user',
+        content: [{ type: 'text', text: 'This must not replace the name' }],
+      });
+      expect(custom.getName()).toBe('Session 9');
 
-    const explicitlyNamed = new Session({ name: 'Session 10', directory: process.cwd(), model: testModel, autoNamePending: true });
-    explicitlyNamed.setName('Session 10');
-    const restored = Session.fromSnapshot(explicitlyNamed.toSnapshot());
-    await restored.sendMessage({
-      role: 'user',
-      content: [{ type: 'text', text: 'Keep the explicit numeric name' }],
-    });
-    expect(restored.getName()).toBe('Session 10');
+      const explicitlyNamed = new Session({ name: 'Session 10', directory: process.cwd(), model: testModel, autoNamePending: true });
+      explicitlyNamed.setName('Session 10');
+      const restored = Session.fromSnapshot(explicitlyNamed.toSnapshot());
+      await restored.sendMessage({
+        role: 'user',
+        content: [{ type: 'text', text: 'Keep the explicit numeric name' }],
+      });
+      expect(restored.getName()).toBe('Session 10');
+      expect(generate).toHaveBeenCalledTimes(1);
+    } finally {
+      generate.mockRestore();
+    }
   });
 
   test('reports latest context usage and aggregates session token totals', () => {

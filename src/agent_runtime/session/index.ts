@@ -19,6 +19,7 @@ import {
   type RewindResult,
 } from './checkpointLog';
 import { MessageQueue, isAutoSendable, type QueuedMessage } from './messageQueue';
+import { generateSessionName } from './naming';
 import { NAME_PATTERN_SOURCE, ParticipantRoster, stripCreationModels, type Participant } from './roster';
 import { Transcript, textOf, type TokenTotals } from './transcript';
 import { TurnRunner } from './turnRunner';
@@ -26,6 +27,7 @@ import { TurnRunner } from './turnRunner';
 // The default model is a catalog fact, named here because that is where
 // callers have always found it.
 export { DEFAULT_MODEL, NAME_PATTERN_SOURCE, defaultDirectoryActivity, isAutoSendable };
+export { SESSION_NAME_LIMIT } from './naming';
 export type {
   Checkpoint,
   DirectoryActivity,
@@ -41,21 +43,8 @@ export type SessionStatus = 'idle' | 'working' | 'error';
 // What the constructor takes and what a snapshot holds: the session's input
 // shapes, and the one function that fills in every default.
 
-export const SESSION_NAME_LIMIT = 40;
-
 const DEFAULT_SESSION_NAME = 'Session 1';
 const DEFAULT_PARTICIPANT_NAME = 'sirus';
-
-// The first nonblank line of the prompt, cut at a word boundary when it runs
-// long. Later lines are context, not part of the sidebar label.
-export function sessionNameFromPrompt(text: string): string {
-  const firstLine = text.split(/\r\n?|\n/).find(line => line.trim().length > 0) ?? '';
-  const line = firstLine.replace(/[ \t]+/g, ' ').trim();
-  if (line.length <= SESSION_NAME_LIMIT) return line;
-  const cut = line.slice(0, SESSION_NAME_LIMIT);
-  const space = cut.lastIndexOf(' ');
-  return `${(space > SESSION_NAME_LIMIT / 2 ? cut.slice(0, space) : cut).trimEnd()}…`;
-}
 
 // The clocks a restored session brings with it. All absent for a new one.
 export interface SessionTiming {
@@ -166,6 +155,7 @@ export class Session {
   // away and back does not discard them.
   private inputContent: string;
   private autoNamePending: boolean;
+  private namingController: AbortController | null = null;
 
   private activeSends = 0;
   private status: SessionStatus = 'idle';
@@ -268,9 +258,8 @@ export class Session {
       // any provider sees the turn.
       const stored = stripCreationModels(resolved, mentions);
       if (this.transcript.isEmpty() && this.autoNamePending) {
-        const name = sessionNameFromPrompt(textOf(stored));
-        if (name) this.name = name;
-        this.autoNamePending = false;
+        // Name from the user's text, not the contents of resolved attachments.
+        this.startNaming(textOf(stripCreationModels(message, mentions)));
       }
       if (this.activeSends === 1) this.transcript.startConversationIfNeeded(Date.now());
       accepted = true;
@@ -319,6 +308,7 @@ export class Session {
   clear(): void {
     if (this.activeSends > 0 || this.rewinding) throw new Error('Wait for the current operation to finish before clearing the session.');
     if (this.transcript.isEmpty()) return;
+    this.stopNaming();
     this.transcript.clear();
     this.checkpoints.clear();
     this.roster.resetRuntimes();
@@ -354,6 +344,7 @@ export class Session {
       const files = options.files ? await this.checkpoints.restoreFiles(found.checkpoint.id) : null;
       let droppedMessages = 0;
       if (options.chat) {
+        if (found.checkpoint.messageIndex === 0) this.stopNaming();
         droppedMessages = this.transcript.truncate(found.checkpoint.messageIndex);
         this.checkpoints.dropFrom(found.index);
         this.roster.resetRuntimes();
@@ -366,9 +357,31 @@ export class Session {
     }
   }
 
+  private startNaming(text: string): void {
+    this.autoNamePending = false;
+    const controller = new AbortController();
+    this.namingController = controller;
+    void generateSessionName(text, this.directory, this.getModel(), controller.signal)
+      .then(name => {
+        if (!name || controller.signal.aborted || this.namingController !== controller) return;
+        this.name = name;
+        this.changes.notify();
+      })
+      .catch(() => { /* Naming must never fail the chat turn. */ })
+      .finally(() => {
+        if (this.namingController === controller) this.namingController = null;
+      });
+  }
+
+  private stopNaming(): void {
+    this.namingController?.abort();
+    this.namingController = null;
+  }
+
   setName(name: string): void {
     const trimmed = name.replace(/\s+/g, ' ').trim();
     if (!trimmed) throw new Error('A session name cannot be empty');
+    this.stopNaming();
     const wasAutoNamePending = this.autoNamePending;
     this.autoNamePending = false;
     if (trimmed === this.name) {

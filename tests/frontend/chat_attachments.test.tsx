@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
+import * as naming from '../../src/agent_runtime/session/naming';
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -15,8 +16,10 @@ let directory: string;
 let originalDataDirectory: string | undefined;
 let imagePath: string;
 let received: readonly Message[];
+let generateName: ReturnType<typeof spyOn<typeof naming, 'generateSessionName'>>;
 
 beforeEach(() => {
+  generateName = spyOn(naming, 'generateSessionName').mockResolvedValue(null);
   directory = mkdtempSync(join(tmpdir(), 'sirus-chat-attachments-'));
   originalDataDirectory = process.env.SIRUS_DATA_DIR;
   process.env.SIRUS_DATA_DIR = join(directory, 'data');
@@ -32,6 +35,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  generateName.mockRestore();
   delete boundTransports[testModel];
   if (originalDataDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
   else process.env.SIRUS_DATA_DIR = originalDataDirectory;

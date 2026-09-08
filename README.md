@@ -107,6 +107,14 @@ Type `@` to find agents and files in one menu. The menu opens at the bottom, wit
 
 Attach an image with `Ctrl+V` or `/image /path/to/screenshot.png` to work from a screenshot, mockup, or visual bug report. Clipboard and notification support depend on your operating system and terminal.
 
+### Repository instructions
+
+Put project guidance in `SIRUS.md` or `AGENTS.md` in the session's working directory. Sirus automatically includes it for session participants, but not spawned subagents. Subagents receive project guidance only through their parent's task instructions. If both exist, `SIRUS.md` **replaces** `AGENTS.md`; they are not merged, even when `SIRUS.md` is empty or unreadable.
+
+Guidance is snapshotted when first needed in each turn: it stays fixed through tool continuations, and edits take effect on the next turn. Only regular files are read, up to 32 KiB; symbolic links are rejected, including dangling links. Truncation and read errors are reported in the model's prompt. Repository guidance is subordinate to Sirus's operating contract and your request, cannot grant tool permissions, and is never included in custom internal prompts such as the permission judge's.
+
+Automatic discovery is limited to the session directory. Ancestor/git-root lookup, nested rules, `CLAUDE.md`, and global instruction files are not loaded automatically; agents can still inspect relevant files using tools.
+
 ### Choose how much approval you want
 
 Permission settings apply to the session's participants and subagents:

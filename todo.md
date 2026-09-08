@@ -1,4 +1,4 @@
-[] read agents.md or sirus.md
+[X] read agents.md or sirus.md
 [X] quitting mid response saves whats happened up to that point.
   [] fixes state of command list header
 [] skills
