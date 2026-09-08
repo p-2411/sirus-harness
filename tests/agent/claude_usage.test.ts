@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import type { SDKControlGetUsageResponse, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 // Initialize the provider registry before importing a transport directly.
-import '../../src/agent_runtime/providers/providers';
+import '../../src/agent_runtime/providers';
 import { createClaudeSubscriptionUsageReader } from '../../src/agent_runtime/providers/anthropic/claude-subscription';
 
 const usage: SDKControlGetUsageResponse = {

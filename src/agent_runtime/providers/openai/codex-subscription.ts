@@ -1,17 +1,16 @@
 import { subscriptionEnvironment } from '../profiles';
-import { dataDirectory } from '../../../persistence';
+import { traitsOf } from '../catalog';
+import { dataDirectory } from '../../../dataDirectory';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import type { ImageBlock, Message, MessageBlock, ToolCallBlock, Usage } from '../../types';
-import type { Response } from '../../chat';
-import type { Transport } from '../provider';
+import type { Response, Transport } from '../provider';
 import type { TurnContext } from '../../turn';
 import { systemPromptFor } from '../../prompt';
-import { availableTools, runTool, type ToolArgumentSchema } from '../../tools';
+import type { Toolbox, ToolArgumentSchema } from '../../tools';
 import { latestUserText, promptWithSharedHistory, unseenImages } from '../subscription';
 import { CodexRpc } from './codex-rpc';
 import { abortReason, abortable, throwIfAborted } from '../../../abort';
-import type { PermissionContext } from '../../permissions/permissions';
 import { SIRUS_VERSION } from '../../../version';
 import {
   WEB_SEARCH_TOOL,
@@ -78,12 +77,12 @@ const PROCESS_CONFIG: Record<string, unknown> = {
   model_catalog_json: MODEL_CATALOG_PATH,
 };
 
-// Thread-local: a large-window Astra thread must not change other models'
-// budgets on the shared account runtime.
-function contextConfig(model: string): Record<string, number> {
-  return model === 'gpt-6-astra'
-    ? { model_context_window: 1_050_000, model_auto_compact_token_limit: 900_000 }
-    : {};
+// Thread-local: a large-window model's thread must not change other models'
+// budgets on the shared account runtime. The figures are the model's own row
+// in the catalog, so a new model needs no edit here.
+function contextConfig(model: string): Record<string, unknown> {
+  const config = traitsOf(model).codexThreadConfig;
+  return config && typeof config === 'object' ? config as Record<string, unknown> : {};
 }
 
 const TURN_TIMEOUT_MS = 10 * 60 * 1000;
@@ -109,7 +108,8 @@ interface Turn {
   usageBaseline: TokenBreakdown;
   usage: Usage | null;
   signal?: AbortSignal;
-  permissions?: PermissionContext;
+  // The tools this turn may run, with its gate and barrier bound.
+  toolbox?: Toolbox;
 }
 
 interface CodexSession {
@@ -332,13 +332,8 @@ function createCodexRuntime(profile: string) {
     };
     turn.blocks.push(toolCall);
     publishTurn(turn);
-    const result = await runTool(
-      toolCall,
-      session.directory,
-      turn.signal,
-      turn.permissions,
-      session.agent,
-    );
+    if (!turn.toolbox) throw new Error('Provider asked for a tool on a tool-less turn');
+    const result = await turn.toolbox.run(toolCall, turn.signal);
     turn.blocks.push(result);
     publishTurn(turn);
     return {
@@ -369,7 +364,7 @@ function createCodexRuntime(profile: string) {
 
   async function ensureSession(rpc: CodexRpc, turn: TurnContext): Promise<CodexSession> {
     const { agent, directory } = turn;
-    const { model, subagent, runtimeId: sessionId } = agent;
+    const { model, runtimeId: sessionId } = agent;
     const participantName = agent.name;
     const existing = sessions.get(sessionId);
     if (existing && existing.model === model) return existing;
@@ -391,10 +386,10 @@ function createCodexRuntime(profile: string) {
       config: {
         ...MODEL_ONLY_CONFIG,
         ...contextConfig(model),
-        ...(turn.tools ? {} : { web_search: 'disabled' }),
+        ...(turn.toolbox ? {} : { web_search: 'disabled' }),
         mcp_servers: await disabledMcpServers(rpc, directory),
       },
-      dynamicTools: (turn.tools ? availableTools({ subagent }) : []).map(definition => ({
+      dynamicTools: (turn.toolbox?.tools ?? []).map(definition => ({
         type: 'function',
         name: definition.name,
         description: definition.description,
@@ -427,7 +422,7 @@ function createCodexRuntime(profile: string) {
     model: string,
     signal?: AbortSignal,
     updateStream?: TurnContext['updateStream'],
-    permissions?: PermissionContext,
+    toolbox?: Toolbox,
     thinkingLevel: ThinkingLevel = DEFAULT_THINKING_LEVEL,
   ): Promise<{ content: MessageBlock[]; usage: Usage | null }> {
     throwIfAborted(signal);
@@ -454,7 +449,7 @@ function createCodexRuntime(profile: string) {
       usageBaseline: session.usageTotal,
       usage: null,
       signal,
-      permissions,
+      toolbox,
     };
     session.turn = turn;
     let turnId: string | undefined;
@@ -501,7 +496,7 @@ function createCodexRuntime(profile: string) {
   ): Promise<Response> {
     const { agent, signal } = turn;
     throwIfAborted(signal);
-    if (!turn.tools) return bareRequest(messages, turn);
+    if (!turn.toolbox) return bareRequest(messages, turn);
     const rpc = await abortable(getCodexRpc(), signal);
     const session = await abortable(ensureSession(rpc, turn), signal);
     throwIfAborted(signal);
@@ -519,7 +514,7 @@ function createCodexRuntime(profile: string) {
       agent.model,
       signal,
       blocks => turn.updateStream(blocks),
-      turn.permissions,
+      turn.toolbox,
       agent.thinkingLevel,
     );
     session.seenMessageCount = messages.length;
@@ -582,6 +577,8 @@ function createCodexRuntime(profile: string) {
   }
 
   const transport: Transport = {
+    // Codex runs the host's tools itself, through the turn's toolbox.
+    toolExecution: 'delegated',
     dispose: shutdown,
     getResponse,
     resetRuntime,
@@ -599,13 +596,10 @@ function runtimeFor(profile = 'default') {
   return runtime;
 }
 export function getCodexRpc(profile = 'default'): Promise<CodexRpc> { return runtimeFor(profile).getCodexRpc(); }
-export function codexSubscriptionTransport(profile: string): Transport { return runtimeFor(profile).transport; }
-export function shutdownCodexRuntime(): void {
+export function codexSubscriptionTransport(profile = 'default'): Transport { return runtimeFor(profile).transport; }
+// Every app-server this process started, closed. Safe to call more than once:
+// each runtime's shutdown is idempotent.
+export function disposeCodexRuntimes(): void {
   for (const runtime of runtimes.values()) runtime.shutdown();
   runtimes.clear();
 }
-export const subscriptionTransport: Transport = {
-  getResponse: (messages, turn) => runtimeFor().transport.getResponse(messages, turn),
-  resetRuntime: id => { for (const runtime of runtimes.values()) runtime.transport.resetRuntime?.(id); },
-  resetAllRuntimes: () => { for (const runtime of runtimes.values()) runtime.transport.resetAllRuntimes?.(); },
-};

@@ -15,9 +15,9 @@ import {
 import {
 	getPermissionsVersion,
 	isAwaitingApproval,
-	isDeclinedResult,
 	subscribePermissions,
-} from '../../agent_runtime/permissions/permissions';
+} from '../../agent_runtime/permissions/approvals';
+import { isDeclinedResult } from '../../agent_runtime/permissions/policy';
 
 function singleLine(text: string): string {
 	return text.replace(/\s+/g, ' ').trim();

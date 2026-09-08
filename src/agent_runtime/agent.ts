@@ -1,12 +1,8 @@
-import { getResponse, modelStrategies } from './chat';
-import {
-  cancelSubagent,
-  checkSubagent,
-  describeSubagents,
-  startSubagent,
-  type SubagentRun,
-  type SubagentSpawnOptions,
-} from './tools/subagents';
+import { getResponse } from './chat';
+import { providerForModel, servesModel } from './providers';
+import type { SubagentRun, SubagentSpawnOptions } from './tools/subagents';
+import { describeSubagents } from './tools/subagents/report';
+import { cancelSubagent, checkSubagent, startSubagent } from './tools/subagents/run';
 import { TurnContext, type TurnOptions } from './turn';
 import { DEFAULT_THINKING_LEVEL, type Message, type ThinkingLevel } from './types';
 
@@ -89,7 +85,7 @@ export class SessionAgent {
   // Drops whatever the provider keeps for this agent between turns, so the
   // next turn starts afresh: after a thinking-level change or a cleared history.
   resetRuntime(): void {
-    modelStrategies[this.model]?.resetRuntime?.(this.runtimeId);
+    if (servesModel(this.model)) providerForModel(this.model).resetRuntime(this.runtimeId);
   }
 
   // Subagents this agent has spawned. It can only see and steer its own.

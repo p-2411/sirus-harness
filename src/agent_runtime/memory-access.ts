@@ -1,14 +1,11 @@
-import {
-  loadMemoryAccessPreference,
-  saveMemoryAccessPreference,
-} from '../persistence';
+import { openSettings } from '../persistence';
 
 export function isMemoryAccessEnabled(): boolean {
-  return loadMemoryAccessPreference();
+  return openSettings().get('memoryEnabled');
 }
 
 export function setMemoryAccessEnabled(enabled: boolean): void {
-  if (!saveMemoryAccessPreference(enabled)) {
+  if (!openSettings().set({ memoryEnabled: enabled })) {
     throw new Error('Could not save the memory access setting');
   }
 }

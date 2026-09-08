@@ -1,6 +1,6 @@
 import { Box, Text } from 'ink';
-import { modelStrategies } from '../../agent_runtime/chat';
-import type { Participant } from '../../agent_runtime/session';
+import { modelIds } from '../../agent_runtime/providers/catalog';
+import { NAME_PATTERN_SOURCE, type Participant } from '../../agent_runtime/session';
 import { theme } from '../styles/theme';
 import { MentionText, participantColorMap } from '../MentionText';
 
@@ -13,15 +13,16 @@ export interface ParticipantMenuItem {
 // Only the unfinished @token at the cursor drives the menu. This supports a
 // second mention in the same message without mistaking emails or @scope/pkg
 // package names for participant input.
+const activeMentionPattern = new RegExp(`(?<![\\w@])@(${NAME_PATTERN_SOURCE}|)$`);
 function activeMention(input: string): string | null {
-  const match = /(?<![\w@])@([A-Za-z][A-Za-z0-9_-]*|)$/.exec(input);
+  const match = activeMentionPattern.exec(input);
   return match?.[1] ?? null;
 }
 
 export function participantMenuItems(
   input: string,
   participants: readonly Participant[],
-  models: readonly string[] = Object.keys(modelStrategies),
+  models: readonly string[] = modelIds(),
 ): ParticipantMenuItem[] {
   const fragment = activeMention(input);
   if (fragment === null) return [];

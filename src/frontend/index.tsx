@@ -2,7 +2,8 @@ import React from "react";
 import App from "./app";
 import { render } from "ink";
 import { installFrameCapture } from "./terminal/screen";
-import { shutdownCodexRuntime } from "../agent_runtime/providers/openai/codex-subscription";
+import { disposeAll } from "../agent_runtime/providers";
+import { closeAllMemoryStores } from "../memory/store";
 import { enableCheckpoints } from "../checkpoints";
 
 // Frame capture must see Ink's writes, so it wraps stdout before anything else.
@@ -21,4 +22,8 @@ const app = render(
 
 // Provider subprocesses outlive individual turns. Tear them down when Ink
 // exits so their stdio handles cannot leave the CLI waiting for another Ctrl+C.
-void app.waitUntilExit().then(shutdownCodexRuntime, shutdownCodexRuntime);
+const shutdown = () => {
+  disposeAll();
+  closeAllMemoryStores();
+};
+void app.waitUntilExit().then(shutdown, shutdown);

@@ -3,6 +3,9 @@ import { mkdtempSync, readFileSync, rmSync, statSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import { createProvider, type Transport } from '../../src/agent_runtime/providers/provider';
+import { disposeAll, providerFor } from '../../src/agent_runtime/providers';
+import { VENDOR_INFO } from '../../src/agent_runtime/providers/catalog';
+import type { SubscriptionSource } from '../../src/agent_runtime/providers/sources';
 import { saveApiKeys, saveSubscriptionPreferences, saveMemoryAccessPreference } from '../../src/persistence';
 import { subscriptionEnvironment } from '../../src/agent_runtime/providers/profiles';
 import { TurnContext } from '../../src/agent_runtime/turn';
@@ -11,9 +14,7 @@ import { TurnCancelledError } from '../../src/abort';
 import type { Message, MessageBlock } from '../../src/agent_runtime/types';
 import type { Response } from '../../src/agent_runtime/chat';
 import { CodexRpc } from '../../src/agent_runtime/providers/openai/codex-rpc';
-import { getCodexRpc, shutdownCodexRuntime } from '../../src/agent_runtime/providers/openai/codex-subscription';
-import { loginGpt } from '../../src/agent_runtime/providers/login';
-import { providerFor } from '../../src/agent_runtime/providers/providers';
+import { getCodexRpc } from '../../src/agent_runtime/providers/openai/codex-subscription';
 import * as ClaudeSdk from '@anthropic-ai/claude-agent-sdk';
 import { readClaudeSubscriptionUsage } from '../../src/agent_runtime/providers/anthropic/claude-subscription';
 
@@ -31,28 +32,33 @@ describe('multiple provider sources', () => {
     delete process.env.TEST_PROVIDER_KEY;
   });
   afterEach(() => {
-    shutdownCodexRuntime();
+    disposeAll();
     mock.restore();
     for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
     Object.assign(process.env, previous);
     rmSync(directory, { recursive: true, force: true });
   });
   function provider(request: (id: string, history: readonly Message[], context: TurnContext) => Promise<Response>) {
-    const transport = (id: string): Transport => ({ getResponse: (history, context) => request(id, history, context) });
-    return createProvider({ vendor: 'gpt', judgeModel: 'gpt-test', apiKey: { env: 'TEST_PROVIDER_KEY', owner: 'Test' },
-      api: key => ({ getResponse: (history, context) => request(key(), history, context) }),
-      subscription: transport('default'), subscriptionFor: transport });
+    const subscriptionFor = (id: string): Transport =>
+      ({ toolExecution: 'delegated', getResponse: (history, context) => request(id, history, context) });
+    return createProvider({
+      vendor: { ...VENDOR_INFO.gpt, displayName: 'Test', apiKeyEnv: 'TEST_PROVIDER_KEY' },
+      api: key => ({ toolExecution: 'host', getResponse: (history, context) => request(key(), history, context) }),
+      subscriptionFor,
+    });
   }
+  const subscriptionsOf = (vendor: 'claude' | 'gpt'): SubscriptionSource[] =>
+    providerFor(vendor).sources.list().filter((source): source is SubscriptionSource => source.kind === 'subscription');
 
   test('migrates legacy sources, saves multiple keys, and preserves unrelated settings', () => {
     saveApiKeys({ gpt: 'old-key' });
     saveSubscriptionPreferences({ gpt: true, claude: false });
     const current = provider(async () => answer);
-    current.setApiKey('new-key');
-    current.setApiKey('new-key');
-    current.addSubscription('second');
+    current.sources.addApiKey('new-key');
+    current.sources.addApiKey('new-key');
+    current.sources.addSubscription('second');
     saveMemoryAccessPreference(false);
-    expect(provider(async () => answer).sources().map(source => source.type))
+    expect(provider(async () => answer).sources.list().map(source => source.kind))
       .toEqual(['subscription', 'api', 'subscription', 'api']);
     const file = path.join(directory, 'settings.json');
     expect(JSON.parse(readFileSync(file, 'utf8')).memory.enabled).toBe(false);
@@ -63,7 +69,7 @@ describe('multiple provider sources', () => {
     process.env.TEST_PROVIDER_KEY = 'env-key';
     const attempted: string[] = [];
     const current = provider(async key => { attempted.push(key); if (key !== 'env-key') throw new Error('429'); return answer; });
-    current.setApiKey('first'); current.setApiKey('second');
+    current.sources.addApiKey('first'); current.sources.addApiKey('second');
     expect(await current.getResponse(messages, turn())).toEqual(answer);
     expect(attempted).toEqual(['second', 'first', 'env-key']);
     attempted.length = 0;
@@ -74,7 +80,7 @@ describe('multiple provider sources', () => {
   test('falls through isolated subscriptions and API sources', async () => {
     const attempted: string[] = [];
     const current = provider(async id => { attempted.push(id); if (id !== 'key') throw new Error('limit reached'); return answer; });
-    current.setApiKey('key'); current.addSubscription('account-one'); current.addSubscription('account-two');
+    current.sources.addApiKey('key'); current.sources.addSubscription('account-one'); current.sources.addSubscription('account-two');
     await current.getResponse(messages, turn());
     expect(attempted).toEqual(['account-two', 'account-one', 'key']);
   });
@@ -82,7 +88,7 @@ describe('multiple provider sources', () => {
   test('reports exhaustion once with masked credentials', async () => {
     const request = mock(async (key: string) => { throw new Error(`invalid ${key}`); });
     const current = provider(request);
-    current.setApiKey('secret-first-1234'); current.setApiKey('secret-second-5678');
+    current.sources.addApiKey('secret-first-1234'); current.sources.addApiKey('secret-second-5678');
     const failure = await current.getResponse(messages, turn()).catch(error => error as Error);
     if (!(failure instanceof Error)) throw new Error('Expected exhaustion');
     expect(failure.message).toContain('All Test sources failed (2)');
@@ -95,7 +101,7 @@ describe('multiple provider sources', () => {
       context.cancel(); throw new TurnCancelledError();
     });
     const current = provider(request);
-    current.setApiKey('one'); current.setApiKey('two');
+    current.sources.addApiKey('one'); current.sources.addApiKey('two');
     await expect(current.getResponse(messages, turn())).rejects.toThrow('Cancelled');
     expect(request).toHaveBeenCalledTimes(1);
   });
@@ -109,7 +115,7 @@ describe('multiple provider sources', () => {
       if (key === 'two') throw new Error('failed');
       release(); return answer;
     });
-    current.setApiKey('one'); current.setApiKey('two');
+    current.sources.addApiKey('one'); current.sources.addApiKey('two');
     await Promise.all([current.getResponse(messages, turn('slow')), current.getResponse(messages, turn('fast'))]);
     expect(seen).toEqual(['two']);
   });
@@ -117,12 +123,13 @@ describe('multiple provider sources', () => {
   test('removes one source without resurrecting a migrated key or dropping others', () => {
     saveApiKeys({ gpt: 'old-key' });
     const current = provider(async () => answer);
-    current.setApiKey('new-key');
-    expect(current.clearApiKey()).toBe(true);
-    expect(current.requireApiKey()).toBe('old-key');
-    expect(current.clearApiKey()).toBe(true);
-    expect(current.sources()).toEqual([]);
-    expect(provider(async () => answer).sources()).toEqual([]);
+    current.sources.addApiKey('new-key');
+    const storedKey = () => current.sources.list().find(source => source.kind === 'api' && !source.fromEnv);
+    expect(current.sources.remove(storedKey()!.id)).toBe(true);
+    expect(storedKey()).toMatchObject({ key: 'old-key' });
+    expect(current.sources.remove(storedKey()!.id)).toBe(true);
+    expect(current.sources.list()).toEqual([]);
+    expect(provider(async () => answer).sources.list()).toEqual([]);
     expect(readFileSync(path.join(directory, 'settings.json'), 'utf8')).not.toContain('old-key');
   });
 
@@ -135,7 +142,7 @@ describe('multiple provider sources', () => {
         continueWithToolResults: async () => { throw new Error('quota'); } };
       retried = history; return answer;
     });
-    current.setApiKey('one'); current.setApiKey('two');
+    current.sources.addApiKey('one'); current.sources.addApiKey('two');
     const context = turn();
     const response = await current.getResponse(messages, context);
     context.commit([tool, result]);
@@ -153,7 +160,7 @@ describe('multiple provider sources', () => {
       if (id === 'two') { context.updateStream(completed); throw new Error('quota'); }
       retried = history; return answer;
     });
-    current.addSubscription('one'); current.addSubscription('two');
+    current.sources.addSubscription('one'); current.sources.addSubscription('two');
     const context = turn();
     await current.getResponse(messages, context);
     expect(context.content).toEqual(completed);
@@ -166,7 +173,7 @@ describe('multiple provider sources', () => {
       throw new Error('connection lost');
     });
     const current = provider(request);
-    current.addSubscription('one'); current.addSubscription('two');
+    current.sources.addSubscription('one'); current.sources.addSubscription('two');
     await expect(current.getResponse(messages, turn())).rejects.toThrow('connection lost');
     expect(request).toHaveBeenCalledTimes(1);
   });
@@ -194,7 +201,7 @@ describe('multiple provider sources', () => {
     expect(one).toBe(oneAgain); expect(one).not.toBe(two);
     expect(start.mock.calls[0]?.[2]?.CODEX_HOME).not.toBe(start.mock.calls[1]?.[2]?.CODEX_HOME);
     expect(start.mock.calls[0]?.[1]?.cli_auth_credentials_store).toBe('file');
-    shutdownCodexRuntime(); await Promise.resolve();
+    disposeAll(); await Promise.resolve();
     for (const close of closes) expect(close).toHaveBeenCalledTimes(1);
   });
 
@@ -203,8 +210,8 @@ describe('multiple provider sources', () => {
       isAlive: true, close: mock(() => {}), onNotification: mock(() => () => {}), onRequest: mock(() => {}),
       request: mock(async () => ({ account: { type: 'chatgpt', email: 'test@example.com' } })),
     } as unknown as CodexRpc));
-    await loginGpt(() => {}); await loginGpt(() => {});
-    const sources = providerFor('gpt').sources().filter(source => source.type === 'subscription');
+    await providerFor('gpt').login(() => {}); await providerFor('gpt').login(() => {});
+    const sources = subscriptionsOf('gpt');
     expect(sources).toHaveLength(2);
     expect(sources[0]!.profile).not.toBe(sources[1]!.profile);
     expect(start.mock.calls[1]?.[2]?.CODEX_HOME).toContain(sources[0]!.profile);

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
-import { providerFor, VENDORS } from '../agent_runtime/providers/providers';
-import { subscribeProviderChanges } from '../agent_runtime/providers/provider';
+import { onProviderChange, providerFor } from '../agent_runtime/providers';
+import { VENDOR_INFO, VENDORS } from '../agent_runtime/providers/catalog';
 import { cachedSubscriptionRemaining, formatRemaining, readSubscriptionUsage, remainingAllowance } from '../agent_runtime/providers/usage';
 import { theme } from './styles/theme';
 
@@ -22,12 +22,12 @@ export function SubscriptionLimitRows({ rows }: { rows: readonly SubscriptionLim
 
 function activeSubscriptions() {
   return VENDORS.flatMap(vendor => {
-    const source = providerFor(vendor).currentSource();
-    if (source?.type !== 'subscription') return [];
+    const source = providerFor(vendor).activeSource();
+    if (source?.kind !== 'subscription') return [];
     return [{
       vendor, source,
       id: `${vendor}:${source.id}`,
-      label: vendor === 'gpt' ? 'codex' : 'claude',
+      label: VENDOR_INFO[vendor].sidebarLabel,
     }];
   });
 }
@@ -36,7 +36,7 @@ function subscriptionRows(subscriptions: ReturnType<typeof activeSubscriptions>,
   return subscriptions.map(item => ({
     id: item.id, label: item.label,
     remaining: previous.find(row => row.id === item.id)?.remaining
-      ?? cachedSubscriptionRemaining(item.vendor, item.source.profile, item.vendor === 'gpt' ? '7-day' : '5-hour'),
+      ?? cachedSubscriptionRemaining(item.vendor, item.source.profile, VENDOR_INFO[item.vendor].limitPeriod),
   }));
 }
 
@@ -56,7 +56,7 @@ export default function SubscriptionLimits() {
         void readSubscriptionUsage(item.vendor, request.signal, item.source.profile).then(usage => {
           if (request.signal.aborted) return;
           setRows(previous => previous.map(row => row.id === item.id
-            ? { ...row, remaining: remainingAllowance(usage, item.vendor === 'gpt' ? '7-day' : '5-hour') } : row));
+            ? { ...row, remaining: remainingAllowance(usage, VENDOR_INFO[item.vendor].limitPeriod) } : row));
         }).catch(() => {
           if (request.signal.aborted) return;
           setRows(previous => previous.map(row => row.id === item.id ? { ...row, remaining: null } : row));
@@ -64,7 +64,7 @@ export default function SubscriptionLimits() {
       }
     };
     refresh();
-    const unsubscribe = subscribeProviderChanges(refresh);
+    const unsubscribe = onProviderChange(refresh);
     const timer = setInterval(refresh, 60_000);
     return () => { clearInterval(timer); unsubscribe(); controller?.abort(); };
   }, []);

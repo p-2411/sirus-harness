@@ -1,5 +1,5 @@
 import { subscriptionEnvironment } from '../profiles';
-import { dataDirectory } from '../../../persistence';
+import { dataDirectory } from '../../../dataDirectory';
 import crypto from 'crypto';
 import {
   createSdkMcpServer,
@@ -12,15 +12,13 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import type { ImageBlock, Message, MessageBlock, ToolCallBlock, ToolResultBlock, Usage } from '../../types';
-import type { Response } from '../../chat';
-import type { Transport } from '../provider';
+import type { Response, Transport } from '../provider';
 import type { TurnContext } from '../../turn';
 import { systemPromptFor } from '../../prompt';
-import { availableTools, runTool, type ToolArgumentSchema } from '../../tools';
+import type { Toolbox, ToolArgumentSchema } from '../../tools';
 import { latestUserText, promptWithSharedHistory, unseenImages } from '../subscription';
 import { imageBlockParam } from './api';
 import { abortable, throwIfAborted } from '../../../abort';
-import type { PermissionContext } from '../../permissions/permissions';
 import type { ThinkingLevel } from '../../types';
 import { anthropicUsage, legacyClaudeThinkingBudget, usesLegacyClaudeThinking } from './api';
 import { SIRUS_CLIENT_ID } from '../../../version';
@@ -58,7 +56,8 @@ interface Turn {
   // the window size of the latest request, from its assistant message
   contextTokens: number;
   signal?: AbortSignal;
-  permissions?: PermissionContext;
+  // The tools this turn may run, with its gate and barrier bound.
+  toolbox?: Toolbox;
 }
 
 interface ClaudeSession {
@@ -215,13 +214,8 @@ function createClaudeRuntime(profile: string) {
     turn.resolved.add(toolCall.id);
     publishTurn(turn);
 
-    const result = await runTool(
-      toolCall,
-      session.directory,
-      turn.signal,
-      turn.permissions,
-      session.agent,
-    );
+    if (!turn.toolbox) throw new Error('Provider asked for a tool on a tool-less turn');
+    const result = await turn.toolbox.run(toolCall, turn.signal);
     turn.blocks.push(result);
     publishTurn(turn);
     return result;
@@ -368,7 +362,7 @@ function createClaudeRuntime(profile: string) {
 
   function createSession(turn: TurnContext): ClaudeSession {
     const { agent, directory } = turn;
-    const { model, thinkingLevel, subagent } = agent;
+    const { model, thinkingLevel } = agent;
     const participantName = agent.name;
     const inbox = createInbox();
     const session: Partial<ClaudeSession> = {
@@ -385,7 +379,7 @@ function createClaudeRuntime(profile: string) {
     const server = createSdkMcpServer({
       name: MCP_SERVER_NAME,
       version: '1.0.0',
-      tools: (turn.tools ? availableTools({ subagent }) : []).map(definition => tool(
+      tools: (turn.toolbox?.tools ?? []).map(definition => tool(
         definition.name,
         definition.description,
         Object.fromEntries(
@@ -407,7 +401,7 @@ function createClaudeRuntime(profile: string) {
           : { thinking: { type: 'adaptive' as const }, effort: thinkingLevel }),
         cwd: directory,
         systemPrompt: systemPromptFor(turn),
-        tools: turn.tools ? [CLAUDE_WEB_SEARCH, CLAUDE_WEB_FETCH] : [],
+        tools: turn.toolbox ? [CLAUDE_WEB_SEARCH, CLAUDE_WEB_FETCH] : [],
         includePartialMessages: true,
         mcpServers: { [MCP_SERVER_NAME]: server },
         strictMcpConfig: true,
@@ -476,7 +470,7 @@ function createClaudeRuntime(profile: string) {
     images: readonly ImageBlock[],
     signal?: AbortSignal,
     updateStream?: TurnContext['updateStream'],
-    permissions?: PermissionContext,
+    toolbox?: Toolbox,
   ): Promise<{ content: MessageBlock[]; usage: Usage }> {
     throwIfAborted(signal);
     const turn: Turn = {
@@ -487,7 +481,7 @@ function createClaudeRuntime(profile: string) {
       pendingWeb: new Map(),
       contextTokens: 0,
       signal,
-      permissions,
+      toolbox,
     };
     session.turn = turn;
     const interrupt = () => { void session.query.interrupt().catch(() => void 0); };
@@ -545,7 +539,7 @@ function createClaudeRuntime(profile: string) {
   ): Promise<Response> {
     const { agent, signal } = turn;
     throwIfAborted(signal);
-    if (!turn.tools) return bareRequest(messages, turn);
+    if (!turn.toolbox) return bareRequest(messages, turn);
     let session = sessions.get(agent.runtimeId);
     const { model, thinkingLevel } = agent;
     // Query options cannot be changed after creation. Rebuild when either the
@@ -574,7 +568,7 @@ function createClaudeRuntime(profile: string) {
       unseenImages(messages, !session.hasSpoken, session.seenMessageCount),
       signal,
       blocks => turn.updateStream(blocks),
-      turn.permissions,
+      turn.toolbox,
     );
     session.seenMessageCount = messages.length;
     return { content, stop_reason: 'end_turn', usage };
@@ -622,6 +616,8 @@ function createClaudeRuntime(profile: string) {
   }
 
   const transport: Transport = {
+    // Claude Code runs the host's tools itself, through the turn's toolbox.
+    toolExecution: 'delegated',
     getResponse,
     resetRuntime,
     resetAllRuntimes,
@@ -639,9 +635,10 @@ function runtimeFor(profile = 'default') {
 export function readClaudeSubscriptionUsage(signal?: AbortSignal, profile = 'default') {
   return runtimeFor(profile).readUsage(signal);
 }
-export function claudeSubscriptionTransport(profile: string): Transport { return runtimeFor(profile).transport; }
-export const subscriptionTransport: Transport = {
-  getResponse: (messages, turn) => runtimeFor().transport.getResponse(messages, turn),
-  resetRuntime: id => { for (const runtime of runtimes.values()) runtime.transport.resetRuntime?.(id); },
-  resetAllRuntimes: () => { for (const runtime of runtimes.values()) runtime.transport.resetAllRuntimes?.(); },
-};
+export function claudeSubscriptionTransport(profile = 'default'): Transport { return runtimeFor(profile).transport; }
+// Claude Code sessions are held by the SDK rather than a child process of our
+// own, so tearing them down is dropping every runtime's session state.
+export function disposeClaudeRuntimes(): void {
+  for (const runtime of runtimes.values()) runtime.transport.resetAllRuntimes?.();
+  runtimes.clear();
+}

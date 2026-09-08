@@ -2,22 +2,21 @@ import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:
 import { mkdtempSync, rmSync } from 'fs';
 import os from 'os';
 import path from 'path';
-import { maskApiKey } from '../../src/agent_runtime/providers/provider';
-import {
-  AnthropicProvider,
-  OpenAIProvider,
-  providerFor,
-} from '../../src/agent_runtime/providers/providers';
+import { boundTransports, disposeAll, providerFor } from '../../src/agent_runtime/providers';
+import { modelInfo } from '../../src/agent_runtime/providers/catalog';
+import { maskApiKey, type Source } from '../../src/agent_runtime/providers/sources';
+import { AnthropicProvider } from '../../src/agent_runtime/providers/anthropic/index';
+import { OpenAIProvider } from '../../src/agent_runtime/providers/openai/index';
 import {
   anthropicThinkingConfig,
   anthropicUsage,
   toAnthropicMessages,
 } from '../../src/agent_runtime/providers/anthropic/api';
 import { openAIUsage, toOpenAIContinuationInput, toOpenAIInput } from '../../src/agent_runtime/providers/openai/api';
-import { codexTurnUsage, shutdownCodexRuntime } from '../../src/agent_runtime/providers/openai/codex-subscription';
-import { modelStrategies } from '../../src/agent_runtime/chat';
+import { codexTurnUsage } from '../../src/agent_runtime/providers/openai/codex-subscription';
 import { SessionAgent } from '../../src/agent_runtime/agent';
 import { TurnContext } from '../../src/agent_runtime/turn';
+import { createToolbox } from '../../src/agent_runtime/tools/toolbox';
 import type { Message, ToolResultBlock } from '../../src/agent_runtime/types';
 
 const toolHistory: Message[] = [
@@ -45,7 +44,6 @@ const toolHistory: Message[] = [
 
 describe('provider tool history', () => {
   test('maps shared thinking levels to adaptive and legacy Claude requests', () => {
-    expect(modelStrategies['claude-fable-5-1']).toBe(AnthropicProvider);
     expect(anthropicThinkingConfig('claude-fable-5-1', 'max')).toEqual({
       thinking: { type: 'adaptive' },
       output_config: { effort: 'max' },
@@ -192,6 +190,15 @@ describe('provider tool history', () => {
   });
 });
 
+test('maps a model id to its vendor', () => {
+  expect(modelInfo('claude-fable-5-1')?.vendor).toBe('claude');
+});
+
+const keylessTurn = () => new TurnContext(
+  new SessionAgent({ name: 'sirus', model: 'claude-sonnet-5', runtimeId: 'credentials' }),
+  { directory: '/tmp' },
+);
+
 describe('provider credentials', () => {
   let directory: string;
   let previousDataDirectory: string | undefined;
@@ -213,44 +220,50 @@ describe('provider credentials', () => {
     rmSync(directory, { recursive: true, force: true });
   });
 
-  test('reports no credentials when neither a stored key nor the env var exists', () => {
-    expect(providerFor('claude').apiKey()).toBeNull();
-    expect(providerFor('claude').authStatus()).toEqual({ mode: 'none' });
-    expect(() => providerFor('claude').requireApiKey()).toThrow(/\/login/);
-    expect(() => providerFor('claude').requireApiKey()).not.toThrow(/ANTHROPIC_API/);
+  const claudeSources = (): Source[] => providerFor('claude').sources.list();
+  const storedClaudeKey = () => claudeSources().find(source => source.kind === 'api' && !source.fromEnv);
+
+  test('reports no credentials when neither a stored key nor the env var exists', async () => {
+    expect(claudeSources()).toEqual([]);
+    expect(providerFor('claude').activeSource()).toBeNull();
+    const failure = await providerFor('claude')
+      .getResponse([{ role: 'user', content: [{ type: 'text', text: 'hi' }] }], keylessTurn())
+      .catch(error => error as Error);
+    expect((failure as Error).message).toMatch(/\/login/);
+    expect((failure as Error).message).not.toMatch(/ANTHROPIC_API/);
   });
 
   test('falls back to the environment variable', () => {
     process.env.ANTHROPIC_API = 'sk-ant-from-env-1234';
-    expect(providerFor('claude').apiKey()).toEqual({ key: 'sk-ant-from-env-1234', source: 'env', masked: 'sk-ant-…1234' });
-    expect(providerFor('claude').authStatus()).toEqual({ mode: 'api', source: 'env', masked: 'sk-ant-…1234' });
+    expect(claudeSources()).toEqual([{ id: 'env', kind: 'api', key: 'sk-ant-from-env-1234', fromEnv: true }]);
+    expect(providerFor('claude').activeSource()).toMatchObject({ kind: 'api', fromEnv: true });
   });
 
   test('prefers a stored key over the environment variable', () => {
     process.env.ANTHROPIC_API = 'sk-ant-from-env-1234';
-    providerFor('claude').setApiKey('  sk-ant-stored-abcd  ');
-    expect(providerFor('claude').requireApiKey()).toBe('sk-ant-stored-abcd');
-    expect(providerFor('claude').authStatus()).toEqual({ mode: 'api', source: 'settings', masked: 'sk-ant-…abcd' });
+    providerFor('claude').sources.addApiKey('  sk-ant-stored-abcd  ');
+    expect(providerFor('claude').activeSource()).toMatchObject({ kind: 'api', key: 'sk-ant-stored-abcd' });
   });
 
   test('storing a key switches the provider off its subscription', () => {
-    providerFor('claude').setSource('subscription');
-    expect(providerFor('claude').authStatus()).toEqual({ mode: 'subscription' });
-    providerFor('claude').setApiKey('sk-ant-stored-abcd');
-    expect(providerFor('claude').source).toBe('api');
+    providerFor('claude').sources.addSubscription('default');
+    expect(providerFor('claude').activeSource()).toMatchObject({ kind: 'subscription' });
+    providerFor('claude').sources.addApiKey('sk-ant-stored-abcd');
+    expect(providerFor('claude').activeSource()).toMatchObject({ kind: 'api' });
   });
 
   test('rejects an empty key and never stores it', () => {
-    expect(() => providerFor('claude').setApiKey('   ')).toThrow(/empty/i);
-    expect(providerFor('claude').apiKey()).toBeNull();
+    expect(() => providerFor('claude').sources.addApiKey('   ')).toThrow(/empty/i);
+    expect(claudeSources()).toEqual([]);
   });
 
   test('clearing a stored key reports whether one existed and restores the env fallback', () => {
     process.env.ANTHROPIC_API = 'sk-ant-from-env-1234';
-    providerFor('claude').setApiKey('sk-ant-stored-abcd');
-    expect(providerFor('claude').clearApiKey()).toBe(true);
-    expect(providerFor('claude').clearApiKey()).toBe(false);
-    expect(providerFor('claude').apiKey()).toEqual({ key: 'sk-ant-from-env-1234', source: 'env', masked: 'sk-ant-…1234' });
+    providerFor('claude').sources.addApiKey('sk-ant-stored-abcd');
+    expect(providerFor('claude').sources.remove(storedClaudeKey()!.id)).toBe(true);
+    expect(storedClaudeKey()).toBeUndefined();
+    expect(providerFor('claude').sources.remove('nothing')).toBe(false);
+    expect(claudeSources()).toEqual([{ id: 'env', kind: 'api', key: 'sk-ant-from-env-1234', fromEnv: true }]);
   });
 
   test('masks short keys without revealing them', () => {
@@ -300,21 +313,19 @@ describe('API providers without credentials', () => {
 describe('Codex subscription runtime lifecycle', () => {
   beforeEach(async () => {
     // Other tests can populate the process-wide runtime before this suite runs.
-    shutdownCodexRuntime();
+    disposeAll();
     await Promise.resolve();
   });
 
   afterEach(async () => {
-    shutdownCodexRuntime();
+    disposeAll();
     await Promise.resolve();
     mock.restore();
   });
 
   test('closes the process-wide app-server when the frontend exits', async () => {
     const { CodexRpc } = await import('../../src/agent_runtime/providers/openai/codex-rpc');
-    const { getCodexRpc, shutdownCodexRuntime } = await import(
-      '../../src/agent_runtime/providers/openai/codex-subscription'
-    );
+    const { getCodexRpc } = await import('../../src/agent_runtime/providers/openai/codex-subscription');
     const close = mock(() => {});
     const rpc = {
       isAlive: true,
@@ -325,21 +336,21 @@ describe('Codex subscription runtime lifecycle', () => {
     const start = spyOn(CodexRpc, 'start').mockResolvedValue(rpc);
 
     await getCodexRpc();
-    shutdownCodexRuntime();
+    disposeAll();
     await Promise.resolve();
 
     expect(start).toHaveBeenCalledTimes(1);
     expect(close).toHaveBeenCalledTimes(1);
 
     // Cleanup is safe if more than one exit path observes the same shutdown.
-    shutdownCodexRuntime();
+    disposeAll();
     await Promise.resolve();
     expect(close).toHaveBeenCalledTimes(1);
   });
 
   test('starts tool-enabled threads with workspace write access', async () => {
     const { CodexRpc } = await import('../../src/agent_runtime/providers/openai/codex-rpc');
-    const { subscriptionTransport, shutdownCodexRuntime } = await import(
+    const { codexSubscriptionTransport } = await import(
       '../../src/agent_runtime/providers/openai/codex-subscription'
     );
 
@@ -370,9 +381,9 @@ describe('Codex subscription runtime lifecycle', () => {
 
     const turn = new TurnContext(
       new SessionAgent({ name: 'worker', model: 'gpt-5.6-sol', runtimeId: 'write-test' }),
-      { directory: '/tmp', tools: true },
+      { directory: '/tmp', toolbox: createToolbox({ directory: '/tmp' }) },
     );
-    await subscriptionTransport.getResponse(
+    await codexSubscriptionTransport().getResponse(
       [{ role: 'user', content: [{ type: 'text', text: 'Edit the file' }] }],
       turn,
     );

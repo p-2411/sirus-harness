@@ -1,6 +1,6 @@
 import { TurnCancelledError } from '../abort';
 import type { SessionAgent } from './agent';
-import type { PermissionContext } from './permissions/permissions';
+import type { Toolbox } from './tools';
 import type { Message, MessageBlock, Usage } from './types';
 
 export interface TurnOptions {
@@ -13,15 +13,13 @@ export interface TurnOptions {
   // A host-generated user turn used when another participant mentioned this
   // agent. It is sent to the provider but is not persisted in chat history.
   turnPrompt?: string;
-  // The gate every tool call of this turn goes through. Absent only for
-  // direct programmatic callers (tests); every session and subagent run
-  // passes one.
-  permissions?: PermissionContext;
+  // The tools this turn may use and the one way to run one: the checkpoint
+  // barrier, the permission gate and the subagent host are all bound inside
+  // it. Absent means a tool-less turn, for one-shot questions.
+  toolbox?: Toolbox;
   // This system prompt instead of Sirus's, for one-shot questions such as
   // the permission judge.
   systemPrompt?: string;
-  // Whether the model may call tools. Off for one-shot questions.
-  tools?: boolean;
 }
 
 // The state of one agent's turn: who is speaking, how to stop it, and the
@@ -37,9 +35,10 @@ export class TurnContext {
   readonly directory: string;
   readonly signal: AbortSignal;
   readonly turnPrompt?: string;
-  readonly permissions?: PermissionContext;
   readonly systemPrompt?: string;
-  readonly tools: boolean;
+  // Null on a tool-less turn: the provider is told about no tools, and a
+  // provider that asks for one anyway is a protocol error.
+  readonly toolbox: Toolbox | null;
   // Settles with the completed message, or with whatever ended the turn.
   readonly result: Promise<Message>;
 
@@ -64,9 +63,8 @@ export class TurnContext {
     this.signal = this.controller.signal;
     if (options.signal) this.follow(options.signal);
     if (options.turnPrompt) this.turnPrompt = options.turnPrompt;
-    if (options.permissions) this.permissions = options.permissions;
     if (options.systemPrompt) this.systemPrompt = options.systemPrompt;
-    this.tools = options.tools ?? true;
+    this.toolbox = options.toolbox ?? null;
     this.result = new Promise<Message>((resolve, reject) => {
       this.resolveResult = resolve;
       this.rejectResult = reject;

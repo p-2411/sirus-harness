@@ -1,11 +1,9 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { Message, MessageBlock, ToolCallBlock, ToolResultBlock, Usage } from '../../types';
 import { imageData } from '../../../images';
-import type { Response } from '../../chat';
-import type { Transport } from '../provider';
+import type { Response, Transport } from '../provider';
 import type { TurnContext } from '../../turn';
 import { systemPromptFor } from '../../prompt';
-import { availableTools } from '../../tools';
 import {
   fetchUrlCall,
   fetchUrlResult,
@@ -284,9 +282,9 @@ async function request(
     ...anthropicThinkingConfig(model, thinkingLevel),
     system: systemPromptFor(turn),
     messages,
-    tools: turn.tools
+    tools: turn.toolbox
       ? [
-        ...availableTools({ subagent: agent.subagent }).map(tool => ({
+        ...turn.toolbox.tools.map(tool => ({
           name: tool.name,
           description: tool.description,
           input_schema: toInputSchema(tool.args),
@@ -373,6 +371,8 @@ async function getResponse(
 
 export function apiTransport(requireApiKey: () => string): Transport {
   return {
+    // The API returns tool_use; the host runs the tools and continues.
+    toolExecution: 'host',
     getResponse: (messages, turn) => getResponse(messages, turn, requireApiKey),
   };
 }

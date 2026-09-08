@@ -11,7 +11,7 @@ import { join } from 'path';
 import { Session } from '../../src/agent_runtime/session';
 import App, { createWorkspace, nextSessionName, startSession } from '../../src/frontend/app';
 import { changeModel } from '../../src/commands/agents/behavior';
-import { loadSessions, saveSessions } from '../../src/persistence';
+import { loadSessionSnapshots, saveSessionSnapshots } from '../../src/persistence';
 
 describe('app workspace startup', () => {
   let settingsDirectory: string;
@@ -28,11 +28,11 @@ describe('app workspace startup', () => {
   });
   test('menus keep pane widths fixed and Ctrl+K leaves the dots in place', async () => {
     const sessions = ['First', 'Second'].map(name => {
-      const session = Session.create(name, `/projects/${name}`);
+      const session = new Session({ name, directory: `/projects/${name}`, autoNamePending: true });
       session.append({ role: 'user', content: [{ type: 'text', text: 'Existing history' }] });
       return session;
     });
-    saveSessions(sessions, null);
+    saveSessionSnapshots(sessions.filter(s => !s.isEmpty()).map(s => s.toSnapshot()), null);
     const update = spyOn(updater, 'checkSirusUpdate').mockResolvedValue({
       updateAvailable: false, currentVersion: '1.0.0', latestVersion: '1.0.0',
     });
@@ -126,7 +126,7 @@ describe('app workspace startup', () => {
     }
   });
   test('uses a collision-safe name for the startup draft', () => {
-    const existing = Session.create('Session 2', '/projects/previous');
+    const existing = new Session({ name: 'Session 2', directory: '/projects/previous', autoNamePending: true });
 
     expect(nextSessionName([existing])).toBe('Session 3');
     expect(createWorkspace({ sessions: [existing], selectedSessionId: existing.getId() }, '/projects/current')
@@ -134,7 +134,7 @@ describe('app workspace startup', () => {
   });
 
   test('opens an unselected draft without adding it to saved sessions', () => {
-    const previous = Session.create('Previous', '/projects/previous');
+    const previous = new Session({ name: 'Previous', directory: '/projects/previous', autoNamePending: true });
     previous.append({ role: 'user', content: [{ type: 'text', text: 'Existing history' }] });
 
     const workspace = createWorkspace({
@@ -162,8 +162,8 @@ describe('app workspace startup', () => {
   });
 
   test('preserves saved session models and applies the preference only to the new draft', () => {
-    const first = new Session('First', 'first', 'gpt-5.6-luna');
-    const second = new Session('Second', 'second', 'gpt-5.6-terra');
+    const first = new Session({ id: 'first', name: 'First', model: 'gpt-5.6-luna' });
+    const second = new Session({ id: 'second', name: 'Second', model: 'gpt-5.6-terra' });
     second.addParticipant('reviewer', 'claude-fable-5-1');
     const workspace = createWorkspace({
       sessions: [first, second],
@@ -184,8 +184,15 @@ describe('app workspace startup', () => {
     const started = startSession(workspace, workspace.draftSession, '/projects/current');
     expect(started.selectedSession?.getModel()).toBe('claude-haiku-4.5');
     expect(started.draftSession.getModel()).toBe('gpt-5.6-sol');
-    saveSessions(started.sessions, started.selectedSession!.getId());
-    const restored = createWorkspace(loadSessions(), '/projects/current');
+    saveSessionSnapshots(
+      started.sessions.filter(s => !s.isEmpty()).map(s => s.toSnapshot()),
+      started.selectedSession!.getId(),
+    );
+    const saved = loadSessionSnapshots();
+    const restored = createWorkspace({
+      sessions: saved.snapshots.map(snapshot => Session.fromSnapshot(snapshot)),
+      selectedSessionId: saved.selectedSessionId,
+    }, '/projects/current');
     expect(restored.sessions[0].getModel()).toBe('claude-haiku-4.5');
     expect(restored.draftSession.getModel()).toBe('gpt-5.6-sol');
   });

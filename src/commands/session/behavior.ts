@@ -1,19 +1,18 @@
-import type { Session } from '../../agent_runtime/session';
 import {
   PERMISSION_MODE_NAMES,
   PERMISSION_MODES,
   parsePermissionMode,
   type PermissionMode,
-} from '../../agent_runtime/permissions/permissions';
+} from '../../agent_runtime/permissions/policy';
 import type { Feedback } from '../feedback';
-import type { CommandMenuItem } from '../types';
+import type { CommandMenuItem, CommandSession } from '../types';
 
-export function clearSession(session: Session): Feedback {
+export function clearSession(session: CommandSession): Feedback {
   session.clear();
   return { kind: 'success', text: 'History cleared.' };
 }
 
-export function renameSession(name: string, session: Session): Feedback {
+export function renameSession(name: string, session: CommandSession): Feedback {
   const trimmed = name.replace(/\s+/g, ' ').trim();
   if (!trimmed) throw new Error('Usage: /rename <name>');
   session.setName(trimmed);
@@ -36,7 +35,7 @@ export function permissionsMenuItems(): CommandMenuItem[] {
   }));
 }
 
-export function permissionsCommand(mode: string | undefined, session: Session): Feedback {
+export function permissionsCommand(mode: string | undefined, session: CommandSession): Feedback {
   if (mode === undefined) {
     return {
       kind: 'info',

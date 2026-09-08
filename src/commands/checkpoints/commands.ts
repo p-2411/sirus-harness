@@ -5,9 +5,9 @@ export const undoCommandSpec: CommandSpec = {
   name: 'undo',
   args: '[all|files|chat]',
   description: 'restore files and chat to before the last turn',
-  run: (args, execution) => {
+  run: (args, context) => {
     if (args.length > 1) throw new Error('Usage: /undo [all|files|chat]');
-    return undoCommand(args[0], execution.session);
+    return undoCommand(args[0], context.session);
   },
   menu: undoMenuItems,
 };
@@ -16,6 +16,6 @@ export const rewindCommandSpec: CommandSpec = {
   name: 'rewind',
   args: '[n] [all|files|chat]',
   description: 'restore files and chat to before an earlier turn',
-  run: (args, execution) => rewindCommand(args, execution.session),
+  run: (args, context) => rewindCommand(args, context.session),
   menu: rewindMenuItems,
 };

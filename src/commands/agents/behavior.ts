@@ -1,11 +1,5 @@
-import { modelStrategies } from '../../agent_runtime/chat';
 import { saveSirusModelPreference } from '../../persistence';
-import {
-  modelsFor,
-  providerFor,
-  VENDORS,
-} from '../../agent_runtime/providers/providers';
-import type { Session } from '../../agent_runtime/session';
+import { modelIds, modelsOf, VENDOR_INFO, VENDORS } from '../../agent_runtime/providers/catalog';
 import {
   THINKING_LEVEL_DESCRIPTIONS,
   THINKING_LEVELS,
@@ -13,7 +7,7 @@ import {
   type ThinkingLevel,
 } from '../../agent_runtime/types';
 import type { Feedback } from '../feedback';
-import type { CommandMenuEntry, CommandMenuItem } from '../types';
+import type { CommandMenuEntry, CommandMenuItem, CommandSession } from '../types';
 
 function modelFamily(model: string): string {
   return model
@@ -43,7 +37,7 @@ function compareModelVersions(left: string, right: string): number {
 
 export function resolveModelReference(
   reference: string,
-  availableModels: readonly string[] = Object.keys(modelStrategies),
+  availableModels: readonly string[] = modelIds(),
 ): string {
   const normalized = reference.toLocaleLowerCase();
   const exact = availableModels.find(model => model.toLocaleLowerCase() === normalized);
@@ -75,9 +69,9 @@ export function modelMenuItems(args: readonly string[] = []): CommandMenuEntry[]
     {
       type: 'heading' as const,
       key: `${vendor}-models`,
-      label: providerFor(vendor).apiKeyOwner,
+      label: VENDOR_INFO[vendor].displayName,
     },
-    ...modelsFor(vendor).map(model => ({
+    ...modelsOf(vendor).map(model => ({
       type: 'item' as const,
       key: model,
       label: model,
@@ -89,7 +83,7 @@ export function modelMenuItems(args: readonly string[] = []): CommandMenuEntry[]
 export function changeModel(
   participantName: string = 'sirus',
   model: string,
-  session: Session,
+  session: CommandSession,
 ): Feedback {
   const resolvedModel = resolveModelReference(model);
   const normalizedParticipantName = participantName.replace(/^@/, '');
@@ -112,7 +106,7 @@ export function changeModel(
 export function changeThinkingLevel(
   participantName: string = 'sirus',
   value: string,
-  session: Session,
+  session: CommandSession,
 ): Feedback {
   const level = parseThinkingLevel(value);
   if (!level) throw new Error(`Unknown thinking level. Try: ${THINKING_LEVELS.join(', ')}`);
@@ -138,7 +132,7 @@ export function thinkingMenuItems(args: readonly string[] = []): CommandMenuItem
   }));
 }
 
-export function thinkingCommand(args: readonly string[], session: Session): Feedback {
+export function thinkingCommand(args: readonly string[], session: CommandSession): Feedback {
   if (args.length === 0) {
     return { kind: 'info', text: `@sirus thinking is ${session.getThinkingLevel()}.` };
   }

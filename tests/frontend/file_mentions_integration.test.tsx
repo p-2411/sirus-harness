@@ -6,7 +6,7 @@ import { PassThrough } from 'node:stream';
 import { useState, type ReactNode } from 'react';
 import { Box, render } from 'ink';
 import stripAnsi from 'strip-ansi';
-import { modelStrategies } from '../../src/agent_runtime/chat';
+import { boundTransports } from '../../src/agent_runtime/providers';
 import { Session } from '../../src/agent_runtime/session';
 import type { Message } from '../../src/agent_runtime/types';
 import Chat, { promptHistory } from '../../src/frontend/chat/Chat';
@@ -17,7 +17,7 @@ const model = 'test-file-mentions-integration';
 const projects: string[] = [];
 
 afterEach(() => {
-  delete modelStrategies[model];
+  delete boundTransports[model];
   for (const project of projects.splice(0)) rmSync(project, { recursive: true, force: true });
 });
 
@@ -255,13 +255,18 @@ describe('file mentions through the terminal', () => {
     const contents = 'Unique attachment contents. @intruder should never become a participant.';
     const directory = project({ 'notes.txt': contents });
     const calls: { participant: string; messages: readonly Message[] }[] = [];
-    modelStrategies[model] = {
+    boundTransports[model] = {
       getResponse: async (messages, turn) => {
         calls.push({ participant: turn.agent.name, messages: structuredClone(messages) });
         return { content: [{ type: 'text', text: 'Reviewed the attachment.' }], stop_reason: 'end_turn' };
       },
     };
-    const session = new Session('File mention integration', 'file-mention-integration', model, [], directory);
+    const session = new Session({
+      id: 'file-mention-integration',
+      name: 'File mention integration',
+      directory,
+      model,
+    });
     session.addParticipant('reviewer', model);
     const ui = terminal(<Chat currSession={session} />);
     try {
@@ -292,13 +297,13 @@ describe('file mentions through the terminal', () => {
   test('a missing file restores the editable draft without starting a provider or recording a message', async () => {
     const directory = project({});
     let calls = 0;
-    modelStrategies[model] = {
+    boundTransports[model] = {
       getResponse: async () => {
         calls++;
         return { content: [{ type: 'text', text: 'Unexpected response' }], stop_reason: 'end_turn' };
       },
     };
-    const session = new Session('Missing file', 'missing-file-integration', model, [], directory);
+    const session = new Session({ id: 'missing-file-integration', name: 'Missing file', directory, model });
     const ui = terminal(<Chat currSession={session} />);
     try {
       await ui.flush();
@@ -318,13 +323,13 @@ describe('file mentions through the terminal', () => {
     const root = project({ 'current/local.txt': 'Current project', 'proj/file.tsx': contents });
     const directory = path.join(root, 'current');
     const received: Message[][] = [];
-    modelStrategies[model] = {
+    boundTransports[model] = {
       getResponse: async messages => {
         received.push(structuredClone([...messages]));
         return { content: [{ type: 'text', text: 'Read the sibling file.' }], stop_reason: 'end_turn' };
       },
     };
-    const session = new Session('Sibling file', 'sibling-file-integration', model, [], directory);
+    const session = new Session({ id: 'sibling-file-integration', name: 'Sibling file', directory, model });
     const ui = terminal(<Chat currSession={session} />);
     try {
       await ui.flush();

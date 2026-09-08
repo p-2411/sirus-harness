@@ -3,9 +3,9 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import os from 'os';
 import path from 'path';
 import { Session } from '../../src/agent_runtime/session';
-import { modelStrategies } from '../../src/agent_runtime/chat';
-import { runTool } from '../../src/agent_runtime/tools';
-import { checkSubagent, type SubagentRun } from '../../src/agent_runtime/tools/subagents';
+import { boundTransports } from '../../src/agent_runtime/providers';
+import type { SubagentRun } from '../../src/agent_runtime/tools/subagents';
+import { checkSubagent } from '../../src/agent_runtime/tools/subagents/run';
 import { enableCheckpoints } from '../../src/checkpoints';
 import { TurnCancelledError } from '../../src/abort';
 import type { Message } from '../../src/agent_runtime/types';
@@ -24,25 +24,25 @@ beforeEach(() => {
   writeFileSync(path.join(project, 'file.txt'), 'user draft');
   process.env.SIRUS_DATA_DIR = path.join(root, 'state');
   enableCheckpoints();
-  session = new Session('Checkpoint test', 'checkpoint-session', model, [], project);
+  session = new Session({ id: 'checkpoint-session', name: 'Checkpoint test', directory: project, model });
   session.setPermissionMode('bypass');
 });
 
 afterEach(() => {
   enableCheckpoints(false);
-  delete modelStrategies[model];
+  delete boundTransports[model];
   if (originalDataDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
   else process.env.SIRUS_DATA_DIR = originalDataDirectory;
   rmSync(root, { recursive: true, force: true });
 });
 
 function writeResponse() {
-  modelStrategies[model] = {
+  boundTransports[model] = {
     getResponse: async (_history, turn) => {
-      const result = await runTool({
+      const result = await turn.toolbox!.run({
         type: 'tool_call', id: 'write', name: 'WriteFile',
         arguments: { path: 'file.txt', content: 'agent edit' },
-      }, turn.directory, turn.signal, turn.permissions, turn.agent);
+      }, turn.signal);
       expect(result.isError).toBe(false);
       return { content: [{ type: 'text', text: 'Edited.' }], stop_reason: 'end_turn' };
     },
@@ -53,7 +53,7 @@ describe('session checkpoint integration', () => {
   test('a mutating tool waits for the pre-turn snapshot, and rewind restores files and history', async () => {
     writeResponse();
     let resets = 0;
-    modelStrategies[model].resetRuntime = () => { resets++; };
+    boundTransports[model].resetRuntime = () => { resets++; };
     await session.sendMessage(prompt);
     expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('agent edit');
     const [checkpoint] = session.getCheckpoints();
@@ -83,7 +83,7 @@ describe('session checkpoint integration', () => {
 
   test('chat rewind restores history-based usage and activity while file-only rewind preserves them', async () => {
     let turn = 0;
-    modelStrategies[model] = {
+    boundTransports[model] = {
       getResponse: async () => {
         turn++;
         return {
@@ -119,14 +119,14 @@ describe('session checkpoint integration', () => {
     let releaseFirst!: () => void;
     const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
     let turnNumber = 0;
-    modelStrategies[model] = {
+    boundTransports[model] = {
       getResponse: async (_history, turn) => {
         const number = ++turnNumber;
         if (number === 1) await firstGate;
-        const result = await runTool({
+        const result = await turn.toolbox!.run({
           type: 'tool_call', id: `write-${number}`, name: 'WriteFile',
           arguments: { path: 'file.txt', content: `edit ${number}` },
-        }, turn.directory, turn.signal, turn.permissions, turn.agent);
+        }, turn.signal);
         expect(result.isError).toBe(false);
         return {
           content: [{ type: 'text', text: `Response ${number}` }],
@@ -172,7 +172,7 @@ describe('session checkpoint integration', () => {
 
   test.each([new Error('provider failed'), new TurnCancelledError()])(
     'settles a snapshot before a failed or cancelled turn can be cleared: %s', async error => {
-      modelStrategies[model] = { getResponse: async () => { throw error; } };
+      boundTransports[model] = { getResponse: async () => { throw error; } };
       await expect(session.sendMessage(prompt)).rejects.toThrow(error.message);
       expect(session.getCheckpoints()).toHaveLength(1);
       expect(session.getStatus()).toBe(error.name === 'AbortError' ? 'idle' : 'error');
@@ -200,7 +200,15 @@ describe('session checkpoint integration', () => {
 
   test('leaves history intact when file restoration fails', async () => {
     const invalidCheckpoint = { id: 'a'.repeat(40), messageIndex: 0, summary: 'Unavailable', createdAt: Date.now() };
-    session = new Session('Missing checkpoint', 'missing', model, [prompt], project, [], 'sirus', 'auto', [invalidCheckpoint]);
+    session = new Session({
+      id: 'missing',
+      name: 'Missing checkpoint',
+      directory: project,
+      model,
+      messages: [prompt],
+      checkpoints: [invalidCheckpoint],
+      permissionMode: 'auto',
+    });
     await expect(session.rewind(invalidCheckpoint.id, { files: true, chat: true })).rejects.toThrow();
     expect(session.getMessages()).toEqual([prompt]);
     expect(session.getCheckpoints()).toEqual([invalidCheckpoint]);
@@ -212,10 +220,10 @@ describe('session checkpoint integration', () => {
     writeResponse();
     await session.sendMessage(prompt);
     const [checkpoint] = session.getCheckpoints();
-    const other = new Session('Other session', 'other', model, [], project);
+    const other = new Session({ id: 'other', name: 'Other session', directory: project, model });
     let finish!: () => void;
     const gate = new Promise<void>(resolve => { finish = resolve; });
-    modelStrategies[model] = {
+    boundTransports[model] = {
       getResponse: async () => {
         await gate;
         return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
@@ -241,15 +249,15 @@ describe('session checkpoint integration', () => {
       await session.sendMessage(prompt);
       const [checkpoint] = session.getCheckpoints();
       const owner = ownerScope === 'same session'
-        ? session : new Session('Other session', 'detached-other', model, [], project);
+        ? session : new Session({ id: 'detached-other', name: 'Other session', directory: project, model });
       let release!: () => void;
       const gate = new Promise<void>(resolve => { release = resolve; });
       let worker!: SubagentRun;
-      modelStrategies[model] = {
+      boundTransports[model] = {
         getResponse: async (_history, turn) => {
           if (turn.agent.subagent) await gate;
           else worker = turn.agent.spawnSubagent('Keep working', model, {
-            directory: turn.directory, permissions: turn.permissions,
+            directory: turn.directory,
           });
           return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
         },
@@ -282,15 +290,15 @@ describe('session checkpoint integration', () => {
     const [checkpoint] = session.getCheckpoints();
     const otherProject = path.join(root, 'other-project');
     mkdirSync(otherProject);
-    const other = new Session('Other project', 'detached-unrelated', model, [], otherProject);
+    const other = new Session({ id: 'detached-unrelated', name: 'Other project', directory: otherProject, model });
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     let worker!: SubagentRun;
-    modelStrategies[model] = {
+    boundTransports[model] = {
       getResponse: async (_history, turn) => {
         if (turn.agent.subagent) await gate;
         else worker = turn.agent.spawnSubagent('Keep working', model, {
-          directory: turn.directory, permissions: turn.permissions,
+          directory: turn.directory,
         });
         return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
       },

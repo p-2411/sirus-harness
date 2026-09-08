@@ -5,7 +5,7 @@ import stripAnsi from 'strip-ansi';
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
-import { providerFor } from '../../src/agent_runtime/providers/providers';
+import { providerFor } from '../../src/agent_runtime/providers';
 import * as usage from '../../src/agent_runtime/providers/usage';
 import SubscriptionLimits, { SubscriptionLimitRows } from '../../src/frontend/SubscriptionLimits';
 import { codexSubscriptionTransport } from '../../src/agent_runtime/providers/openai/codex-subscription';
@@ -39,8 +39,8 @@ test('shows only the active subscription and follows fallback, removal and API s
   let output = '';
   stdout.on('data', chunk => { if (chunk.toString().trim()) output = stripAnsi(chunk.toString()); });
   const current = providerFor('gpt');
-  current.addSubscription('one'); current.addSubscription('two');
-  providerFor('claude').addSubscription('claude-one');
+  current.sources.addSubscription('one'); current.sources.addSubscription('two');
+  providerFor('claude').sources.addSubscription('claude-one');
   saveSubscriptionLimitCache([
     { vendor: 'gpt', profile: 'two', period: '7-day', remaining: 35, checkedAt: Date.now(), resetsAt: null },
     { vendor: 'claude', profile: 'other-account', period: '5-hour', remaining: 99, checkedAt: Date.now(), resetsAt: null },
@@ -79,7 +79,9 @@ test('shows only the active subscription and follows fallback, removal and API s
     expect(output).toContain('claude: 80%');
     expect(reader.mock.calls.map(call => call[2]).sort()).toEqual(['claude-one', 'two']);
     limitsReady = new Promise<void>(resolve => { releaseLimits = resolve; });
-    current.setSource('subscription');
+    // A change to the list that leaves the active source alone: the rows keep
+    // their values while the refresh it triggers is in flight.
+    current.sources.promote('two');
     await flush();
     expect(output).toContain('codex: 10%');
     expect(output).toContain('claude: 80%');
@@ -95,16 +97,16 @@ test('shows only the active subscription and follows fallback, removal and API s
     expect(output).not.toContain('codex: 10%');
     finish();
     await response;
-    current.removeSource('one');
+    current.sources.remove('one');
     await flush();
     expect(output).toContain('codex: 10%');
     expect(output).not.toContain('codex 2');
-    current.setApiKey('sidebar-test-key');
+    current.sources.addApiKey('sidebar-test-key');
     await flush();
     expect(output).not.toContain('codex:');
     expect(output).toContain('claude: 80%');
     reader.mockResolvedValue({ windows: [], unavailable: 'could not read limits' });
-    current.setSource('api');
+    providerFor('claude').sources.promote('claude-one');
     await flush();
     expect(output).toContain('claude: unavailable');
   } finally {

@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'bun:test';
 import type { Checkpoint, Session } from '../../src/agent_runtime/session';
 import { rewindCommand, rewindMenuItems, undoCommand, undoMenuItems } from '../../src/commands/checkpoints/behavior';
 import { undoCommandSpec } from '../../src/commands/checkpoints/commands';
-import type { CommandExecution } from '../../src/commands/types';
+import type { CommandContext } from '../../src/commands/types';
 
 function checkpointSession() {
   const checkpoints: Checkpoint[] = [
@@ -51,7 +51,8 @@ describe('checkpoint commands', () => {
       expect(() => rewindCommand(args, session)).toThrow('Usage: /rewind');
     }
     expect(() => undoCommand('invalid', session)).toThrow('Usage: /undo');
-    expect(() => undoCommandSpec.run(['chat', 'extra'], { session } as CommandExecution)).toThrow('Usage: /undo');
+    const context: CommandContext = { session, signal: new AbortController().signal, notify: () => {} };
+    expect(() => undoCommandSpec.run(['chat', 'extra'], context)).toThrow('Usage: /undo');
     expect(rewind).not.toHaveBeenCalled();
   });
 });

@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { getResponse, modelStrategies } from '../../src/agent_runtime/chat';
+import { getResponse } from '../../src/agent_runtime/chat';
+import { boundTransports } from '../../src/agent_runtime/providers';
 import type { Response } from '../../src/agent_runtime/chat';
 import { SessionAgent } from '../../src/agent_runtime/agent';
 import { TurnContext, type TurnOptions } from '../../src/agent_runtime/turn';
+import { createToolbox } from '../../src/agent_runtime/tools/toolbox';
 import type { Message, MessageBlock } from '../../src/agent_runtime/types';
 
 const testModel = 'test-message-list-model';
@@ -10,12 +12,12 @@ const testModel = 'test-message-list-model';
 function testTurn(options: Partial<TurnOptions> = {}): TurnContext {
   return new TurnContext(
     new SessionAgent({ name: 'sirus', model: testModel, runtimeId: 'default' }),
-    { directory: process.cwd(), ...options },
+    { directory: process.cwd(), toolbox: createToolbox({ directory: process.cwd() }), ...options },
   );
 }
 
 afterEach(() => {
-  delete modelStrategies[testModel];
+  delete boundTransports[testModel];
 });
 
 describe('getResponse', () => {
@@ -27,7 +29,7 @@ describe('getResponse', () => {
     let receivedModel: string | undefined;
     let receivedDirectory: string | undefined;
 
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async (providerMessages, turn) => {
         receivedMessages = providerMessages;
         receivedModel = turn.agent.model;
@@ -57,7 +59,7 @@ describe('getResponse', () => {
     let receivedMessages: readonly Message[] | undefined;
     let receivedToolResults: Parameters<NonNullable<Response['continueWithToolResults']>>[0] | undefined;
 
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async providerMessages => {
         receivedMessages = providerMessages;
         return {
@@ -128,7 +130,7 @@ describe('getResponse', () => {
       },
     });
 
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async () => toolRound(1),
     };
 
@@ -147,7 +149,7 @@ describe('getResponse', () => {
   });
 
   test('sums usage across tool requests while retaining only the latest context', async () => {
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async () => ({
         stop_reason: 'tool_use',
         content: [{ type: 'tool_call', id: 'read', name: 'ReadFile', arguments: { path: 'package.json' } }],
@@ -173,7 +175,7 @@ describe('getResponse', () => {
   test('exposes streamed text on the turn before the provider finishes', async () => {
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async (_messages, turn) => {
         turn.updateStream([{ type: 'text', text: 'Hel' }]);
         await gate;
@@ -203,7 +205,7 @@ describe('getResponse', () => {
   test('keeps streamed continuation text after tool calls and results', async () => {
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async (_messages, turn) => {
         const toolCall = {
           type: 'tool_call' as const,
@@ -248,7 +250,7 @@ describe('getResponse', () => {
   });
 
   test('commits each result while a multi-tool run is still in progress', async () => {
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async () => ({
         content: [
           { type: 'tool_call', id: 'call_one', name: 'ReadFile', arguments: { path: 'package.json' } },
@@ -275,7 +277,7 @@ describe('getResponse', () => {
   });
 
   test('settles the turn with the provider error and ends the change stream', async () => {
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async () => {
         throw new Error('provider down');
       },

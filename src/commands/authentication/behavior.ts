@@ -1,18 +1,10 @@
-import { maskApiKey, type ProviderSource } from '../../agent_runtime/providers/provider';
-import { login, subscriptionDetail, type Notify } from '../../agent_runtime/providers/login';
-import {
-  parseVendor,
-  providerFor,
-  VENDORS,
-  type Vendor,
-} from '../../agent_runtime/providers/providers';
-import type { Session } from '../../agent_runtime/session';
+import { providerFor } from '../../agent_runtime/providers';
+import { parseVendor, VENDOR_INFO, VENDORS, type Vendor } from '../../agent_runtime/providers/catalog';
+import { maskApiKey, type Source } from '../../agent_runtime/providers/sources';
 import { contextPercent, formatTokens } from '../../agent_runtime/usage';
 import type { Feedback } from '../feedback';
-import type { CommandMenuItem } from '../types';
+import type { CommandMenuItem, CommandSession, Notify } from '../types';
 import { readSubscriptionUsage, remainingAllowance, formatRemaining, type SubscriptionUsage } from '../../agent_runtime/providers/usage';
-
-const VENDOR_NAMES: Record<Vendor, string> = { claude: 'Claude', gpt: 'ChatGPT' };
 
 // `/login` asks which provider first; `/login <provider>` then offers that
 // provider's two ways in. Picking a provider sends `/login <provider>`, which
@@ -23,7 +15,7 @@ export function loginMenuItems(args: readonly string[] = []): CommandMenuItem[] 
     return VENDORS.map(vendor => ({
       type: 'item',
       key: vendor,
-      label: VENDOR_NAMES[vendor],
+      label: VENDOR_INFO[vendor].accountName,
       description: `${vendor}-* models`,
       command: `/login ${vendor}`,
     }));
@@ -34,16 +26,16 @@ export function loginMenuItems(args: readonly string[] = []): CommandMenuItem[] 
       type: 'item',
       key: 'subscription',
       label: 'Subscription',
-      description: `sign in to ${VENDOR_NAMES[vendor]} in the browser`,
+      description: `sign in to ${VENDOR_INFO[vendor].accountName} in the browser`,
       command: `/login ${vendor} subscription`,
     },
     {
       type: 'item',
       key: 'api',
       label: 'API key',
-      description: `paste an ${providerFor(vendor).apiKeyOwner} API key`,
+      description: `paste an ${VENDOR_INFO[vendor].displayName} API key`,
       command: `/login ${vendor} api`,
-      secret: { prompt: `${providerFor(vendor).apiKeyOwner} API key` },
+      secret: { prompt: `${VENDOR_INFO[vendor].displayName} API key` },
     },
   ];
 }
@@ -57,33 +49,36 @@ export function loginCommand(
   if (choices) return { kind: 'info', text: choices.map(item => item.command).join(' · ') };
   const vendor = parseVendor(args[0]);
   if (args[1] === 'subscription' && args.length === 2) {
-    return login(vendor, notify, signal).then(text => ({ kind: 'success', text }));
+    return providerFor(vendor).login(notify, signal).then(text => ({ kind: 'success', text }));
   }
   if (args[1] === 'api' && args.length === 3) {
-    const provider = providerFor(vendor);
-    const stored = provider.setApiKey(args[2]);
-    return { kind: 'success', text: `Saved ${provider.apiKeyOwner} API key ${stored.masked}.` };
+    const stored = providerFor(vendor).sources.addApiKey(args[2]);
+    return { kind: 'success', text: `Saved ${VENDOR_INFO[vendor].displayName} API key ${maskApiKey(stored.key)}.` };
   }
   throw new Error(`Usage: /login ${vendor} subscription  or  /login ${vendor} api <key>`);
 }
 
+function isEnvironmentKey(source: Source): boolean {
+  return source.kind === 'api' && source.fromEnv === true;
+}
+
 // The account behind a source: the email a subscription was signed in with,
 // or the recognisable ends of an API key.
-function describeSource(vendor: Vendor, source: ProviderSource): string {
-  return `${vendor} · ${source.type === 'api' ? maskApiKey(source.key) : source.label ?? 'subscription'}`;
+function describeSource(vendor: Vendor, source: Source): string {
+  return `${vendor} · ${source.kind === 'api' ? maskApiKey(source.key) : source.label ?? 'subscription'}`;
 }
 
 // `/logout` alone lists every removable source by account. Environment keys
 // are not listed: they belong to the shell.
 export function logoutMenuItems(args: readonly string[] = []): CommandMenuItem[] | null {
   if (args.length > 0) return null;
-  const items = VENDORS.flatMap(vendor => providerFor(vendor).sources()
-    .filter(source => !('environment' in source))
+  const items = VENDORS.flatMap(vendor => providerFor(vendor).sources.list()
+    .filter(source => !isEnvironmentKey(source))
     .map(source => ({
       type: 'item' as const,
       key: `${vendor}:${source.id}`,
       label: describeSource(vendor, source),
-      description: source.type === 'api' ? 'API key' : 'subscription',
+      description: source.kind === 'api' ? 'API key' : 'subscription',
       command: `/logout ${vendor} ${source.id}`,
     })));
   return items.length ? items : null;
@@ -93,25 +88,28 @@ export function logoutCommand(name: string | undefined, sourceId?: string): Feed
   if (name === undefined) return { kind: 'info', text: 'Nothing to sign out of.' };
   const vendor = parseVendor(name);
   const provider = providerFor(vendor);
-  const sources = provider.sources();
+  const sources = provider.sources.list();
+  // Without an id: the source this vendor would use next, which is the head of
+  // its own list. Environment keys belong to the shell and are never removed.
   const target = sourceId
     ? sources.find(source => source.id === sourceId || source.id.startsWith(sourceId))
-    : sources.find(source => source.type === provider.source && !('environment' in source));
+    : sources.find(source => !isEnvironmentKey(source));
   if (sourceId && sources.filter(source => source.id.startsWith(sourceId)).length > 1) {
     throw new Error('Ambiguous source. Pick one from /logout.');
   }
   if (sourceId && !target) throw new Error('Unknown source. Pick one from /logout.');
-  if (!target || !provider.removeSource(target.id)) return { kind: 'info', text: `Nothing to sign out of for ${vendor}.` };
+  if (!target || !provider.sources.remove(target.id)) return { kind: 'info', text: `Nothing to sign out of for ${vendor}.` };
   return { kind: 'success', text: `Removed ${describeSource(vendor, target)}.` };
 }
 
 async function describeVendor(vendor: Vendor, signal?: AbortSignal): Promise<string> {
-  const sources = providerFor(vendor).sources();
+  const provider = providerFor(vendor);
+  const sources = provider.sources.list();
   if (!sources.length) return `${vendor} · not configured`;
   const rows = await Promise.all(sources.map(async source => {
-    if (source.type === 'api') return `${describeSource(vendor, source)} · API key${'environment' in source ? ' (env)' : ''}`;
+    if (source.kind === 'api') return `${describeSource(vendor, source)} · API key${isEnvironmentKey(source) ? ' (env)' : ''}`;
     // Logins before accounts were recorded have no label; ask the provider.
-    const account = source.label ?? await subscriptionDetail(vendor, signal, source.profile).catch(() => 'subscription');
+    const account = source.label ?? await provider.subscriptionDetail(source.profile, signal).catch(() => 'subscription');
     const usage = await readSubscriptionUsage(vendor, signal, source.profile);
     return `${vendor} · ${account} · ${describeSubscriptionUsage(usage)}`;
   }));
@@ -124,7 +122,7 @@ export function describeSubscriptionUsage(usage: SubscriptionUsage): string {
 
 // What the session has spent so far and how full its window is, when any
 // response has reported usage.
-export function describeSessionUsage(session: Session): string {
+export function describeSessionUsage(session: CommandSession): string {
   const totals = session.getTotalUsage();
   if (!totals) return 'session · no usage reported yet';
   const context = session.getContextUsage();
@@ -137,7 +135,7 @@ export function describeSessionUsage(session: Session): string {
   return `session · ${parts.join(' · ')}`;
 }
 
-export async function usageCommand(signal?: AbortSignal, session?: Session): Promise<Feedback> {
+export async function usageCommand(signal?: AbortSignal, session?: CommandSession): Promise<Feedback> {
   const lines = await Promise.all(VENDORS.map(vendor => describeVendor(vendor, signal)));
   if (session) lines.push(describeSessionUsage(session));
   return { kind: 'info', text: lines.join('\n'), showIcon: false };

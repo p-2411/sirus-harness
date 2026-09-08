@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import type { ImageBlock, Message, MessageBlock, ToolCallBlock } from '../../agent_runtime/types';
-import { Session } from '../../agent_runtime/session';
+import { isAutoSendable, Session } from '../../agent_runtime/session';
 import { attachClipboardImage, describeImage, removeStoredImage } from '../../images';
 import { Box, Text, measureElement, renderToString, useApp, useBoxMetrics, useInput, useStdout, type DOMElement } from 'ink';
 import { theme } from '../styles/theme';
@@ -11,6 +11,7 @@ import { InputBar, InputFeedback, type InputMode } from './InputBar';
 import {
   commandMenu,
   executeCommand,
+  parseCommandLine,
   type CommandMenuEntry,
   type CommandMenuItem,
 } from '../../commands/registry';
@@ -22,14 +23,12 @@ import { participantColorMap, type ParticipantColors } from '../MentionText';
 import { isAbortError, TurnCancelledError } from '../../abort';
 import {
   getPermissionsVersion,
-  nextPermissionMode,
   pendingApprovals,
   resolveApproval,
   subscribePermissions,
-} from '../../agent_runtime/permissions/permissions';
-import { permissionsCommand } from '../../commands/session/behavior';
+} from '../../agent_runtime/permissions/approvals';
+import { nextPermissionMode } from '../../agent_runtime/permissions/policy';
 import { getSubagentsVersion, subscribeSubagents } from '../../agent_runtime/tools/subagents';
-// import { AppState, useModel } from '../../state';
 
 export function ChatHeader({ session }: { session: Session }) {
   const participants = session.getParticipants();
@@ -252,9 +251,9 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       onDecide: decision => { resolveApproval(approvals[0].id, decision); },
     }
     : inputMode;
-  // shift+tab is /permissions <next mode>, feedback included
+  // shift+tab is /permissions <next mode>, sent down the same path as typing it
   const cyclePermissionMode = () => {
-    setFeedback(permissionsCommand(nextPermissionMode(currSession.getPermissionMode()), currSession));
+    send(`/permissions ${nextPermissionMode(currSession.getPermissionMode())}`);
   };
   const [scrollOffset, setScrollOffset] = useState(0);
   const commandAbort = useRef<AbortController | null>(null);
@@ -323,8 +322,9 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   });
 
   // A command with choices (like /login) turns the input bar into a
-  // picker; the chosen item is sent as if the user had typed it, after any
-  // secret it asks for.
+  // picker; the chosen item runs as if the user had typed it. A secret is
+  // handed over as one final argument, so a key containing a space survives
+  // and is never echoed into the input.
   const openMenu = (items: readonly CommandMenuEntry[]) => {
     const close = () => setInputMode({ type: 'text' });
     const choose = (item: CommandMenuItem) => {
@@ -333,12 +333,13 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         send(item.command);
         return;
       }
+      const { name, args } = parseCommandLine(item.command);
       setInputMode({
         type: 'secret',
         prompt: item.secret.prompt,
         onSubmit: value => {
           close();
-          send(`${item.command} ${value}`);
+          runCommand(name, [...args, value]);
         },
         onCancel: close,
       });
@@ -346,62 +347,71 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     setInputMode({ type: 'menu', items, onSelect: choose, onCancel: close });
   };
 
-  // A command leaves any attachments waiting for the next real message.
-  const send = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[]) => {
-    if (text.startsWith('/')) {
-      const command: string = text.split(' ')[0].slice(1);
-      const args: string[] = text.split(' ').slice(1).filter(Boolean);
-      setFeedback(null);
-      let menu: CommandMenuEntry[] | null;
-      try {
-        menu = commandMenu(command, args, currSession);
-      } catch (e) {
-        commandAbort.current = null;
-        setFeedback({ kind: 'error', text: e instanceof Error ? e.message : 'Something went wrong.' });
-        return;
-      }
-      if (menu) {
-        openMenu(menu);
-        return;
-      }
-      const controller = new AbortController();
+  // The one path a command takes, however it was started: its menu opens if
+  // it has one for these arguments, and otherwise it runs. commandAbort is
+  // only ever written once we know a command is async (below) — a sync
+  // command (e.g. shift+tab's /permissions, fired while /login is still
+  // awaiting the browser) must never touch, let alone clear, another
+  // command's still-live abort handle.
+  const runCommand = (command: string, args: readonly string[]) => {
+    setFeedback(null);
+    let menu: CommandMenuEntry[] | null;
+    try {
+      // Args may carry a secret (see openMenu) — never let it reach a menu label.
+      menu = commandMenu(command, args, currSession);
+    } catch (e) {
+      setFeedback({ kind: 'error', text: e instanceof Error ? e.message : 'Something went wrong.' });
+      return;
+    }
+    if (menu) {
+      openMenu(menu);
+      return;
+    }
+    const controller = new AbortController();
+    let result;
+    try {
+      result = executeCommand(command, args, {
+        session: currSession,
+        notify: text => setFeedback({ kind: 'info', text }),
+        attachImage,
+        exit: () => exit(),
+        signal: controller.signal,
+      });
+    } catch (e) {
+      setFeedback({ kind: 'error', text: e instanceof Error ? e.message : 'Something went wrong.' });
+      return;
+    }
+    if (result instanceof Promise) {
+      // a long-running command (browser login) holds the input like a turn
+      // does; only now is the controller stored, so escape can cancel it.
       commandAbort.current = controller;
-      let result;
-      try {
-        result = executeCommand(command, args, {
-          session: currSession,
-          notify: text => setFeedback({ kind: 'info', text }),
-          attachImage,
-          exit: () => exit(),
-          signal: controller.signal,
+      setCommandStartedAt(Date.now());
+      setCommandIsLoading(true);
+      result
+        .then(outcome => { if (outcome) setFeedback(outcome); })
+        .catch((caught: unknown) => {
+          setFeedback(isAbortError(caught)
+            ? null
+            : { kind: 'error', text: caught instanceof Error ? caught.message : 'Something went wrong.' });
+        })
+        .finally(() => {
+          // Guard against a newer async command having taken over the ref
+          // since this one started.
+          if (commandAbort.current === controller) commandAbort.current = null;
+          setCommandStartedAt(null);
+          setCommandIsLoading(false);
         });
-      } catch (e) {
-        commandAbort.current = null;
-        setFeedback({ kind: 'error', text: e instanceof Error ? e.message : 'Something went wrong.' });
-        return;
-      }
-      if (result instanceof Promise) {
-        // a long-running command (browser login) holds the input like a turn does
-        setCommandStartedAt(Date.now());
-        setCommandIsLoading(true);
-        result
-          .then(outcome => { if (outcome) setFeedback(outcome); })
-          .catch((caught: unknown) => {
-            setFeedback(isAbortError(caught)
-              ? null
-              : { kind: 'error', text: caught instanceof Error ? caught.message : 'Something went wrong.' });
-          })
-          .finally(() => {
-            if (commandAbort.current === controller) commandAbort.current = null;
-            setCommandStartedAt(null);
-            setCommandIsLoading(false);
-          });
-      } else if (result) {
-        commandAbort.current = null;
-        setFeedback(result);
-      } else {
-        commandAbort.current = null;
-      }
+    } else if (result) {
+      setFeedback(result);
+    }
+  };
+
+  // A command leaves any attachments waiting for the next real message.
+  // Commands are exactly what the background queue leaves for a mounted Chat.
+  const send = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[]) => {
+    if (!isAutoSendable(text)) {
+      const { name, args } = parseCommandLine(text);
+      runCommand(name, args);
     } else {
       // Images sit where the draft placed them.
       const msg: Message = {

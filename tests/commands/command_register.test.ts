@@ -6,12 +6,13 @@ import { afterEach, beforeEach } from 'bun:test';
 import {
   commandMenu,
   executeCommand,
-  loginMenuItems,
   matchCommands,
+  parseCommandLine,
   type CommandMenuItem,
 } from '../../src/commands/registry';
+import { loginMenuItems } from '../../src/commands/authentication/behavior';
 import { Session } from '../../src/agent_runtime/session';
-import { providerFor } from '../../src/agent_runtime/providers/providers';
+import { providerFor } from '../../src/agent_runtime/providers';
 import { resolveModelReference } from '../../src/commands/agents/behavior';
 import type { Feedback } from '../../src/commands/feedback';
 import { loadSirusModelPreference, saveSirusModelPreference } from '../../src/persistence';
@@ -166,8 +167,8 @@ describe('executeCommand', () => {
   });
 
   test('clear command empties only the current session history', () => {
-    const current = new Session('Current');
-    const other = new Session('Other');
+    const current = new Session({ name: 'Current' });
+    const other = new Session({ name: 'Other' });
     current.append({ role: 'user', content: [{ type: 'text', text: 'clear me' }] });
     other.append({ role: 'user', content: [{ type: 'text', text: 'keep me' }] });
 
@@ -180,7 +181,7 @@ describe('executeCommand', () => {
   });
 
   test('rename command updates the current session and rejects an empty name', () => {
-    const session = new Session('Session 1');
+    const session = new Session({ name: 'Session 1' });
     expect(runCommand('rename', ['UX', 'work'], session)).toEqual({
       kind: 'success',
       text: 'Renamed to UX work.',
@@ -340,7 +341,28 @@ describe('credential commands', () => {
     });
     expect((result as { text: string }).text).not.toContain('sk-ant-pasted-key-9876');
     expect((result as { text: string }).text).toContain('9876');
-    expect(providerFor('claude').apiKey()).toEqual({ key: 'sk-ant-pasted-key-9876', source: 'settings', masked: 'sk-ant-…9876' });
+    expect(providerFor('claude').activeSource()).toMatchObject({ kind: 'api', key: 'sk-ant-pasted-key-9876' });
+  });
+
+  test('a secret containing a space reaches the command intact', () => {
+    // Regression test for the old string re-entry bug: Chat.tsx used to put a
+    // chosen secret back through the input as text and re-split it on spaces,
+    // so a key containing a space broke into extra arguments. It now parses
+    // the menu item's command once with parseCommandLine and appends the
+    // secret as a single trailing argument — reproduce that composition here
+    // rather than calling executeCommand directly with a pre-split array.
+    const item = loginMenuItems(['gpt'])!.find(entry => entry.secret)!;
+    const { name, args } = parseCommandLine(item.command);
+    expect(name).toBe('login');
+    expect(args).toEqual(['gpt', 'api']);
+
+    const result = runCommand(name, [...args, 'sk-test with space']);
+    expect(result).toMatchObject({ kind: 'success' });
+    expect((result as { text: string }).text).not.toContain('sk-test with space');
+    expect(providerFor('gpt').activeSource()).toMatchObject({
+      kind: 'api',
+      key: 'sk-test with space',
+    });
   });
 
   test('/login <provider> api without a key explains the usage', () => {
@@ -380,16 +402,21 @@ describe('credential commands', () => {
   });
 
   test('/usage includes session totals and the latest context', async () => {
-    const session = new Session('Usage', 'usage', 'gpt-5.6-luna', [
-      {
-        role: 'assistant', content: [{ type: 'text', text: 'First.' }],
-        usage: { inputTokens: 1_000, outputTokens: 200, contextTokens: 1_200, contextWindow: 200_000 },
-      },
-      {
-        role: 'assistant', content: [{ type: 'text', text: 'Second.' }],
-        usage: { inputTokens: 2_000, outputTokens: 400, contextTokens: 2_400, contextWindow: 400_000 },
-      },
-    ]);
+    const session = new Session({
+      id: 'usage',
+      name: 'Usage',
+      model: 'gpt-5.6-luna',
+      messages: [
+        {
+          role: 'assistant', content: [{ type: 'text', text: 'First.' }],
+          usage: { inputTokens: 1_000, outputTokens: 200, contextTokens: 1_200, contextWindow: 200_000 },
+        },
+        {
+          role: 'assistant', content: [{ type: 'text', text: 'Second.' }],
+          usage: { inputTokens: 2_000, outputTokens: 400, contextTokens: 2_400, contextWindow: 400_000 },
+        },
+      ],
+    });
     const result = await runCommand('usage', [], session);
     expect((result as Feedback).text).toContain('session · 3k in · 600 out · ctx 2.4k (1% of 400k)');
   });
@@ -403,10 +430,10 @@ describe('credential commands', () => {
   });
 
   test('/logout leaves the subscription when that is active', () => {
-    providerFor('gpt').setSource('subscription');
+    providerFor('gpt').sources.addSubscription('default');
     process.env.OPENAI_SECRET = 'sk-proj-from-env-4321';
     const result = runCommand('logout', ['gpt']);
-    expect(providerFor('gpt').source).toBe('api');
+    expect(providerFor('gpt').activeSource()).toMatchObject({ kind: 'api', fromEnv: true });
     expect(result).toEqual({
       kind: 'success',
       text: 'Removed gpt · subscription.',
@@ -416,7 +443,7 @@ describe('credential commands', () => {
   test('/logout removes the stored key when that is active', () => {
     runCommand('login', ['claude', 'api', 'sk-ant-pasted-key-9876']);
     const result = runCommand('logout', ['claude']);
-    expect(providerFor('claude').apiKey()).toBeNull();
+    expect(providerFor('claude').sources.list()).toEqual([]);
     expect(result).toEqual({
       kind: 'success',
       text: 'Removed claude · sk-ant-…9876.',
@@ -429,6 +456,6 @@ describe('credential commands', () => {
       kind: 'info',
       text: 'Nothing to sign out of for claude.',
     });
-    expect(providerFor('claude').apiKey()).not.toBeNull();
+    expect(providerFor('claude').sources.list()).not.toEqual([]);
   });
 });

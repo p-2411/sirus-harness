@@ -1,10 +1,7 @@
 import { useEffect, useRef } from 'react';
 import type { Session, SessionStatus } from '../agent_runtime/session';
-import {
-  describeRequester,
-  pendingApprovals,
-  subscribePermissions,
-} from '../agent_runtime/permissions/permissions';
+import { pendingApprovals, subscribePermissions } from '../agent_runtime/permissions/approvals';
+import { describeRequester } from '../agent_runtime/permissions/describe';
 import {
   listAllSubagents,
   subscribeSubagents,
@@ -93,7 +90,7 @@ export function useNotifications(sessions: readonly Session[]) {
         statuses.set(run.id, run.status);
         if (previous !== 'working' || run.status === 'working' || run.status === 'cancelled') continue;
         // While its owner is still working the owner's own finish will say so.
-        const session = latestSessions.current.find(candidate => candidate.getId() === run.permissions?.sessionId);
+        const session = latestSessions.current.find(candidate => candidate.getId() === run.sessionId);
         if (session?.getStatus() === 'working') continue;
         notify(
           `Sirus · ${session?.getName() ?? 'subagent'}`,

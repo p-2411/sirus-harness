@@ -1,16 +1,18 @@
 import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { SessionAgent } from '../../src/agent_runtime/agent';
 import { TurnContext } from '../../src/agent_runtime/turn';
+import { createToolbox } from '../../src/agent_runtime/tools/toolbox';
 import { Session } from '../../src/agent_runtime/session';
-import { contextWindowFor } from '../../src/agent_runtime/providers/providers';
+import { disposeAll } from '../../src/agent_runtime/providers';
+import { contextWindowFor } from '../../src/agent_runtime/providers/catalog';
 import { CodexRpc } from '../../src/agent_runtime/providers/openai/codex-rpc';
-import { subscriptionTransport, shutdownCodexRuntime } from '../../src/agent_runtime/providers/openai/codex-subscription';
+import { codexSubscriptionTransport } from '../../src/agent_runtime/providers/openai/codex-subscription';
 import catalog from '../../src/agent_runtime/providers/openai/codex-models.json';
 
 const messages = [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Hello' }] }];
 
 describe('Astra context configuration', () => {
-  afterEach(() => { shutdownCodexRuntime(); mock.restore(); });
+  afterEach(() => { disposeAll(); mock.restore(); });
 
   test('catalog enables the large window without enabling built-in execution tools', () => {
     const astra = catalog.models.find(model => model.slug === 'gpt-6-astra');
@@ -28,7 +30,7 @@ describe('Astra context configuration', () => {
     expect(contextWindowFor('gpt-5.6-sol')).toBe(400_000);
     expect(contextWindowFor('claude-sonnet-5')).toBe(200_000);
     expect(contextWindowFor('unknown')).toBeUndefined();
-    const session = new Session('Astra', 'astra-window', 'gpt-6-astra');
+    const session = new Session({ id: 'astra-window', name: 'Astra', model: 'gpt-6-astra' });
     session.append({ role: 'assistant', model: 'gpt-6-astra', content: [],
       usage: { inputTokens: 100, outputTokens: 20, contextTokens: 120 } });
     expect(session.getContextUsage()?.window).toBe(1_050_000);
@@ -38,7 +40,7 @@ describe('Astra context configuration', () => {
   });
 
   test('large budgets stay on Astra threads and model switches start fresh threads', async () => {
-    shutdownCodexRuntime();
+    disposeAll();
     const listeners = new Set<(method: string, params: Record<string, any>) => void>();
     const emit = (method: string, params: Record<string, any>) => {
       for (const listener of listeners) listener(method, params);
@@ -69,8 +71,11 @@ describe('Astra context configuration', () => {
       onRequest() {},
     } as unknown as CodexRpc);
     const agent = new SessionAgent({ name: 'sirus', model: 'gpt-6-astra', runtimeId: 'astra-budget' });
-    const run = (tools: boolean) => subscriptionTransport.getResponse(messages,
-      new TurnContext(agent, { directory: '/tmp', tools }));
+    const run = (tools: boolean) => codexSubscriptionTransport().getResponse(messages,
+      new TurnContext(agent, {
+        directory: '/tmp',
+        ...(tools ? { toolbox: createToolbox({ directory: '/tmp' }) } : {}),
+      }));
     const response = await run(true);
     expect(response.usage?.contextWindow).toBe(997_500);
     await run(true); // reuse only while the model matches

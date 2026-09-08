@@ -4,7 +4,8 @@ import { spawn } from 'child_process';
 import { existsSync } from 'fs';
 import { createRequire } from 'module';
 import path from 'path';
-import { providerFor, type Vendor } from './providers';
+import { VENDOR_INFO, type Vendor } from './catalog';
+import type { SourceStore } from './sources';
 import { getCodexRpc } from './openai/codex-subscription';
 import { abortReason, abortable, throwIfAborted } from '../../abort';
 
@@ -12,8 +13,10 @@ import { abortReason, abortable, throwIfAborted } from '../../abort';
 // command and Codex's `account/login/start`. Sirus only learns whether the
 // login succeeded; the credentials stay in the providers' stores.
 
-function nextProfile(vendor: Vendor): string {
-  return providerFor(vendor).sources().some(source => source.type === 'subscription') ? randomUUID() : 'default';
+// The first sign-in owns the vendor's default profile directory; every later
+// one gets an isolated profile of its own, so accounts never share a store.
+function nextProfile(sources: SourceStore): string {
+  return sources.list().some(source => source.kind === 'subscription') ? randomUUID() : 'default';
 }
 
 export type Notify = (text: string) => void;
@@ -29,7 +32,7 @@ interface ClaudeAuthStatus {
 
 // The Agent SDK ships Claude Code in a per-platform package; the same binary
 // handles login so the SDK's requests and the login share one credential.
-export function claudeBinaryPath(): string {
+function claudeBinaryPath(): string {
   try {
     const require = createRequire(import.meta.url);
     const packageJson = require.resolve(
@@ -110,11 +113,11 @@ function claudePlan(status: ClaudeAuthStatus): string {
 }
 
 function describeClaude(status: ClaudeAuthStatus): string {
-  return `Signed in to Claude${status.email ? ` as ${status.email}` : ''} (${claudePlan(status)}).`;
+  return `Signed in to ${VENDOR_INFO.claude.accountName}${status.email ? ` as ${status.email}` : ''} (${claudePlan(status)}).`;
 }
 
-export async function loginClaude(notify: Notify, signal?: AbortSignal): Promise<string> {
-  const profile = nextProfile('claude');
+async function loginClaude(sources: SourceStore, notify: Notify, signal?: AbortSignal): Promise<string> {
+  const profile = nextProfile(sources);
   let status = await claudeStatus(signal, profile);
   if (!(status.loggedIn && status.authMethod === 'claude.ai')) {
     notify('Opening the browser…');
@@ -130,7 +133,7 @@ export async function loginClaude(notify: Notify, signal?: AbortSignal): Promise
       throw new Error('Claude login did not complete with a Claude subscription account');
     }
   }
-  providerFor('claude').addSubscription(profile, status.email);
+  sources.addSubscription(profile, status.email);
   return describeClaude(status);
 }
 
@@ -153,7 +156,7 @@ function gptPlan(account: CodexAccount): string {
 }
 
 function describeGpt(account: CodexAccount): string {
-  return `Signed in to ChatGPT${account.email ? ` as ${account.email}` : ''} (${gptPlan(account)}).`;
+  return `Signed in to ${VENDOR_INFO.gpt.accountName}${account.email ? ` as ${account.email}` : ''} (${gptPlan(account)}).`;
 }
 
 function openInBrowser(url: string): void {
@@ -168,8 +171,8 @@ function openInBrowser(url: string): void {
   }
 }
 
-export async function loginGpt(notify: Notify, signal?: AbortSignal): Promise<string> {
-  const profile = nextProfile('gpt');
+async function loginGpt(sources: SourceStore, notify: Notify, signal?: AbortSignal): Promise<string> {
+  const profile = nextProfile(sources);
   let account = await codexAccount(signal, profile);
   if (account?.type !== 'chatgpt') {
     const rpc = await abortable(getCodexRpc(profile), signal);
@@ -201,22 +204,44 @@ export async function loginGpt(notify: Notify, signal?: AbortSignal): Promise<st
       throw new Error('ChatGPT login did not complete');
     }
   }
-  providerFor('gpt').addSubscription(profile, account.email ?? undefined);
+  sources.addSubscription(profile, account.email ?? undefined);
   return describeGpt(account);
 }
 
-export async function login(vendor: Vendor, notify: Notify, signal?: AbortSignal): Promise<string> {
-  return vendor === 'claude' ? loginClaude(notify, signal) : loginGpt(notify, signal);
+export async function login(
+  vendor: Vendor,
+  sources: SourceStore,
+  notify: Notify,
+  signal?: AbortSignal,
+): Promise<string> {
+  switch (vendor) {
+    case 'claude':
+      return loginClaude(sources, notify, signal);
+    case 'gpt':
+      return loginGpt(sources, notify, signal);
+    default: {
+      const exhaustive: never = vendor;
+      throw new Error(`No login flow for vendor "${String(exhaustive)}"`);
+    }
+  }
 }
 
 // Plan and account for a provider already in subscription mode, for /usage.
-export async function subscriptionDetail(vendor: Vendor, signal?: AbortSignal, profile = 'default'): Promise<string> {
-  if (vendor === 'claude') {
-    const status = await claudeStatus(signal, profile);
-    if (!status.loggedIn) return 'signed out of Claude Code';
-    return [claudePlan(status), status.email].filter(Boolean).join(' · ');
+export async function subscriptionDetail(vendor: Vendor, profile = 'default', signal?: AbortSignal): Promise<string> {
+  switch (vendor) {
+    case 'claude': {
+      const status = await claudeStatus(signal, profile);
+      if (!status.loggedIn) return `signed out of ${VENDOR_INFO.claude.accountName} Code`;
+      return [claudePlan(status), status.email].filter(Boolean).join(' · ');
+    }
+    case 'gpt': {
+      const account = await codexAccount(signal, profile);
+      if (account?.type !== 'chatgpt') return `signed out of ${VENDOR_INFO.gpt.accountName}`;
+      return [gptPlan(account), account.email].filter(Boolean).join(' · ');
+    }
+    default: {
+      const exhaustive: never = vendor;
+      throw new Error(`No subscription detail for vendor "${String(exhaustive)}"`);
+    }
   }
-  const account = await codexAccount(signal, profile);
-  if (account?.type !== 'chatgpt') return 'signed out of ChatGPT';
-  return [gptPlan(account), account.email].filter(Boolean).join(' · ');
 }

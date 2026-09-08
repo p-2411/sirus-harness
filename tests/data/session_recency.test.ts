@@ -3,9 +3,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Session } from '../../src/agent_runtime/session';
-import { modelStrategies } from '../../src/agent_runtime/chat';
+import { boundTransports } from '../../src/agent_runtime/providers';
 import type { Message } from '../../src/agent_runtime/types';
-import { loadSessions, saveSessions } from '../../src/persistence';
+import { loadSessionSnapshots, saveSessionSnapshots } from '../../src/persistence';
 
 const prompt: Message = { role: 'user', content: [{ type: 'text', text: 'Continue' }] };
 const response: Message = { role: 'assistant', content: [{ type: 'text', text: 'Done' }] };
@@ -28,14 +28,14 @@ describe('session conversation recency', () => {
       expect(session.getConversationStartedAt()).toBe(2_000);
       expect(session.getLastActivity()).toBe(now);
       session.append(response);
-      expect(saveSessions([session], session.getId(), directory)).toBe(true);
-      session = loadSessions(directory).sessions[0];
+      expect(saveSessionSnapshots([session].filter(s => !s.isEmpty()).map(s => s.toSnapshot()), session.getId(), directory)).toBe(true);
+      session = Session.fromSnapshot(loadSessionSnapshots(directory).snapshots[0]!);
       expect(session.getConversationStartedAt()).toBe(2_000);
       now += 5 * 60_000 + 1;
       session.append(prompt);
       expect(session.getConversationStartedAt()).toBe(now);
-      expect(saveSessions([session], session.getId(), directory)).toBe(true);
-      expect(loadSessions(directory).sessions[0].toSnapshot()).toEqual(session.toSnapshot());
+      expect(saveSessionSnapshots([session].filter(s => !s.isEmpty()).map(s => s.toSnapshot()), session.getId(), directory)).toBe(true);
+      expect(Session.fromSnapshot(loadSessionSnapshots(directory).snapshots[0]!).toSnapshot()).toEqual(session.toSnapshot());
     } finally {
       clock.mockRestore();
       rmSync(directory, { recursive: true, force: true });
@@ -47,14 +47,14 @@ describe('session conversation recency', () => {
     const clock = spyOn(Date, 'now').mockImplementation(() => now);
     const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-recency-'));
     const model = 'test-conversation-recency';
-    modelStrategies[model] = {
+    boundTransports[model] = {
       getResponse: async () => {
         now += 10 * 60_000;
         return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
       },
     };
     try {
-      const session = new Session('Test', 'recency', model, [], directory);
+      const session = new Session({ id: 'recency', name: 'Test', directory, model });
       await session.sendMessage(prompt);
       expect(session.getConversationStartedAt()).toBe(1_000);
       expect(session.toSnapshot().lastResponseFinishedAt).toBe(now);
@@ -71,7 +71,7 @@ describe('session conversation recency', () => {
       expect(session.getConversationStartedAt()).toBe(started);
     } finally {
       clock.mockRestore();
-      delete modelStrategies[model];
+      delete boundTransports[model];
       rmSync(directory, { recursive: true, force: true });
     }
   });

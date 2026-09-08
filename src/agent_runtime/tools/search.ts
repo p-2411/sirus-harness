@@ -2,7 +2,7 @@ import { readdir, readFile, stat } from 'fs/promises';
 import path from 'path';
 import { throwIfAborted } from '../../abort';
 import { errorMessage, requiredString } from './arguments';
-import type { ToolCallContext } from './types';
+import type { Tool, ToolContext } from './types';
 
 const SKIPPED_DIRECTORIES = new Set([
   '.git', 'node_modules', 'dist', 'out', 'build', 'coverage', '.cache', '.next',
@@ -16,10 +16,9 @@ const LINE_PREVIEW_CHARS = 200;
 
 // Content search that yields between files, so Escape can stop a walk of a
 // large tree the same way it stops a shell command.
-export async function searchFiles(
+async function searchFiles(
   args: Record<string, unknown>,
-  directory: string,
-  call?: ToolCallContext,
+  { directory, signal }: ToolContext,
 ): Promise<string> {
   const source = requiredString(args, 'pattern', 'SearchFiles');
   let pattern: RegExp;
@@ -29,7 +28,6 @@ export async function searchFiles(
     throw new Error(`SearchFiles pattern is not a valid regular expression: ${errorMessage(error)}`);
   }
   const root = path.resolve(directory, requiredString(args, 'path', 'SearchFiles'));
-  const signal = call?.signal;
   const displayPath = (file: string) => {
     const relative = path.relative(directory, file);
     return relative === '' ? '.' : relative.startsWith('..') ? file : relative;
@@ -99,3 +97,22 @@ export async function searchFiles(
     truncated ? `; showing the first ${MAX_MATCHES}` : ''}`;
   return [summary, ...matches].join('\n');
 }
+
+export const searchTools: Tool[] = [
+  {
+    name: 'SearchFiles',
+    description: 'Search file contents under a directory for a regular expression and return the matching lines as path:line: text. Skips .git, node_modules, build output, binary files, and files over 1 MiB. Use it to find where something is defined or used before reading files.',
+    args: {
+      pattern: {
+        type: 'string',
+        description: 'A JavaScript regular expression, matched case-sensitively against each line.',
+      },
+      path: {
+        type: 'string',
+        description: 'The directory to search recursively, or a single file, relative to the working directory. Use "." for the whole workspace.',
+      },
+    },
+    effect: 'read',
+    run: searchFiles,
+  },
+];

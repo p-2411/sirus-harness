@@ -1,8 +1,9 @@
 import { abortable, throwIfAborted } from '../../abort';
 import { readClaudeSubscriptionUsage } from './anthropic/claude-subscription';
 import { getCodexRpc } from './openai/codex-subscription';
-import type { Vendor } from './provider';
-import { dataDirectory, loadSubscriptionLimitCache, saveSubscriptionLimitCache } from '../../persistence';
+import type { Vendor } from './catalog';
+import { dataDirectory } from '../../dataDirectory';
+import { loadSubscriptionLimitCache, saveSubscriptionLimitCache } from '../../persistence';
 
 export interface SubscriptionWindow {
   label: string;
@@ -111,12 +112,20 @@ export async function readSubscriptionUsage(vendor: Vendor, signal?: AbortSignal
   const bounded = signal ? AbortSignal.any([signal, timeout]) : timeout;
   try {
     let usage: SubscriptionUsage;
-    if (vendor === 'claude') {
-      usage = claudeSubscriptionUsage(await abortable(readClaudeSubscriptionUsage(bounded, profile), bounded));
-    } else {
-      const rpc = await abortable(getCodexRpc(profile), bounded);
-      const response = await abortable(rpc.request('account/rateLimits/read'), bounded);
-      usage = codexSubscriptionUsage(response);
+    switch (vendor) {
+      case 'claude':
+        usage = claudeSubscriptionUsage(await abortable(readClaudeSubscriptionUsage(bounded, profile), bounded));
+        break;
+      case 'gpt': {
+        const rpc = await abortable(getCodexRpc(profile), bounded);
+        const response = await abortable(rpc.request('account/rateLimits/read'), bounded);
+        usage = codexSubscriptionUsage(response);
+        break;
+      }
+      default: {
+        const exhaustive: never = vendor;
+        throw new Error(`No subscription usage reader for vendor "${String(exhaustive)}"`);
+      }
     }
     throwIfAborted(bounded);
     const checkedAt = Date.now();

@@ -4,15 +4,15 @@ import Chat from "./chat/Chat";
 import Sidebar, { COLLAPSED_SIDEBAR_WIDTH, SIDEBAR_WIDTH } from "./Sidebar";
 import { DEFAULT_MODEL, Session } from "../agent_runtime/session";
 import {
-  loadSessions,
+  loadSessionSnapshots,
   loadSirusModelPreference,
-  saveSessions,
+  saveSessionSnapshots,
   type PersistedSessions,
 } from "../persistence";
 import { useTextSelection } from "./interaction/useTextSelection";
 import { useTerminalFocus } from "./interaction/useTerminalFocus";
 import { useNotifications } from "./useNotifications";
-import { modelStrategies } from '../agent_runtime/chat';
+import { isKnownModel } from '../agent_runtime/providers/catalog';
 import { checkSirusUpdate } from '../updater';
 
 export function nextSessionName(sessions: readonly Session[]): string {
@@ -40,8 +40,8 @@ function createDraft(
   directory: string,
   preference: string | null = loadSirusModelPreference(),
 ): Session {
-  const model = preference && modelStrategies[preference] ? preference : DEFAULT_MODEL;
-  return Session.create(nextSessionName(sessions), directory, model);
+  const model = preference && isKnownModel(preference) ? preference : DEFAULT_MODEL;
+  return new Session({ name: nextSessionName(sessions), directory, model, autoNamePending: true });
 }
 
 export function startSession(
@@ -62,8 +62,11 @@ export function startSession(
 
 export default function App({ launchDirectory = process.cwd() }: { launchDirectory?: string }) {
   const [workspace, setWorkspace] = useState(() => {
-    const saved = loadSessions(undefined, launchDirectory);
-    return createWorkspace(saved, launchDirectory);
+    const saved = loadSessionSnapshots(undefined, launchDirectory);
+    return createWorkspace({
+      sessions: saved.snapshots.map(snapshot => Session.fromSnapshot(snapshot)),
+      selectedSessionId: saved.selectedSessionId,
+    }, launchDirectory);
   });
   const { sessions, selectedSession, draftSession } = workspace;
   const activeSession = selectedSession ?? draftSession;
@@ -120,7 +123,12 @@ export default function App({ launchDirectory = process.cwd() }: { launchDirecto
     // Include the startup draft so its first streamed turn is durable even if
     // the process exits before React promotes it into the sidebar state.
     const persistableSessions = [...new Set([...sessions, draftSession])];
-    const persist = () => saveSessions(persistableSessions, selectedSession?.getId() ?? null);
+    // A session with no history is a draft, not something to restore next
+    // launch; a selection pointing at one is dropped with it.
+    const persist = () => saveSessionSnapshots(
+      persistableSessions.filter(session => !session.isEmpty()).map(session => session.toSnapshot()),
+      selectedSession?.getId() ?? null,
+    );
     const unsubscribe = persistableSessions.map(session => session.subscribe(persist));
     // Session messages are mutated with the latest streamed snapshot before
     // throttled UI notifications. A synchronous exit save captures that final

@@ -1,15 +1,13 @@
 import { spawn } from 'child_process';
 import { abortReason, throwIfAborted } from '../../abort';
 import { requiredString } from './arguments';
-import type { ToolCallContext } from './types';
+import type { Tool, ToolContext } from './types';
 
-export function runShell(
+function runShell(
   args: Record<string, unknown>,
-  directory: string,
-  call?: ToolCallContext,
+  { directory, signal }: ToolContext,
 ): Promise<Record<string, unknown>> {
   const command = requiredString(args, 'command', 'RunShell');
-  const signal = call?.signal;
   throwIfAborted(signal);
 
   return new Promise((resolve, reject) => {
@@ -73,3 +71,21 @@ export function runShell(
     if (signal?.aborted) onAbort();
   });
 }
+
+export const shellTools: Tool[] = [
+  {
+    name: 'RunShell',
+    description: 'Run a non-interactive shell command in the current working directory and capture its output.',
+    args: {
+      command: {
+        type: 'string',
+        description: 'The shell command to execute. It has a 30-second timeout and a 1 MiB output limit.',
+      },
+    },
+    // A command classified as a read can still write through flags such as
+    // find -delete or sort -o, so every shell call waits for the pre-turn
+    // snapshot. The permission gate classifies the command itself separately.
+    effect: 'mutates',
+    run: runShell,
+  },
+];

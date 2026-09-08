@@ -11,7 +11,7 @@ export const loginCommandSpec: CommandSpec = {
   name: 'login',
   args: '[claude|gpt] [subscription|api <key>]',
   description: 'add a subscription or API key',
-  run: (args, execution) => loginCommand(args, execution.notify, execution.signal),
+  run: (args, context) => loginCommand(args, context.notify, context.signal),
   menu: loginMenuItems,
 };
 
@@ -26,8 +26,8 @@ export const logoutCommandSpec: CommandSpec = {
 export const usageCommandSpec: CommandSpec = {
   name: 'usage',
   description: 'remaining subscription allowance and session tokens',
-  run: (args, execution) => {
+  run: (args, context) => {
     if (args.length > 0) throw new Error('Usage: /usage');
-    return usageCommand(execution.signal, execution.session);
+    return usageCommand(context.signal, context.session);
   },
 };

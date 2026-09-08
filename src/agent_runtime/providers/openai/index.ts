@@ -1,12 +1,11 @@
+import { VENDOR_INFO } from '../catalog';
 import { createProvider } from '../provider';
 import { apiTransport } from './api';
-import { subscriptionTransport, codexSubscriptionTransport } from './codex-subscription';
+import { codexSubscriptionTransport, disposeCodexRuntimes } from './codex-subscription';
 
 export const OpenAIProvider = createProvider({
-  vendor: 'gpt',
-  judgeModel: 'gpt-5.6-luna',
-  apiKey: { env: 'OPENAI_SECRET', owner: 'OpenAI' },
+  vendor: VENDOR_INFO.gpt,
   api: apiTransport,
-  subscription: subscriptionTransport,
   subscriptionFor: codexSubscriptionTransport,
+  dispose: disposeCodexRuntimes,
 });

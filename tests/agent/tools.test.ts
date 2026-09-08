@@ -2,11 +2,31 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { availableTools, executeTool, findTool, runTool, toolRegistry } from '../../src/agent_runtime/tools';
+import { availableTools, toolRegistry } from '../../src/agent_runtime/tools';
+import { createToolbox } from '../../src/agent_runtime/tools/toolbox';
+import type { ToolCallBlock, ToolResultBlock } from '../../src/agent_runtime/types';
 import { saveMemoryAccessPreference } from '../../src/persistence';
 
 let testDirectory: string;
 let previousDataDirectory: string | undefined;
+
+const findTool = (name: string) => toolRegistry.find(tool => tool.name === name) ?? null;
+
+// The registry as a direct caller sees it: no gate, no barrier.
+function executeTool(
+  name: string,
+  args: Record<string, unknown>,
+  directory: string = process.cwd(),
+  call: { callId?: string; signal?: AbortSignal } = {},
+): Promise<unknown> {
+  const tool = findTool(name);
+  if (!tool) throw new Error(`Unknown tool: ${name}`);
+  return tool.run(args, { directory, callId: call.callId ?? 'direct', ...(call.signal ? { signal: call.signal } : {}) });
+}
+
+function runTool(call: ToolCallBlock, directory: string = process.cwd()): Promise<ToolResultBlock> {
+  return createToolbox({ directory }).run(call);
+}
 
 beforeEach(() => {
   testDirectory = mkdtempSync(join(tmpdir(), 'sirus-tools-'));
@@ -86,36 +106,36 @@ describe('agent tools', () => {
     expect(result.result).toContain('global or project');
   });
 
-  test('WriteFile creates and replaces UTF-8 files', () => {
+  test('WriteFile creates and replaces UTF-8 files', async () => {
     const path = join(testDirectory, 'memory.md');
 
-    const created = executeTool('WriteFile', { path, content: 'first 🐎' });
+    const created = await executeTool('WriteFile', { path, content: 'first 🐎' });
     expect(created).toMatchObject({ path, created: true });
     expect(readFileSync(path, 'utf8')).toBe('first 🐎');
 
-    const replaced = executeTool('WriteFile', { path, content: 'second' });
+    const replaced = await executeTool('WriteFile', { path, content: 'second' });
     expect(replaced).toMatchObject({ path, created: false });
     expect(readFileSync(path, 'utf8')).toBe('second');
   });
 
-  test('WriteFile permits empty content', () => {
+  test('WriteFile permits empty content', async () => {
     const path = join(testDirectory, 'empty.txt');
 
-    expect(executeTool('WriteFile', { path, content: '' })).toMatchObject({ bytesWritten: 0 });
+    expect(await executeTool('WriteFile', { path, content: '' })).toMatchObject({ bytesWritten: 0 });
     expect(readFileSync(path, 'utf8')).toBe('');
   });
 
-  test('EditFile replaces one exact occurrence and supports deletion', () => {
+  test('EditFile replaces one exact occurrence and supports deletion', async () => {
     const path = join(testDirectory, 'source.ts');
     writeFileSync(path, 'const first = 1;\nconst second = 2;\n', 'utf8');
 
-    expect(executeTool('EditFile', {
+    expect(await executeTool('EditFile', {
       path,
       old_text: 'const first = 1;',
       new_text: 'const first = 10;',
     })).toMatchObject({ path, replacements: 1 });
 
-    executeTool('EditFile', {
+    await executeTool('EditFile', {
       path,
       old_text: 'const second = 2;\n',
       new_text: '',
@@ -124,21 +144,21 @@ describe('agent tools', () => {
     expect(readFileSync(path, 'utf8')).toBe('const first = 10;\n');
   });
 
-  test('EditFile rejects missing and ambiguous matches without changing the file', () => {
+  test('EditFile rejects missing and ambiguous matches without changing the file', async () => {
     const path = join(testDirectory, 'repeated.txt');
     writeFileSync(path, 'same\nsame\n', 'utf8');
 
-    expect(() => executeTool('EditFile', {
+    await expect(executeTool('EditFile', {
       path,
       old_text: 'missing',
       new_text: 'replacement',
-    })).toThrow('could not find');
+    })).rejects.toThrow('could not find');
 
-    expect(() => executeTool('EditFile', {
+    await expect(executeTool('EditFile', {
       path,
       old_text: 'same',
       new_text: 'replacement',
-    })).toThrow('multiple');
+    })).rejects.toThrow('multiple');
 
     expect(readFileSync(path, 'utf8')).toBe('same\nsame\n');
   });
@@ -175,7 +195,7 @@ describe('agent tools', () => {
   test('resolves relative file and shell paths from the owning session directory', async () => {
     writeFileSync(join(testDirectory, 'owned.txt'), 'session file', 'utf8');
 
-    expect(executeTool('ReadFile', { path: 'owned.txt' }, testDirectory)).toBe('session file');
+    expect(await executeTool('ReadFile', { path: 'owned.txt' }, testDirectory)).toBe('session file');
     expect(await executeTool('RunShell', { command: 'pwd' }, testDirectory)).toMatchObject({
       stdout: `${realpathSync(testDirectory)}\n`,
     });
@@ -246,5 +266,30 @@ describe('agent tools', () => {
       isError: true,
     });
     expect(result.result).toContain('/memory on');
+  });
+
+  test('a subagent cannot delegate: SpawnAgent is hidden and refused by name', async () => {
+    const call: ToolCallBlock = {
+      type: 'tool_call',
+      id: 'spawn_1',
+      name: 'SpawnAgent',
+      arguments: { prompt: 'Do the work', model: 'test-model' },
+    };
+
+    const worker = createToolbox({ directory: testDirectory, audience: { subagent: true } });
+    expect(worker.tools.map(tool => tool.name)).not.toContain('SpawnAgent');
+    const refused = await worker.run(call);
+    expect(refused).toMatchObject({
+      type: 'tool_result',
+      callId: 'spawn_1',
+      isError: true,
+    });
+    expect(refused.result).toContain('Unknown tool: SpawnAgent');
+
+    // The same call on an ordinary toolbox reaches the tool. It still fails
+    // here — this toolbox has no subagent host — but never as an unknown name.
+    const owner = createToolbox({ directory: testDirectory });
+    expect(owner.tools.map(tool => tool.name)).toContain('SpawnAgent');
+    expect((await owner.run(call)).result).not.toContain('Unknown tool: SpawnAgent');
   });
 });

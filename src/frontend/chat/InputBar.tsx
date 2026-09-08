@@ -27,13 +27,9 @@ import { useFileSuggestions } from './FileMenu';
 import { MentionMenu, mentionMenuItems, MENTION_MENU_VISIBLE_ITEMS } from './MentionMenu';
 import { MentionText, participantColorMap, type ParticipantColors } from '../MentionText';
 import { contextPercent, formatTokens, type ContextUsage } from '../../agent_runtime/usage';
-import {
-  PERMISSION_MODE_NAMES,
-  describeRequester,
-  type ApprovalDecision,
-  type ApprovalRequest,
-  type PermissionMode,
-} from '../../agent_runtime/permissions/permissions';
+import type { ApprovalDecision, ApprovalRequest } from '../../agent_runtime/permissions/approvals';
+import { describeRequester } from '../../agent_runtime/permissions/describe';
+import { PERMISSION_MODE_NAMES, type PermissionMode } from '../../agent_runtime/permissions/policy';
 
 // readline's backward-kill-word: drop the last word and any whitespace after it
 function deleteWordBackward(text: string): string {

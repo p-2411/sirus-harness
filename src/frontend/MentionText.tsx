@@ -1,5 +1,5 @@
 import { Text } from 'ink';
-import type { Participant } from '../agent_runtime/session';
+import { NAME_PATTERN_SOURCE, type Participant } from '../agent_runtime/session';
 import { theme } from './styles/theme';
 import { parseFileMentions } from '../fileMentions';
 
@@ -8,7 +8,7 @@ export interface MentionSegment {
   isMention: boolean;
 }
 
-const mentionPattern = /(?<![\w@])@[A-Za-z][A-Za-z0-9_-]*(?![A-Za-z0-9_\/-])/g;
+const mentionPattern = new RegExp(`(?<![\\w@])@${NAME_PATTERN_SOURCE}(?![A-Za-z0-9_\\/-])`, 'g');
 const filenamePattern = /(?<![\w@])@(?:[A-Za-z0-9_.-]+\/)*(?=[A-Za-z0-9_.-]*\.[A-Za-z0-9_-])[A-Za-z0-9_.-]+(?![A-Za-z0-9_\/-])/g;
 
 // Sirus keeps the original soft grey. Additional participants are ordered by

@@ -7,7 +7,7 @@ import { Box, render } from 'ink';
 import stripAnsi from 'strip-ansi';
 import Chat from '../../src/frontend/chat/Chat';
 import { Session } from '../../src/agent_runtime/session';
-import { modelStrategies } from '../../src/agent_runtime/chat';
+import { boundTransports } from '../../src/agent_runtime/providers';
 import type { Message } from '../../src/agent_runtime/types';
 
 const testModel = 'test-chat-attachment-model';
@@ -23,7 +23,7 @@ beforeEach(() => {
   imagePath = join(directory, 'sample.png');
   writeFileSync(imagePath, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aKioAAAAASUVORK5CYII=', 'base64'));
   received = [];
-  modelStrategies[testModel] = {
+  boundTransports[testModel] = {
     getResponse: async messages => {
       received = [...messages];
       return { content: [{ type: 'text', text: 'I received the image.' }], stop_reason: 'end_turn' };
@@ -32,7 +32,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  delete modelStrategies[testModel];
+  delete boundTransports[testModel];
   if (originalDataDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
   else process.env.SIRUS_DATA_DIR = originalDataDirectory;
   rmSync(directory, { recursive: true, force: true });
@@ -103,7 +103,7 @@ function storedImages(): string[] {
 
 describe('chat attachment lifecycle', () => {
   test('retains an image after invalid routing, then transfers it to the accepted message', async () => {
-    const session = Session.create('Image chat', directory, testModel);
+    const session = new Session({ name: 'Image chat', directory, model: testModel, autoNamePending: true });
     const chat = createChat(session);
     let sentPath: string | undefined;
     try {
@@ -143,7 +143,7 @@ describe('chat attachment lifecycle', () => {
     let release = () => {};
     const gate = new Promise<void>(resolve => { release = resolve; });
     let calls = 0;
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async messages => {
         calls++;
         received = [...messages];
@@ -151,7 +151,7 @@ describe('chat attachment lifecycle', () => {
         return { content: [{ type: 'text', text: 'Done.' }], stop_reason: 'end_turn' };
       },
     };
-    const session = Session.create('Queued image draft', directory, testModel);
+    const session = new Session({ name: 'Queued image draft', directory, model: testModel, autoNamePending: true });
     const chat = createChat(session);
     let activeTurn: Promise<Message[]> | undefined;
     let sentPath: string | undefined;
@@ -190,7 +190,7 @@ describe('chat attachment lifecycle', () => {
   });
 
   test('combines image attachments with history recall, multiline paste and focus reports', async () => {
-    const session = Session.create('Draft editing', directory, testModel);
+    const session = new Session({ name: 'Draft editing', directory, model: testModel, autoNamePending: true });
     session.append({ role: 'user', content: [{ type: 'text', text: 'Earlier prompt' }] });
     session.append({ role: 'assistant', content: [{ type: 'text', text: 'Earlier reply' }] });
     const chat = createChat(session);
@@ -218,7 +218,7 @@ describe('chat attachment lifecycle', () => {
   });
 
   test('sends an image without text when idle', async () => {
-    const session = Session.create('Image only', directory, testModel);
+    const session = new Session({ name: 'Image only', directory, model: testModel, autoNamePending: true });
     const chat = createChat(session);
     try {
       await chat.submit(`/image ${imagePath}`);
@@ -232,7 +232,7 @@ describe('chat attachment lifecycle', () => {
   });
 
   test('removes an unsent stored attachment when leaving the chat', async () => {
-    const chat = createChat(Session.create('Unsent image', directory, testModel));
+    const chat = createChat(new Session({ name: 'Unsent image', directory, model: testModel, autoNamePending: true }));
     try {
       await chat.submit(`/image ${imagePath}`);
       await chat.waitFor(() => chat.output().includes('Attached image'));

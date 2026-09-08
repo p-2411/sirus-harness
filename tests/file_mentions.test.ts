@@ -4,10 +4,10 @@ import os from 'os';
 import path from 'path';
 import { formatFileMention, MAX_MENTION_FILE_BYTES, parseFileMentions, resolveFileMentions } from '../src/fileMentions';
 import { rootTextRanges } from '../src/mentions';
-import { modelStrategies } from '../src/agent_runtime/chat';
+import { boundTransports } from '../src/agent_runtime/providers';
 import { Session } from '../src/agent_runtime/session';
 import type { Message } from '../src/agent_runtime/types';
-import { loadSessions, saveSessions } from '../src/persistence';
+import { loadSessionSnapshots, saveSessionSnapshots } from '../src/persistence';
 
 const model = 'test-file-mention-model';
 let directory: string;
@@ -21,7 +21,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  delete modelStrategies[model];
+  delete boundTransports[model];
   rmSync(temporary, { recursive: true, force: true });
 });
 
@@ -134,11 +134,11 @@ describe('file mentions', () => {
   test('routes original agent mentions while giving providers attached file content synchronously', async () => {
     writeFileSync(path.join(directory, '@stranger notes.txt'), '@unwanted wrong-model\n```\n@other\n```');
     const received: { name: string; messages: Message[] }[] = [];
-    modelStrategies[model] = { getResponse: async (messages, turn) => {
+    boundTransports[model] = { getResponse: async (messages, turn) => {
       received.push({ name: turn.agent.name, messages: [...messages] });
       return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
     } };
-    const session = new Session('Files', 'file-session', model, [], directory);
+    const session = new Session({ id: 'file-session', name: 'Files', directory, model });
     const send = session.sendMessage(prompt(`Read @"./@stranger notes.txt" @reviewer ${model} please`));
     expect(session.getMessages()).toHaveLength(1);
     expect(session.getMessages()[0]?.content[0]).toEqual({ type: 'text', text: 'Read @"./@stranger notes.txt" @reviewer please' });
@@ -156,12 +156,12 @@ describe('file mentions', () => {
     let queuedReceived!: (message: Message) => void;
     const received = new Promise<Message>(resolve => { queuedReceived = resolve; });
     let calls = 0;
-    modelStrategies[model] = { getResponse: async messages => {
+    boundTransports[model] = { getResponse: async messages => {
       if (calls++ === 0) await gate;
       else queuedReceived(messages.at(-1)!);
       return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
     } };
-    const session = new Session('Queued files', 'queued-files', model, [], directory);
+    const session = new Session({ id: 'queued-files', name: 'Queued files', directory, model });
     const first = session.sendMessage(prompt('Start here'));
     session.queueMessage('Read @./queued.ts');
     writeFileSync(file, 'latest file contents');
@@ -178,8 +178,8 @@ describe('file mentions', () => {
     mkdirSync(path.join(directory, 'src'));
     writeFileSync(path.join(directory, 'src', 'index.ts'), 'source');
     writeFileSync(path.join(directory, 'README.md'), 'readme');
-    modelStrategies[model] = { getResponse: async () => ({ content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' }) };
-    const session = new Session('Paths', 'pathname-session', model, [], directory);
+    boundTransports[model] = { getResponse: async () => ({ content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' }) };
+    const session = new Session({ id: 'pathname-session', name: 'Paths', directory, model });
     await session.sendMessage(prompt('@src/index.ts @README.md @scope/package'));
     expect(session.getParticipants().map(participant => participant.name)).toEqual(['sirus']);
     expect(session.getMessages()[0]?.content).toHaveLength(3);
@@ -188,11 +188,11 @@ describe('file mentions', () => {
   test('distinguishes a quoted extensionless filename from an agent with the same name', async () => {
     writeFileSync(path.join(directory, 'reviewer'), 'file contents');
     let invoked: string | undefined;
-    modelStrategies[model] = { getResponse: async (_messages, turn) => {
+    boundTransports[model] = { getResponse: async (_messages, turn) => {
       invoked = turn.agent.name;
       return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
     } };
-    const session = new Session('Names', 'same-name-file-session', model, [], directory);
+    const session = new Session({ id: 'same-name-file-session', name: 'Names', directory, model });
     session.addParticipant('reviewer', model);
     await session.sendMessage(prompt('Read @"reviewer", @reviewer please'));
     expect(invoked).toBe('reviewer');
@@ -202,11 +202,11 @@ describe('file mentions', () => {
 
   test('validates attachments before adding a new participant or user history', async () => {
     let calls = 0;
-    modelStrategies[model] = { getResponse: async () => {
+    boundTransports[model] = { getResponse: async () => {
       calls++;
       return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
     } };
-    const session = new Session('Files', 'invalid-file-session', model, [], directory);
+    const session = new Session({ id: 'invalid-file-session', name: 'Files', directory, model });
     await expect(session.sendMessage(prompt(`@reviewer ${model} read @./missing.ts`))).rejects.toThrow(/Could not attach/);
     expect(session.getParticipants().map(participant => participant.name)).toEqual(['sirus']);
     expect(session.getMessages()).toEqual([]);
@@ -220,11 +220,11 @@ describe('file mentions', () => {
       writeFileSync(path.join(directory, 'file.txt'), 'snapshot');
       writeFileSync(path.join(temporary, 'sibling.txt'), 'sibling snapshot');
       writeFileSync(path.join(temporary, 'absolute.txt'), 'absolute snapshot');
-      const session = new Session('Files', 'saved-files', model, [], directory);
+      const session = new Session({ id: 'saved-files', name: 'Files', directory, model });
       const resolved = resolveFileMentions(prompt(`@./file.txt @../sibling.txt @${path.join(temporary, 'absolute.txt')}`), directory);
       session.append(resolved);
-      expect(saveSessions([session], session.getId())).toBe(true);
-      expect(loadSessions().sessions[0]?.getMessages()).toEqual([resolved]);
+      expect(saveSessionSnapshots([session].filter(s => !s.isEmpty()).map(s => s.toSnapshot()), session.getId())).toBe(true);
+      expect(Session.fromSnapshot(loadSessionSnapshots().snapshots[0]!).getMessages()).toEqual([resolved]);
     } finally {
       if (previousDataDir === undefined) delete process.env.SIRUS_DATA_DIR;
       else process.env.SIRUS_DATA_DIR = previousDataDir;

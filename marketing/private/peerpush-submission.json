@@ -1,0 +1,42 @@
+{
+  "date": "2026-09-07",
+  "site": "PeerPush",
+  "website": "https://trysirus.com/",
+  "name": "Sirus",
+  "tagline": "Your Claude and ChatGPT subscriptions, one terminal.",
+  "description": "Sirus brings the Claude and ChatGPT subscriptions you already pay for into one terminal workspace, including multiple accounts from the same provider. It is built for developers who want to keep their AI coding work together as they move between models and tasks.\n\nConnect your accounts with /login, choose a model with /model, and start a task in your project. You can explore a codebase, implement a change, run tests or bring another model into the conversation for a review. Named participants share the session history, while autonomous subagents can handle focused assignments. Persistent project memory carries decisions into later sessions, and file checkpoints let you restore earlier work.\n\nThe harness is free and open source under the MIT license. Your provider subscriptions keep their own access rules and usage limits. Optional Anthropic and OpenAI API keys are supported, with API usage charged by the provider. Install with npm and bring one small task to your first session.\n\nInstall: npm install -g sirus-harness\nSource: https://github.com/p-2411/sirus-harness\nFirst-session guide: https://github.com/p-2411/sirus-harness/blob/main/docs/first-session.md",
+  "first_comment": "I'm building Sirus to bring existing Claude and ChatGPT subscriptions into one terminal. Try a small project task and tell me where setup gets confusing.",
+  "categories": [
+    "AI Harness",
+    "Developer Tools",
+    "Open Source"
+  ],
+  "use_cases": [
+    "AI Context Management",
+    "Code Development",
+    "Code Review"
+  ],
+  "audiences": [
+    "AI Power Users",
+    "Developers"
+  ],
+  "pricing": "Free",
+  "platforms": [
+    "CLI"
+  ],
+  "install_command": "npm install -g sirus-harness",
+  "logo_source": "Auto-imported by PeerPush from the public Sirus website; visually inspected.",
+  "logo_url": "https://static.peerpush.com/5bebda70a2eb54013c62456fa9e0c0d5.png",
+  "screenshots": [],
+  "screenshot_note": "Auto-imported illustrative example was removed because the form did not label it as an example.",
+  "launch_type": "Standard",
+  "status": "submitted_in_free_launch_queue",
+  "listing_url": "https://peerpush.com/p/sirus",
+  "queue_position": 2519,
+  "estimated_launch_wait": "~1 month and 12 days (~42 days)",
+  "cost": 0,
+  "discoverable": false,
+  "founder_x": "https://x.com/parhamsepas",
+  "verification": "Owner listing page confirms Product in Queue, #2519, and not yet visible to the community, AI assistants or crawlers. Saved tagline, description, CLI install command, taxonomy, founder X and first comment verified in rendered page.",
+  "verified_date": "2026-09-07"
+}

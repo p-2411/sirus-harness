@@ -5,14 +5,14 @@ import path from 'path';
 import { Session } from '../../src/agent_runtime/session';
 import {
   loadApiKeys,
-  loadSessions,
+  loadSessionSnapshots,
   loadMemoryAccessPreference,
   loadSirusModelPreference,
   loadSubscriptionPreferences,
   saveApiKeys,
   saveMemoryAccessPreference,
   saveSirusModelPreference,
-  saveSessions,
+  saveSessionSnapshots,
   saveSubscriptionPreferences,
   loadNotificationPreference,
   saveNotificationPreference,
@@ -32,20 +32,30 @@ describe('session persistence', () => {
   test('round-trips image attachments, checkpoints, usage, and session naming metadata together', () => {
     const image = { type: 'image' as const, path: path.join(directory, 'images', 'screenshot.png'), mediaType: 'image/png' as const, bytes: 123 };
     const checkpoint = { id: 'b'.repeat(40), messageIndex: 0, summary: '[image]', createdAt: Date.now() };
-    const session = new Session('With image', 'image-session', 'gpt-5.6-luna', [
-      { role: 'user', content: [image, { type: 'text', text: 'Explain this screenshot' }] },
-      { role: 'assistant', content: [{ type: 'text', text: 'Explanation' }],
-        usage: { inputTokens: 120, outputTokens: 8, contextTokens: 128, contextWindow: 200_000 } },
-    ], '/projects/image', [], 'sirus', 'ask', [checkpoint], 1_000, true);
+    const session = new Session({
+      id: 'image-session',
+      name: 'With image',
+      directory: '/projects/image',
+      model: 'gpt-5.6-luna',
+      messages: [
+        { role: 'user', content: [image, { type: 'text', text: 'Explain this screenshot' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'Explanation' }],
+          usage: { inputTokens: 120, outputTokens: 8, contextTokens: 128, contextWindow: 200_000 } },
+      ],
+      checkpoints: [checkpoint],
+      permissionMode: 'ask',
+      autoNamePending: true,
+      timing: { updatedAt: 1_000 },
+    });
 
-    expect(saveSessions([session], session.getId(), directory)).toBe(true);
-    const restored = loadSessions(directory);
+    expect(saveSessionSnapshots([session].filter(s => !s.isEmpty()).map(s => s.toSnapshot()), session.getId(), directory)).toBe(true);
+    const restored = loadSessionSnapshots(directory);
     expect(restored.selectedSessionId).toBe(session.getId());
-    expect(restored.sessions[0].toSnapshot()).toEqual(session.toSnapshot());
+    expect(restored.snapshots[0]).toEqual(session.toSnapshot());
   });
 
   test('restores sessions, selected session, models, and complete message history', () => {
-    const first = new Session('First', 'first-id', 'claude-fable-5-1', [], '/projects/first');
+    const first = new Session({ id: 'first-id', name: 'First', directory: '/projects/first', model: 'claude-fable-5-1' });
     first.append({ role: 'user', content: [{ type: 'text', text: 'Inspect this' }] });
     first.addParticipant('reviewer', 'gpt-5.6-terra');
     first.setThinkingLevel('medium');
@@ -61,23 +71,28 @@ describe('session persistence', () => {
       ],
       usage: { inputTokens: 120, outputTokens: 8, contextTokens: 128, contextWindow: 200_000 },
     });
-    const second = new Session('Second', 'second-id', 'gpt-5.6-sol', [], '/projects/second');
+    const second = new Session({ id: 'second-id', name: 'Second', directory: '/projects/second', model: 'gpt-5.6-sol' });
     second.append({ role: 'user', content: [{ type: 'text', text: 'Keep this too' }] });
     first.setInputContent('Unfinished first message');
     second.setInputContent('  Unfinished second message\nwith whitespace  ');
 
-    expect(saveSessions([first, second], second.getId(), directory)).toBe(true);
-    const restored = loadSessions(directory);
+    expect(saveSessionSnapshots(
+      [first, second].filter(s => !s.isEmpty()).map(s => s.toSnapshot()),
+      second.getId(),
+      directory,
+    )).toBe(true);
+    const restored = loadSessionSnapshots(directory);
 
     expect(restored.selectedSessionId).toBe('second-id');
-    expect(restored.sessions.map(session => session.toSnapshot())).toEqual([
+    const restoredSessions = restored.snapshots.map(Session.fromSnapshot);
+    expect(restoredSessions.map(session => session.toSnapshot())).toEqual([
       first.toSnapshot(),
       second.toSnapshot(),
     ]);
-    expect(restored.sessions[0].getThinkingLevel()).toBe('medium');
-    expect(restored.sessions[0].getThinkingLevel('reviewer')).toBe('xhigh');
-    expect(restored.sessions[0].getInputContent()).toBe('Unfinished first message');
-    expect(restored.sessions[1].getInputContent()).toBe('  Unfinished second message\nwith whitespace  ');
+    expect(restoredSessions[0].getThinkingLevel()).toBe('medium');
+    expect(restoredSessions[0].getThinkingLevel('reviewer')).toBe('xhigh');
+    expect(restoredSessions[0].getInputContent()).toBe('Unfinished first message');
+    expect(restoredSessions[1].getInputContent()).toBe('  Unfinished second message\nwith whitespace  ');
   });
 
   test('restores older participant snapshots with an empty draft', () => {
@@ -103,10 +118,10 @@ describe('session persistence', () => {
 
   test('falls back safely when the session file is corrupt or from an unknown version', () => {
     writeFileSync(path.join(directory, 'sessions.json'), '{broken');
-    expect(loadSessions(directory)).toEqual({ sessions: [], selectedSessionId: null });
+    expect(loadSessionSnapshots(directory)).toEqual({ snapshots: [], selectedSessionId: null });
 
     writeFileSync(path.join(directory, 'sessions.json'), JSON.stringify({ version: 999, sessions: [] }));
-    expect(loadSessions(directory)).toEqual({ sessions: [], selectedSessionId: null });
+    expect(loadSessionSnapshots(directory)).toEqual({ snapshots: [], selectedSessionId: null });
   });
 
   test('assigns legacy sessions without a directory to the launch directory', () => {
@@ -121,30 +136,72 @@ describe('session persistence', () => {
       }],
     }));
 
-    expect(loadSessions(directory, '/projects/current-launch').sessions[0].getDirectory())
+    expect(loadSessionSnapshots(directory, '/projects/current-launch').snapshots[0]!.directory)
       .toBe('/projects/current-launch');
-    expect(loadSessions(directory, '/projects/current-launch').sessions[0].getParticipants())
+    expect(loadSessionSnapshots(directory, '/projects/current-launch').snapshots[0]!.participants)
       .toEqual([{ name: 'sirus', model: 'gpt-5.6-luna' }]);
   });
 
+  test('normalises the single-model legacy file into a complete modern snapshot', () => {
+    writeFileSync(path.join(directory, 'sessions.json'), JSON.stringify({
+      version: 1,
+      selectedSessionId: 'legacy-id',
+      sessions: [{
+        id: 'legacy-id',
+        name: 'Legacy',
+        model: 'gpt-5.6-luna',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'Legacy history' }] }],
+      }],
+    }));
+
+    const restored = loadSessionSnapshots(directory, '/projects/current-launch');
+    expect(restored.selectedSessionId).toBe('legacy-id');
+    expect(restored.snapshots).toHaveLength(1);
+    // Every field the modern shape carries, so the one remaining migration
+    // stays pinned: no participants, no clocks and no draft on disk become a
+    // single `sirus` participant, an epoch-zero history and an empty draft.
+    // Round-tripped through `Session` itself, since a session with no
+    // checkpoints omits that key from `toSnapshot()`.
+    expect(Session.fromSnapshot(restored.snapshots[0]!).toSnapshot()).toEqual({
+      id: 'legacy-id',
+      name: 'Legacy',
+      directory: '/projects/current-launch',
+      participants: [{ name: 'sirus', model: 'gpt-5.6-luna' }],
+      defaultModel: { name: 'sirus', model: 'gpt-5.6-luna' },
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'Legacy history' }] }],
+      inputContent: '',
+      permissionMode: 'auto',
+      updatedAt: 0,
+      conversationStartedAt: 0,
+      lastResponseFinishedAt: 0,
+      autoNamePending: false,
+    });
+  });
+
   test('writes valid JSON without leaving temporary files behind', () => {
-    expect(saveSessions([new Session()], null, directory)).toBe(true);
+    expect(saveSessionSnapshots([new Session()].filter(s => !s.isEmpty()).map(s => s.toSnapshot()), null, directory)).toBe(true);
     expect(() => JSON.parse(readFileSync(path.join(directory, 'sessions.json'), 'utf8'))).not.toThrow();
     expect(readdirSync(directory)).toEqual(['sessions.json']);
   });
 
   test('does not save or restore empty sessions', () => {
-    const used = Session.create('Used', '/projects/used');
+    const used = new Session({ name: 'Used', directory: '/projects/used', autoNamePending: true });
     used.append({ role: 'user', content: [{ type: 'text', text: 'Persist me' }] });
-    const empty = Session.create('Empty', '/projects/empty');
+    const empty = new Session({ name: 'Empty', directory: '/projects/empty', autoNamePending: true });
 
-    expect(saveSessions([used, empty], empty.getId(), directory)).toBe(true);
+    // The empty-session filter is `app.tsx`'s save-side rule in production;
+    // this test recreates it here so the drop-empty behaviour stays pinned.
+    expect(saveSessionSnapshots(
+      [used, empty].filter(session => !session.isEmpty()).map(session => session.toSnapshot()),
+      empty.getId(),
+      directory,
+    )).toBe(true);
     const json = JSON.parse(readFileSync(path.join(directory, 'sessions.json'), 'utf8'));
     expect(json.sessions.map((session: { id: string }) => session.id)).toEqual([used.getId()]);
     expect(json.selectedSessionId).toBeNull();
 
-    const restored = loadSessions(directory);
-    expect(restored.sessions.map(session => session.getId())).toEqual([used.getId()]);
+    const restored = loadSessionSnapshots(directory);
+    expect(restored.snapshots.map(snapshot => snapshot.id)).toEqual([used.getId()]);
     expect(restored.selectedSessionId).toBeNull();
   });
 });

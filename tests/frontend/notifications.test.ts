@@ -3,7 +3,9 @@ import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { Session, type SessionStatus } from '../../src/agent_runtime/session';
-import { authorizeToolCall, pendingApprovals, resolveApproval } from '../../src/agent_runtime/permissions/permissions';
+import { pendingApprovals, resolveApproval } from '../../src/agent_runtime/permissions/approvals';
+import { authorizeToolCall } from '../../src/agent_runtime/permissions/policy';
+import { toolRegistry } from '../../src/agent_runtime/tools';
 import { loadNotificationPreference, loadMemoryAccessPreference, saveMemoryAccessPreference } from '../../src/persistence';
 import { notificationMode, setNotificationMode, shouldNotify, terminalNotificationSequence } from '../../src/frontend/terminal/notifications';
 import { parseFocusEvent, recordFocusEvent, resetFocusState } from '../../src/frontend/terminal/window-focus';
@@ -94,7 +96,7 @@ describe('notification settings and delivery', () => {
 
 describe('notification event subscriptions', () => {
   test('notifies each completed session once, reports errors, skips cancellation, and cleans up', () => {
-    const session = new Session('Background work');
+    const session = new Session({ name: 'Background work' });
     let status: SessionStatus = 'idle';
     let cancelled = false;
     const statusSpy = spyOn(session, 'getStatus').mockImplementation(() => status);
@@ -140,12 +142,13 @@ describe('notification event subscriptions', () => {
   });
 
   test('notifies once for each new approval and uses the latest session list', async () => {
-    const session = new Session('First name');
+    const session = new Session({ name: 'First name' });
     let sessions: Session[] = [];
     const sent: string[] = [];
     const stop = subscribeApprovalNotifications(() => sessions, (title, body) => sent.push(`${title}: ${body}`));
     const approvals: Promise<string | null>[] = [];
     const request = (id: string) => authorizeToolCall(
+      toolRegistry.find(tool => tool.name === 'WriteFile'),
       { type: 'tool_call', id, name: 'WriteFile', arguments: { path: 'example.txt', content: 'test' } },
       directory,
       { sessionId: session.getId(), mode: () => 'ask', requester: { participant: 'reviewer' }, model: session.getModel() },

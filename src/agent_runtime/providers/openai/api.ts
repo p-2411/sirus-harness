@@ -1,10 +1,8 @@
 import type { Message, MessageBlock, ToolResultBlock, Usage } from '../../types';
 import { OpenAI } from 'openai';
-import type { Response } from '../../chat';
-import type { Transport } from '../provider';
+import type { Response, Transport } from '../provider';
 import type { TurnContext } from '../../turn';
 import { systemPromptFor } from '../../prompt';
-import { availableTools } from '../../tools';
 import { fetchUrlCall, fetchUrlResult, webSearchCall, webSearchResult } from '../../tools/web';
 import { imageDataUrl } from '../../../images';
 
@@ -164,9 +162,9 @@ async function request(
     instructions: systemPromptFor(turn),
     input,
     stream: true,
-    tools: turn.tools
+    tools: turn.toolbox
       ? [
-        ...availableTools({ subagent: agent.subagent }).map(tool => ({
+        ...turn.toolbox.tools.map(tool => ({
           type: 'function' as const,
           name: tool.name,
           description: tool.description,
@@ -290,6 +288,8 @@ async function getResponse(
 
 export function apiTransport(requireApiKey: () => string): Transport {
   return {
+    // The API returns tool_use; the host runs the tools and continues.
+    toolExecution: 'host',
     getResponse: (messages, turn) => getResponse(messages, turn, requireApiKey),
   };
 }

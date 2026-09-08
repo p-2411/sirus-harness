@@ -3,11 +3,14 @@ import { Box, render, renderToString } from 'ink';
 import { PassThrough } from 'stream';
 import stripAnsi from 'strip-ansi';
 import { Session } from '../../src/agent_runtime/session';
-import { modelStrategies } from '../../src/agent_runtime/chat';
-import { checkSubagent, type SubagentRun } from '../../src/agent_runtime/tools/subagents';
+import { boundTransports } from '../../src/agent_runtime/providers';
+import { listAllSubagents, type SubagentRun } from '../../src/agent_runtime/tools/subagents';
+import { checkSubagent } from '../../src/agent_runtime/tools/subagents/run';
 import Chat from '../../src/frontend/chat/Chat';
 import { ChatMessage } from '../../src/frontend/chat/ChatMessage';
-import { authorizeToolCall, pendingApprovals, resolveApproval } from '../../src/agent_runtime/permissions/permissions';
+import { pendingApprovals, resolveApproval } from '../../src/agent_runtime/permissions/approvals';
+import { authorizeToolCall } from '../../src/agent_runtime/permissions/policy';
+import { toolRegistry } from '../../src/agent_runtime/tools';
 import type { Message, ToolCallBlock } from '../../src/agent_runtime/types';
 
 test('the input status follows only the displayed session’s workers, including detached workers', async () => {
@@ -15,20 +18,27 @@ test('the input status follows only the displayed session’s workers, including
   const workers: SubagentRun[] = [];
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
-  modelStrategies[model] = {
+  boundTransports[model] = {
     getResponse: async (_messages, turn) => {
       if (turn.agent.subagent) await gate;
-      else workers.push(turn.agent.spawnSubagent('Work', model, {
-        directory: turn.directory,
-        permissions: turn.permissions,
-        callId: 'reused-provider-call',
-      }));
+      else {
+        // Through the session's own toolbox, so the worker is spawned by the
+        // production path: toolbox → subagent host → startSubagent → the
+        // worker's own subagent toolbox.
+        const spawned = await turn.toolbox!.run({
+          type: 'tool_call', id: 'reused-provider-call', name: 'SpawnAgent',
+          arguments: { prompt: 'Work', model },
+        }, turn.signal);
+        expect(spawned.isError).toBe(false);
+        const { id } = JSON.parse(spawned.result) as { id: string };
+        workers.push(listAllSubagents().find(run => run.id === id)!);
+      }
       return { content: [{ type: 'text', text: 'Done.' }], stop_reason: 'end_turn' };
     },
   };
-  const first = new Session('First', 'status-first', model);
-  const second = new Session('Second', 'status-second', model);
-  const empty = new Session('Empty', 'status-empty', model);
+  const first = new Session({ id: 'status-first', name: 'First', model });
+  const second = new Session({ id: 'status-second', name: 'Second', model });
+  const empty = new Session({ id: 'status-empty', name: 'Empty', model });
   expect(first.getDirectory()).toBe(second.getDirectory());
   const stdin = Object.assign(new PassThrough(), {
     isTTY: true, setRawMode() {}, ref() {}, unref() {},
@@ -68,6 +78,17 @@ test('the input status follows only the displayed session’s workers, including
     expect(output).toContain('2 active subagents');
     expect(output).not.toContain('3 active subagents');
 
+    // Each worker answers to its owner's session, as itself: the session's
+    // permission context, re-stamped with the run's own requester and model.
+    const [worker] = workers;
+    expect(worker.sessionId).toBe(first.getId());
+    expect(worker.permissions).toMatchObject({
+      sessionId: first.getId(),
+      requester: { subagent: worker.id },
+      model,
+    });
+    expect(worker.permissions?.mode()).toBe(first.getPermissionMode());
+
     app.rerender(pane(second));
     await flush();
     expect(output).toContain('1 active subagent');
@@ -80,7 +101,7 @@ test('the input status follows only the displayed session’s workers, including
     expect(output).toContain('1 active subagent');
 
     first.cancel();
-    await Promise.all(workers.filter(run => run.permissions?.sessionId === first.getId())
+    await Promise.all(workers.filter(run => run.sessionId === first.getId())
       .map(run => checkSubagent(run, true)));
     await flush();
     expect(first.getActiveSubagentCount()).toBe(0);
@@ -112,18 +133,19 @@ test('the input status follows only the displayed session’s workers, including
     app.cleanup();
     stdin.destroy();
     stdout.destroy();
-    delete modelStrategies[model];
+    delete boundTransports[model];
   }
 });
 
 test('tool approval indicators do not leak between sessions reusing a call ID', async () => {
-  const first = new Session('First', 'approval-status-first');
-  const second = new Session('Second', 'approval-status-second');
+  const first = new Session({ id: 'approval-status-first', name: 'First' });
+  const second = new Session({ id: 'approval-status-second', name: 'Second' });
   const call: ToolCallBlock = {
     type: 'tool_call', id: 'reused-approval-call', name: 'WriteFile',
     arguments: { path: 'example.txt', content: 'test' },
   };
-  const pending = authorizeToolCall(call, second.getDirectory(), {
+  const writeFile = toolRegistry.find(tool => tool.name === 'WriteFile');
+  const pending = authorizeToolCall(writeFile, call, second.getDirectory(), {
     sessionId: second.getId(), mode: () => 'ask',
     requester: { participant: 'sirus' }, model: second.getModel(),
   });

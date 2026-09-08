@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { renderToString } from 'ink';
 import stripAnsi from 'strip-ansi';
-import { modelStrategies } from '../../src/agent_runtime/chat';
+import { boundTransports } from '../../src/agent_runtime/providers';
 import { Session } from '../../src/agent_runtime/session';
 import {
   SESSION_STATUS_APPEARANCE,
@@ -82,15 +82,15 @@ describe('sidebar session metadata', () => {
   });
 
   test('sorts by conversation start rather than latest activity without mutating the source list', () => {
-    const older = Session.fromSnapshot({ ...new Session('Older').toSnapshot(), updatedAt: 9_000, conversationStartedAt: 1_000 });
-    const newer = Session.fromSnapshot({ ...new Session('Newer').toSnapshot(), updatedAt: 2_000, conversationStartedAt: 2_000 });
+    const older = Session.fromSnapshot({ ...new Session({ name: 'Older' }).toSnapshot(), updatedAt: 9_000, conversationStartedAt: 1_000 });
+    const newer = Session.fromSnapshot({ ...new Session({ name: 'Newer' }).toSnapshot(), updatedAt: 2_000, conversationStartedAt: 2_000 });
     const source = [older, newer];
     expect(sessionsByRecency(source)).toEqual([newer, older]);
     expect(source).toEqual([older, newer]);
   });
 
   test('shows the session name and activity time on one line without its directory', () => {
-    const session = new Session('Work', 'work', undefined, [], '/projects/sirus-harness', [], 'sirus', undefined, [], 1_000);
+    const session = new Session({ id: 'work', name: 'Work', directory: '/projects/sirus-harness', timing: { updatedAt: 1_000 } });
     const output = stripAnsi(renderToString(
       <SessionItem
         session={session}
@@ -128,19 +128,19 @@ describe('sidebar session status', () => {
   });
 
   test('shows an empty circle while idle', () => {
-    expect(render(new Session('Idle'))).toContain('○ Idle');
+    expect(render(new Session({ name: 'Idle' }))).toContain('○ Idle');
   });
 
   test('shows a hollow circle while working and a filled circle after an error', async () => {
     const model = 'sidebar-status-model';
     let finish!: () => void;
-    modelStrategies[model] = {
+    boundTransports[model] = {
       getResponse: async () => {
         await new Promise<void>(resolve => { finish = resolve; });
         throw new Error('provider failed');
       },
     };
-    const session = new Session('Active', 'status-id', model);
+    const session = new Session({ id: 'status-id', name: 'Active', model });
 
     const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Go' }] });
     await Promise.resolve();
@@ -150,6 +150,6 @@ describe('sidebar session status', () => {
     await expect(turn).rejects.toThrow('provider failed');
     expect(render(session)).toContain('● Active');
 
-    delete modelStrategies[model];
+    delete boundTransports[model];
   });
 });

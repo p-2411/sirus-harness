@@ -1,12 +1,11 @@
+import { VENDOR_INFO } from '../catalog';
 import { createProvider } from '../provider';
 import { apiTransport } from './api';
-import { subscriptionTransport, claudeSubscriptionTransport } from './claude-subscription';
+import { claudeSubscriptionTransport, disposeClaudeRuntimes } from './claude-subscription';
 
 export const AnthropicProvider = createProvider({
-  vendor: 'claude',
-  judgeModel: 'claude-haiku-4.5',
-  apiKey: { env: 'ANTHROPIC_API', owner: 'Anthropic' },
+  vendor: VENDOR_INFO.claude,
   api: apiTransport,
-  subscription: subscriptionTransport,
   subscriptionFor: claudeSubscriptionTransport,
+  dispose: disposeClaudeRuntimes,
 });

@@ -4,8 +4,7 @@ import { tmpdir } from 'os';
 import path from 'path';
 import { Session } from '../../src/agent_runtime/session';
 import { CodexRpc } from '../../src/agent_runtime/providers/openai/codex-rpc';
-import { shutdownCodexRuntime } from '../../src/agent_runtime/providers/openai/codex-subscription';
-import { providerFor } from '../../src/agent_runtime/providers/providers';
+import { disposeAll, providerFor } from '../../src/agent_runtime/providers';
 import { usageCommand } from '../../src/commands/authentication/behavior';
 import { cachedSubscriptionRemaining, readSubscriptionUsage } from '../../src/agent_runtime/providers/usage';
 import { loadSubscriptionLimitCache, saveSubscriptionLimitCache } from '../../src/persistence';
@@ -19,12 +18,12 @@ describe('/usage subscription allowance', () => {
     previous = process.env.SIRUS_DATA_DIR;
     directory = mkdtempSync(path.join(tmpdir(), 'sirus-allowance-'));
     process.env.SIRUS_DATA_DIR = directory;
-    providerFor('gpt').setSource('subscription');
-    shutdownCodexRuntime();
+    providerFor('gpt').sources.addSubscription('default');
+    disposeAll();
   });
 
   afterEach(async () => {
-    shutdownCodexRuntime();
+    disposeAll();
     await Promise.resolve();
     mock.restore();
     if (previous === undefined) delete process.env.SIRUS_DATA_DIR;
@@ -49,7 +48,7 @@ describe('/usage subscription allowance', () => {
     const request = fakeRuntime(() => ({ rateLimits: {
       primary: { usedPercent: 30, windowDurationMins: 300, resetsAt: 1_800_000_000 },
     } }));
-    const session = new Session('Usage');
+    const session = new Session({ name: 'Usage' });
     session.append({ role: 'assistant', content: [{ type: 'text', text: 'Done' }],
       usage: { inputTokens: 1000, outputTokens: 200, contextTokens: 1200, contextWindow: 400_000 } });
     const result = await usageCommand(undefined, session);
@@ -101,7 +100,7 @@ describe('/usage subscription allowance', () => {
   test('expires cached windows and clears account values on removal or reauthentication', () => {
     const now = Date.now();
     const current = providerFor('gpt');
-    current.addSubscription('work');
+    current.sources.addSubscription('work');
     const entry = { vendor: 'gpt' as const, profile: 'work', period: '7-day' as const,
       remaining: 42, checkedAt: now, resetsAt: now + 1000 };
     saveSubscriptionLimitCache([entry]);
@@ -109,10 +108,10 @@ describe('/usage subscription allowance', () => {
     expect(cachedSubscriptionRemaining('gpt', 'work', '7-day', now + 1000)).toBeUndefined();
     saveSubscriptionLimitCache([{ ...entry, resetsAt: null }]);
     expect(cachedSubscriptionRemaining('gpt', 'work', '7-day', now + 7 * 86400_000)).toBeUndefined();
-    current.addSubscription('work');
+    current.sources.addSubscription('work');
     expect(cachedSubscriptionRemaining('gpt', 'work', '7-day', now)).toBeUndefined();
     saveSubscriptionLimitCache([entry]);
-    current.removeSource('work');
+    current.sources.remove('work');
     expect(cachedSubscriptionRemaining('gpt', 'work', '7-day', now)).toBeUndefined();
   });
 });

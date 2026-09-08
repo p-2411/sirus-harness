@@ -6,7 +6,7 @@ import { ChatHeader } from '../../src/frontend/chat/Chat';
 
 describe('chat header', () => {
   test('shows the owning directory beside the session name', () => {
-    const session = new Session('Project work', 'session-id', 'gpt-5.6-luna', [], '/projects/sirus');
+    const session = new Session({ id: 'session-id', name: 'Project work', directory: '/projects/sirus', model: 'gpt-5.6-luna' });
     const output = stripAnsi(renderToString(
       <ChatHeader session={session} />,
       { columns: 100 },
@@ -18,7 +18,7 @@ describe('chat header', () => {
   });
 
   test('sits on the first row, flush with the sidebar header', () => {
-    const session = new Session('Project work', 'session-id', 'gpt-5.6-luna', [], '/projects/sirus');
+    const session = new Session({ id: 'session-id', name: 'Project work', directory: '/projects/sirus', model: 'gpt-5.6-luna' });
     const output = stripAnsi(renderToString(
       <ChatHeader session={session} />,
       { columns: 100 },

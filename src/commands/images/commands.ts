@@ -7,11 +7,14 @@ export const imageCommandSpec: CommandSpec = {
   name: 'image',
   args: '[path]',
   description: 'attach the clipboard image or an image file',
-  run: async (args, execution) => {
+  // Only a caller with a message being composed has somewhere to put it.
+  run: async (args, context) => {
+    const attachImage = context.attachImage;
+    if (!attachImage) throw new Error('/image is not available here.');
     const image = args.length === 0
       ? await attachClipboardImage()
-      : attachImageFile(args.join(' '), execution.session.getDirectory());
-    execution.attachImage(image);
+      : attachImageFile(args.join(' '), context.session.getDirectory());
+    attachImage(image);
     return { kind: 'success', text: `Attached ${describeImage(image)}.` };
   },
 };

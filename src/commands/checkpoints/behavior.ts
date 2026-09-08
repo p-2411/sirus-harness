@@ -1,8 +1,7 @@
-import type { Checkpoint, RewindResult, Session } from '../../agent_runtime/session';
-import { activeSubagentCount } from '../../agent_runtime/tools/subagents';
+import { defaultDirectoryActivity, type Checkpoint, type RewindResult } from '../../agent_runtime/session';
 import { checkpointFailure, checkpointsEnabled } from '../../checkpoints';
 import type { Feedback } from '../feedback';
-import type { CommandMenuEntry } from '../types';
+import type { CommandMenuEntry, CommandSession } from '../types';
 
 // What a rewind puts back: the directory, the chat, or both.
 export type RewindScope = 'all' | 'files' | 'chat';
@@ -27,21 +26,21 @@ export function parseRewindScope(value: unknown): RewindScope | null {
   return value === 'all' || value === 'files' || value === 'chat' ? value : null;
 }
 
-function noCheckpoints(session: Session): Error {
+function noCheckpoints(session: CommandSession): Error {
   const failure = checkpointFailure(session.getDirectory());
   if (failure) return new Error(`No checkpoints: the last capture failed. ${failure}`);
   if (!checkpointsEnabled()) return new Error('Checkpoints are not enabled in this process.');
   return new Error('No checkpoints yet: one is taken before each turn.');
 }
 
-function requireCheckpoints(session: Session): Checkpoint[] {
+function requireCheckpoints(session: CommandSession): Checkpoint[] {
   const checkpoints = session.getCheckpoints();
   if (checkpoints.length === 0) throw noCheckpoints(session);
   return checkpoints;
 }
 
 // 1-based, oldest first: the number a user types after /rewind.
-function checkpointNumber(session: Session, value: string | undefined): Checkpoint {
+function checkpointNumber(session: CommandSession, value: string | undefined): Checkpoint {
   const checkpoints = requireCheckpoints(session);
   const number = Number(value);
   if (!/^\d+$/.test(value ?? '') || number < 1 || number > checkpoints.length) {
@@ -76,7 +75,7 @@ function scopeItems(heading: string, command: (scope: RewindScope) => string): C
 
 // /undo alone asks what to restore; with a scope it runs. Without a
 // checkpoint there is no menu, and the command explains why.
-export function undoMenuItems(args: readonly string[], session: Session): CommandMenuEntry[] | null {
+export function undoMenuItems(args: readonly string[], session: CommandSession): CommandMenuEntry[] | null {
   if (args.length > 0) return null;
   const checkpoints = session.getCheckpoints();
   const last = checkpoints[checkpoints.length - 1];
@@ -86,7 +85,7 @@ export function undoMenuItems(args: readonly string[], session: Session): Comman
 
 // /rewind alone lists the checkpoints, newest first; /rewind <n> asks what
 // to restore; /rewind <n> <scope> runs.
-export function rewindMenuItems(args: readonly string[], session: Session): CommandMenuEntry[] | null {
+export function rewindMenuItems(args: readonly string[], session: CommandSession): CommandMenuEntry[] | null {
   const checkpoints = session.getCheckpoints();
   if (checkpoints.length === 0 || args.length > 1) return null;
   if (args.length === 0) {
@@ -127,22 +126,22 @@ export function describeRewind(result: RewindResult): Feedback {
   };
 }
 
-async function rewindTo(checkpoint: Checkpoint, scope: RewindScope, session: Session): Promise<Feedback> {
+async function rewindTo(checkpoint: Checkpoint, scope: RewindScope, session: CommandSession): Promise<Feedback> {
   const files = scope !== 'chat';
-  if (files && activeSubagentCount(session.getDirectory()) > 0) {
+  if (files && defaultDirectoryActivity.subagentCount(session.getDirectory()) > 0) {
     throw new Error('Subagents are still working in this directory. Wait for them or press escape to cancel them, then rewind.');
   }
   return describeRewind(await session.rewind(checkpoint.id, { files, chat: scope !== 'files' }));
 }
 
-export function undoCommand(scope: string | undefined, session: Session): Promise<Feedback> {
+export function undoCommand(scope: string | undefined, session: CommandSession): Promise<Feedback> {
   const parsed = parseRewindScope(scope ?? 'all');
   if (!parsed) throw new Error('Usage: /undo [all|files|chat]');
   const checkpoints = requireCheckpoints(session);
   return rewindTo(checkpoints[checkpoints.length - 1], parsed, session);
 }
 
-export function rewindCommand(args: readonly string[], session: Session): Promise<Feedback> {
+export function rewindCommand(args: readonly string[], session: CommandSession): Promise<Feedback> {
   const target = checkpointNumber(session, args[0]);
   const parsed = parseRewindScope(args[1] ?? 'all');
   if (!parsed || args.length > 2) throw new Error('Usage: /rewind <n> [all|files|chat]');

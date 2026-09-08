@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { modelStrategies } from '../../src/agent_runtime/chat';
+import { boundTransports } from '../../src/agent_runtime/providers';
 import type { TurnContext } from '../../src/agent_runtime/turn';
 import type { Message } from '../../src/agent_runtime/types';
 import type { SubagentRun } from '../../src/agent_runtime/tools/subagents';
+import { availableTools } from '../../src/agent_runtime/tools';
 import { Session } from '../../src/agent_runtime/session';
 
 const testModel = 'test-session-model';
@@ -10,9 +11,9 @@ const secondTestModel = 'test-second-session-model';
 const thirdTestModel = 'test-third-session-model';
 
 afterEach(() => {
-  delete modelStrategies[testModel];
-  delete modelStrategies[secondTestModel];
-  delete modelStrategies[thirdTestModel];
+  delete boundTransports[testModel];
+  delete boundTransports[secondTestModel];
+  delete boundTransports[thirdTestModel];
 });
 
 describe('Session model', () => {
@@ -39,31 +40,31 @@ describe('Session model', () => {
 
   test('is owned by the directory where it was created', () => {
     expect(new Session().getDirectory()).toBe(process.cwd());
-    expect(Session.create('Owned', '/projects/owned').getDirectory()).toBe('/projects/owned');
+    expect(new Session({ name: 'Owned', directory: '/projects/owned', autoNamePending: true }).getDirectory()).toBe('/projects/owned');
   });
 
   test('auto-names a default session from its first prompt but preserves a custom name', async () => {
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async () => ({
         content: [{ type: 'text', text: 'Done' }],
         stop_reason: 'end_turn',
       }),
     };
-    const automatic = Session.create('Session 3', process.cwd(), testModel);
+    const automatic = new Session({ name: 'Session 3', directory: process.cwd(), model: testModel, autoNamePending: true });
     await automatic.sendMessage({
       role: 'user',
       content: [{ type: 'text', text: '\n  Implement the queued message workflow with tests  \nDo not use this line' }],
     });
     expect(automatic.getName()).toBe('Implement the queued message workflow…');
 
-    const custom = new Session('Session 9', 'custom-name', testModel);
+    const custom = new Session({ id: 'custom-name', name: 'Session 9', model: testModel });
     await custom.sendMessage({
       role: 'user',
       content: [{ type: 'text', text: 'This must not replace the name' }],
     });
     expect(custom.getName()).toBe('Session 9');
 
-    const explicitlyNamed = Session.create('Session 10', process.cwd(), testModel);
+    const explicitlyNamed = new Session({ name: 'Session 10', directory: process.cwd(), model: testModel, autoNamePending: true });
     explicitlyNamed.setName('Session 10');
     const restored = Session.fromSnapshot(explicitlyNamed.toSnapshot());
     await restored.sendMessage({
@@ -74,28 +75,33 @@ describe('Session model', () => {
   });
 
   test('reports latest context usage and aggregates session token totals', () => {
-    const session = new Session('Usage', 'usage', testModel, [
-      {
-        role: 'assistant',
-        model: 'claude-sonnet-5',
-        content: [{ type: 'text', text: 'First' }],
-        usage: { inputTokens: 100, outputTokens: 20, contextTokens: 120, contextWindow: 200_000 },
-      },
-      {
-        role: 'assistant',
-        model: 'gpt-5.6-sol',
-        content: [{ type: 'text', text: 'Second' }],
-        usage: { inputTokens: 250, outputTokens: 50, contextTokens: 300, contextWindow: 400_000 },
-      },
-    ]);
+    const session = new Session({
+      id: 'usage',
+      name: 'Usage',
+      model: testModel,
+      messages: [
+        {
+          role: 'assistant',
+          model: 'claude-sonnet-5',
+          content: [{ type: 'text', text: 'First' }],
+          usage: { inputTokens: 100, outputTokens: 20, contextTokens: 120, contextWindow: 200_000 },
+        },
+        {
+          role: 'assistant',
+          model: 'gpt-5.6-sol',
+          content: [{ type: 'text', text: 'Second' }],
+          usage: { inputTokens: 250, outputTokens: 50, contextTokens: 300, contextWindow: 400_000 },
+        },
+      ],
+    });
     expect(session.getContextUsage()).toEqual({ tokens: 300, window: 400_000 });
     expect(session.getTotalUsage()).toEqual({ inputTokens: 350, outputTokens: 70 });
   });
 
-  test('setModel changes the model for that session only', () => {
-    const a = new Session('A');
-    const b = new Session('B');
-    a.setModel('claude-fable-5-1');
+  test('changing a participant model changes it for that session only', () => {
+    const a = new Session({ name: 'A' });
+    const b = new Session({ name: 'B' });
+    a.changeParticipantModel('sirus', 'claude-fable-5-1');
     expect(a.getModel()).toBe('claude-fable-5-1');
     expect(b.getModel()).toBe('gpt-5.6-luna');
   });
@@ -110,7 +116,7 @@ describe('Session model', () => {
   });
 
   test('round-trips its persisted fields through a snapshot', () => {
-    const original = new Session('Saved session', 'session-123', 'claude-fable-5-1', [], '/projects/sirus');
+    const original = new Session({ id: 'session-123', name: 'Saved session', directory: '/projects/sirus', model: 'claude-fable-5-1' });
     original.append({ role: 'user', content: [{ type: 'text', text: 'remember me' }] });
 
     const restored = Session.fromSnapshot(original.toSnapshot());
@@ -123,12 +129,12 @@ describe('Session model', () => {
   });
 
   test('sends a message through the agent runtime and returns the updated history', async () => {
-    const session = new Session('Test', 'session-id', testModel, [], '/projects/test');
+    const session = new Session({ id: 'session-id', name: 'Test', directory: '/projects/test', model: testModel });
     session.setThinkingLevel('medium');
     let receivedMessages: Message[] | undefined;
     let receivedTurn: TurnContext | undefined;
 
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async (messages, turn) => {
         receivedMessages = [...messages];
         receivedTurn = turn;
@@ -152,13 +158,11 @@ describe('Session model', () => {
     expect(receivedTurn?.agent.runtimeId).toBe('session-id');
     expect(receivedTurn?.directory).toBe('/projects/test');
     expect(receivedTurn?.agent.thinkingLevel).toBe('medium');
-    expect(receivedTurn?.permissions).toEqual({
-      sessionId: 'session-id',
-      mode: expect.any(Function),
-      requester: { participant: 'sirus' },
-      model: testModel,
-      beforeMutation: expect.any(Function),
-    });
+    // The turn is handed a toolbox, not a gate: the session's permission
+    // context and its checkpoint barrier are bound inside it.
+    expect(receivedTurn?.toolbox).not.toBeNull();
+    expect(receivedTurn?.toolbox?.tools.map(tool => tool.name))
+      .toEqual(availableTools().map(tool => tool.name));
     expect(receivedTurn?.signal).toBeInstanceOf(AbortSignal);
     expect(receivedTurn?.turnPrompt).toBeUndefined();
     expect(messages).toEqual([
@@ -174,11 +178,11 @@ describe('Session model', () => {
   });
 
   test('makes a streaming assistant response visible before the provider finishes', async () => {
-    const session = new Session('Test', 'stream-session', testModel);
+    const session = new Session({ id: 'stream-session', name: 'Test', model: testModel });
     let finish!: () => void;
     const gate = new Promise<void>(resolve => { finish = resolve; });
 
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async (_messages, turn) => {
         turn.updateStream([{ type: 'text', text: 'Working' }]);
         await gate;
@@ -215,22 +219,25 @@ describe('Session model', () => {
   });
 
   test('keeps queued messages on the session in FIFO order', () => {
-    const session = new Session('Queue');
+    const session = new Session({ name: 'Queue' });
     session.queueMessage('first');
     session.queueMessage('second');
 
     expect(session.getQueuedMessageCount()).toBe(2);
     expect(session.shiftQueuedMessage()).toBe('first');
     expect(session.getQueuedMessageCount()).toBe(1);
-    session.clearQueuedMessages();
-    expect(session.getQueuedMessageCount()).toBe(0);
+    // The queue is not persisted: round-tripping a session with a message
+    // still queued restores none of it.
     expect(Session.fromSnapshot(session.toSnapshot()).getQueuedMessageCount()).toBe(0);
+    expect(session.getQueuedMessageCount()).toBe(1);
+    expect(session.shiftQueuedMessage()).toBe('second');
+    expect(session.getQueuedMessageCount()).toBe(0);
   });
 
   test('drains queued prompts in order without a mounted chat', async () => {
     const pending: Array<() => void> = [];
     const prompts: string[] = [];
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async messages => {
         const block = messages.at(-1)!.content[0];
         if (block.type === 'text') prompts.push(block.text);
@@ -238,7 +245,7 @@ describe('Session model', () => {
         return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
       },
     };
-    const session = new Session('Queue', 'background-queue', testModel);
+    const session = new Session({ id: 'background-queue', name: 'Queue', model: testModel });
     const first = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'first' }] });
     session.queueMessage('second');
     session.queueMessage('third');
@@ -258,13 +265,13 @@ describe('Session model', () => {
 
   test('pauses the background queue at commands that may need user input', async () => {
     let finish!: () => void;
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async () => {
         await new Promise<void>(resolve => { finish = resolve; });
         return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
       },
     };
-    const session = new Session('Queue', 'command-queue', testModel);
+    const session = new Session({ id: 'command-queue', name: 'Queue', model: testModel });
     const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'first' }] });
     session.queueMessage('/login');
     session.queueMessage('after login');
@@ -278,14 +285,14 @@ describe('Session model', () => {
   test('cancelling sends that session queue next and leaves other sessions running', async () => {
     let finish!: () => void;
     const gate = new Promise<void>(resolve => { finish = resolve; });
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async () => {
         await gate;
         return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
       },
     };
-    const first = new Session('First', 'cancel-first', testModel);
-    const second = new Session('Second', 'cancel-second', testModel);
+    const first = new Session({ id: 'cancel-first', name: 'First', model: testModel });
+    const second = new Session({ id: 'cancel-second', name: 'Second', model: testModel });
     const message: Message = { role: 'user', content: [{ type: 'text', text: 'start' }] };
     const firstTurn = first.sendMessage(message);
     const secondTurn = second.sendMessage(message);
@@ -311,7 +318,7 @@ describe('Session model', () => {
     let finish!: () => void;
     const gate = new Promise<void>(resolve => { finish = resolve; });
     const workers: SubagentRun[] = [];
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async (_messages, turn) => {
         if (turn.agent.subagent) await gate;
         else workers.push(turn.agent.spawnSubagent('background task', testModel, {
@@ -321,8 +328,8 @@ describe('Session model', () => {
         return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
       },
     };
-    const first = new Session('First', 'detached-first', testModel);
-    const second = new Session('Second', 'detached-second', testModel);
+    const first = new Session({ id: 'detached-first', name: 'First', model: testModel });
+    const second = new Session({ id: 'detached-second', name: 'Second', model: testModel });
     const message: Message = { role: 'user', content: [{ type: 'text', text: 'start' }] };
     await first.sendMessage(message);
     await second.sendMessage(message);
@@ -339,13 +346,13 @@ describe('Session model', () => {
   test('tracks the active turn start independently of the chat view', async () => {
     let finish!: () => void;
     const gate = new Promise<void>(resolve => { finish = resolve; });
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async () => {
         await gate;
         return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
       },
     };
-    const session = new Session('Elapsed', 'elapsed-session', testModel);
+    const session = new Session({ id: 'elapsed-session', name: 'Elapsed', model: testModel });
 
     const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Start' }] });
     expect(session.getActiveTurnStartedAt()).toBeNumber();
@@ -355,11 +362,11 @@ describe('Session model', () => {
   });
 
   test('cancels the whole active turn even when a provider ignores its signal', async () => {
-    const session = new Session('Test', 'cancel-session', testModel);
+    const session = new Session({ id: 'cancel-session', name: 'Test', model: testModel });
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     let providerSignal: AbortSignal | undefined;
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async (_messages, turn) => {
         providerSignal = turn.signal;
         turn.updateStream([{ type: 'text', text: 'Partial' }]);
@@ -393,13 +400,13 @@ describe('Session model', () => {
 
   test('creates a named participant from a mention and targets it thereafter', async () => {
     const calls: Array<{ model: string; turn: TurnContext; messages: Message[] }> = [];
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async (messages, turn) => {
         calls.push({ model: turn.agent.model, turn, messages: [...messages] });
         return { content: [{ type: 'text', text: 'reviewed' }], stop_reason: 'end_turn' };
       },
     };
-    const session = new Session('Test', 'session-id', secondTestModel);
+    const session = new Session({ id: 'session-id', name: 'Test', model: secondTestModel });
 
     await session.sendMessage({
       role: 'user',
@@ -453,14 +460,14 @@ describe('Session model', () => {
     const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
     const secondGate = new Promise<void>(resolve => { releaseSecond = resolve; });
     const started: string[] = [];
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async () => {
         started.push('first');
         await firstGate;
         return { content: [{ type: 'text', text: 'first response' }], stop_reason: 'end_turn' };
       },
     };
-    modelStrategies[secondTestModel] = {
+    boundTransports[secondTestModel] = {
       getResponse: async () => {
         started.push('second');
         await secondGate;
@@ -497,7 +504,7 @@ describe('Session model', () => {
 
   test('does not strip a model name following an existing participant mention', async () => {
     let receivedText: string | undefined;
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async messages => {
         receivedText = messages.at(-1)?.content
           .filter(block => block.type === 'text')
@@ -529,13 +536,13 @@ describe('Session model', () => {
 
   test('does not treat a scoped package name as a participant mention', async () => {
     let calls = 0;
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async () => {
         calls++;
         return { content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn' };
       },
     };
-    const session = new Session('Test', 'session-id', testModel);
+    const session = new Session({ id: 'session-id', name: 'Test', model: testModel });
 
     await session.sendMessage({
       role: 'user',
@@ -548,19 +555,19 @@ describe('Session model', () => {
 
   test('does not invoke or create participants from mentions inside Markdown blocks', async () => {
     const calls: string[] = [];
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async () => {
         calls.push('sirus');
         return { content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn' };
       },
     };
-    modelStrategies[secondTestModel] = {
+    boundTransports[secondTestModel] = {
       getResponse: async () => {
         calls.push('reviewer');
         return { content: [{ type: 'text', text: 'reviewed' }], stop_reason: 'end_turn' };
       },
     };
-    const session = new Session('Team', 'team-id', testModel);
+    const session = new Session({ id: 'team-id', name: 'Team', model: testModel });
     session.addParticipant('reviewer', secondTestModel);
     const text = [
       'These are examples only:',
@@ -591,13 +598,13 @@ describe('Session model', () => {
 
   test('runs only top-level mentions when blocked examples appear in the same message', async () => {
     const calls: string[] = [];
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async () => {
         calls.push('reviewer');
         return { content: [{ type: 'text', text: 'reviewed' }], stop_reason: 'end_turn' };
       },
     };
-    modelStrategies[secondTestModel] = {
+    boundTransports[secondTestModel] = {
       getResponse: async () => {
         calls.push('verifier');
         return { content: [{ type: 'text', text: 'verified' }], stop_reason: 'end_turn' };
@@ -620,19 +627,19 @@ describe('Session model', () => {
 
   test('does not delegate from an agent mention inside a Markdown block', async () => {
     let reviewerCalls = 0;
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async () => ({
         content: [{ type: 'text', text: '> @reviewer this is a quoted example' }],
         stop_reason: 'end_turn',
       }),
     };
-    modelStrategies[secondTestModel] = {
+    boundTransports[secondTestModel] = {
       getResponse: async () => {
         reviewerCalls++;
         return { content: [{ type: 'text', text: 'reviewed' }], stop_reason: 'end_turn' };
       },
     };
-    const session = new Session('Team', 'team-id', testModel);
+    const session = new Session({ id: 'team-id', name: 'Team', model: testModel });
     session.addParticipant('reviewer', secondTestModel);
 
     await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Start' }] });
@@ -644,7 +651,7 @@ describe('Session model', () => {
   test('lets agents mention existing participants across multiple delegation rounds', async () => {
     const calls: Array<{ model: string; turn: TurnContext; messages: Message[] }> = [];
     let sirusCalls = 0;
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async (messages, turn) => {
         calls.push({ model: turn.agent.model, turn, messages: [...messages] });
         sirusCalls++;
@@ -657,7 +664,7 @@ describe('Session model', () => {
         };
       },
     };
-    modelStrategies[secondTestModel] = {
+    boundTransports[secondTestModel] = {
       getResponse: async (messages, turn) => {
         calls.push({ model: turn.agent.model, turn, messages: [...messages] });
         return {
@@ -668,7 +675,7 @@ describe('Session model', () => {
         };
       },
     };
-    modelStrategies[thirdTestModel] = {
+    boundTransports[thirdTestModel] = {
       getResponse: async (messages, turn) => {
         calls.push({ model: turn.agent.model, turn, messages: [...messages] });
         return {
@@ -678,7 +685,7 @@ describe('Session model', () => {
         };
       },
     };
-    const session = new Session('Team', 'team-id', testModel);
+    const session = new Session({ id: 'team-id', name: 'Team', model: testModel });
     session.addParticipant('reviewer', secondTestModel);
     session.addParticipant('verifier', thirdTestModel);
 
@@ -703,7 +710,7 @@ describe('Session model', () => {
 
   test('ignores an agent mentioning itself', async () => {
     let calls = 0;
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async () => {
         calls++;
         return {
@@ -712,7 +719,7 @@ describe('Session model', () => {
         };
       },
     };
-    const session = new Session('Team', 'team-id', testModel);
+    const session = new Session({ id: 'team-id', name: 'Team', model: testModel });
 
     await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Start' }] });
 
@@ -726,27 +733,27 @@ describe('Session model', () => {
     const reviewerGate = new Promise<void>(resolve => { releaseReviewer = resolve; });
     const verifierGate = new Promise<void>(resolve => { releaseVerifier = resolve; });
     const started: string[] = [];
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async () => ({
         content: [{ type: 'text', text: '@reviewer @verifier compare this.' }],
         stop_reason: 'end_turn',
       }),
     };
-    modelStrategies[secondTestModel] = {
+    boundTransports[secondTestModel] = {
       getResponse: async () => {
         started.push('reviewer');
         await reviewerGate;
         return { content: [{ type: 'text', text: 'reviewed' }], stop_reason: 'end_turn' };
       },
     };
-    modelStrategies[thirdTestModel] = {
+    boundTransports[thirdTestModel] = {
       getResponse: async () => {
         started.push('verifier');
         await verifierGate;
         return { content: [{ type: 'text', text: 'verified' }], stop_reason: 'end_turn' };
       },
     };
-    const session = new Session('Team', 'team-id', testModel);
+    const session = new Session({ id: 'team-id', name: 'Team', model: testModel });
     session.addParticipant('reviewer', secondTestModel);
     session.addParticipant('verifier', thirdTestModel);
 
@@ -765,10 +772,10 @@ describe('Session model', () => {
   });
 
   test('persists all participants and their model choices in snapshots', () => {
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async () => ({ content: [], stop_reason: 'end_turn' }),
     };
-    const session = new Session('Team');
+    const session = new Session({ name: 'Team' });
     session.addParticipant('reviewer', testModel);
 
     const restored = Session.fromSnapshot(session.toSnapshot());
@@ -784,7 +791,7 @@ describe('Session subscriptions', () => {
   test('tracks working, idle, and error turn states', async () => {
     let finish!: () => void;
     let shouldFail = false;
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async (_messages, turn) => {
         await new Promise<void>(resolve => { finish = resolve; });
         if (shouldFail) {
@@ -794,7 +801,7 @@ describe('Session subscriptions', () => {
         return { content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn' };
       },
     };
-    const session = new Session('Status', 'status-id', testModel);
+    const session = new Session({ id: 'status-id', name: 'Status', model: testModel });
 
     expect(session.getStatus()).toBe('idle');
     const successfulTurn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Start' }] });
@@ -823,7 +830,7 @@ describe('Session subscriptions', () => {
     const session = new Session();
     let calls = 0;
     session.subscribe(() => calls++);
-    session.setModel('claude-fable-5-1');
+    session.changeParticipantModel('sirus', 'claude-fable-5-1');
     expect(calls).toBe(1);
   });
 
@@ -860,7 +867,7 @@ describe('Session subscriptions', () => {
     let calls = 0;
     const unsubscribe = session.subscribe(() => calls++);
     unsubscribe();
-    session.setModel('claude-fable-5-1');
+    session.changeParticipantModel('sirus', 'claude-fable-5-1');
     session.append({ role: 'user', content: [{ type: 'text', text: 'hi' }] });
     expect(calls).toBe(0);
   });
@@ -869,34 +876,34 @@ describe('Session subscriptions', () => {
     const session = new Session();
     const before = session.getVersion();
     session.append({ role: 'user', content: [{ type: 'text', text: 'hi' }] });
-    session.setModel('claude-fable-5-1');
+    session.changeParticipantModel('sirus', 'claude-fable-5-1');
     expect(session.getVersion()).toBe(before + 2);
   });
 });
 
 describe('session-owned subagent cancellation', () => {
   test('cancels its detached workers after the parent finishes without cancelling another session', async () => {
-    const { listAllSubagents, checkSubagent } = await import('../../src/agent_runtime/tools/subagents');
+    const { listAllSubagents } = await import('../../src/agent_runtime/tools/subagents');
+    const { checkSubagent } = await import('../../src/agent_runtime/tools/subagents/run');
     const workers = new Map<string, import('../../src/agent_runtime/tools/subagents').SubagentRun>();
     let finishWorkers!: () => void;
     const workerGate = new Promise<void>(resolve => { finishWorkers = resolve; });
-    modelStrategies[secondTestModel] = {
+    boundTransports[secondTestModel] = {
       getResponse: async () => {
         await workerGate;
         return { content: [{ type: 'text', text: 'Worker done' }], stop_reason: 'end_turn' };
       },
     };
-    modelStrategies[testModel] = {
+    boundTransports[testModel] = {
       getResponse: async (_messages, turn) => {
         workers.set(turn.agent.runtimeId, turn.agent.spawnSubagent('Work', secondTestModel, {
           directory: turn.directory,
-          permissions: turn.permissions,
         }));
         return { content: [{ type: 'text', text: 'Worker started' }], stop_reason: 'end_turn' };
       },
     };
-    const first = new Session('First', 'owned-first', testModel);
-    const second = new Session('Second', 'owned-second', testModel);
+    const first = new Session({ id: 'owned-first', name: 'First', model: testModel });
+    const second = new Session({ id: 'owned-second', name: 'Second', model: testModel });
     const message: Message = { role: 'user', content: [{ type: 'text', text: 'Start' }] };
     try {
       await first.sendMessage(message);

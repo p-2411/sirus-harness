@@ -21,7 +21,7 @@ import type { CommandMenuEntry, CommandMenuItem } from '../../src/commands/regis
 import type { Feedback } from '../../src/commands/feedback';
 import { Session } from '../../src/agent_runtime/session';
 import Sidebar from '../../src/frontend/Sidebar';
-import type { ApprovalRequest } from '../../src/agent_runtime/permissions/permissions';
+import type { ApprovalRequest } from '../../src/agent_runtime/permissions/approvals';
 
 describe('session input drafts', () => {
   test('edits and restores drafts when switching session panes with Option+arrows', async () => {

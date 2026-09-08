@@ -7,7 +7,7 @@ import {
   MAX_IMAGE_BYTES, removeStoredImage, validatedImagePath,
 } from '../src/images';
 import { Session } from '../src/agent_runtime/session';
-import { loadSessions, saveSessions } from '../src/persistence';
+import { loadSessionSnapshots, saveSessionSnapshots } from '../src/persistence';
 import { toAnthropicMessages } from '../src/agent_runtime/providers/anthropic/api';
 import { toOpenAIInput } from '../src/agent_runtime/providers/openai/api';
 import { codexTurnInput } from '../src/agent_runtime/providers/openai/codex-subscription';
@@ -105,14 +105,14 @@ describe('image storage', () => {
 
   test('persists image-only sessions using metadata and reloads usable attachments', () => {
     const image = attach();
-    const session = new Session('Screenshot', 'image-session', 'gpt-5.6-sol', [], directory);
+    const session = new Session({ id: 'image-session', name: 'Screenshot', directory, model: 'gpt-5.6-sol' });
     session.append({ role: 'user', content: [image] });
-    expect(saveSessions([session], session.getId())).toBe(true);
+    expect(saveSessionSnapshots([session].filter(s => !s.isEmpty()).map(s => s.toSnapshot()), session.getId())).toBe(true);
     const saved = readFileSync(path.join(process.env.SIRUS_DATA_DIR!, 'sessions.json'), 'utf8');
     expect(saved).not.toContain(PNG.toString('base64'));
-    const restored = loadSessions();
+    const restored = loadSessionSnapshots();
     expect(restored.selectedSessionId).toBe(session.getId());
-    const content = restored.sessions[0]!.toSnapshot().messages[0]!.content;
+    const content = restored.snapshots[0]!.messages[0]!.content;
     expect(content).toEqual([image]);
     expect(imageData(content[0] as ImageBlock)).toBe(PNG.toString('base64'));
   });

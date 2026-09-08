@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { modelStrategies } from '../chat';
+import { judgeModelFor } from '../providers/catalog';
 import { SessionAgent } from '../agent';
 import type { Message } from '../types';
 
@@ -17,9 +17,9 @@ export interface JudgePrompt {
   user: string;
 }
 
-export function judgeModelFor(model: string): string | null {
-  return modelStrategies[model]?.judgeModel ?? null;
-}
+// The judge model is a catalog fact; re-exported here because callers meet it
+// through the permission layer.
+export { judgeModelFor };
 
 export function judgePrompt(command: string, directory: string): JudgePrompt {
   return {
@@ -56,8 +56,8 @@ export async function judgeShellCommand(
   const judgeModel = judgeModelFor(model);
   if (!judgeModel) return 'sensitive';
   const prompt = judgePrompt(command, directory);
-  // A throwaway agent: no permissions because it has no tools, its own runtime
-  // id so nothing of the participant's provider session is touched.
+  // A throwaway agent: no toolbox, so no gate and no barrier, and its own
+  // runtime id so nothing of the participant's provider session is touched.
   const judge = new SessionAgent({
     name: 'judge',
     model: judgeModel,
@@ -70,7 +70,7 @@ export async function judgeShellCommand(
       directory,
       signal: signal ? AbortSignal.any([signal, timer.signal]) : timer.signal,
       systemPrompt: prompt.system,
-      tools: false,
+      // No toolbox: the judge answers with one word and calls nothing.
     });
     return parseVerdict(textOf(await turn.result));
   } catch (error) {

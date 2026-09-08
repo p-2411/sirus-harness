@@ -1,13 +1,21 @@
-import { updateCommand } from './behavior';
+import { updateSirus } from '../../updater';
 import { SIRUS_VERSION } from '../../version';
-import type { CommandSpec } from '../types';
+import type { Feedback } from '../feedback';
+import type { CommandSpec, Notify } from '../types';
+
+async function updateCommand(notify: Notify, signal?: AbortSignal): Promise<Feedback> {
+  const result = await updateSirus(notify, signal);
+  return result.updated
+    ? { kind: 'success', text: `Updated ${result.currentVersion} → ${result.latestVersion}. Restart to use it.` }
+    : { kind: 'info', text: `Up to date (${result.currentVersion}).` };
+}
 
 export const updateCommandSpec: CommandSpec = {
   name: 'update',
   description: 'install the latest release',
-  run: (args, execution) => {
+  run: (args, context) => {
     if (args.length > 0) throw new Error('Usage: /update');
-    return updateCommand(execution.notify, execution.signal);
+    return updateCommand(context.notify, context.signal);
   },
 };
 

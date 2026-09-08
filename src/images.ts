@@ -3,7 +3,7 @@ import { execFile } from 'child_process';
 import { lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
-import { dataDirectory } from './persistence';
+import { dataDirectory } from './dataDirectory';
 import type { ImageBlock, ImageMediaType } from './agent_runtime/types';
 
 // Images the user attaches to a message. Each one is copied into the

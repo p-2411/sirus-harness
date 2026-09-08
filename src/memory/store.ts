@@ -2,8 +2,12 @@ import { Database } from 'bun:sqlite';
 import { existsSync, mkdirSync } from 'fs';
 import { dirname, join, resolve } from 'path';
 import * as sqliteVec from 'sqlite-vec';
-import { dataDirectory } from '../persistence';
+import { dataDirectory } from '../dataDirectory';
 import { LocalEmbeddingProvider, type EmbeddingProvider } from './embeddings';
+import { SELECT_MEMORIES, globalScopeId, migrate, type MemoryRow } from './schema';
+import { VectorIndex, type IndexableMemory } from './vectorIndex';
+
+export type { EmbeddingProvider };
 
 export type MemoryScope = 'global' | 'project';
 export type MemorySearchScope = MemoryScope | 'available';
@@ -30,43 +34,37 @@ export interface MemorySearchResult extends Memory {
   similarity: number;
 }
 
+// The scope a memory operation addresses: global, or one project keyed by its
+// resolved directory. `directory` is ignored (and blank) for global memories.
+export interface MemoryTarget {
+  scope: MemoryScope;
+  directory: string;
+}
+
+export interface MemoryInput {
+  name: string;
+  content: string;
+  // Model- and caller-supplied; validated (not merely cast) in validateMemoryInput.
+  links?: unknown;
+}
+
+export interface MemoryStore {
+  save(target: MemoryTarget, input: MemoryInput): Promise<Memory>;
+  get(target: MemoryTarget, name: string): Memory | undefined;
+  delete(target: MemoryTarget, name: string): boolean;
+  search(
+    scope: MemorySearchScope,
+    directory: string,
+    query: string,
+    limit?: number,
+  ): Promise<MemorySearchResult[]>;
+  close(): void;
+}
+
 export interface MemoryStoreOptions {
   databasePath: string;
   embedder: EmbeddingProvider;
 }
-
-interface MemoryRow {
-  id: number;
-  scope_id: number;
-  scope: MemoryScope;
-  project_directory: string | null;
-  name: string;
-  content: string;
-  links_json: string;
-  embedding_model: string;
-  created_at: string;
-  updated_at: string;
-}
-
-interface LegacyMemoryRow {
-  id: number;
-  name: string;
-  content: string;
-  links_json: string;
-  embedding_model: string;
-  created_at: string;
-  updated_at: string;
-}
-
-interface SearchRow extends MemoryRow {
-  distance: number;
-}
-
-const MEMORY_COLUMNS = `
-  memories.id, memories.scope_id, memory_scopes.kind AS scope,
-  memory_scopes.directory AS project_directory, memories.name, memories.content,
-  memories.links_json, memories.embedding_model, memories.created_at, memories.updated_at
-`;
 
 let sqliteConfigured = false;
 
@@ -96,17 +94,10 @@ function loadVectorExtension(database: Database): void {
   }
 }
 
-export function defaultMemoryDatabasePath(): string {
-  const directory = dataDirectory();
-  mkdirSync(directory, { recursive: true });
-  return join(directory, 'sirus.db');
-}
-
-export class MemoryStore {
+class SqliteMemoryStore implements MemoryStore {
   private readonly database: Database;
   private readonly embedder: EmbeddingProvider;
-  private needsReindex = false;
-  private reindexPromise: Promise<void> | undefined;
+  private readonly index: VectorIndex;
 
   constructor(options: MemoryStoreOptions) {
     validateEmbedder(options.embedder);
@@ -122,7 +113,14 @@ export class MemoryStore {
       this.database.exec('PRAGMA busy_timeout = 5000');
       if (options.databasePath !== ':memory:') this.database.exec('PRAGMA journal_mode = WAL');
       loadVectorExtension(this.database);
-      this.migrate();
+      const { needsReindex } = migrate(this.database, this.embedder);
+      this.index = new VectorIndex({
+        database: this.database,
+        embedder: this.embedder,
+        needsReindex,
+        memories: () => this.indexableMemories(),
+        embed: text => this.embed(text),
+      });
     } catch (error) {
       this.database.close();
       throw error;
@@ -133,124 +131,56 @@ export class MemoryStore {
     this.database.close();
   }
 
-  async addMemory(
-    scope: MemoryScope,
-    directory: string,
-    name: string,
-    content: string,
-    links: MemoryLink[] = [],
-  ): Promise<Memory> {
-    const target = validateTarget(scope, directory);
-    const input = validateMemoryInput(target.scope, name, content, links);
-    await this.ensureIndex();
-    const embedding = await this.embedMemory(input.name, input.content, input.links);
-    const scopeId = this.scopeId(target.scope, target.directory, true)!;
-    const insert = this.database.transaction(() => {
-      const result = this.database.query(`
-        INSERT INTO memories (scope_id, name, content, links_json, embedding_model)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(scopeId, input.name, input.content, JSON.stringify(input.links), this.embedder.model);
-      const id = Number(result.lastInsertRowid);
-      this.database.query('INSERT INTO memory_vectors(rowid, embedding, scope_id) VALUES (?, ?, ?)')
-        .run(id, embedding, scopeId);
-      return id;
-    });
-    const id = insert.immediate();
-    return this.getMemoryById(id)!;
+  async save(target: MemoryTarget, input: MemoryInput): Promise<Memory> {
+    const scoped = memoryTarget(target.scope, target.directory);
+    const existing = this.get(scoped, input.name);
+    const memory = validateMemoryInput(scoped.scope, input);
+    await this.index.ensure();
+    const embedding = await this.embed(memoryEmbeddingText(memory.name, memory.content, memory.links));
+    return existing
+      ? this.update(scoped, existing.id, memory, embedding)
+      : this.add(scoped, memory, embedding);
   }
 
-  async saveMemory(
-    scope: MemoryScope,
-    directory: string,
-    name: string,
-    content: string,
-    links: MemoryLink[] = [],
-  ): Promise<Memory> {
-    return this.getMemory(scope, directory, name)
-      ? (await this.updateMemory(scope, directory, name, content, links))!
-      : this.addMemory(scope, directory, name, content, links);
+  get(target: MemoryTarget, name: string): Memory | undefined {
+    const scoped = memoryTarget(target.scope, target.directory);
+    const scopeId = this.scopeId(scoped, false);
+    if (scopeId === undefined) return undefined;
+    const row = this.database.query<MemoryRow, [number, string]>(`
+      ${SELECT_MEMORIES} WHERE memories.scope_id = ? AND memories.name = ?
+    `).get(scopeId, requiredText(name, 'Memory name'));
+    return row ? memoryFromRow(row) : undefined;
   }
 
-  async updateMemory(
-    scope: MemoryScope,
-    directory: string,
-    name: string,
-    content: string,
-    links: MemoryLink[] = [],
-  ): Promise<Memory | undefined> {
-    const target = validateTarget(scope, directory);
-    const existing = this.getMemory(target.scope, target.directory, name);
-    if (!existing) return undefined;
-    const input = validateMemoryInput(target.scope, name, content, links);
-    await this.ensureIndex();
-    const embedding = await this.embedMemory(input.name, input.content, input.links);
-    const update = this.database.transaction(() => {
-      this.database.query(`
-        UPDATE memories
-        SET content = ?, links_json = ?, embedding_model = ?,
-            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-        WHERE id = ?
-      `).run(input.content, JSON.stringify(input.links), this.embedder.model, existing.id);
-      this.database.query('DELETE FROM memory_vectors WHERE rowid = ?').run(existing.id);
-      this.database.query('INSERT INTO memory_vectors(rowid, embedding, scope_id) VALUES (?, ?, ?)')
-        .run(existing.id, embedding, this.scopeId(target.scope, target.directory, false)!);
-    });
-    update.immediate();
-    return this.getMemoryById(existing.id);
-  }
-
-  deleteMemory(scope: MemoryScope, directory: string, name: string): boolean {
-    const existing = this.getMemory(scope, directory, name);
+  delete(target: MemoryTarget, name: string): boolean {
+    const existing = this.get(target, name);
     if (!existing) return false;
     const remove = this.database.transaction(() => {
-      this.database.query('DELETE FROM memory_vectors WHERE rowid = ?').run(existing.id);
+      this.index.remove(existing.id);
       this.database.query('DELETE FROM memories WHERE id = ?').run(existing.id);
     });
     remove.immediate();
     return true;
   }
 
-  getMemory(scope: MemoryScope, directory: string, name: string): Memory | undefined {
-    const target = validateTarget(scope, directory);
-    const scopeId = this.scopeId(target.scope, target.directory, false);
-    if (scopeId === undefined) return undefined;
-    const row = this.database.query<MemoryRow, [number, string]>(`
-      SELECT ${MEMORY_COLUMNS}
-      FROM memories JOIN memory_scopes ON memory_scopes.id = memories.scope_id
-      WHERE memories.scope_id = ? AND memories.name = ?
-    `).get(scopeId, requiredText(name, 'Memory name'));
-    return row ? memoryFromRow(row) : undefined;
-  }
-
-  listMemories(scope: MemorySearchScope = 'available', directory: string = process.cwd()): Memory[] {
-    const scopeIds = this.visibleScopeIds(validateSearchScope(scope), directory);
-    const memories = scopeIds.flatMap(scopeId => this.database.query<MemoryRow, [number]>(`
-      SELECT ${MEMORY_COLUMNS}
-      FROM memories JOIN memory_scopes ON memory_scopes.id = memories.scope_id
-      WHERE memories.scope_id = ?
-    `).all(scopeId).map(memoryFromRow));
-    return memories.sort((left, right) =>
-      right.updatedAt.localeCompare(left.updatedAt) || right.id - left.id);
-  }
-
-  async searchMemories(
+  async search(
     scope: MemorySearchScope,
     directory: string,
     query: string,
     limit = 5,
   ): Promise<MemorySearchResult[]> {
-    const normalizedScope = validateSearchScope(scope);
+    const normalizedScope = memorySearchScope(scope);
     const normalizedQuery = requiredText(query, 'Memory search query');
     if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
       throw new RangeError('Memory search limit must be an integer between 1 and 50');
     }
-    await this.ensureIndex();
+    await this.index.ensure();
     const scopeIds = this.visibleScopeIds(normalizedScope, directory)
       .filter(scopeId => this.countMemories(scopeId) > 0);
     if (scopeIds.length === 0) return [];
 
     const embedding = await this.embed(normalizedQuery);
-    const rows = scopeIds.flatMap(scopeId => this.searchScope(embedding, scopeId, limit));
+    const rows = scopeIds.flatMap(scopeId => this.index.search(embedding, scopeId, limit));
     return rows
       .sort((left, right) => left.distance - right.distance || left.id - right.id)
       .slice(0, limit)
@@ -261,191 +191,57 @@ export class MemoryStore {
       }));
   }
 
-  private migrate(): void {
-    this.database.exec(`
-      CREATE TABLE IF NOT EXISTS memory_settings (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-      ) STRICT;
-      CREATE TABLE IF NOT EXISTS memory_scopes (
-        id INTEGER PRIMARY KEY,
-        kind TEXT NOT NULL CHECK (kind IN ('global', 'project')),
-        directory TEXT,
-        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-        CHECK (
-          (kind = 'global' AND directory IS NULL)
-          OR (kind = 'project' AND directory IS NOT NULL AND length(directory) > 0)
-        )
-      ) STRICT;
-      CREATE UNIQUE INDEX IF NOT EXISTS memory_scopes_one_global
-        ON memory_scopes(kind) WHERE kind = 'global';
-      CREATE UNIQUE INDEX IF NOT EXISTS memory_scopes_project_directory
-        ON memory_scopes(directory) WHERE kind = 'project';
-      INSERT OR IGNORE INTO memory_scopes (kind, directory) VALUES ('global', NULL);
-    `);
-
-    const globalScopeId = this.globalScopeId();
-    let migratedLegacyMemories = false;
-    if (!this.tableExists('memories')) {
-      this.createMemoryTable();
-    } else if (!this.tableHasColumn('memories', 'scope_id')) {
-      this.migrateLegacyMemories(globalScopeId);
-      migratedLegacyMemories = true;
-    }
-    this.createMemoryIndexes();
-
-    const storedModel = this.setting('embedding_model');
-    const storedDimensions = this.setting('embedding_dimensions');
-    if (storedModel === undefined && storedDimensions === undefined) {
-      const writeSettings = this.database.transaction(() => {
-        this.database.query('INSERT INTO memory_settings (key, value) VALUES (?, ?)')
-          .run('embedding_model', this.embedder.model);
-        this.database.query('INSERT INTO memory_settings (key, value) VALUES (?, ?)')
-          .run('embedding_dimensions', String(this.embedder.dimensions));
-      });
-      writeSettings();
-    } else if (storedModel !== this.embedder.model || storedDimensions !== String(this.embedder.dimensions)) {
-      this.needsReindex = true;
-    }
-
-    const vectorTableExists = this.tableExists('memory_vectors');
-    if (migratedLegacyMemories || (vectorTableExists && !this.tableHasColumn('memory_vectors', 'scope_id'))) {
-      this.needsReindex = true;
-    }
-    if (!vectorTableExists && this.countAllMemories() > 0) this.needsReindex = true;
-    if (!this.needsReindex) this.createVectorTable();
-    this.database.exec('PRAGMA user_version = 3');
-  }
-
-  private createMemoryTable(): void {
-    this.database.exec(`
-      CREATE TABLE IF NOT EXISTS memories (
-        id INTEGER PRIMARY KEY,
-        scope_id INTEGER NOT NULL REFERENCES memory_scopes(id),
-        name TEXT NOT NULL,
-        content TEXT NOT NULL,
-        links_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(links_json)),
-        embedding_model TEXT NOT NULL,
-        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-      ) STRICT
-    `);
-  }
-
-  private createMemoryIndexes(): void {
-    this.database.exec(`
-      CREATE UNIQUE INDEX IF NOT EXISTS memories_scope_name
-        ON memories(scope_id, name);
-      CREATE INDEX IF NOT EXISTS memories_scope_updated
-        ON memories(scope_id, updated_at DESC);
-    `);
-  }
-
-  private migrateLegacyMemories(globalScopeId: number): void {
-    const legacyRows = this.database.query<LegacyMemoryRow, []>(`
-      SELECT id, name, content, links_json, embedding_model, created_at, updated_at
-      FROM memories ORDER BY id
-    `).all();
-    const migrate = this.database.transaction(() => {
-      this.database.exec('ALTER TABLE memories RENAME TO memories_legacy_v2');
-      this.createMemoryTable();
-      const insert = this.database.query(`
-        INSERT INTO memories (
-          id, scope_id, name, content, links_json, embedding_model, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      for (const row of legacyRows) {
-        insert.run(
-          row.id,
-          globalScopeId,
-          row.name,
-          row.content,
-          JSON.stringify(legacyLinks(row.links_json)),
-          row.embedding_model,
-          row.created_at,
-          row.updated_at,
-        );
-      }
-      this.database.exec('DROP TABLE memories_legacy_v2');
+  private add(target: MemoryTarget, input: ValidMemoryInput, embedding: Float32Array): Memory {
+    const scopeId = this.scopeId(target, true)!;
+    const insert = this.database.transaction(() => {
+      const result = this.database.query(`
+        INSERT INTO memories (scope_id, name, content, links_json, embedding_model)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(scopeId, input.name, input.content, JSON.stringify(input.links), this.embedder.model);
+      const id = Number(result.lastInsertRowid);
+      this.index.insert(id, embedding, scopeId);
+      return id;
     });
-    migrate.immediate();
+    return this.memoryById(insert.immediate())!;
   }
 
-  private createVectorTable(): void {
-    this.database.exec(`
-      CREATE VIRTUAL TABLE IF NOT EXISTS memory_vectors USING vec0(
-        embedding float[${this.embedder.dimensions}] distance_metric=cosine,
-        scope_id integer
-      )
-    `);
-  }
-
-  private async ensureIndex(): Promise<void> {
-    if (!this.needsReindex) return;
-    this.reindexPromise ??= this.reindex().catch(error => {
-      this.reindexPromise = undefined;
-      throw error;
-    });
-    await this.reindexPromise;
-  }
-
-  private async reindex(): Promise<void> {
-    const memories = this.listAllMemories();
-    const vectors: Array<{ id: number; scopeId: number; embedding: Float32Array }> = [];
-    for (const memory of memories) {
-      vectors.push({
-        id: memory.memory.id,
-        scopeId: memory.scopeId,
-        embedding: await this.embedMemory(memory.memory.name, memory.memory.content, memory.memory.links),
-      });
-    }
-
-    const rebuild = this.database.transaction(() => {
-      this.database.exec('DROP TABLE IF EXISTS memory_vectors');
-      this.createVectorTable();
+  private update(
+    target: MemoryTarget,
+    id: number,
+    input: ValidMemoryInput,
+    embedding: Float32Array,
+  ): Memory {
+    const scopeId = this.scopeId(target, false)!;
+    const update = this.database.transaction(() => {
       this.database.query(`
-        INSERT INTO memory_settings (key, value) VALUES (?, ?)
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value
-      `).run('embedding_model', this.embedder.model);
-      this.database.query(`
-        INSERT INTO memory_settings (key, value) VALUES (?, ?)
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value
-      `).run('embedding_dimensions', String(this.embedder.dimensions));
-      this.database.query('UPDATE memories SET embedding_model = ?').run(this.embedder.model);
-      const insertVector = this.database.query(
-        'INSERT INTO memory_vectors(rowid, embedding, scope_id) VALUES (?, ?, ?)',
-      );
-      for (const vector of vectors) insertVector.run(vector.id, vector.embedding, vector.scopeId);
+        UPDATE memories
+        SET content = ?, links_json = ?, embedding_model = ?,
+            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        WHERE id = ?
+      `).run(input.content, JSON.stringify(input.links), this.embedder.model, id);
+      this.index.remove(id);
+      this.index.insert(id, embedding, scopeId);
     });
-    rebuild.immediate();
-    this.needsReindex = false;
-  }
-
-  private searchScope(embedding: Float32Array, scopeId: number, limit: number): SearchRow[] {
-    return this.database.query<SearchRow, [Float32Array, number, number]>(`
-      WITH nearest AS (
-        SELECT rowid, distance FROM memory_vectors
-        WHERE embedding MATCH ? AND k = ? AND scope_id = ?
-      )
-      SELECT ${MEMORY_COLUMNS}, nearest.distance
-      FROM nearest
-      JOIN memories ON memories.id = nearest.rowid
-      JOIN memory_scopes ON memory_scopes.id = memories.scope_id
-      ORDER BY nearest.distance
-    `).all(embedding, limit, scopeId);
+    update.immediate();
+    return this.memoryById(id)!;
   }
 
   private visibleScopeIds(scope: MemorySearchScope, directory: string): number[] {
-    if (scope === 'global') return [this.globalScopeId()];
-    const projectScopeId = this.scopeId('project', normalizeDirectory(directory), false);
+    if (scope === 'global') return [globalScopeId(this.database)];
+    const projectScopeId = this.projectScopeId(directory, false);
     if (scope === 'project') return projectScopeId === undefined ? [] : [projectScopeId];
     return projectScopeId === undefined
-      ? [this.globalScopeId()]
-      : [this.globalScopeId(), projectScopeId];
+      ? [globalScopeId(this.database)]
+      : [globalScopeId(this.database), projectScopeId];
   }
 
-  private scopeId(scope: MemoryScope, directory: string, create: boolean): number | undefined {
-    if (scope === 'global') return this.globalScopeId();
+  private scopeId(target: MemoryTarget, create: boolean): number | undefined {
+    return target.scope === 'global'
+      ? globalScopeId(this.database)
+      : this.projectScopeId(target.directory, create);
+  }
+
+  private projectScopeId(directory: string, create: boolean): number | undefined {
     const normalizedDirectory = normalizeDirectory(directory);
     let id = this.database.query<{ id: number }, [string]>(`
       SELECT id FROM memory_scopes WHERE kind = 'project' AND directory = ?
@@ -461,66 +257,30 @@ export class MemoryStore {
     return id;
   }
 
-  private globalScopeId(): number {
-    const id = this.database.query<{ id: number }, []>(`
-      SELECT id FROM memory_scopes WHERE kind = 'global'
-    `).get()?.id;
-    if (id === undefined) throw new Error('Global memory scope is missing');
-    return id;
-  }
-
-  private setting(key: string): string | undefined {
-    return this.database.query<{ value: string }, [string]>(
-      'SELECT value FROM memory_settings WHERE key = ?',
-    ).get(key)?.value;
-  }
-
-  private tableExists(name: string): boolean {
-    return this.database.query<{ found: number }, [string]>(`
-      SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = ?
-    `).get(name)?.found === 1;
-  }
-
-  private tableHasColumn(table: 'memories' | 'memory_vectors', column: string): boolean {
-    return this.database.query<{ name: string }, []>(`PRAGMA table_info(${table})`)
-      .all().some(info => info.name === column);
-  }
-
-  private countAllMemories(): number {
-    return this.database.query<{ count: number }, []>(
-      'SELECT count(*) AS count FROM memories',
-    ).get()?.count ?? 0;
-  }
-
   private countMemories(scopeId: number): number {
     return this.database.query<{ count: number }, [number]>(
       'SELECT count(*) AS count FROM memories WHERE scope_id = ?',
     ).get(scopeId)?.count ?? 0;
   }
 
-  private listAllMemories(): Array<{ scopeId: number; memory: Memory }> {
+  private indexableMemories(): IndexableMemory[] {
     return this.database.query<MemoryRow, []>(`
-      SELECT ${MEMORY_COLUMNS}
-      FROM memories JOIN memory_scopes ON memory_scopes.id = memories.scope_id
-      ORDER BY memories.id
-    `).all().map(row => ({ scopeId: row.scope_id, memory: memoryFromRow(row) }));
+      ${SELECT_MEMORIES} ORDER BY memories.id
+    `).all().map(row => {
+      const memory = memoryFromRow(row);
+      return {
+        id: memory.id,
+        scopeId: row.scope_id,
+        text: memoryEmbeddingText(memory.name, memory.content, memory.links),
+      };
+    });
   }
 
-  private getMemoryById(id: number): Memory | undefined {
+  private memoryById(id: number): Memory | undefined {
     const row = this.database.query<MemoryRow, [number]>(`
-      SELECT ${MEMORY_COLUMNS}
-      FROM memories JOIN memory_scopes ON memory_scopes.id = memories.scope_id
-      WHERE memories.id = ?
+      ${SELECT_MEMORIES} WHERE memories.id = ?
     `).get(id);
     return row ? memoryFromRow(row) : undefined;
-  }
-
-  private embedMemory(name: string, content: string, links: MemoryLink[]): Promise<Float32Array> {
-    return this.embed([
-      `Memory: ${name}`,
-      content,
-      links.length > 0 ? `Related: ${links.map(link => `${link.scope}:${link.name}`).join(', ')}` : '',
-    ].filter(Boolean).join('\n'));
   }
 
   private async embed(text: string): Promise<Float32Array> {
@@ -537,14 +297,32 @@ export class MemoryStore {
   }
 }
 
-function validateEmbedder(embedder: EmbeddingProvider): void {
-  requiredText(embedder.model, 'Embedding model');
-  if (!Number.isInteger(embedder.dimensions) || embedder.dimensions < 1) {
-    throw new TypeError('Embedding dimensions must be a positive integer');
-  }
+export function openMemoryStore(options: MemoryStoreOptions): MemoryStore {
+  return new SqliteMemoryStore(options);
 }
 
-function validateTarget(scope: MemoryScope, directory: string): { scope: MemoryScope; directory: string } {
+const stores = new Map<string, MemoryStore>();
+
+// One store per database file. The data directory is read at call time, so a
+// test or a relocated install is not pinned to whatever the first caller saw.
+export function memoryStoreFor(directory: string = dataDirectory()): MemoryStore {
+  const databasePath = join(resolve(directory), 'sirus.db');
+  let store = stores.get(databasePath);
+  if (!store) {
+    store = openMemoryStore({ databasePath, embedder: new LocalEmbeddingProvider() });
+    stores.set(databasePath, store);
+  }
+  return store;
+}
+
+export function closeAllMemoryStores(): void {
+  for (const store of stores.values()) store.close();
+  stores.clear();
+}
+
+// A validated scope/directory pair. Callers hand user- or model-supplied values
+// straight in; every store method re-derives the target from what it is given.
+export function memoryTarget(scope: unknown, directory: string): MemoryTarget {
   if (scope !== 'global' && scope !== 'project') {
     throw new TypeError('Memory scope must be global or project');
   }
@@ -554,32 +332,51 @@ function validateTarget(scope: MemoryScope, directory: string): { scope: MemoryS
   };
 }
 
-function validateSearchScope(scope: MemorySearchScope): MemorySearchScope {
+export function memorySearchScope(scope: unknown): MemorySearchScope {
   if (scope !== 'available' && scope !== 'global' && scope !== 'project') {
     throw new TypeError('Memory search scope must be available, global, or project');
   }
   return scope;
 }
 
-function validateMemoryInput(scope: MemoryScope, name: string, content: string, links: MemoryLink[]) {
+interface ValidMemoryInput {
+  name: string;
+  content: string;
+  links: MemoryLink[];
+}
+
+function validateEmbedder(embedder: EmbeddingProvider): void {
+  requiredText(embedder.model, 'Embedding model');
+  if (!Number.isInteger(embedder.dimensions) || embedder.dimensions < 1) {
+    throw new TypeError('Embedding dimensions must be a positive integer');
+  }
+}
+
+function validateMemoryInput(scope: MemoryScope, input: MemoryInput): ValidMemoryInput {
+  const links = input.links ?? [];
   if (!Array.isArray(links)) throw new TypeError('Memory links must be an array');
-  const normalizedLinks = links.map(link => {
-    if (!link || typeof link !== 'object' || (link.scope !== 'global' && link.scope !== 'project')) {
+  const normalizedLinks = links.map((link: unknown): MemoryLink => {
+    const candidate = link as { scope?: unknown; name?: unknown } | null;
+    if (
+      !candidate
+      || typeof candidate !== 'object'
+      || (candidate.scope !== 'global' && candidate.scope !== 'project')
+    ) {
       throw new TypeError('Memory links must contain a global or project scope and a non-empty name');
     }
-    return { scope: link.scope, name: requiredText(link.name, 'Memory link name') };
+    return { scope: candidate.scope, name: requiredText(candidate.name, 'Memory link name') };
   });
   if (scope === 'global' && normalizedLinks.some(link => link.scope === 'project')) {
     throw new TypeError('Global memories may only link to global memories');
   }
   return {
-    name: requiredText(name, 'Memory name'),
-    content: requiredText(content, 'Memory content'),
+    name: requiredText(input.name, 'Memory name'),
+    content: requiredText(input.content, 'Memory content'),
     links: [...new Map(normalizedLinks.map(link => [`${link.scope}\0${link.name}`, link])).values()],
   };
 }
 
-function requiredText(value: string, label: string): string {
+function requiredText(value: unknown, label: string): string {
   if (typeof value !== 'string' || !value.trim()) {
     throw new TypeError(`${label} must be a non-empty string`);
   }
@@ -590,12 +387,12 @@ function normalizeDirectory(directory: string): string {
   return resolve(requiredText(directory, 'Project directory'));
 }
 
-function legacyLinks(linksJson: string): MemoryLink[] {
-  const parsed: unknown = JSON.parse(linksJson);
-  if (!Array.isArray(parsed) || parsed.some(link => typeof link !== 'string' || !link.trim())) {
-    throw new Error('Legacy memory has invalid links');
-  }
-  return parsed.map(name => ({ scope: 'global', name: name.trim() }));
+function memoryEmbeddingText(name: string, content: string, links: MemoryLink[]): string {
+  return [
+    `Memory: ${name}`,
+    content,
+    links.length > 0 ? `Related: ${links.map(link => `${link.scope}:${link.name}`).join(', ')}` : '',
+  ].filter(Boolean).join('\n');
 }
 
 function memoryFromRow(row: MemoryRow): Memory {
@@ -618,14 +415,4 @@ function memoryFromRow(row: MemoryRow): Memory {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
-}
-
-let defaultStore: MemoryStore | undefined;
-
-export function getDefaultMemoryStore(): MemoryStore {
-  defaultStore ??= new MemoryStore({
-    databasePath: defaultMemoryDatabasePath(),
-    embedder: new LocalEmbeddingProvider(),
-  });
-  return defaultStore;
 }

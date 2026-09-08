@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import { execFile } from 'child_process';
 import { existsSync, lstatSync, mkdirSync, unlinkSync, writeFileSync } from 'fs';
 import path from 'path';
-import { dataDirectory } from './persistence';
+import { dataDirectory } from './dataDirectory';
 
 // A checkpoint is the state of a session's directory just before a turn
 // started, kept in a shadow git repository under the application-state
