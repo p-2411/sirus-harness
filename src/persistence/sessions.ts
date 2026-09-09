@@ -117,11 +117,20 @@ export interface PersistedSessionSnapshots {
 // single way back in. A file written before multi-agent support carries one
 // `model` and no clocks: it becomes a lone `sirus` participant whose history
 // is dated to the epoch, which sorts it below anything with a real timestamp.
+// Catalog ids that were renamed; a session saved under the old id must still
+// restore to a model the providers serve.
+const RENAMED_MODELS: Record<string, string> = { 'claude-haiku-4.5': 'claude-haiku-4-5' };
+
+function currentModel<T extends { model: string }>(participant: T): T {
+  const renamed = RENAMED_MODELS[participant.model];
+  return renamed ? { ...participant, model: renamed } : participant;
+}
+
 function toSnapshot(stored: StoredSession, fallbackSessionDirectory: string): SessionSnapshot {
-  const participants = stored.participants
-    ?? [{ name: LEGACY_PARTICIPANT_NAME, model: stored.model as string }];
-  const defaultModel = stored.defaultModel
-    ?? { name: LEGACY_PARTICIPANT_NAME, model: stored.model as string };
+  const participants = (stored.participants
+    ?? [{ name: LEGACY_PARTICIPANT_NAME, model: stored.model as string }]).map(currentModel);
+  const defaultModel = currentModel(stored.defaultModel
+    ?? { name: LEGACY_PARTICIPANT_NAME, model: stored.model as string });
   return {
     id: stored.id,
     name: stored.name,

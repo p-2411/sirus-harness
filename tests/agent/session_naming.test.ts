@@ -34,13 +34,13 @@ describe('sessionNamingModel', () => {
     process.env.ANTHROPIC_API = 'test-claude-key';
     process.env.OPENAI_SECRET = 'test-openai-key';
 
-    expect(sessionNamingModel('claude-sonnet-5')).toBe('claude-haiku-4.5');
+    expect(sessionNamingModel('claude-sonnet-5')).toBe('claude-haiku-4-5');
     expect(sessionNamingModel('gpt-5.6-sol')).toBe('gpt-5.6-luna');
   });
 
   test('falls back to the first connected provider, or no model', () => {
     process.env.ANTHROPIC_API = 'test-claude-key';
-    expect(sessionNamingModel('gpt-5.6-sol')).toBe('claude-haiku-4.5');
+    expect(sessionNamingModel('gpt-5.6-sol')).toBe('claude-haiku-4-5');
 
     delete process.env.ANTHROPIC_API;
     expect(sessionNamingModel('gpt-5.6-sol')).toBeNull();

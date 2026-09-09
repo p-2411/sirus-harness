@@ -46,7 +46,7 @@ const VENDOR_TABLE = {
     accountName: 'Claude',
     sidebarLabel: 'claude',
     apiKeyEnv: 'ANTHROPIC_API',
-    judgeModel: 'claude-haiku-4.5',
+    judgeModel: 'claude-haiku-4-5',
     scrubEnv: [
       'ANTHROPIC_API_KEY',
       'ANTHROPIC_AUTH_TOKEN',
@@ -98,7 +98,7 @@ export const MODELS: readonly ModelInfo[] = [
   },
   { id: 'claude-opus-5', vendor: 'claude', contextWindow: 200_000 },
   { id: 'claude-sonnet-5', vendor: 'claude', contextWindow: 200_000 },
-  { id: 'claude-haiku-4.5', vendor: 'claude', contextWindow: 200_000 },
+  { id: 'claude-haiku-4-5', vendor: 'claude', contextWindow: 200_000 },
   { id: 'claude-fable-5-1', vendor: 'claude', contextWindow: 200_000 },
 ];
 

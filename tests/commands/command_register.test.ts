@@ -126,14 +126,14 @@ describe('executeCommand', () => {
     const session = new Session();
     expect(runCommand('model', ['HAIKU'], session)).toEqual({
       kind: 'success',
-      text: '@sirus model set to claude-haiku-4.5.',
+      text: '@sirus model set to claude-haiku-4-5.',
     });
-    expect(session.getModel()).toBe('claude-haiku-4.5');
-    expect(loadSirusModelPreference()).toBe('claude-haiku-4.5');
+    expect(session.getModel()).toBe('claude-haiku-4-5');
+    expect(loadSirusModelPreference()).toBe('claude-haiku-4-5');
   });
 
   test('model references choose the latest version within one model family', () => {
-    const models = ['claude-haiku-4.5', 'claude-haiku-5'];
+    const models = ['claude-haiku-4-5', 'claude-haiku-5'];
 
     expect(resolveModelReference('haiku', models)).toBe('claude-haiku-5');
     expect(resolveModelReference('claude-haiku-5', models)).toBe('claude-haiku-5');
@@ -155,7 +155,7 @@ describe('executeCommand', () => {
     expect(menuItems('model', []).map(item => item.command)).toEqual([
       '/model claude-opus-5',
       '/model claude-sonnet-5',
-      '/model claude-haiku-4.5',
+      '/model claude-haiku-4-5',
       '/model claude-fable-5-1',
       '/model gpt-5.6-luna',
       '/model gpt-5.6-terra',

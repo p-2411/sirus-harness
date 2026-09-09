@@ -52,7 +52,7 @@ describe('provider tool history', () => {
       thinking: { type: 'adaptive' },
       output_config: { effort: 'xhigh' },
     });
-    expect(anthropicThinkingConfig('claude-haiku-4.5', 'high')).toEqual({
+    expect(anthropicThinkingConfig('claude-haiku-4-5', 'high')).toEqual({
       thinking: { type: 'enabled', budget_tokens: 4096 },
     });
   });
