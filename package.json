@@ -1,6 +1,6 @@
 {
   "name": "sirus-harness",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "A local-first terminal client for running AI coding agents.",
   "license": "MIT",
   "author": "Sirus contributors",
@@ -47,6 +47,7 @@
     "test": "bun test tests",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "release:check": "bun test && bun run typecheck && npm pack --dry-run",
+    "release": "bun run release:check && bun pm version patch && bun publish",
     "prepublishOnly": "bun test && bun run typecheck"
   },
   "devDependencies": {
