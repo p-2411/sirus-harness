@@ -123,6 +123,20 @@ export function disposeAllRuntimes(): void {
   live.clear();
 }
 
+// Bumped whenever something every runtime has baked in changes, such as the
+// system prompt after /memory on or off. A participant whose runtime predates
+// the current generation rebuilds it on its next turn.
+let generation = 0;
+
+export function runtimeGeneration(): number {
+  return generation;
+}
+
+export function invalidateAllRuntimes(): void {
+  generation++;
+  disposeAllRuntimes();
+}
+
 // Starts a runtime for the model: a scripted one when the test suite bound
 // it, otherwise the vendor's adapter process.
 export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
