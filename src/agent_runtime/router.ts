@@ -2,8 +2,9 @@ import path from 'path';
 import { choice, TypeSafeClient, type ChoiceCriteria } from '@typesafe-ai/sdk';
 import { parseFileMentions } from '../fileMentions';
 import { allProviders } from './providers';
-import { latestModelOf } from './providers/catalog';
+import { latestModelOf, type Vendor } from './providers/catalog';
 import { cachedSubscriptionRemaining } from './providers/usage';
+import type { ThinkingLevel } from './types';
 
 // Jev, TypeSafe AI's System One model, picks a new session's model from its
 // first prompt: one typed choice between the latest model of each vendor
@@ -107,4 +108,55 @@ export async function routeSessionModel(
   } catch {
     return null;
   }
+}
+
+// Jev also picks a worker's model and thinking level when the session has
+// no fixed subagent model. Candidates are every catalog model of a vendor
+// with allowance, except the ones the catalog keeps off the worker list;
+// the state carries the task, the project's name and each vendor's remaining
+// allowance, so a vendor near its limit is chosen less. Two questions in one
+// call: the model, then how hard to think.
+
+export interface WorkerCandidate {
+  model: string;
+  strengths: string;
+}
+
+export interface WorkerRoutingInput {
+  task: string;
+  directory: string;
+}
+
+export interface WorkerPick {
+  model: string;
+  thinkingLevel: ThinkingLevel;
+}
+
+// One vendor's remaining allowance as a percentage, or null for one on an
+// API key (no window to run out of) or with no cached figure yet.
+export interface VendorAllowance {
+  vendor: Vendor;
+  remaining: number | null;
+}
+
+export function workerCandidates(): WorkerCandidate[] {
+  throw new Error('not implemented');
+}
+
+export function vendorAllowance(): VendorAllowance[] {
+  throw new Error('not implemented');
+}
+
+// The pick for one task, or null when Jev is not configured, did not answer
+// in time, failed, or was unsure about the model; the caller then keeps the
+// owner's model and level. An unsure thinking level alone falls back to the
+// owner's level while the model pick stands.
+export async function routeWorker(
+  input: WorkerRoutingInput,
+  candidates: readonly WorkerCandidate[],
+  allowance: readonly VendorAllowance[],
+  options: { signal?: AbortSignal; client?: RoutingClient | null; fallbackLevel?: ThinkingLevel } = {},
+): Promise<WorkerPick | null> {
+  void input; void candidates; void allowance; void options;
+  throw new Error('not implemented');
 }

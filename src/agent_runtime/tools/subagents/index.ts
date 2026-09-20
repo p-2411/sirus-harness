@@ -1,6 +1,7 @@
 import path from 'path';
 import type { SessionAgent } from '../../agent';
-import type { MessageBlock } from '../../types';
+import type { Message, MessageBlock, ThinkingLevel } from '../../types';
+import type { WorkerContext } from '../types';
 
 // Subagents: one detached runtime per delegated task, a worker like a
 // participant with a record of its own. This file is the process-wide index
@@ -13,31 +14,54 @@ import type { MessageBlock } from '../../types';
 // the chat, the notifications and the rewind interlock can see runs they do
 // not own.
 
-export type SubagentStatus = 'working' | 'done' | 'failed' | 'cancelled';
+// `interrupted` is a run that was still working when the process it lived in
+// ended: its record survives in the session file, nothing restarts it.
+export type SubagentStatus = 'working' | 'done' | 'failed' | 'cancelled' | 'interrupted';
 
-export interface SubagentRun {
+export type { WorkerContext };
+
+// What the session file keeps of a worker: enough to show its record, tell
+// where its branch is, and give its owner the report it never received.
+export interface WorkerRecord {
   id: string;
   // The SpawnAgent tool call that started the run, so the UI can decorate it.
   callId: string | null;
-  // The session the owning agent belongs to, so the UI can tell two sessions
-  // sharing a call id apart.
-  sessionId: string;
-  // The agent that spawned the run, and the agent that does its work.
-  owner: SessionAgent;
-  worker: SessionAgent;
+  // The participant that spawned the run.
+  owner: string;
   model: string;
+  thinkingLevel: ThinkingLevel;
+  context: WorkerContext;
   prompt: string;
+  // Where the worker runs: its own worktree in a git project, the project
+  // itself otherwise.
   directory: string;
+  // The branch its worktree is on, or null when it works in place.
+  branch: string | null;
   status: SubagentStatus;
-  streamFile: string | null;
   startedAt: number;
   finishedAt: number | null;
-  // The worker's response as it stands: the content of its one assistant
-  // entry, mutated in place while it works.
-  content: MessageBlock[];
+  // The worker's own record: the task, the steering messages sent to it,
+  // and the one assistant entry its turn fills in. Live while it works.
+  transcript: Message[];
   finalMessage: string | null;
   changes: string[];
   error: string | null;
+  // Its report has been delivered to the owner's transcript.
+  reported: boolean;
+  // The user cleared its line from the worker strip.
+  dismissed: boolean;
+}
+
+export interface SubagentRun extends WorkerRecord {
+  // The session the owning agent belongs to, so the UI can tell two sessions
+  // sharing a call id apart.
+  sessionId: string;
+  // The agent that does the work; null for a run restored from a snapshot,
+  // which is a record and nothing more.
+  worker: SessionAgent | null;
+  // The worker's response as it stands: the content of its assistant entry,
+  // mutated in place while it works.
+  content: MessageBlock[];
 }
 
 const runs = new Map<string, SubagentRun>();
@@ -61,6 +85,14 @@ export function getSubagentsVersion(): number {
 
 export function registerSubagent(run: SubagentRun): void {
   runs.set(run.id, run);
+}
+
+export function unregisterSubagent(id: string): void {
+  runs.delete(id);
+}
+
+export function findSubagent(id: string): SubagentRun | undefined {
+  return runs.get(id);
 }
 
 export function findSubagentByCall(callId: string, sessionId?: string): SubagentRun | undefined {

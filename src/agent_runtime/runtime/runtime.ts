@@ -76,6 +76,15 @@ export interface PromptResult {
   stopReason: StopReason;
 }
 
+// What a forked runtime takes from the caller rather than inheriting from
+// the runtime it was forked from: it runs somewhere else, for someone else,
+// with its own callbacks and its own Sirus tool entry. The conversation so
+// far is inherited; the system prompt is the worker's own where the vendor
+// takes one per session (Claude), and the process's where it does not
+// (Codex, whose instructions file is set at launch).
+export type ForkOptions = Pick<RuntimeOptions,
+  'directory' | 'model' | 'thinkingLevel' | 'systemPrompt' | 'permissionMode' | 'mcpServer' | 'onPermission' | 'onUpdate'>;
+
 export interface Runtime {
   readonly vendor: Vendor;
   readonly model: string;
@@ -95,7 +104,18 @@ export interface Runtime {
   // apply, in which case the caller rebuilds the runtime.
   setModel(model: string): Promise<boolean>;
   setThinkingLevel(level: ThinkingLevel): Promise<void>;
-  // Ends the process. Idempotent.
+  // `session/fork`: a second session on the same adapter process that
+  // starts from this one's conversation so far, prompted separately from
+  // then on. Works while this runtime is mid-prompt. Rejects when the vendor
+  // cannot fork, in which case the caller starts a fresh runtime instead.
+  // The fork shares this runtime's process: disposing this runtime loses
+  // the fork too, and its next prompt rejects like any lost runtime's.
+  fork(options: ForkOptions): Promise<Runtime>;
+  // `_session/steering`: injects text into the prompt in flight, which the
+  // vendor folds into the running turn. Rejects when no prompt is running
+  // or the vendor cannot steer; the caller then reports that instead.
+  steer(text: string): Promise<void>;
+  // Ends the process, or for a fork just its session. Idempotent.
   dispose(): void;
 }
 

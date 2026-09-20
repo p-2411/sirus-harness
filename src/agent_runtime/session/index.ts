@@ -8,6 +8,7 @@ import { routeSessionModel, routingCandidates } from '../router';
 import { servableModelIds, servesModel } from '../providers';
 import { DEFAULT_MODEL } from '../providers/catalog';
 import { registerToolSession, sirusMcpServerEntry, unregisterToolSession } from '../tools/server';
+import type { SubagentRun, WorkerRecord } from '../tools/subagents';
 import type { SubagentHost } from '../tools/types';
 import { textOf, type Message, type ThinkingLevel } from '../types';
 import type { ContextUsage } from '../usage';
@@ -72,6 +73,9 @@ export interface SessionOptions {
   permissionMode?: PermissionMode;
   // The model spawned subagents run on; null for the owner's own.
   subagentModel?: string | null;
+  // Workers of this session as the snapshot kept them. One still working
+  // when it was saved is restored as interrupted.
+  workers?: readonly WorkerRecord[];
   inputContent?: string;
   // A newly-created session may still take its name from its first prompt.
   autoNamePending?: boolean;
@@ -95,6 +99,9 @@ export interface SessionSnapshot {
   permissionMode?: PermissionMode;
   // The model spawned subagents run on; absent for the owner's own.
   subagentModel?: string;
+  // Every worker the session's participants spawned, oldest first; absent
+  // when none.
+  workers?: WorkerRecord[];
   // Directory snapshots taken before turns, oldest first; absent when none.
   checkpoints?: Checkpoint[];
   // When the history last changed; absent in older snapshots.
@@ -637,6 +644,29 @@ export class Session {
 
   getSubagentModel(): string | null {
     return this.subagentModel;
+  }
+
+  // The session's workers, oldest first, restored records included.
+  getWorkers(): SubagentRun[] {
+    throw new Error('not implemented');
+  }
+
+  // Stops one working worker and waits for it to wind down.
+  cancelWorker(id: string): Promise<void> {
+    void id;
+    throw new Error('not implemented');
+  }
+
+  // Sends text into a running worker's turn; rejects for one that has ended.
+  messageWorker(id: string, text: string): Promise<void> {
+    void id; void text;
+    throw new Error('not implemented');
+  }
+
+  // Clears a finished worker's line from the strip; its record stays.
+  dismissWorker(id: string): void {
+    void id;
+    throw new Error('not implemented');
   }
 
   setSubagentModel(model: string | null): void {

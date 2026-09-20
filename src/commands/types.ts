@@ -1,5 +1,6 @@
 import type { PermissionMode } from '../agent_runtime/permissions/policy';
 import type { Checkpoint, Participant, RewindOptions, RewindResult } from '../agent_runtime/session';
+import type { SubagentRun } from '../agent_runtime/tools/subagents';
 import type { ImageBlock, ThinkingLevel } from '../agent_runtime/types';
 import type { ContextUsage } from '../agent_runtime/usage';
 import type { Feedback } from './feedback';
@@ -51,6 +52,11 @@ export interface CommandSession {
   // participant's own.
   getSubagentModel(): string | null;
   setSubagentModel(model: string | null): void;
+  // The session's workers, oldest first, and what the user can do to one.
+  getWorkers(): SubagentRun[];
+  cancelWorker(id: string): Promise<void>;
+  messageWorker(id: string, text: string): Promise<void>;
+  dismissWorker(id: string): void;
 }
 
 // What every command gets: the conversation it runs in, a way to report
