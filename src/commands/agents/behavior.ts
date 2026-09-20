@@ -103,6 +103,18 @@ export function changeModel(
   };
 }
 
+// `/model subagent` reads or sets the model spawned subagents run on, a
+// setting of the session. `default` returns them to the spawning
+// participant's own model.
+export function subagentModelCommand(args: readonly string[], session: CommandSession): Feedback {
+  const describe = (model: string | null) => `Subagents run on ${model ?? 'each participant\'s own model'}.`;
+  if (args.length === 0) return { kind: 'info', text: describe(session.getSubagentModel()) };
+  if (args.length > 1) throw new Error('Usage: /model subagent [<model>|default]');
+  const model = args[0] === 'default' ? null : resolveModelReference(args[0]);
+  session.setSubagentModel(model);
+  return { kind: 'success', text: describe(model) };
+}
+
 export function changeThinkingLevel(
   participantName: string = 'sirus',
   value: string,

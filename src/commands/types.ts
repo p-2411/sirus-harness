@@ -1,11 +1,5 @@
 import type { PermissionMode } from '../agent_runtime/permissions/policy';
-import type {
-  Checkpoint,
-  CompactionResult,
-  RewindOptions,
-  RewindResult,
-  TokenTotals,
-} from '../agent_runtime/session';
+import type { Checkpoint, Participant, RewindOptions, RewindResult } from '../agent_runtime/session';
 import type { ImageBlock, ThinkingLevel } from '../agent_runtime/types';
 import type { ContextUsage } from '../agent_runtime/usage';
 import type { Feedback } from './feedback';
@@ -38,19 +32,25 @@ export type { Notify } from '../agent_runtime/providers/login';
 export interface CommandSession {
   changeParticipantModel(participantName: string, newModel: string): void;
   clear(): void;
-  compact(signal?: AbortSignal): Promise<CompactionResult>;
+  // Sends /compact to the default participant's runtime as a turn. Rejects
+  // while the session is busy.
+  compact(signal?: AbortSignal): Promise<void>;
   getCheckpoints(): Checkpoint[];
-  getContextUsage(): ContextUsage | null;
+  getContextUsage(participantName?: string): ContextUsage | null;
+  getParticipants(): Participant[];
   getDirectory(): string;
   getName(): string;
   getPermissionMode(): PermissionMode;
   getThinkingLevel(participantName?: string): ThinkingLevel;
-  getTotalUsage(): TokenTotals | null;
   isEmpty(): boolean;
   rewind(checkpointId: string, options: RewindOptions): Promise<RewindResult>;
   setName(name: string): void;
   setPermissionMode(mode: PermissionMode): void;
   setThinkingLevel(level: ThinkingLevel, participantName?: string): void;
+  // The model spawned subagents run on; null means the spawning
+  // participant's own.
+  getSubagentModel(): string | null;
+  setSubagentModel(model: string | null): void;
 }
 
 // What every command gets: the conversation it runs in, a way to report

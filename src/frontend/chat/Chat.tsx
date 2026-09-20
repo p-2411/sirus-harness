@@ -5,7 +5,7 @@ import { attachClipboardImage, describeImage, removeStoredImage } from '../../im
 import { Box, Text, measureElement, renderToString, useApp, useBoxMetrics, useInput, useStdout, type DOMElement } from 'ink';
 import { theme } from '../styles/theme';
 import { HORSE } from '../branding/horse';
-import { ChatMessage } from './ChatMessage';
+import { ChatMessage, toolLine } from './ChatMessage';
 import { Spinner } from './Spinner';
 import { InputBar, type InputMode } from './InputBar';
 import { InputFeedback } from './InputRows';
@@ -72,18 +72,19 @@ export function promptHistory(messages: readonly Message[]): string[] {
   return prompts;
 }
 
-// What the agents are up to, read off the end of the transcript: a tool the
-// turn is waiting on, text arriving, or nothing visible yet.
+// Room for a tool title in the status line before it is cut.
+const PHASE_TITLE_LENGTH = 40;
+
+// What the agents are up to, read off the end of the timeline: the tool call
+// the turn is waiting on, text arriving, or nothing visible yet.
 export function turnPhase(messages: readonly Message[]): string {
   const last = messages[messages.length - 1];
   if (!last || last.role !== 'assistant') return 'thinking';
-  const answered = new Set(
-    last.content.flatMap(block => block.type === 'tool_result' ? [block.callId] : []),
-  );
   const running = [...last.content]
     .reverse()
-    .find((block): block is ToolCallBlock => block.type === 'tool_call' && !answered.has(block.id));
-  if (running) return `running ${running.name}`;
+    .find((block): block is ToolCallBlock =>
+      block.type === 'tool_call' && block.status !== 'completed' && block.status !== 'failed');
+  if (running) return `running ${toolLine(running, PHASE_TITLE_LENGTH)}`;
   const tail = last.content[last.content.length - 1];
   if (tail?.type === 'text' && tail.text) return 'writing';
   return 'thinking';
@@ -417,9 +418,10 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       const { name, args } = parseCommandLine(text);
       runCommand(name, args);
     } else {
-      // Images sit where the draft placed them.
-      const msg: Message = {
-        role: 'user',
+      // Images sit where the draft placed them. The session stamps the
+      // entry's seq when it enters the transcript.
+      const msg = {
+        role: 'user' as const,
         content: content ?? [...images, ...(text ? [{ type: 'text' as const, text }] : [])],
       };
       setScrollOffset(0);
@@ -552,6 +554,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         directory={currSession.getDirectory()}
         mode={effectiveInputMode}
         permissionMode={currSession.getPermissionMode()}
+        modeNotice={currSession.getModeNotice()}
         onCyclePermissionMode={cyclePermissionMode}
         attachments={attachments}
         onPasteImage={pasteImage}

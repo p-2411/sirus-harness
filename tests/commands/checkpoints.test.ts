@@ -6,8 +6,8 @@ import type { CommandContext } from '../../src/commands/types';
 
 function checkpointSession() {
   const checkpoints: Checkpoint[] = [
-    { id: '1'.repeat(40), messageIndex: 0, summary: 'first turn', createdAt: Date.now() },
-    { id: '2'.repeat(40), messageIndex: 2, summary: 'second turn', createdAt: Date.now() },
+    { id: '1'.repeat(40), seq: 0, summary: 'first turn', createdAt: Date.now() },
+    { id: '2'.repeat(40), seq: 2, summary: 'second turn', createdAt: Date.now() },
   ];
   const rewind = mock(async (id: string, options: { files: boolean; chat: boolean }) => ({
     checkpoint: checkpoints.find(checkpoint => checkpoint.id === id)!,

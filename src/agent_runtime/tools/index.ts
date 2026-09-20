@@ -1,29 +1,24 @@
 import { isMemoryAccessEnabled } from '../memory-access';
 import { agentTools } from './agents';
-import { fileTools } from './files';
 import { memoryTools } from './memories';
-import { searchTools } from './search';
-import { shellTools } from './shell';
 import type { Tool, ToolAudience } from './types';
 
-// The tool registry: every tool the host offers and the one rule for who may
-// see it. A turn is handed a `Toolbox` (`./toolbox`) and nothing else, so the
-// permission gate and the checkpoint barrier stay behind that; `createToolbox`
-// is imported from `./toolbox` directly, because the toolbox reads this
-// registry and a re-export here would close the loop.
+// The tool registry: every tool Sirus offers and the one rule for who may see
+// it. The vendors run file, shell, search and web tools themselves; what is
+// left here is what only Sirus can do, memory and delegation, served to every
+// runtime by the MCP server in `./server`. The server reads this registry, so
+// it is imported directly rather than re-exported here.
 
-// Every tool the host offers, in provider-visible order. Adding a tool is one
-// entry in one family file; nothing else in the runtime lists tool names.
+// Every tool Sirus offers, in the order the runtimes are told about them.
+// Adding a tool is one entry in one family file; nothing else lists tool
+// names.
 export const toolRegistry: Tool[] = [
-  ...fileTools,
-  ...shellTools,
-  ...searchTools,
   ...memoryTools,
   ...agentTools,
 ];
 
 // Whether one caller may see and run one tool. The single visibility rule:
-// the listing filters with it and the toolbox refuses a call that fails it,
+// the listing filters with it and the server refuses a call that fails it,
 // so a hidden tool cannot be reached by name. Both filters are live — the
 // memory switch is read on every check, so /memory on and off take effect on
 // the next request.
@@ -45,15 +40,12 @@ export function visibleTools(
   return tools.filter(tool => isVisible(tool, audience, memoryEnabled));
 }
 
-// The registry as one audience sees it: what a provider is told about and
+// The registry as one audience sees it: what a runtime is told about and
 // what the system prompt describes.
 export function availableTools(audience: ToolAudience = {}): Tool[] {
   return visibleTools(toolRegistry, audience, isMemoryAccessEnabled);
 }
 
-// Type-only: erased at runtime, so naming the toolbox here costs no import
-// edge back into it.
-export type { Toolbox, ToolboxOptions } from './toolbox';
 export type {
   SubagentHandle,
   SubagentHost,
@@ -62,5 +54,4 @@ export type {
   ToolArgumentSchema,
   ToolAudience,
   ToolContext,
-  ToolEffect,
 } from './types';

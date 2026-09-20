@@ -1,82 +1,76 @@
 import { isAbortError } from '../../abort';
-import type { SessionAgent } from '../agent';
-import { activeContext } from '../compaction';
-import type { Toolbox } from '../tools';
+import type { SessionAgent, TurnInput } from '../agent';
+import { textOf, type ImageBlock, type Message } from '../types';
 import { keyOf, type ParticipantRoster } from './roster';
-import type { Transcript } from './transcript';
+import type { Timeline } from './timeline';
 
-// One agent to run in a round, and the peers whose messages woke it.
+// One agent to run in a round, and what woke it: the user's prompt entry on
+// the first round, the peers' entries that mentioned it on later ones.
 export interface Invocation {
   participant: SessionAgent;
-  mentionedBy: string[];
+  // The entries this turn's prompt carries. They are already in the
+  // participant's transcript; the runtime hears them through the prompt.
+  entries: Message[];
 }
 
 export interface TurnRunnerOptions {
-  transcript: Transcript;
+  timeline: Timeline;
   roster: ParticipantRoster;
-  // Where every turn of this session runs.
-  directory: string;
-  // The tools each turn gets, with its gate and its barrier already bound.
-  // The barrier is the session's pre-turn checkpoint, which mutating tools
-  // must wait for.
-  toolboxFor: (agent: SessionAgent, beforeMutation: Promise<void>) => Toolbox;
 }
 
-// A host-generated user turn telling an agent why it was woken. It is sent to
-// the provider but is not persisted in chat history.
-function delegationPrompt(mentionedBy: readonly string[]): string {
-  const sources = mentionedBy.map(name => `@${name}`).join(' and ');
-  return `${sources} mentioned you in the shared session. Respond to the message${
-    mentionedBy.length === 1 ? '' : 's'
-  } that mentioned you.`;
+// What a participant is prompted with: the user's own words on the first
+// round, the whole message of each peer that mentioned it afterwards,
+// attributed. Only the mentioning paragraph would save tokens but drop
+// context the sender assumed was shared.
+function promptFor(invocation: Invocation): TurnInput {
+  const [first] = invocation.entries;
+  if (first?.role === 'user' && invocation.entries.length === 1) {
+    return {
+      text: textOf(first),
+      images: first.content.filter((block): block is ImageBlock => block.type === 'image'),
+    };
+  }
+  return {
+    text: invocation.entries
+      .map(entry => `@${entry.participant ?? 'sirus'} wrote:\n${textOf(entry)}`)
+      .join('\n\n'),
+  };
 }
 
-// The round loop: run every invocation of a round in parallel, file what they
-// produced, then run whatever they mentioned in the next round.
+// The round loop: run every invocation of a round in parallel, deliver what
+// they produced to whoever they mentioned, then run those in the next round.
 export class TurnRunner {
   constructor(private readonly options: TurnRunnerOptions) {}
 
-  async run(
-    initial: readonly Invocation[],
-    beforeMutation: Promise<void> = Promise.resolve(),
-  ): Promise<void> {
-    const { transcript, roster, directory, toolboxFor } = this.options;
+  async run(initial: readonly Invocation[], signal?: AbortSignal): Promise<void> {
+    const { timeline, roster } = this.options;
     let pending = [...initial];
     let firstFailure: unknown;
     let hasFailure = false;
 
     // Several agents mentioning the same peer in one round are coalesced into
-    // one invocation with all mentions in history. Participants remain free to
+    // one invocation carrying all their messages. Participants remain free to
     // invoke one another again in later rounds for a back-and-forth exchange.
     while (pending.length > 0) {
-      // Every participant in a round receives the same immutable snapshot,
-      // from the latest compaction summary on, and starts before any response
-      // is awaited, preserving parallel execution.
-      const history = activeContext(transcript.history());
-      const round = transcript.openRound(pending.map(({ participant }) => ({
-        role: 'assistant' as const,
-        participant: participant.name,
+      const round = timeline.openRound(pending.map(({ participant }) => ({
+        name: participant.name,
         model: participant.model,
-        content: [],
+        transcript: participant.transcript,
       })));
 
-      const settled = await Promise.allSettled(pending.map(async ({ participant, mentionedBy }, index) => {
-        const turnPrompt = mentionedBy.length > 0 ? delegationPrompt(mentionedBy) : undefined;
-        const turn = participant.respond(history, {
-          directory,
-          toolbox: toolboxFor(participant, beforeMutation),
-          ...(turnPrompt ? { turnPrompt } : {}),
+      const settled = await Promise.allSettled(pending.map(async (invocation, index) => {
+        const entry = round.entries[index];
+        await invocation.participant.respond(promptFor(invocation), {
+          entry,
+          carried: invocation.entries,
+          onUpdate: () => round.update(index),
+          ...(signal ? { signal } : {}),
         });
-        for await (const snapshot of turn.changes()) {
-          round.update(index, snapshot.content, snapshot.usage);
-        }
-        const response = await turn.result;
-        return { ...response, participant: participant.name, model: participant.model };
+        return entry;
       }));
 
       for (let index = 0; index < settled.length; index++) {
-        const result = settled[index];
-        if (result.status === 'fulfilled') round.settle(index, result.value);
+        if (settled[index].status === 'fulfilled') round.settle(index);
         else round.discardIfEmpty(index);
       }
       round.flush();
@@ -99,14 +93,13 @@ export class TurnRunner {
           }
           continue;
         }
-        for (const participant of roster.routeAgentMessage(result.value, source)) {
+        const recipients = roster.routeAgentMessage(result.value, source);
+        timeline.deliver(result.value, recipients.map(participant => ({ name: participant.name, transcript: participant.transcript })));
+        for (const participant of recipients) {
           const key = keyOf(participant.name);
           const invocation = next.get(key);
-          if (invocation) {
-            if (!invocation.mentionedBy.includes(source.name)) invocation.mentionedBy.push(source.name);
-          } else {
-            next.set(key, { participant, mentionedBy: [source.name] });
-          }
+          if (invocation) invocation.entries.push(result.value);
+          else next.set(key, { participant, entries: [result.value] });
         }
       }
       pending = [...next.values()];

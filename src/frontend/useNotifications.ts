@@ -1,12 +1,14 @@
 import { useEffect, useRef } from 'react';
 import type { Session, SessionStatus } from '../agent_runtime/session';
-import { pendingApprovals, subscribePermissions } from '../agent_runtime/permissions/approvals';
-import { describeRequester } from '../agent_runtime/permissions/describe';
+import { textOf } from '../agent_runtime/types';
+import { describeRequester, pendingApprovals, subscribePermissions } from '../agent_runtime/permissions/approvals';
 import {
   listAllSubagents,
   subscribeSubagents,
   type SubagentStatus,
 } from '../agent_runtime/tools/subagents';
+import { sentenceCase } from './chat/ApprovalPrompt';
+import { toolLine } from './chat/ChatMessage';
 import { notify } from './terminal/notifications';
 
 const BODY_LENGTH = 120;
@@ -22,13 +24,8 @@ export function turnSummary(session: Session, status: SessionStatus): string {
   const messages = session.getMessages();
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index];
-    if (message.role === 'user' && message.content.some(block => block.type === 'text' || block.type === 'image')) break;
-    if (message.role !== 'assistant') continue;
-    const text = message.content
-      .filter((block): block is Extract<typeof block, { type: 'text' }> => block.type === 'text')
-      .map(block => block.text)
-      .join('\n');
-    const line = firstLine(text);
+    if (message.role === 'user') break;
+    const line = firstLine(textOf(message));
     if (line) return `@${message.participant ?? 'sirus'}: ${line}`;
   }
   return 'Turn finished.';
@@ -61,10 +58,9 @@ export function subscribeApprovalNotifications(getSessions: () => readonly Sessi
     for (const request of current) {
       if (seen.has(request.id)) continue;
       const session = getSessions().find(candidate => candidate.getId() === request.sessionId);
-      const detail = request.detail[0] ? `: ${firstLine(request.detail[0])}` : '';
       send(
         `Sirus · ${session?.getName() ?? 'approval needed'}`,
-        `${describeRequester(request.requester)} wants to run ${request.call.name}${detail}`,
+        `${describeRequester(request.requester)} wants to ${firstLine(sentenceCase(toolLine(request.toolCall)))}`,
       );
     }
     seen = new Set(current.map(request => request.id));

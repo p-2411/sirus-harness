@@ -1,22 +1,17 @@
 import crypto from 'crypto';
-import type { SessionAgent } from '../agent';
-import {
-  activeContext,
-  isAutoCompactEnabled,
-  needsCompaction,
-  summarizeHistory,
-  type CompactionResult,
-  type CompactionTrigger,
-} from '../compaction';
+import { SessionAgent, type RuntimeHost } from '../agent';
 import { isMemoryAccessEnabled } from '../memory-access';
-import { DEFAULT_PERMISSION_MODE, type PermissionContext, type PermissionMode } from '../permissions/policy';
+import { requestPermission } from '../permissions/approvals';
+import { DEFAULT_PERMISSION_MODE, type PermissionMode } from '../permissions/policy';
+import { getSystemPrompt, systemPromptFor } from '../prompt';
+import { servableModelIds, servesModel } from '../providers';
 import { DEFAULT_MODEL } from '../providers/catalog';
-import type { SubagentHost } from '../tools';
-import { createToolbox, type Toolbox } from '../tools/toolbox';
-import type { Message, ThinkingLevel } from '../types';
+import { registerToolSession, sirusMcpServerEntry, unregisterToolSession } from '../tools/server';
+import type { SubagentHost } from '../tools/types';
+import { textOf, type Message, type ThinkingLevel } from '../types';
 import type { ContextUsage } from '../usage';
 import { parseFileMentions, resolveFileMentions } from '../../fileMentions';
-import { TurnCancelledError, isAbortError } from '../../abort';
+import { isAbortError } from '../../abort';
 import { ChangeFeed } from './changeFeed';
 import {
   CheckpointLog,
@@ -28,23 +23,22 @@ import {
 } from './checkpointLog';
 import { MessageQueue, isAutoSendable, type QueuedMessage } from './messageQueue';
 import { generateSessionName } from './naming';
-import { NAME_PATTERN_SOURCE, ParticipantRoster, stripCreationModels, type Participant } from './roster';
-import { Transcript, textOf, type TokenTotals } from './transcript';
+import { keyOf, NAME_PATTERN_SOURCE, ParticipantRoster, stripCreationModels, type Participant } from './roster';
+import { Timeline, type Draft } from './timeline';
 import { TurnRunner } from './turnRunner';
 
 // The default model is a catalog fact, named here because that is where
 // callers have always found it.
 export { DEFAULT_MODEL, NAME_PATTERN_SOURCE, defaultDirectoryActivity, isAutoSendable };
 export { SESSION_NAME_LIMIT } from './naming';
-export type { CompactionResult } from '../compaction';
 export type {
   Checkpoint,
   DirectoryActivity,
+  Draft,
   Participant,
   QueuedMessage,
   RewindOptions,
   RewindResult,
-  TokenTotals,
 };
 
 export type SessionStatus = 'idle' | 'working' | 'error';
@@ -71,9 +65,12 @@ export interface SessionOptions {
   model?: string;
   defaultParticipant?: string;
   participants?: readonly Participant[];
-  messages?: readonly Message[];
+  // Entries with a seq are restored as they are; drafts are stamped in order.
+  messages?: readonly (Message | Draft)[];
   checkpoints?: readonly Checkpoint[];
   permissionMode?: PermissionMode;
+  // The model spawned subagents run on; null for the owner's own.
+  subagentModel?: string | null;
   inputContent?: string;
   // A newly-created session may still take its name from its first prompt.
   autoNamePending?: boolean;
@@ -86,11 +83,14 @@ export interface SessionSnapshot {
   directory: string;
   participants: Participant[];
   defaultModel: Participant;
+  // The timeline: every transcript's entries, once, in seq order.
   messages: Message[];
   // Absent in snapshots saved before session drafts were supported.
   inputContent?: string;
   // How tool calls are approved in this session; absent in older snapshots.
   permissionMode?: PermissionMode;
+  // The model spawned subagents run on; absent for the owner's own.
+  subagentModel?: string;
   // Directory snapshots taken before turns, oldest first; absent when none.
   checkpoints?: Checkpoint[];
   // When the history last changed; absent in older snapshots.
@@ -108,9 +108,10 @@ interface ResolvedSessionOptions {
   model: string;
   defaultParticipant: string;
   participants: readonly Participant[];
-  messages: readonly Message[];
+  messages: readonly (Message | Draft)[];
   checkpoints: readonly Checkpoint[];
   permissionMode: PermissionMode;
+  subagentModel: string | null;
   inputContent: string;
   autoNamePending: boolean;
   updatedAt: number;
@@ -132,6 +133,7 @@ function resolveSessionOptions(options: SessionOptions = {}): ResolvedSessionOpt
     messages,
     checkpoints: options.checkpoints ?? [],
     permissionMode: options.permissionMode ?? DEFAULT_PERMISSION_MODE,
+    subagentModel: options.subagentModel ?? null,
     inputContent: options.inputContent ?? '',
     autoNamePending: options.autoNamePending ?? false,
     updatedAt,
@@ -146,12 +148,13 @@ function resolveSessionOptions(options: SessionOptions = {}): ResolvedSessionOpt
 }
 
 // One conversation: its identity and settings, and the collaborators that own
-// its history, its agents, its checkpoints and its queue. Everything the UI
-// and the commands touch goes through here.
+// its participants and their transcripts, the timeline over them, its
+// checkpoints and its queue. Everything the UI and the commands touch goes
+// through here.
 export class Session {
-  private readonly changes = new ChangeFeed(() => this.transcript.touch());
+  private readonly changes = new ChangeFeed(() => this.timeline.touch());
   private readonly queue = new MessageQueue();
-  private readonly transcript: Transcript;
+  private readonly timeline: Timeline;
   private readonly roster: ParticipantRoster;
   private readonly checkpoints: CheckpointLog;
   private readonly turns: TurnRunner;
@@ -160,6 +163,7 @@ export class Session {
   private readonly directory: string;
   private name: string;
   private permissionMode: PermissionMode;
+  private subagentModel: string | null;
   // Drafts typed while a turn is active belong to the session, so switching
   // away and back does not discard them.
   private inputContent: string;
@@ -171,9 +175,8 @@ export class Session {
   private turnFailed = false;
   private lastTurnCancelled = false;
   private rewinding = false;
+  private compacting = false;
   private activeTurnStartedAt: number | null = null;
-  // The compaction in flight, if one is: cancel() stops it like a turn.
-  private compaction: AbortController | null = null;
 
   constructor(options: SessionOptions = {}) {
     const resolved = resolveSessionOptions(options);
@@ -181,26 +184,28 @@ export class Session {
     this.name = resolved.name;
     this.directory = resolved.directory;
     this.permissionMode = resolved.permissionMode;
+    this.subagentModel = resolved.subagentModel;
     this.inputContent = resolved.inputContent;
     this.autoNamePending = resolved.autoNamePending;
-    this.transcript = new Transcript(this.changes, {
-      messages: resolved.messages,
-      updatedAt: resolved.updatedAt,
-      conversationStartedAt: resolved.conversationStartedAt,
-      lastResponseFinishedAt: resolved.lastResponseFinishedAt,
-    });
     this.roster = new ParticipantRoster(this.changes, {
       sessionId: this.id,
       model: resolved.model,
       defaultParticipant: resolved.defaultParticipant,
       participants: resolved.participants,
+      host: this.runtimeHost(),
     });
+    this.timeline = new Timeline(() => this.roster.transcripts(), this.changes, {
+      updatedAt: resolved.updatedAt,
+      conversationStartedAt: resolved.conversationStartedAt,
+      lastResponseFinishedAt: resolved.lastResponseFinishedAt,
+    });
+    this.restore(resolved.messages);
     this.checkpoints = new CheckpointLog(this.directory, resolved.checkpoints, this.changes);
-    this.turns = new TurnRunner({
-      transcript: this.transcript,
-      roster: this.roster,
+    this.turns = new TurnRunner({ timeline: this.timeline, roster: this.roster });
+    registerToolSession(this.id, {
       directory: this.directory,
-      toolboxFor: (agent, beforeMutation) => this.toolboxFor(agent, beforeMutation),
+      memoryEnabled: isMemoryAccessEnabled,
+      hostFor: name => this.subagentHostFor(name),
     });
   }
 
@@ -217,6 +222,7 @@ export class Session {
       inputContent: snapshot.inputContent ?? '',
       autoNamePending: snapshot.autoNamePending ?? false,
       ...(snapshot.permissionMode ? { permissionMode: snapshot.permissionMode } : {}),
+      ...(snapshot.subagentModel ? { subagentModel: snapshot.subagentModel } : {}),
       timing: {
         updatedAt: snapshot.updatedAt ?? 0,
         conversationStartedAt: snapshot.conversationStartedAt,
@@ -225,21 +231,72 @@ export class Session {
     });
   }
 
-  // Seeds one message into the history without running a turn.
-  append(message: Message): void {
-    this.transcript.append(message, this.activeSends === 0);
+  // Everything a participant's runtime needs from the session, and the same
+  // for a worker one of them spawns: the worker answers to this session's
+  // mode and gate, as itself.
+  private runtimeHost(): RuntimeHost {
+    const host: RuntimeHost = {
+      sessionId: this.id,
+      directory: this.directory,
+      systemPrompt: agent => systemPromptFor(this.directory, agent.name, false),
+      mcpServer: agent => sirusMcpServerEntry(this.id, agent.name),
+      permissionMode: () => this.permissionMode,
+      requestPermission: (agent, request, signal) =>
+        requestPermission({ sessionId: this.id, requester: agent.requester }, request, signal),
+      subagentModel: () => this.subagentModel,
+      forWorker: id => ({
+        ...host,
+        systemPrompt: () => getSystemPrompt(this.directory, 'sirus', true),
+        mcpServer: () => sirusMcpServerEntry(this.id, `subagent:${id}`),
+        forWorker: () => { throw new Error('A subagent cannot spawn a subagent'); },
+      }),
+    };
+    return host;
+  }
+
+  // Puts restored entries back into the transcripts they were delivered to.
+  // An entry from before delivery was recorded goes where a fresh one would:
+  // a prompt to the default participant, a response to its author.
+  private restore(messages: readonly (Message | Draft)[]): void {
+    const stamped: Message[] = [];
+    let next = messages.reduce((highest, entry) => 'seq' in entry ? Math.max(highest, entry.seq + 1) : highest, 0);
+    for (const message of messages) {
+      const entry: Message = 'seq' in message ? message : { ...message, seq: next++ };
+      stamped.push(entry);
+      for (const transcript of this.transcriptsFor(entry)) transcript.append(entry);
+    }
+    this.timeline.restoreSeq(stamped);
+  }
+
+  // The transcripts an entry belongs in. A name the roster does not know
+  // falls back to the default participant, so a restored file whose
+  // participant list drifted still lands somewhere.
+  private transcriptsFor(entry: Message) {
+    const names = new Set<string>((entry.to ?? []).map(keyOf));
+    if (entry.role === 'assistant') names.add(keyOf(entry.participant ?? this.roster.default.name));
+    const known = this.roster.all().filter(agent => names.has(keyOf(agent.name)));
+    return (known.length > 0 ? known : [this.roster.default]).map(agent => agent.transcript);
+  }
+
+  // Seeds one entry into the history without running a turn.
+  append(message: Draft): void {
+    for (const name of [...(message.to ?? []), ...(message.participant ? [message.participant] : [])]) {
+      if (!this.roster.find(name)) throw new Error(`Participant ${name} not found`);
+    }
+    const to = this.transcriptsFor({ ...message, seq: -1 });
+    this.timeline.add(message, to, this.activeSends === 0);
   }
 
   addParticipant(name: string, model: string): void {
     this.roster.add(name, model);
   }
 
-  async sendMessage(message: Message): Promise<Message[]> {
+  async sendMessage(message: Draft): Promise<Message[]> {
     if (message.role !== 'user') throw new Error('Only user messages can start a session turn');
     if (this.rewinding || this.checkpoints.isRestoringDirectory()) {
       throw new Error('Wait for the rewind to finish before sending a message.');
     }
-    if (this.compaction) throw new Error('Wait for the context compaction to finish before sending a message.');
+    if (this.compacting) throw new Error('Wait for the context compaction to finish before sending a message.');
 
     if (this.activeSends === 0) {
       this.turnFailed = false;
@@ -249,7 +306,6 @@ export class Session {
     this.activeSends++;
     this.checkpoints.beginTurn();
     this.setStatus('working');
-    let checkpointBarrier: Promise<void> = Promise.resolve();
     let accepted = false;
     try {
       const messageText = textOf(message);
@@ -267,43 +323,33 @@ export class Session {
 
       // A model following a newly introduced @name is host routing metadata,
       // not part of the conversation. Strip it before either the UI history or
-      // any provider sees the turn.
+      // any runtime sees the turn.
       const stored = stripCreationModels(resolved, mentions);
-      if (this.transcript.isEmpty() && this.autoNamePending) {
+      if (this.timeline.isEmpty() && this.autoNamePending) {
         // Name from the user's text, not the contents of resolved attachments.
         this.startNaming(textOf(stripCreationModels(message, mentions)));
       }
-      if (this.activeSends === 1) this.transcript.startConversationIfNeeded(Date.now());
+      if (this.activeSends === 1) this.timeline.startConversationIfNeeded(Date.now());
       accepted = true;
-      this.append(stored);
-      // A full window is folded before the turn starts: the summary of the
-      // conversation up to this prompt goes in ahead of it, so the provider
-      // reads the summary and then the prompt. The participant about to
-      // answer writes the summary, on its own model. The prompt is already
-      // in the history, as a prompt whose turn fails would be.
-      if (isAutoCompactEnabled() && needsCompaction(this.getContextUsage())) {
-        await this.runCompaction('auto', targets[0], { keep: 1 });
-      }
-      // Start the provider immediately, while the pre-turn snapshot is taken
-      // in parallel. Every mutating tool call waits for this barrier, so agent
-      // writes cannot race ahead of the checkpoint.
-      checkpointBarrier = this.checkpoints.capture(this.transcript.length - 1, messageText || '[image]');
-      await this.turns.run(
-        targets.map(participant => ({ participant, mentionedBy: [] })),
-        checkpointBarrier,
+      // The prompt enters the transcript of every participant it addresses,
+      // and nothing else's.
+      const entry = this.timeline.add(
+        { ...stored, to: targets.map(target => target.name) },
+        targets.map(target => target.transcript),
+        false,
       );
-      return this.transcript.history();
+      // The runtimes run their tools themselves and cannot wait on a barrier,
+      // so the pre-turn snapshot is taken before any of them is prompted.
+      await this.checkpoints.capture(entry.seq, messageText || '[image]');
+      await this.turns.run(targets.map(participant => ({ participant, entries: [entry] })));
+      return this.timeline.entries();
     } catch (error) {
       if (isAbortError(error)) this.lastTurnCancelled = true;
       else this.turnFailed = true;
       throw error;
     } finally {
-      // Measure the reply gap from the end of model work, not streamed chunks
-      // or a checkpoint that may still be finishing in the background.
-      if (accepted) this.transcript.markResponseFinished();
-      // Failed and cancelled providers must also finish their snapshot before
-      // the session becomes available for clearing or rewinding its history.
-      await checkpointBarrier;
+      // Measure the reply gap from the end of model work, not streamed chunks.
+      if (accepted) this.timeline.markResponseFinished();
       this.activeSends--;
       this.checkpoints.endTurn();
       if (this.activeSends === 0) this.activeTurnStartedAt = null;
@@ -318,86 +364,64 @@ export class Session {
     return this.roster.activeSubagentCount();
   }
 
-  // Stops this session's turns and subagents, including detached workers,
-  // and a compaction in flight.
-  cancel(): boolean {
-    const cancelled = this.roster.cancel();
-    if (!this.compaction) return cancelled;
-    this.compaction.abort(new TurnCancelledError());
-    return true;
+  // One participant's delegation port: what its SpawnAgent, CheckAgent,
+  // CancelAgent and ListAgents calls reach through the tool server.
+  subagentHostFor(participantName: string): SubagentHost | null {
+    return this.roster.find(participantName)?.subagentHost() ?? null;
   }
 
-  // Folds the history since the last summary into a new one, on the given
-  // participant's model, and starts every provider runtime afresh so each
-  // reads the summary rather than the conversation it stands for. The last
-  // `keep` messages stay out of the summary and after it: the prompt a turn
-  // is about to send.
-  private async runCompaction(
-    trigger: CompactionTrigger,
-    agent: SessionAgent,
-    options: { signal?: AbortSignal; keep?: number } = {},
-  ): Promise<CompactionResult> {
-    const { signal, keep = 0 } = options;
-    const context = activeContext(this.transcript.history());
-    const messages = context.slice(0, context.length - keep);
-    if (messages.length === 0) throw new Error('There is no history to compact.');
-    if (messages.length === 1 && messages[0].compaction) throw new Error('The history is already compacted.');
-    const controller = new AbortController();
-    const forward = () => controller.abort(signal?.reason);
-    if (signal?.aborted) forward();
-    else signal?.addEventListener('abort', forward, { once: true });
-    this.compaction = controller;
-    this.changes.notify();
+  // Stops this session's turns and subagents, including detached workers.
+  cancel(): boolean {
+    return this.roster.cancel();
+  }
+
+  // Asks the default participant's runtime to fold its own conversation now:
+  // `/compact` is a slash command both vendors take as a prompt. What the
+  // runtime reports lands in the record like any other turn. Like a rewind,
+  // it waits for nothing else to be running and nothing else runs meanwhile.
+  async compact(signal?: AbortSignal): Promise<void> {
+    if (this.activeSends > 0 || this.rewinding || this.compacting) {
+      throw new Error('Wait for the current operation to finish before compacting.');
+    }
+    if (this.timeline.isEmpty()) throw new Error('There is no history to compact.');
+    const agent = this.roster.default;
+    this.compacting = true;
+    this.activeSends++;
+    this.activeTurnStartedAt = Date.now();
+    this.setStatus('working');
+    const round = this.timeline.openRound([{ name: agent.name, model: agent.model, transcript: agent.transcript }]);
     try {
-      const usage = this.getContextUsage();
-      const summary = await summarizeHistory({
-        messages,
-        agent,
-        directory: this.directory,
-        trigger,
-        usage,
-        signal: controller.signal,
+      await agent.respond({ text: '/compact' }, {
+        entry: round.entries[0],
+        onUpdate: () => round.update(0),
+        ...(signal ? { signal } : {}),
       });
-      this.transcript.compact(summary, this.transcript.length - keep);
-      this.roster.resetRuntimes();
-      return {
-        messages: messages.length,
-        tokensBefore: usage?.tokens ?? 0,
-        tokensAfter: summary.usage?.contextTokens ?? 0,
-      };
+      round.settle(0);
+      round.discardIfEmpty(0);
+    } catch (error) {
+      round.discardIfEmpty(0);
+      throw error;
     } finally {
-      signal?.removeEventListener('abort', forward);
-      this.compaction = null;
+      round.flush();
+      this.compacting = false;
+      this.activeSends--;
+      this.activeTurnStartedAt = null;
+      this.setStatus(this.turnFailed ? 'error' : 'idle');
       this.changes.notify();
     }
   }
 
-  // Folds the whole active history into a summary now, on the default
-  // participant's model. Like a rewind, it waits for nothing else to be
-  // running and nothing else runs meanwhile.
-  async compact(signal?: AbortSignal): Promise<CompactionResult> {
-    if (this.activeSends > 0 || this.rewinding || this.compaction) {
-      throw new Error('Wait for the current operation to finish before compacting.');
-    }
-    this.setStatus('working');
-    try {
-      return await this.runCompaction('manual', this.roster.default, { signal });
-    } finally {
-      this.setStatus(this.turnFailed ? 'error' : 'idle');
-    }
-  }
-
   isCompacting(): boolean {
-    return this.compaction !== null;
+    return this.compacting;
   }
 
-  // A provider-side conversation must not outlive the history it mirrors.
+  // A vendor runtime's conversation must not outlive the record it mirrors.
   // Checkpoints go with it: they point into the history that was cleared.
   clear(): void {
-    if (this.activeSends > 0 || this.rewinding || this.compaction) throw new Error('Wait for the current operation to finish before clearing the session.');
-    if (this.transcript.isEmpty()) return;
+    if (this.activeSends > 0 || this.rewinding) throw new Error('Wait for the current operation to finish before clearing the session.');
+    if (this.timeline.isEmpty()) return;
     this.stopNaming();
-    this.transcript.clear();
+    this.timeline.clear();
     this.checkpoints.clear();
     this.roster.resetRuntimes();
     this.changes.notify();
@@ -408,12 +432,12 @@ export class Session {
   }
 
   // Puts the directory, the chat, or both back to a checkpoint. Restoring
-  // the chat drops that checkpoint and every later one, since the messages
+  // the chat drops that checkpoint and every later one, since the entries
   // they belong to are gone; restoring only files keeps them all.
   async rewind(checkpointId: string, options: RewindOptions): Promise<RewindResult> {
     if (!options.files && !options.chat) throw new Error('Nothing to restore: choose files, chat, or both.');
     if (this.rewinding) throw new Error('Wait for the current rewind to finish.');
-    if (this.activeSends > 0 || this.compaction) throw new Error('Wait for the current turn to finish before rewinding.');
+    if (this.activeSends > 0) throw new Error('Wait for the current turn to finish before rewinding.');
     if (options.chat && this.roster.hasWorkingSubagents()) {
       throw new Error('Wait for this session’s subagents to finish before rewinding its chat.');
     }
@@ -432,8 +456,10 @@ export class Session {
       const files = options.files ? await this.checkpoints.restoreFiles(found.checkpoint.id) : null;
       let droppedMessages = 0;
       if (options.chat) {
-        if (found.checkpoint.messageIndex === 0) this.stopNaming();
-        droppedMessages = this.transcript.truncate(found.checkpoint.messageIndex);
+        if (found.checkpoint.seq === 0) this.stopNaming();
+        // Every participant loses what came from that seq on, and every
+        // runtime is rebuilt from what is left.
+        droppedMessages = this.timeline.truncateFrom(found.checkpoint.seq);
         this.checkpoints.dropFrom(found.index);
         this.roster.resetRuntimes();
       }
@@ -518,27 +544,42 @@ export class Session {
   }
 
   getLastActivity(): number {
-    return this.transcript.lastActivity;
+    return this.timeline.lastActivity;
   }
 
   getConversationStartedAt(): number {
-    return this.transcript.conversationStartedAt;
+    return this.timeline.conversationStartedAt;
   }
 
-  getContextUsage(): ContextUsage | null {
-    return this.transcript.contextUsage(this.roster.default.model);
+  // A participant's window as its runtime last reported it, or for the
+  // status row the default participant's, else the last responder's.
+  getContextUsage(participantName?: string): ContextUsage | null {
+    if (participantName) return this.roster.require(participantName).context;
+    if (this.roster.default.context) return this.roster.default.context;
+    const entries = this.timeline.entries();
+    for (let index = entries.length - 1; index >= 0; index--) {
+      const entry = entries[index];
+      if (entry.role !== 'assistant' || !entry.participant) continue;
+      const context = this.roster.find(entry.participant)?.context;
+      if (context) return context;
+    }
+    return null;
   }
 
-  getTotalUsage(): TokenTotals | null {
-    return this.transcript.totalUsage();
+  // What a vendor could not honour about the session's mode, if anything:
+  // the default participant's word first, then any other participant's.
+  getModeNotice(): string | null {
+    return this.roster.default.modeNotice
+      ?? this.roster.all().find(agent => agent.modeNotice)?.modeNotice
+      ?? null;
   }
 
   getMessages(): Message[] {
-    return this.transcript.history();
+    return this.timeline.entries();
   }
 
   isEmpty(): boolean {
-    return this.transcript.isEmpty();
+    return this.timeline.isEmpty();
   }
 
   getId(): string {
@@ -573,6 +614,19 @@ export class Session {
     this.roster.changeModel(participantName, newModel);
   }
 
+  getSubagentModel(): string | null {
+    return this.subagentModel;
+  }
+
+  setSubagentModel(model: string | null): void {
+    if (model !== null && !servesModel(model)) {
+      throw new Error(`Unknown model "${model}". Try: ${servableModelIds().join(', ')}`);
+    }
+    if (this.subagentModel === model) return;
+    this.subagentModel = model;
+    this.changes.notify();
+  }
+
   getStatus(): SessionStatus {
     return this.status;
   }
@@ -589,11 +643,12 @@ export class Session {
     return this.permissionMode;
   }
 
-  // Applies to the next tool call of every participant and of any subagent
-  // the session has spawned; the gate reads the mode live.
+  // Switches every live runtime of the session, workers included, and is
+  // what any runtime started later begins in.
   setPermissionMode(mode: PermissionMode): void {
     if (this.permissionMode === mode) return;
     this.permissionMode = mode;
+    this.roster.setPermissionMode(mode);
     this.changes.notify();
   }
 
@@ -612,7 +667,7 @@ export class Session {
   }
 
   // monotonic mutation counter — a cheap referentially-stable snapshot for
-  // useSyncExternalStore, since messages is mutated in place
+  // useSyncExternalStore, since entries are mutated in place
   getVersion(): number {
     return this.changes.version;
   }
@@ -625,15 +680,24 @@ export class Session {
       directory: this.directory,
       participants: this.getParticipants(),
       defaultModel: this.roster.default.toParticipant(),
-      messages: [...this.transcript.history()],
+      messages: [...this.timeline.entries()],
       inputContent: this.inputContent,
       permissionMode: this.permissionMode,
+      ...(this.subagentModel ? { subagentModel: this.subagentModel } : {}),
       ...(checkpoints.length > 0 ? { checkpoints } : {}),
-      updatedAt: this.transcript.lastActivity,
-      conversationStartedAt: this.transcript.conversationStartedAt,
-      lastResponseFinishedAt: this.transcript.lastResponseFinishedAt,
+      updatedAt: this.timeline.lastActivity,
+      conversationStartedAt: this.timeline.conversationStartedAt,
+      lastResponseFinishedAt: this.timeline.lastResponseFinishedAt,
       autoNamePending: this.autoNamePending,
     };
+  }
+
+  // A deleted session takes its runtimes and its tool server binding with it.
+  dispose(): void {
+    this.cancel();
+    this.stopNaming();
+    this.roster.resetRuntimes();
+    unregisterToolSession(this.id);
   }
 
   private setStatus(status: SessionStatus): void {
@@ -641,47 +705,4 @@ export class Session {
     this.status = status;
     this.changes.notify();
   }
-
-  // What one participant's turn may do: the session's tools, behind this
-  // session's permission gate and this turn's checkpoint barrier, with the
-  // participant's own subagents attached. The mode is read live, so changing
-  // it mid-turn applies to the next tool call.
-  private toolboxFor(agent: SessionAgent, beforeMutation: Promise<void>): Toolbox {
-    const permissions: PermissionContext = {
-      sessionId: this.id,
-      mode: () => this.permissionMode,
-      requester: { participant: agent.name },
-      model: agent.model,
-    };
-    return createToolbox({
-      directory: this.directory,
-      permissions,
-      memoryEnabled: isMemoryAccessEnabled,
-      beforeMutation: () => beforeMutation,
-      subagents: subagentHost(agent, this.directory, permissions, () => beforeMutation),
-    });
-  }
-}
-
-// The agent's own delegation, as the narrow port the agent tools speak to.
-// A worker inherits the owner's gate and barrier, re-stamped with its own
-// requester and model by the runner.
-function subagentHost(
-  agent: SessionAgent,
-  directory: string,
-  permissions: PermissionContext,
-  beforeMutation: () => Promise<void>,
-): SubagentHost {
-  return {
-    spawn: (prompt, model, call) => agent.spawnSubagent(prompt, model, {
-      directory,
-      permissions,
-      beforeMutation,
-      callId: call.callId,
-      ...(call.signal ? { signal: call.signal } : {}),
-    }),
-    check: (id, wait, signal) => agent.checkSubagent(id, wait, signal),
-    cancel: (id, signal) => agent.cancelSubagent(id, signal),
-    list: () => agent.describeSubagents(),
-  };
 }

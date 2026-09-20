@@ -13,9 +13,9 @@ import { dataDirectory } from './dataDirectory';
 export interface Checkpoint {
   // The shadow commit holding the directory's files.
   id: string;
-  // Index in the session history of the user message that started the turn;
-  // rewinding the chat truncates the history to this point.
-  messageIndex: number;
+  // The sequence number of the user prompt that started the turn; rewinding
+  // the chat drops every participant's entries from this seq on.
+  seq: number;
   // The first line of that message, for the picker.
   summary: string;
   createdAt: number;

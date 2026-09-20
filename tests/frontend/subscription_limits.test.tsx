@@ -8,9 +8,6 @@ import path from 'path';
 import { providerFor } from '../../src/agent_runtime/providers';
 import * as usage from '../../src/agent_runtime/providers/usage';
 import SubscriptionLimits, { SubscriptionLimitRows } from '../../src/frontend/SubscriptionLimits';
-import { codexSubscriptionTransport } from '../../src/agent_runtime/providers/openai/codex-subscription';
-import { TurnContext } from '../../src/agent_runtime/turn';
-import { SessionAgent } from '../../src/agent_runtime/agent';
 import { saveSubscriptionLimitCache } from '../../src/persistence';
 import Sidebar from '../../src/frontend/Sidebar';
 
@@ -45,13 +42,8 @@ test('shows only the active subscription and follows fallback, removal and API s
     { vendor: 'gpt', profile: 'two', period: '7-day', remaining: 35, checkedAt: Date.now(), resetsAt: null },
     { vendor: 'claude', profile: 'other-account', period: '5-hour', remaining: 99, checkedAt: Date.now(), resetsAt: null },
   ]);
-  const failed = spyOn(codexSubscriptionTransport('two'), 'getResponse').mockRejectedValue(new Error('quota'));
-  let finish!: () => void;
-  const pending = new Promise<void>(resolve => { finish = resolve; });
-  const fallback = spyOn(codexSubscriptionTransport('one'), 'getResponse').mockImplementation(async () => {
-    await pending;
-    return { content: [], stop_reason: 'end_turn' };
-  });
+  const subscription = (profile: string) =>
+    current.sources.list().find(source => source.kind === 'subscription' && source.profile === profile)!;
   // Capture the initial sidebar output while all provider reads are pending.
   const firstFrame = stripAnsi(renderToString(<Sidebar sessions={[]} currSession={null}
     selectSession={() => {}} addSession={() => {}} deleteSession={() => {}} />, { columns: 26 }));
@@ -89,14 +81,12 @@ test('shows only the active subscription and follows fallback, removal and API s
     expect(output).not.toContain('unavailable');
     releaseLimits();
     await flush();
-    const response = current.getResponse([{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
-      new TurnContext(new SessionAgent({ name: 'sirus', model: 'gpt-test', runtimeId: 'sidebar-test' }), { directory }));
-    // The row must switch while the fallback request is still running.
+    // A participant whose runtime fell back to the other subscription: the
+    // row follows the credential that runtime is actually on.
+    current.markActive('sidebar-test', subscription('one'));
     await flush();
     expect(output).toContain('codex: 75%');
     expect(output).not.toContain('codex: 10%');
-    finish();
-    await response;
     current.sources.remove('one');
     await flush();
     expect(output).toContain('codex: 10%');
@@ -111,7 +101,7 @@ test('shows only the active subscription and follows fallback, removal and API s
     expect(output).toContain('claude: unavailable');
   } finally {
     releaseLimits();
-    finish(); failed.mockRestore(); fallback.mockRestore();
+    current.clearActive('sidebar-test');
     app.unmount(); stdout.destroy(); reader.mockRestore();
     if (previous === undefined) delete process.env.SIRUS_DATA_DIR;
     else process.env.SIRUS_DATA_DIR = previous;

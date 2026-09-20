@@ -4,9 +4,10 @@ import { Box, render } from 'ink';
 import { PassThrough } from 'node:stream';
 import stripAnsi from 'strip-ansi';
 import { Session } from '../../src/agent_runtime/session';
-import type { Message } from '../../src/agent_runtime/types';
+import type { Message, ToolCallBlock } from '../../src/agent_runtime/types';
 import Chat, { formatElapsed, promptHistory, turnPhase } from '../../src/frontend/chat/Chat';
 import { usageCommandSpec } from '../../src/commands/authentication/commands';
+import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
 
 test('Escape dismisses help, command suggestions, login stages and secret entry', async () => {
   const session = new Session();
@@ -85,14 +86,18 @@ test('Escape dismisses help, command suggestions, login stages and secret entry'
 });
 
 test('help and usage stay scrollable above the editor in an 80 by 24 terminal', async () => {
-  const session = new Session();
-  session.append({
-    role: 'assistant', content: [{ type: 'text', text: [
+  // The gauge is the runtime's own report, so the history comes from a turn
+  // rather than a seeded entry.
+  const model = 'test-chat-scrolling';
+  bindScriptedRuntime(model, (_input, emit) => {
+    emit({ type: 'text', text: [
       'Conversation remains available.',
       ...Array.from({ length: 24 }, (_, i) => `Conversation row ${i}.`),
-    ].join('\n\n') }],
-    usage: { inputTokens: 100, outputTokens: 20, contextTokens: 120, contextWindow: 400_000 },
+    ].join('\n\n') });
+    emit({ type: 'context', usage: { tokens: 120, window: 400_000 } });
   });
+  const session = new Session({ model });
+  await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Go on.' }] });
   const originalMessages = [...session.getMessages()];
   const stdin = Object.assign(new PassThrough(), {
     isTTY: true, setRawMode() {}, ref() {}, unref() {},
@@ -176,36 +181,46 @@ test('help and usage stay scrollable above the editor in an 80 by 24 terminal', 
     app.unmount();
     stdin.destroy();
     stdout.destroy();
+    session.dispose();
+    unbindRuntime(model);
   }
 });
 
 describe('chat input history', () => {
   test('collects user prompts in order and removes immediate duplicates', () => {
     const messages: Message[] = [
-      { role: 'user', content: [{ type: 'text', text: 'first' }] },
-      { role: 'assistant', content: [{ type: 'text', text: 'answer' }] },
-      { role: 'user', content: [{ type: 'text', text: 'first' }] },
-      { role: 'user', content: [{ type: 'text', text: 'second' }] },
+      { seq: 0, role: 'user', content: [{ type: 'text', text: 'first' }] },
+      { seq: 1, role: 'assistant', content: [{ type: 'text', text: 'answer' }] },
+      { seq: 2, role: 'user', content: [{ type: 'text', text: 'first' }] },
+      { seq: 3, role: 'user', content: [{ type: 'text', text: 'second' }] },
     ];
     expect(promptHistory(messages)).toEqual(['first', 'second']);
   });
 });
 
 describe('turn status', () => {
+  const running: ToolCallBlock = {
+    type: 'tool_call', id: 'call-1', kind: 'execute', title: 'bun test',
+    status: 'in_progress', locations: [], content: [],
+  };
+
   test('distinguishes thinking, tool activity, and writing', () => {
     expect(turnPhase([])).toBe('thinking');
+    expect(turnPhase([{ seq: 0, role: 'assistant', content: [running] }])).toBe('running Run bun test');
     expect(turnPhase([{
-      role: 'assistant',
-      content: [{ type: 'tool_call', id: 'call-1', name: 'RunShell', arguments: { command: 'bun test' } }],
-    }])).toBe('running RunShell');
-    expect(turnPhase([{
+      seq: 0,
       role: 'assistant',
       content: [
-        { type: 'tool_call', id: 'call-1', name: 'RunShell', arguments: { command: 'bun test' } },
-        { type: 'tool_result', callId: 'call-1', result: 'ok', isError: false },
+        { ...running, status: 'completed' },
         { type: 'text', text: 'All done' },
       ],
     }])).toBe('writing');
+  });
+
+  test('cuts a long tool title down to the status line', () => {
+    const title = 'bun test --coverage --reporter junit tests/frontend';
+    expect(turnPhase([{ seq: 0, role: 'assistant', content: [{ ...running, title }] }]))
+      .toBe(`running Run ${title.slice(0, 39)}…`);
   });
 
   test('formats elapsed seconds and minutes', () => {

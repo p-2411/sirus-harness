@@ -8,14 +8,15 @@ import { Box, render } from 'ink';
 import stripAnsi from 'strip-ansi';
 import Chat from '../../src/frontend/chat/Chat';
 import { Session } from '../../src/agent_runtime/session';
-import { boundTransports } from '../../src/agent_runtime/providers';
+import type { PromptInput } from '../../src/agent_runtime/runtime/runtime';
 import type { Message } from '../../src/agent_runtime/types';
+import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
 
 const testModel = 'test-chat-attachment-model';
 let directory: string;
 let originalDataDirectory: string | undefined;
 let imagePath: string;
-let received: readonly Message[];
+let received: PromptInput[];
 let generateName: ReturnType<typeof spyOn<typeof naming, 'generateSessionName'>>;
 
 beforeEach(() => {
@@ -26,17 +27,15 @@ beforeEach(() => {
   imagePath = join(directory, 'sample.png');
   writeFileSync(imagePath, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aKioAAAAASUVORK5CYII=', 'base64'));
   received = [];
-  boundTransports[testModel] = {
-    getResponse: async messages => {
-      received = [...messages];
-      return { content: [{ type: 'text', text: 'I received the image.' }], stop_reason: 'end_turn' };
-    },
-  };
+  bindScriptedRuntime(testModel, (input, emit) => {
+    received.push(input);
+    emit({ type: 'text', text: 'I received the image.' });
+  });
 });
 
 afterEach(() => {
   generateName.mockRestore();
-  delete boundTransports[testModel];
+  unbindRuntime(testModel);
   if (originalDataDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
   else process.env.SIRUS_DATA_DIR = originalDataDirectory;
   rmSync(directory, { recursive: true, force: true });
@@ -135,7 +134,7 @@ describe('chat attachment lifecycle', () => {
       await chat.waitFor(() => session.getStatus() === 'idle' && received.length > 0);
       const attached = session.getMessages()[0].content.find(block => block.type === 'image');
       expect(attached).toMatchObject({ type: 'image', path: sentPath });
-      expect(received.some(message => message.content.some(block => block.type === 'image' && block.path === sentPath))).toBe(true);
+      expect(received.some(input => input.images.some(image => image.path === sentPath))).toBe(true);
       expect(storedImages()).toEqual([sentPath]);
     } finally {
       await chat.close();
@@ -147,14 +146,12 @@ describe('chat attachment lifecycle', () => {
     let release = () => {};
     const gate = new Promise<void>(resolve => { release = resolve; });
     let calls = 0;
-    boundTransports[testModel] = {
-      getResponse: async messages => {
-        calls++;
-        received = [...messages];
-        if (calls === 1) await gate;
-        return { content: [{ type: 'text', text: 'Done.' }], stop_reason: 'end_turn' };
-      },
-    };
+    bindScriptedRuntime(testModel, async (input, emit) => {
+      calls++;
+      received.push(input);
+      if (calls === 1) await gate;
+      emit({ type: 'text', text: 'Done.' });
+    });
     const session = new Session({ name: 'Queued image draft', directory, model: testModel, autoNamePending: true });
     const chat = createChat(session);
     let activeTurn: Promise<Message[]> | undefined;

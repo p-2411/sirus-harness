@@ -1,8 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import type { SDKControlGetUsageResponse, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
-// Initialize the provider registry before importing a transport directly.
-import '../../src/agent_runtime/providers';
-import { createClaudeSubscriptionUsageReader } from '../../src/agent_runtime/providers/anthropic/claude-subscription';
+import { createClaudeSubscriptionUsageReader } from '../../src/agent_runtime/providers/anthropic/claude-account';
+import { SIRUS_CLIENT_ID } from '../../src/version';
 
 const usage: SDKControlGetUsageResponse = {
   session: {
@@ -28,17 +27,7 @@ function fakeQuery(readUsage: () => Promise<SDKControlGetUsageResponse> = async 
 }
 
 describe('Claude subscription usage', () => {
-  test('reuses an existing runtime without closing it or starting another query', async () => {
-    const existing = fakeQuery();
-    const read = createClaudeSubscriptionUsageReader({
-      activeQuery: () => existing,
-      createQuery: () => { throw new Error('must reuse existing query'); },
-    });
-    expect(await read()).toEqual(usage);
-    expect(existing.closed).toBe(false);
-  });
-
-  test('queries before chat without submitting any prompt and closes the temporary runtime', async () => {
+  test('asks on a query that receives no prompt, in the profile environment, and closes it', async () => {
     let inputFinished = false;
     let inputCount = 0;
     let consumeInput: Promise<void> | undefined;
@@ -48,12 +37,16 @@ describe('Claude subscription usage', () => {
       return usage;
     });
     const read = createClaudeSubscriptionUsageReader({
-      activeQuery: () => undefined,
+      environment: () => ({ CLAUDE_CONFIG_DIR: '/profiles/work' }),
       createQuery: ({ prompt, options }) => {
         expect(options?.tools).toEqual([]);
         expect(options?.settingSources).toEqual([]);
         expect(options?.settings).toEqual({ disableAllHooks: true });
         expect(options?.persistSession).toBe(false);
+        expect(options?.env).toEqual({
+          CLAUDE_CONFIG_DIR: '/profiles/work',
+          CLAUDE_AGENT_SDK_CLIENT_APP: SIRUS_CLIENT_ID,
+        });
         consumeInput = (async () => {
           for await (const _ of prompt as AsyncIterable<SDKUserMessage>) inputCount++;
           inputFinished = true;
@@ -68,11 +61,10 @@ describe('Claude subscription usage', () => {
     expect(temporary.closed).toBe(true);
   });
 
-  test('cleans up temporary queries on an unsupported SDK or request failure', async () => {
+  test('cleans up on an unsupported SDK or a failed request', async () => {
     for (const supported of [false, true]) {
       const temporary = fakeQuery(async () => { throw new Error('not authenticated'); });
       const read = createClaudeSubscriptionUsageReader({
-        activeQuery: () => undefined,
         createQuery: () => supported ? temporary : {
           close: () => temporary.close(),
           initializationResult: temporary.initializationResult,
@@ -83,28 +75,18 @@ describe('Claude subscription usage', () => {
     }
   });
 
-  test('bounds stalled reads and leaves an existing runtime intact', async () => {
-    for (const shared of [false, true]) {
-      const stalled = fakeQuery(() => new Promise(() => {}));
-      const read = createClaudeSubscriptionUsageReader({
-        activeQuery: () => shared ? stalled : undefined,
-        createQuery: () => stalled,
-        timeoutMs: 10,
-      });
-      await expect(read()).rejects.toThrow('Claude usage request timed out');
-      expect(stalled.closed).toBe(!shared);
-    }
+  test('bounds a stalled read', async () => {
+    const stalled = fakeQuery(() => new Promise(() => {}));
+    const read = createClaudeSubscriptionUsageReader({ createQuery: () => stalled, timeoutMs: 10 });
+    await expect(read()).rejects.toThrow('Claude usage request timed out');
+    expect(stalled.closed).toBe(true);
   });
 
   test('waits for initialization and bounds a stalled startup before requesting usage', async () => {
     let calls = 0;
     const temporary = fakeQuery(async () => { calls++; return usage; });
     temporary.initializationResult = () => new Promise(() => {});
-    const read = createClaudeSubscriptionUsageReader({
-      activeQuery: () => undefined,
-      createQuery: () => temporary,
-      timeoutMs: 10,
-    });
+    const read = createClaudeSubscriptionUsageReader({ createQuery: () => temporary, timeoutMs: 10 });
     await expect(read()).rejects.toThrow('Claude usage request timed out');
     expect(calls).toBe(0);
     expect(temporary.closed).toBe(true);
@@ -115,7 +97,6 @@ describe('Claude subscription usage', () => {
     const temporary = fakeQuery(() => new Promise(() => {}));
     let launches = 0;
     const read = createClaudeSubscriptionUsageReader({
-      activeQuery: () => undefined,
       createQuery: () => { launches++; return temporary; },
     });
     const pending = read(controller.signal);

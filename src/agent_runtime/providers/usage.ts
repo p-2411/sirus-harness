@@ -1,6 +1,6 @@
 import { abortable, throwIfAborted } from '../../abort';
-import { readClaudeSubscriptionUsage } from './anthropic/claude-subscription';
-import { getCodexRpc } from './openai/codex-subscription';
+import { readClaudeSubscriptionUsage } from './anthropic/claude-account';
+import { readCodexRateLimits } from './openai/codex-account';
 import type { Vendor } from './catalog';
 import { dataDirectory } from '../../dataDirectory';
 import { loadSubscriptionLimitCache, saveSubscriptionLimitCache } from '../../persistence';
@@ -104,7 +104,8 @@ export function claudeSubscriptionUsage(response: unknown): SubscriptionUsage {
 }
 
 // Reading allowance never sends a model prompt or consumes a reset credit.
-// Bound both runtime startup and the read so /usage cannot wait indefinitely.
+// Bound both the helper's startup and the read so /usage cannot wait
+// indefinitely.
 export async function readSubscriptionUsage(vendor: Vendor, signal?: AbortSignal, profile = 'default'): Promise<SubscriptionUsage> {
   throwIfAborted(signal);
   const directory = dataDirectory();
@@ -116,12 +117,9 @@ export async function readSubscriptionUsage(vendor: Vendor, signal?: AbortSignal
       case 'claude':
         usage = claudeSubscriptionUsage(await abortable(readClaudeSubscriptionUsage(bounded, profile), bounded));
         break;
-      case 'gpt': {
-        const rpc = await abortable(getCodexRpc(profile), bounded);
-        const response = await abortable(rpc.request('account/rateLimits/read'), bounded);
-        usage = codexSubscriptionUsage(response);
+      case 'gpt':
+        usage = codexSubscriptionUsage(await readCodexRateLimits(profile, bounded));
         break;
-      }
       default: {
         const exhaustive: never = vendor;
         throw new Error(`No subscription usage reader for vendor "${String(exhaustive)}"`);

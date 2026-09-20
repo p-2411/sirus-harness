@@ -120,19 +120,17 @@ export function describeSubscriptionUsage(usage: SubscriptionUsage): string {
   return `5h ${formatRemaining(remainingAllowance(usage, '5-hour'))} · 7d ${formatRemaining(remainingAllowance(usage, '7-day'))}`;
 }
 
-// What the session has spent so far and how full its window is, when any
-// response has reported usage.
+// How full each participant's window is, from the last usage its runtime
+// reported. A participant whose runtime has not reported yet is left out.
 export function describeSessionUsage(session: CommandSession): string {
-  const totals = session.getTotalUsage();
-  if (!totals) return 'session · no usage reported yet';
-  const context = session.getContextUsage();
-  const parts = [`${formatTokens(totals.inputTokens)} in`, `${formatTokens(totals.outputTokens)} out`];
-  if (context) {
+  const parts = session.getParticipants().flatMap(participant => {
+    const context = session.getContextUsage(participant.name);
+    if (!context) return [];
     const percent = contextPercent(context);
-    parts.push(`ctx ${formatTokens(context.tokens)}${
-      percent !== null && context.window ? ` (${percent}% of ${formatTokens(context.window)})` : ''}`);
-  }
-  return `session · ${parts.join(' · ')}`;
+    return [`@${participant.name} ctx ${formatTokens(context.tokens)}${
+      percent !== null ? ` (${percent}% of ${formatTokens(context.window)})` : ''}`];
+  });
+  return parts.length ? `session · ${parts.join(' · ')}` : 'session · no context reported yet';
 }
 
 export async function usageCommand(signal?: AbortSignal, session?: CommandSession): Promise<Feedback> {

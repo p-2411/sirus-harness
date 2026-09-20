@@ -14,7 +14,7 @@ export const KEY_BINDINGS: ReadonlyArray<readonly [keys: string, action: string]
   ['shift+tab', 'cycle the permission mode'],
   ['esc', 'close menus · cancel the turn'],
   ['pgup / pgdn · home / end', 'scroll the history'],
-  ['y / a / n', 'allow once · allow for this session · deny'],
+  ['y / a / n / d', 'allow once · allow for this session · deny · deny for this session'],
   ['ctrl+u · ctrl+w', 'clear the line · delete the previous word'],
 ];
 

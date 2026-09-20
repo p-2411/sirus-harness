@@ -29,25 +29,26 @@ afterEach(() => {
 });
 
 describe('session persistence', () => {
-  test('round-trips image attachments, checkpoints, usage, and session naming metadata together', () => {
+  test('round-trips image attachments, checkpoints, tool activity, compaction and naming metadata together', () => {
     const image = { type: 'image' as const, path: path.join(directory, 'images', 'screenshot.png'), mediaType: 'image/png' as const, bytes: 123 };
-    const checkpoint = { id: 'b'.repeat(40), messageIndex: 0, summary: '[image]', createdAt: Date.now() };
+    const checkpoint = { id: 'b'.repeat(40), seq: 0, summary: '[image]', createdAt: Date.now() };
     const session = new Session({
       id: 'image-session',
       name: 'With image',
       directory: '/projects/image',
       model: 'gpt-5.6-luna',
       messages: [
-        { role: 'user', content: [image, { type: 'text', text: 'Explain this screenshot' }] },
-        { role: 'assistant', content: [{ type: 'text', text: 'Explanation' }],
-          usage: { inputTokens: 120, outputTokens: 8, contextTokens: 128, contextWindow: 200_000 } },
-        { role: 'user', content: [{ type: 'text', text: 'Earlier conversation compacted: the screenshot was explained.' }],
-          model: 'gpt-5.6-luna',
-          usage: { inputTokens: 300, outputTokens: 20, contextTokens: 20, contextWindow: 200_000 },
-          compaction: { messages: 2, tokensBefore: 128, trigger: 'auto' } },
+        { role: 'user', to: ['sirus'], content: [image, { type: 'text', text: 'Explain this screenshot' }] },
+        { role: 'assistant', participant: 'sirus', model: 'gpt-5.6-luna', content: [
+          { type: 'thought', text: 'Looking at it.' },
+          { type: 'tool_call', id: 'call-1', title: 'ls', kind: 'execute', status: 'completed', locations: [], content: [{ type: 'text', text: 'a.png' }], input: { command: 'ls' }, output: 'a.png' },
+          { type: 'text', text: 'Explanation' },
+          { type: 'compaction', summary: 'The screenshot was explained.' },
+        ] },
       ],
       checkpoints: [checkpoint],
       permissionMode: 'ask',
+      subagentModel: 'claude-sonnet-5',
       autoNamePending: true,
       timing: { updatedAt: 1_000 },
     });
@@ -68,12 +69,11 @@ describe('session persistence', () => {
       role: 'assistant',
       participant: 'sirus',
       model: 'claude-fable-5-1',
+      to: ['reviewer'],
       content: [
-        { type: 'tool_call', id: 'call-1', name: 'ReadFile', arguments: { path: 'README.md' } },
-        { type: 'tool_result', callId: 'call-1', result: '# Sirus', isError: false },
-        { type: 'text', text: 'Done.' },
+        { type: 'tool_call', id: 'call-1', title: 'README.md', kind: 'read', status: 'completed', locations: [{ path: 'README.md', line: 1 }], content: [] },
+        { type: 'text', text: 'Done. @reviewer over to you.' },
       ],
-      usage: { inputTokens: 120, outputTokens: 8, contextTokens: 128, contextWindow: 200_000 },
     });
     const second = new Session({ id: 'second-id', name: 'Second', directory: '/projects/second', model: 'gpt-5.6-sol' });
     second.append({ role: 'user', content: [{ type: 'text', text: 'Keep this too' }] });
@@ -162,17 +162,17 @@ describe('session persistence', () => {
     expect(restored.selectedSessionId).toBe('legacy-id');
     expect(restored.snapshots).toHaveLength(1);
     // Every field the modern shape carries, so the one remaining migration
-    // stays pinned: no participants, no clocks and no draft on disk become a
-    // single `sirus` participant, an epoch-zero history and an empty draft.
-    // Round-tripped through `Session` itself, since a session with no
-    // checkpoints omits that key from `toSnapshot()`.
+    // stays pinned: no participants, no clocks, no draft and no seqs on disk
+    // become a single `sirus` participant, an epoch-zero history, an empty
+    // draft and seqs by position. Round-tripped through `Session` itself,
+    // since a session with no checkpoints omits that key from `toSnapshot()`.
     expect(Session.fromSnapshot(restored.snapshots[0]!).toSnapshot()).toEqual({
       id: 'legacy-id',
       name: 'Legacy',
       directory: '/projects/current-launch',
       participants: [{ name: 'sirus', model: 'gpt-5.6-luna' }],
       defaultModel: { name: 'sirus', model: 'gpt-5.6-luna' },
-      messages: [{ role: 'user', content: [{ type: 'text', text: 'Legacy history' }] }],
+      messages: [{ seq: 0, role: 'user', content: [{ type: 'text', text: 'Legacy history' }] }],
       inputContent: '',
       permissionMode: 'auto',
       updatedAt: 0,
@@ -180,6 +180,53 @@ describe('session persistence', () => {
       lastResponseFinishedAt: 0,
       autoNamePending: false,
     });
+  });
+
+  test('migrates tool results, Sirus-written summaries and checkpoint indexes from files written before the runtimes ran the tools', () => {
+    writeFileSync(path.join(directory, 'sessions.json'), JSON.stringify({
+      version: 1,
+      selectedSessionId: 'old-id',
+      sessions: [{
+        id: 'old-id',
+        name: 'Old',
+        directory: '/projects/old',
+        participants: [{ name: 'sirus', model: 'claude-sonnet-5' }],
+        defaultModel: { name: 'sirus', model: 'claude-sonnet-5' },
+        messages: [
+          { role: 'user', content: [{ type: 'text', text: 'Read the readme' }] },
+          { role: 'assistant', participant: 'sirus', model: 'claude-sonnet-5', content: [
+            { type: 'tool_call', id: 'call-1', name: 'ReadFile', arguments: { path: 'README.md' } },
+            { type: 'tool_result', callId: 'call-1', result: '# Sirus', isError: false },
+            { type: 'tool_call', id: 'call-2', name: 'RunShell', arguments: { command: 'false' } },
+            { type: 'tool_result', callId: 'call-2', result: 'exit 1', isError: true },
+            { type: 'text', text: 'Done.' },
+          ], usage: { inputTokens: 1, outputTokens: 1, contextTokens: 1, contextWindow: 200000 } },
+          { role: 'user', content: [{ type: 'text', text: 'Earlier conversation compacted: the readme was read.' }],
+            model: 'claude-sonnet-5', compaction: { messages: 2, tokensBefore: 128, trigger: 'auto' } },
+        ],
+        checkpoints: [{ id: 'c'.repeat(40), messageIndex: 0, summary: 'Read the readme', createdAt: 5 }],
+        updatedAt: 7,
+      }],
+    }));
+
+    const [snapshot] = loadSessionSnapshots(directory).snapshots;
+    expect(snapshot.messages).toEqual([
+      { seq: 0, role: 'user', content: [{ type: 'text', text: 'Read the readme' }] },
+      { seq: 1, role: 'assistant', participant: 'sirus', model: 'claude-sonnet-5', content: [
+        { type: 'tool_call', id: 'call-1', title: 'ReadFile', kind: 'other', status: 'completed', locations: [], content: [], input: { path: 'README.md' }, output: '# Sirus' },
+        { type: 'tool_call', id: 'call-2', title: 'RunShell', kind: 'other', status: 'failed', locations: [], content: [], input: { command: 'false' }, output: 'exit 1' },
+        { type: 'text', text: 'Done.' },
+      ] },
+      { seq: 2, role: 'assistant', participant: 'sirus', model: 'claude-sonnet-5', content: [
+        { type: 'compaction', summary: 'Earlier conversation compacted: the readme was read.' },
+      ] },
+    ]);
+    expect(snapshot.checkpoints).toEqual([{ id: 'c'.repeat(40), seq: 0, summary: 'Read the readme', createdAt: 5 }]);
+    // Once saved again, the file carries only the current shape.
+    expect(saveSessionSnapshots([snapshot], 'old-id', directory)).toBe(true);
+    const raw = JSON.parse(readFileSync(path.join(directory, 'sessions.json'), 'utf8'));
+    expect(JSON.stringify(raw)).not.toContain('tool_result');
+    expect(JSON.stringify(raw)).not.toContain('messageIndex');
   });
 
   test('writes valid JSON without leaving temporary files behind', () => {

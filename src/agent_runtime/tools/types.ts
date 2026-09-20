@@ -20,18 +20,19 @@ export interface SubagentHandle {
   streamFile: string | null;
 }
 
-// The host identity of the model-requested call that is spawning a subagent,
-// so the run can be tied back to it and stopped with the turn that made it.
+// The identity of the tool call that is spawning a subagent, so the run can
+// be tied back to it and stopped with the call that made it.
 export interface SubagentSpawnCall {
   callId: string;
   signal?: AbortSignal;
 }
 
-// The narrow port the agent tools speak to. The session binds one of these to
-// the agent whose turn the toolbox belongs to; a subagent's toolbox has none,
-// which is why a subagent cannot spawn a grandchild.
+// The narrow port the agent tools speak to. The session hands the MCP server
+// one per participant that may delegate; a worker gets none, which is why a
+// subagent cannot spawn a grandchild. The subagent's model is a session
+// setting, not the spawner's choice.
 export interface SubagentHost {
-  spawn(prompt: string, model: string, call: SubagentSpawnCall): SubagentHandle;
+  spawn(prompt: string, call: SubagentSpawnCall): SubagentHandle;
   check(id: string, wait: boolean, signal?: AbortSignal): Promise<Record<string, unknown>>;
   cancel(id: string, signal?: AbortSignal): Promise<Record<string, unknown>>;
   list(): Record<string, unknown>[];
@@ -39,30 +40,20 @@ export interface SubagentHost {
 
 // Everything one tool call knows about where and for whom it runs.
 export interface ToolContext {
-  // Where the call runs: the turn's directory. Relative paths resolve here.
+  // Where the call runs: the session's directory. Relative paths resolve here.
   directory: string;
-  // The turn's signal: a tool that can outlive a keystroke watches it.
+  // Aborted when the caller cancels the call or drops the connection: a tool
+  // that can outlive a keystroke watches it.
   signal?: AbortSignal;
-  // The model's id for this call, for effects that outlive it.
+  // An id for this call, for effects that outlive it.
   callId: string;
   subagents?: SubagentHost;
 }
-
-// What the call does to the world: 'read' passes the checkpoint barrier and
-// the permission gate untouched. A tool whose effect depends on its arguments
-// answers as a function of them.
-export type ToolEffect = 'read' | 'mutates';
 
 export interface Tool<A = Record<string, unknown>> {
   name: string;
   description: string;
   args: Record<string, ToolArgumentSchema>;
-  // The function form decides from the call's own arguments — `RunShell` reads
-  // `command`, and the gate refines a mutating call by the `path` argument a
-  // tool declares. `SaveMemory` and `DeleteMemory` are `'read'` despite
-  // writing, because memories live outside the working directory: nothing
-  // there is covered by the checkpoint snapshot or the directory's approvals.
-  effect: ToolEffect | ((args: A, directory: string) => ToolEffect);
   // Which callers may see and run it. Absent means everyone.
   audience?: ToolAudience;
   // A capability the tool needs switched on; without it the tool is hidden

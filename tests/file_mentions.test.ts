@@ -4,15 +4,14 @@ import os from 'os';
 import path from 'path';
 import { formatFileMention, MAX_MENTION_FILE_BYTES, parseFileMentions, resolveFileMentions } from '../src/fileMentions';
 import { rootTextRanges } from '../src/mentions';
-import { boundTransports } from '../src/agent_runtime/providers';
-import { Session } from '../src/agent_runtime/session';
-import type { Message } from '../src/agent_runtime/types';
+import { Session, type Draft } from '../src/agent_runtime/session';
 import { loadSessionSnapshots, saveSessionSnapshots } from '../src/persistence';
+import { bindScriptedRuntime, textTurn, unbindRuntime } from './support/runtime';
 
 const model = 'test-file-mention-model';
 let directory: string;
 let temporary: string;
-const prompt = (text: string): Message => ({ role: 'user', content: [{ type: 'text', text }] });
+const prompt = (text: string): Draft => ({ role: 'user', content: [{ type: 'text', text }] });
 
 beforeEach(() => {
   temporary = mkdtempSync(path.join(os.tmpdir(), 'sirus-file-mentions-'));
@@ -21,7 +20,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  delete boundTransports[model];
+  unbindRuntime(model);
   rmSync(temporary, { recursive: true, force: true });
 });
 
@@ -131,21 +130,17 @@ describe('file mentions', () => {
     expect(resolveFileMentions(prompt('@./0.txt @./1.txt'), directory).content).toHaveLength(3);
   });
 
-  test('routes original agent mentions while giving providers attached file content synchronously', async () => {
+  test('routes original agent mentions while giving runtimes attached file content synchronously', async () => {
     writeFileSync(path.join(directory, '@stranger notes.txt'), '@unwanted wrong-model\n```\n@other\n```');
-    const received: { name: string; messages: Message[] }[] = [];
-    boundTransports[model] = { getResponse: async (messages, turn) => {
-      received.push({ name: turn.agent.name, messages: [...messages] });
-      return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
-    } };
+    const binding = bindScriptedRuntime(model, textTurn('Done'));
     const session = new Session({ id: 'file-session', name: 'Files', directory, model });
     const send = session.sendMessage(prompt(`Read @"./@stranger notes.txt" @reviewer ${model} please`));
     expect(session.getMessages()).toHaveLength(1);
     expect(session.getMessages()[0]?.content[0]).toEqual({ type: 'text', text: 'Read @"./@stranger notes.txt" @reviewer please' });
     await send;
     expect(session.getParticipants().map(participant => participant.name)).toEqual(['sirus', 'reviewer']);
-    expect(received.map(call => call.name)).toEqual(['reviewer']);
-    expect(JSON.stringify(received[0]?.messages)).toContain('@unwanted wrong-model');
+    expect(binding.starts.map(options => options.mcpServer?.headers[1].value)).toEqual(['reviewer']);
+    expect(binding.runtimes[0].prompts[0].text).toContain('@unwanted wrong-model');
   });
 
   test('reads queued references when their turn starts', async () => {
@@ -153,14 +148,14 @@ describe('file mentions', () => {
     writeFileSync(file, 'before the first turn finishes');
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
-    let queuedReceived!: (message: Message) => void;
-    const received = new Promise<Message>(resolve => { queuedReceived = resolve; });
+    let queuedReceived!: (text: string) => void;
+    const received = new Promise<string>(resolve => { queuedReceived = resolve; });
     let calls = 0;
-    boundTransports[model] = { getResponse: async messages => {
+    bindScriptedRuntime(model, async (input, emit) => {
       if (calls++ === 0) await gate;
-      else queuedReceived(messages.at(-1)!);
-      return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
-    } };
+      else queuedReceived(input.text);
+      emit({ type: 'text', text: 'Done' });
+    });
     const session = new Session({ id: 'queued-files', name: 'Queued files', directory, model });
     const first = session.sendMessage(prompt('Start here'));
     session.queueMessage('Read @./queued.ts');
@@ -168,9 +163,10 @@ describe('file mentions', () => {
     release();
     await first;
     const queued = await received;
-    expect(queued.content[1]).toMatchObject({ type: 'text', filePath: 'queued.ts' });
-    expect(JSON.stringify(queued)).toContain('latest file contents');
-    expect(JSON.stringify(queued)).not.toContain('before the first turn finishes');
+    expect(queued).toContain('File: "queued.ts"');
+    expect(queued).toContain('latest file contents');
+    expect(queued).not.toContain('before the first turn finishes');
+    expect(session.getMessages().at(-2)?.content[1]).toMatchObject({ type: 'text', filePath: 'queued.ts' });
     while (session.getStatus() === 'working') await new Promise(resolve => setImmediate(resolve));
   });
 
@@ -178,7 +174,7 @@ describe('file mentions', () => {
     mkdirSync(path.join(directory, 'src'));
     writeFileSync(path.join(directory, 'src', 'index.ts'), 'source');
     writeFileSync(path.join(directory, 'README.md'), 'readme');
-    boundTransports[model] = { getResponse: async () => ({ content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' }) };
+    bindScriptedRuntime(model, textTurn('Done'));
     const session = new Session({ id: 'pathname-session', name: 'Paths', directory, model });
     await session.sendMessage(prompt('@src/index.ts @README.md @scope/package'));
     expect(session.getParticipants().map(participant => participant.name)).toEqual(['sirus']);
@@ -187,30 +183,22 @@ describe('file mentions', () => {
 
   test('distinguishes a quoted extensionless filename from an agent with the same name', async () => {
     writeFileSync(path.join(directory, 'reviewer'), 'file contents');
-    let invoked: string | undefined;
-    boundTransports[model] = { getResponse: async (_messages, turn) => {
-      invoked = turn.agent.name;
-      return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
-    } };
+    const binding = bindScriptedRuntime(model, textTurn('Done'));
     const session = new Session({ id: 'same-name-file-session', name: 'Names', directory, model });
     session.addParticipant('reviewer', model);
     await session.sendMessage(prompt('Read @"reviewer", @reviewer please'));
-    expect(invoked).toBe('reviewer');
+    expect(binding.starts.map(options => options.mcpServer?.headers[1].value)).toEqual(['reviewer']);
     expect(session.getMessages()[0]?.content[1]).toMatchObject({ type: 'text', filePath: 'reviewer' });
     expect(session.getParticipants()).toHaveLength(2);
   });
 
   test('validates attachments before adding a new participant or user history', async () => {
-    let calls = 0;
-    boundTransports[model] = { getResponse: async () => {
-      calls++;
-      return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
-    } };
+    const binding = bindScriptedRuntime(model, textTurn('Done'));
     const session = new Session({ id: 'invalid-file-session', name: 'Files', directory, model });
     await expect(session.sendMessage(prompt(`@reviewer ${model} read @./missing.ts`))).rejects.toThrow(/Could not attach/);
     expect(session.getParticipants().map(participant => participant.name)).toEqual(['sirus']);
     expect(session.getMessages()).toEqual([]);
-    expect(calls).toBe(0);
+    expect(binding.starts).toHaveLength(0);
   });
 
   test('preserves file labels and snapshots when sessions are saved and restored', () => {
@@ -224,7 +212,7 @@ describe('file mentions', () => {
       const resolved = resolveFileMentions(prompt(`@./file.txt @../sibling.txt @${path.join(temporary, 'absolute.txt')}`), directory);
       session.append(resolved);
       expect(saveSessionSnapshots([session].filter(s => !s.isEmpty()).map(s => s.toSnapshot()), session.getId())).toBe(true);
-      expect(Session.fromSnapshot(loadSessionSnapshots().snapshots[0]!).getMessages()).toEqual([resolved]);
+      expect(Session.fromSnapshot(loadSessionSnapshots().snapshots[0]!).getMessages()).toEqual([{ ...resolved, seq: 0 }]);
     } finally {
       if (previousDataDir === undefined) delete process.env.SIRUS_DATA_DIR;
       else process.env.SIRUS_DATA_DIR = previousDataDir;

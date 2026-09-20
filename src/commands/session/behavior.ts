@@ -1,11 +1,9 @@
-import { isAutoCompactEnabled, setAutoCompactEnabled } from '../../agent_runtime/compaction';
 import {
   PERMISSION_MODE_NAMES,
   PERMISSION_MODES,
   parsePermissionMode,
   type PermissionMode,
 } from '../../agent_runtime/permissions/policy';
-import { formatTokens } from '../../agent_runtime/usage';
 import type { Feedback } from '../feedback';
 import type { CommandMenuItem, CommandSession } from '../types';
 
@@ -14,27 +12,13 @@ export function clearSession(session: CommandSession): Feedback {
   return { kind: 'success', text: 'History cleared.' };
 }
 
-// /compact folds the history into a summary now; /compact on|off says
-// whether sessions do that by themselves when the window fills.
-export async function compactCommand(
-  mode: string | undefined,
-  session: CommandSession,
-  signal?: AbortSignal,
-): Promise<Feedback> {
-  if (mode === 'on' || mode === 'off') {
-    setAutoCompactEnabled(mode === 'on');
-    return { kind: 'success', text: `Automatic compaction set to ${mode}.` };
-  }
-  if (mode !== undefined) throw new Error('Usage: /compact [on|off]');
-  const result = await session.compact(signal);
-  const size = result.tokensBefore > 0
-    ? ` (ctx ${formatTokens(result.tokensBefore)} → ~${formatTokens(result.tokensAfter)})`
-    : '';
-  return {
-    kind: 'success',
-    text: `Compacted ${result.messages} message${result.messages === 1 ? '' : 's'} into a summary${size}. `
-      + `Automatic compaction is ${isAutoCompactEnabled() ? 'on' : 'off'}.`,
-  };
+// /compact asks the default participant's runtime to fold its conversation
+// now. Each runtime also compacts on its own when its window fills; that is
+// the vendor's and has no switch.
+export async function compactCommand(session: CommandSession, signal?: AbortSignal): Promise<Feedback> {
+  await session.compact(signal);
+  const name = session.getParticipants()[0]?.name ?? 'sirus';
+  return { kind: 'success', text: `Compacted @${name}'s context.` };
 }
 
 export function renameSession(name: string, session: CommandSession): Feedback {
@@ -45,9 +29,9 @@ export function renameSession(name: string, session: CommandSession): Feedback {
 }
 
 const PERMISSION_MODE_DESCRIPTIONS: Record<PermissionMode, string> = {
-  ask: 'prompt before every write, shell command, and spawned agent',
-  auto: 'run ordinary work; prompt only for sensitive operations',
-  bypass: 'run everything without prompting',
+  ask: 'the agent asks before every action that is not a read',
+  auto: 'the agent\'s own reviewer decides and asks only about what it judges unsafe',
+  bypass: 'nothing is asked',
 };
 
 export function permissionsMenuItems(): CommandMenuItem[] {

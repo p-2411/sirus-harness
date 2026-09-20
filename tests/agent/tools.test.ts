@@ -1,74 +1,118 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
-import { availableTools, toolRegistry } from '../../src/agent_runtime/tools';
-import { createToolbox } from '../../src/agent_runtime/tools/toolbox';
-import type { ToolCallBlock, ToolResultBlock } from '../../src/agent_runtime/types';
-import { saveMemoryAccessPreference } from '../../src/persistence';
+import { join } from 'path';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import type { EmbeddingProvider } from '../../src/memory/embeddings';
+
+// The local embedding model is a download the memory tools do not need for
+// these tests: the store only asks for a vector of the declared size.
+class TestEmbeddingProvider implements EmbeddingProvider {
+  readonly model = 'test-embedding-v1';
+  readonly dimensions = 3;
+
+  async embed(text: string): Promise<Float32Array> {
+    const length = Math.max(1, text.length);
+    return new Float32Array([1 / length, 1 - 1 / length, 0.5]);
+  }
+}
+
+const embeddings = await import('../../src/memory/embeddings');
+mock.module('../../src/memory/embeddings', () => ({ ...embeddings, LocalEmbeddingProvider: TestEmbeddingProvider }));
+
+const { availableTools, toolRegistry } = await import('../../src/agent_runtime/tools');
+const {
+  registerToolSession,
+  sirusMcpServerEntry,
+  stopSirusMcpServer,
+  unregisterToolSession,
+} = await import('../../src/agent_runtime/tools/server');
+const { closeAllMemoryStores } = await import('../../src/memory/store');
+const { saveMemoryAccessPreference } = await import('../../src/persistence');
+
+type SubagentHost = import('../../src/agent_runtime/tools').SubagentHost;
+type SubagentSpawnCall = import('../../src/agent_runtime/tools').SubagentSpawnCall;
+
+const MEMORY_TOOLS = ['SaveMemory', 'GetMemory', 'SearchMemories', 'DeleteMemory'];
+const AGENT_TOOLS = ['SpawnAgent', 'CheckAgent', 'CancelAgent', 'ListAgents'];
+const SESSION = 'tools-test-session';
 
 let testDirectory: string;
 let previousDataDirectory: string | undefined;
+let memoryOn: boolean;
+let spawned: { prompt: string; call: SubagentSpawnCall }[];
 
 const findTool = (name: string) => toolRegistry.find(tool => tool.name === name) ?? null;
 
-// The registry as a direct caller sees it: no gate, no barrier.
-function executeTool(
-  name: string,
-  args: Record<string, unknown>,
-  directory: string = process.cwd(),
-  call: { callId?: string; signal?: AbortSignal } = {},
-): Promise<unknown> {
-  const tool = findTool(name);
-  if (!tool) throw new Error(`Unknown tool: ${name}`);
-  return tool.run(args, { directory, callId: call.callId ?? 'direct', ...(call.signal ? { signal: call.signal } : {}) });
-}
-
-function runTool(call: ToolCallBlock, directory: string = process.cwd()): Promise<ToolResultBlock> {
-  return createToolbox({ directory }).run(call);
-}
+const stubHost: SubagentHost = {
+  spawn(prompt, call) {
+    spawned.push({ prompt, call });
+    return { id: 'run-1', model: 'stub-model', status: 'working', streamFile: null };
+  },
+  async check(id) { return { id, status: 'done' }; },
+  async cancel(id) { return { id, status: 'cancelled' }; },
+  list() { return spawned.map((run, index) => ({ id: `run-${index + 1}`, task: run.prompt })); },
+};
 
 beforeEach(() => {
   testDirectory = mkdtempSync(join(tmpdir(), 'sirus-tools-'));
   previousDataDirectory = process.env.SIRUS_DATA_DIR;
   process.env.SIRUS_DATA_DIR = testDirectory;
+  memoryOn = true;
+  spawned = [];
+  registerToolSession(SESSION, {
+    directory: testDirectory,
+    memoryEnabled: () => memoryOn,
+    // Only sirus may delegate here; any other participant has no host.
+    hostFor: participant => participant === 'sirus' ? stubHost : null,
+  });
 });
 
 afterEach(() => {
+  unregisterToolSession(SESSION);
+  closeAllMemoryStores();
   if (previousDataDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
   else process.env.SIRUS_DATA_DIR = previousDataDirectory;
   rmSync(testDirectory, { recursive: true, force: true });
 });
 
-describe('agent tools', () => {
-  test('registers file, shell, and memory tools', () => {
-    expect(toolRegistry.map(tool => tool.name)).toEqual([
-      'ReadFile',
-      'WriteFile',
-      'EditFile',
-      'RunShell',
-      'SearchFiles',
-      'SaveMemory',
-      'GetMemory',
-      'SearchMemories',
-      'DeleteMemory',
-      'SpawnAgent',
-      'CheckAgent',
-      'CancelAgent',
-      'ListAgents',
-    ]);
-    expect(findTool('WriteFile')?.args).toEqual(expect.objectContaining({
-      path: expect.objectContaining({ type: 'string' }),
-      content: expect.objectContaining({ type: 'string' }),
-    }));
-    expect(findTool('EditFile')?.args).toEqual(expect.objectContaining({
-      path: expect.objectContaining({ type: 'string' }),
-      old_text: expect.objectContaining({ type: 'string' }),
-      new_text: expect.objectContaining({ type: 'string' }),
-    }));
-    expect(findTool('RunShell')?.args).toEqual(expect.objectContaining({
-      command: expect.objectContaining({ type: 'string' }),
-    }));
+afterAll(() => {
+  stopSirusMcpServer();
+  // Idempotent: the app's shutdown may run it after a test already has.
+  stopSirusMcpServer();
+});
+
+// The MCP client as a runtime would be configured: the entry's URL and
+// headers, with the token or the requester header overridden to test refusal.
+async function connect(
+  requester: string,
+  override: { token?: string; requester?: string | null } = {},
+): Promise<Client> {
+  const entry = await sirusMcpServerEntry(SESSION, requester);
+  expect(entry.name).toBe('sirus');
+  const headers = Object.fromEntries(entry.headers.map(header => [header.name, header.value]));
+  if (override.token !== undefined) headers.Authorization = `Bearer ${override.token}`;
+  if (override.requester === null) delete headers['X-Sirus-Requester'];
+  const client = new Client({ name: 'tools-test', version: '0' });
+  await client.connect(new StreamableHTTPClientTransport(new URL(entry.url), { requestInit: { headers } }));
+  return client;
+}
+
+async function toolNames(client: Client): Promise<string[]> {
+  return (await client.listTools()).tools.map(tool => tool.name);
+}
+
+async function call(client: Client, name: string, args: Record<string, unknown>): Promise<{ text: string; isError: boolean }> {
+  const result = await client.callTool({ name, arguments: args });
+  const [block] = result.content as { type: string; text: string }[];
+  expect(block.type).toBe('text');
+  return { text: block.text, isError: result.isError === true };
+}
+
+describe('tool registry', () => {
+  test('registers the memory tools then the agent tools', () => {
+    expect(toolRegistry.map(tool => tool.name)).toEqual([...MEMORY_TOOLS, ...AGENT_TOOLS]);
     expect(findTool('SaveMemory')?.args).toEqual(expect.objectContaining({
       scope: expect.objectContaining({ type: 'string', enum: ['global', 'project'] }),
       name: expect.objectContaining({ type: 'string' }),
@@ -89,207 +133,163 @@ describe('agent tools', () => {
     expect(findTool('SaveMemory')?.description).toContain('global');
     expect(findTool('SaveMemory')?.description).toContain('current-project');
     expect(findTool('SearchMemories')?.args.scope?.description).toContain('no other project');
-    for (const name of ['SaveMemory', 'GetMemory', 'SearchMemories', 'DeleteMemory']) {
+    for (const name of MEMORY_TOOLS) {
       expect(findTool(name)?.args).not.toHaveProperty('directory');
     }
   });
 
-  test('rejects invalid memory scopes before opening the store', async () => {
-    const result = await runTool({
-      type: 'tool_call',
-      id: 'memory_scope_1',
-      name: 'GetMemory',
-      arguments: { scope: 'another-project', name: 'private' },
-    }, testDirectory);
-
-    expect(result).toMatchObject({ isError: true, callId: 'memory_scope_1' });
-    expect(result.result).toContain('global or project');
+  test('SpawnAgent takes the prompt only; the model is a session setting', () => {
+    const spawn = findTool('SpawnAgent');
+    expect(Object.keys(spawn?.args ?? {})).toEqual(['prompt']);
+    expect(spawn?.args.prompt).toEqual(expect.objectContaining({ type: 'string' }));
+    expect(spawn?.description).toContain('/model subagent');
+    for (const name of AGENT_TOOLS) {
+      expect(findTool(name)?.audience).toEqual({ subagent: false });
+    }
   });
 
-  test('WriteFile creates and replaces UTF-8 files', async () => {
-    const path = join(testDirectory, 'memory.md');
+  test('a subagent audience sees no agent tools and disabled memory hides the memory tools', () => {
+    expect(availableTools().map(tool => tool.name)).toEqual([...MEMORY_TOOLS, ...AGENT_TOOLS]);
+    expect(availableTools({ subagent: true }).map(tool => tool.name)).toEqual(MEMORY_TOOLS);
 
-    const created = await executeTool('WriteFile', { path, content: 'first 🐎' });
-    expect(created).toMatchObject({ path, created: true });
-    expect(readFileSync(path, 'utf8')).toBe('first 🐎');
+    expect(saveMemoryAccessPreference(false)).toBe(true);
+    expect(availableTools().map(tool => tool.name)).toEqual(AGENT_TOOLS);
+    expect(availableTools({ subagent: true })).toEqual([]);
+  });
+});
 
-    const replaced = await executeTool('WriteFile', { path, content: 'second' });
-    expect(replaced).toMatchObject({ path, created: false });
-    expect(readFileSync(path, 'utf8')).toBe('second');
+describe('Sirus MCP server', () => {
+  test('lists every tool to a participant and only the memory tools to a worker', async () => {
+    const participant = await connect('sirus');
+    const worker = await connect('subagent:run-1');
+    try {
+      expect(await toolNames(participant)).toEqual([...MEMORY_TOOLS, ...AGENT_TOOLS]);
+      expect(await toolNames(worker)).toEqual(MEMORY_TOOLS);
+
+      const spawn = (await participant.listTools()).tools.find(tool => tool.name === 'SpawnAgent');
+      expect(spawn?.inputSchema).toEqual({
+        type: 'object',
+        properties: { prompt: expect.objectContaining({ type: 'string' }) },
+        required: ['prompt'],
+      });
+    } finally {
+      await participant.close();
+      await worker.close();
+    }
   });
 
-  test('WriteFile permits empty content', async () => {
-    const path = join(testDirectory, 'empty.txt');
+  test('SaveMemory then GetMemory round-trips through the store in the data directory', async () => {
+    const client = await connect('sirus');
+    try {
+      const saved = await call(client, 'SaveMemory', {
+        scope: 'project',
+        name: 'preferred-database',
+        content: 'The project uses SQLite for local storage.',
+      });
+      expect(saved.isError).toBe(false);
+      expect(JSON.parse(saved.text)).toMatchObject({ name: 'preferred-database', scope: 'project' });
 
-    expect(await executeTool('WriteFile', { path, content: '' })).toMatchObject({ bytesWritten: 0 });
-    expect(readFileSync(path, 'utf8')).toBe('');
+      const fetched = await call(client, 'GetMemory', { scope: 'project', name: 'preferred-database' });
+      expect(fetched.isError).toBe(false);
+      expect(JSON.parse(fetched.text)).toMatchObject({
+        scope: 'project',
+        name: 'preferred-database',
+        content: 'The project uses SQLite for local storage.',
+        embeddingModel: 'test-embedding-v1',
+      });
+
+      const missing = await call(client, 'GetMemory', { scope: 'global', name: 'nothing' });
+      expect(missing.isError).toBe(false);
+      expect(JSON.parse(missing.text)).toEqual({ found: false, scope: 'global', name: 'nothing' });
+    } finally {
+      await client.close();
+    }
   });
 
-  test('EditFile replaces one exact occurrence and supports deletion', async () => {
-    const path = join(testDirectory, 'source.ts');
-    writeFileSync(path, 'const first = 1;\nconst second = 2;\n', 'utf8');
-
-    expect(await executeTool('EditFile', {
-      path,
-      old_text: 'const first = 1;',
-      new_text: 'const first = 10;',
-    })).toMatchObject({ path, replacements: 1 });
-
-    await executeTool('EditFile', {
-      path,
-      old_text: 'const second = 2;\n',
-      new_text: '',
-    });
-
-    expect(readFileSync(path, 'utf8')).toBe('const first = 10;\n');
+  test("a tool's own failure comes back as an error result", async () => {
+    const client = await connect('sirus');
+    try {
+      const result = await call(client, 'GetMemory', { scope: 'another-project', name: 'private' });
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain('global or project');
+    } finally {
+      await client.close();
+    }
   });
 
-  test('EditFile rejects missing and ambiguous matches without changing the file', async () => {
-    const path = join(testDirectory, 'repeated.txt');
-    writeFileSync(path, 'same\nsame\n', 'utf8');
+  test("SpawnAgent reaches the participant's own host with the prompt and a call id", async () => {
+    const client = await connect('sirus');
+    try {
+      const result = await call(client, 'SpawnAgent', { prompt: 'Do the work' });
+      expect(result.isError).toBe(false);
+      expect(JSON.parse(result.text)).toMatchObject({ id: 'run-1', model: 'stub-model', status: 'working', streamFile: null });
+      expect(spawned).toHaveLength(1);
+      expect(spawned[0].prompt).toBe('Do the work');
+      expect(typeof spawned[0].call.callId).toBe('string');
+      expect(spawned[0].call.signal).toBeInstanceOf(AbortSignal);
 
-    await expect(executeTool('EditFile', {
-      path,
-      old_text: 'missing',
-      new_text: 'replacement',
-    })).rejects.toThrow('could not find');
-
-    await expect(executeTool('EditFile', {
-      path,
-      old_text: 'same',
-      new_text: 'replacement',
-    })).rejects.toThrow('multiple');
-
-    expect(readFileSync(path, 'utf8')).toBe('same\nsame\n');
+      const listed = await call(client, 'ListAgents', {});
+      expect(JSON.parse(listed.text)).toEqual({ subagents: [{ id: 'run-1', task: 'Do the work' }] });
+    } finally {
+      await client.close();
+    }
   });
 
-  test('runTool reports invalid edit arguments as a tool error', async () => {
-    const result = await runTool({
-      type: 'tool_call',
-      id: 'edit_1',
-      name: 'EditFile',
-      arguments: { path: join(testDirectory, 'file.txt'), old_text: '', new_text: 'x' },
-    });
+  test('a worker is refused SpawnAgent by name and a participant without a host by the tool', async () => {
+    const worker = await connect('subagent:run-1');
+    const reviewer = await connect('reviewer');
+    try {
+      const refused = await call(worker, 'SpawnAgent', { prompt: 'Do the work' });
+      expect(refused).toEqual({ isError: true, text: 'Unknown tool: SpawnAgent' });
 
-    expect(result).toMatchObject({
-      type: 'tool_result',
-      callId: 'edit_1',
-      isError: true,
-    });
-    expect(result.result).toContain('old_text');
+      const noHost = await call(reviewer, 'SpawnAgent', { prompt: 'Do the work' });
+      expect(noHost.isError).toBe(true);
+      expect(noHost.text).toContain('SpawnAgent needs the calling agent');
+      expect(spawned).toEqual([]);
+    } finally {
+      await worker.close();
+      await reviewer.close();
+    }
   });
 
-  test('RunShell captures stdout, stderr, and a successful exit code', async () => {
-    const result = await executeTool('RunShell', {
-      command: "printf 'hello'; printf 'warning' >&2",
-    });
-
-    expect(result).toMatchObject({
-      exitCode: 0,
-      signal: null,
-      stdout: 'hello',
-      stderr: 'warning',
-    });
+  test('a wrong token or a missing requester is refused before any tool runs', async () => {
+    // The client surfaces the status as the error's code and the body as
+    // its message.
+    await expect(connect('sirus', { token: 'not-the-token' })).rejects.toMatchObject({ code: 401 });
+    await expect(connect('sirus', { token: 'not-the-token' })).rejects.toThrow('Unauthorized');
+    await expect(connect('sirus', { requester: null })).rejects.toMatchObject({ code: 400 });
+    await expect(connect('sirus', { requester: null })).rejects.toThrow('X-Sirus-Requester');
   });
 
-  test('resolves relative file and shell paths from the owning session directory', async () => {
-    writeFileSync(join(testDirectory, 'owned.txt'), 'session file', 'utf8');
+  test('memory off hides the memory tools and refuses a call with the way to switch it on', async () => {
+    const client = await connect('sirus');
+    try {
+      memoryOn = false;
+      expect(await toolNames(client)).toEqual(AGENT_TOOLS);
+      const result = await call(client, 'GetMemory', { scope: 'global', name: 'anything' });
+      expect(result).toEqual({ isError: true, text: 'Memory access is disabled. Use /memory on to enable it.' });
 
-    expect(await executeTool('ReadFile', { path: 'owned.txt' }, testDirectory)).toBe('session file');
-    expect(await executeTool('RunShell', { command: 'pwd' }, testDirectory)).toMatchObject({
-      stdout: `${realpathSync(testDirectory)}\n`,
-    });
+      memoryOn = true;
+      expect(await toolNames(client)).toEqual([...MEMORY_TOOLS, ...AGENT_TOOLS]);
+    } finally {
+      await client.close();
+    }
   });
 
-  test('RunShell returns non-zero command exits without losing their output', async () => {
-    const result = await executeTool('RunShell', {
-      command: "printf 'failed' >&2; exit 7",
-    });
-
-    expect(result).toMatchObject({
-      exitCode: 7,
-      stdout: '',
-      stderr: 'failed',
-    });
-  });
-
-  test('RunShell terminates immediately when its turn is aborted', async () => {
-    const controller = new AbortController();
-    const command = executeTool('RunShell', {
-      command: `${process.execPath} -e "setTimeout(() => {}, 30000)"`,
-    }, testDirectory, { callId: 'shell_abort', signal: controller.signal });
-
-    controller.abort();
-
-    await expect(command).rejects.toMatchObject({ name: 'AbortError' });
-  });
-
-  test('runTool reports an empty shell command as a tool error', async () => {
-    const result = await runTool({
-      type: 'tool_call',
-      id: 'shell_1',
-      name: 'RunShell',
-      arguments: { command: '' },
-    });
-
-    expect(result).toMatchObject({
-      type: 'tool_result',
-      callId: 'shell_1',
-      isError: true,
-    });
-    expect(result.result).toContain('command');
-  });
-
-  test('disabled memory is hidden from providers and rejects direct calls', async () => {
-    expect(saveMemoryAccessPreference(false, testDirectory)).toBe(true);
-    expect(availableTools().map(tool => tool.name)).toEqual([
-      'ReadFile',
-      'WriteFile',
-      'EditFile',
-      'RunShell',
-      'SearchFiles',
-      'SpawnAgent',
-      'CheckAgent',
-      'CancelAgent',
-      'ListAgents',
+  test('the token is stable while a session stays registered and new after it is re-registered', async () => {
+    const first = await sirusMcpServerEntry(SESSION, 'sirus');
+    registerToolSession(SESSION, { directory: testDirectory, memoryEnabled: () => true, hostFor: () => null });
+    const second = await sirusMcpServerEntry(SESSION, 'reviewer');
+    expect(second.url).toBe(first.url);
+    expect(second.headers).toEqual([
+      first.headers[0],
+      { name: 'X-Sirus-Requester', value: 'reviewer' },
     ]);
+    expect(first.headers[0].value).toMatch(/^Bearer .{40,}$/);
 
-    const result = await runTool({
-      type: 'tool_call',
-      id: 'memory_1',
-      name: 'GetMemory',
-      arguments: { name: 'anything' },
-    });
-    expect(result).toMatchObject({
-      type: 'tool_result',
-      callId: 'memory_1',
-      isError: true,
-    });
-    expect(result.result).toContain('/memory on');
-  });
-
-  test('a subagent cannot delegate: SpawnAgent is hidden and refused by name', async () => {
-    const call: ToolCallBlock = {
-      type: 'tool_call',
-      id: 'spawn_1',
-      name: 'SpawnAgent',
-      arguments: { prompt: 'Do the work', model: 'test-model' },
-    };
-
-    const worker = createToolbox({ directory: testDirectory, audience: { subagent: true } });
-    expect(worker.tools.map(tool => tool.name)).not.toContain('SpawnAgent');
-    const refused = await worker.run(call);
-    expect(refused).toMatchObject({
-      type: 'tool_result',
-      callId: 'spawn_1',
-      isError: true,
-    });
-    expect(refused.result).toContain('Unknown tool: SpawnAgent');
-
-    // The same call on an ordinary toolbox reaches the tool. It still fails
-    // here — this toolbox has no subagent host — but never as an unknown name.
-    const owner = createToolbox({ directory: testDirectory });
-    expect(owner.tools.map(tool => tool.name)).toContain('SpawnAgent');
-    expect((await owner.run(call)).result).not.toContain('Unknown tool: SpawnAgent');
+    unregisterToolSession(SESSION);
+    await expect(sirusMcpServerEntry(SESSION, 'sirus')).rejects.toThrow('not registered');
+    registerToolSession(SESSION, { directory: testDirectory, memoryEnabled: () => true, hostFor: () => null });
+    expect((await sirusMcpServerEntry(SESSION, 'sirus')).headers[0]).not.toEqual(first.headers[0]);
   });
 });
