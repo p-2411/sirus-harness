@@ -107,7 +107,10 @@ export const boundRuntimes: Record<string, (options: RuntimeOptions) => Runtime 
 const live = new Set<Runtime>();
 
 // Every runtime the process started and has not yet disposed. The app tears
-// them all down when Ink exits, so their stdio cannot keep the CLI alive.
+// them all down when Ink exits, so their stdio cannot keep the CLI alive; an
+// exit that skips that still takes every agent process down with it.
+process.once('exit', () => disposeAllRuntimes());
+
 export function trackRuntime(runtime: Runtime): Runtime {
   live.add(runtime);
   const dispose = runtime.dispose.bind(runtime);
