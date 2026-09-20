@@ -17,11 +17,30 @@ export function latestUserText(messages: readonly Message[]): string {
     .join('\n');
 }
 
+export interface TranscriptOptions {
+  // Cut a tool result longer than this many characters, saying how much was
+  // left out. Absent renders every result in full.
+  resultLimit?: number;
+}
+
+function clipped(result: string, limit: number | undefined): string {
+  if (limit === undefined || result.length <= limit) return result;
+  return `${result.slice(0, limit)}\n[… ${result.length - limit} more characters cut]`;
+}
+
 // The provider runtime keeps its own history, so a session that already has
 // turns when it first reaches that runtime hands them over as plain text.
-export function transcript(messages: readonly Message[]): string {
+// The compaction summariser reads the same rendering.
+export function transcript(messages: readonly Message[], options: TranscriptOptions = {}): string {
   const lines: string[] = [];
   for (const message of messages) {
+    // A compaction summary says what it is; it is nobody's line.
+    if (message.compaction) {
+      for (const block of message.content) {
+        if (block.type === 'text' && block.text) lines.push(block.text);
+      }
+      continue;
+    }
     const speaker = message.role === 'user'
       ? 'User'
       : `@${message.participant ?? 'sirus'}`;
@@ -33,7 +52,7 @@ export function transcript(messages: readonly Message[]): string {
       } else if (block.type === 'tool_call') {
         lines.push(`${speaker} called tool ${block.name} with ${JSON.stringify(block.arguments)}`);
       } else {
-        lines.push(`Tool result${block.isError ? ' (error)' : ''}: ${block.result}`);
+        lines.push(`Tool result${block.isError ? ' (error)' : ''}: ${clipped(block.result, options.resultLimit)}`);
       }
     }
   }

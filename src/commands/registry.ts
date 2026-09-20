@@ -6,7 +6,7 @@ import {
 } from './authentication/commands';
 import { helpCommand } from './help/commands';
 import { memoryCommandSpec } from './memory/commands';
-import { clearCommand, exitCommand, permissionsCommandSpec, renameCommand } from './session/commands';
+import { clearCommand, compactCommandSpec, exitCommand, permissionsCommandSpec, renameCommand } from './session/commands';
 import { updateCommandSpec, versionCommandSpec } from './update/commands';
 import { rewindCommandSpec, undoCommandSpec } from './checkpoints/commands';
 import { imageCommandSpec } from './images/commands';
@@ -34,6 +34,7 @@ export type {
 export const commandRegistry: readonly CommandSpec[] = [
   modelCommand,
   clearCommand,
+  compactCommandSpec,
   thinkingCommandSpec,
   loginCommandSpec,
   logoutCommandSpec,

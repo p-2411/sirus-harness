@@ -126,12 +126,22 @@ export class Transcript {
     return dropped;
   }
 
-  // The window of the latest response that reported one: what the model had
-  // in front of it when it last answered.
+  // Puts a compaction summary into the history, at the end or ahead of the
+  // messages from `at` on. It is not a prompt and not a response, so the
+  // conversation clocks stay where they were.
+  compact(summary: Message, at: number = this.messages.length): void {
+    this.messages.splice(at, 0, summary);
+    this.activityAt = Date.now();
+    this.changes.notify();
+  }
+
+  // The window of the latest message that reported one: what the model had
+  // in front of it when it last answered, or, after a compaction, the size
+  // of the summary the next request starts from.
   contextUsage(fallbackModel: string): ContextUsage | null {
     for (let index = this.messages.length - 1; index >= 0; index--) {
       const message = this.messages[index];
-      if (message.role !== 'assistant' || !message.usage) continue;
+      if (!message.usage) continue;
       const window = message.usage.contextWindow
         ?? contextWindowFor(message.model ?? fallbackModel);
       return { tokens: message.usage.contextTokens, ...(window ? { window } : {}) };
@@ -139,13 +149,14 @@ export class Transcript {
     return null;
   }
 
-  // Every token the session's responses have reported, or null before any.
+  // Every token the session's responses and compaction summaries have
+  // reported, or null before any.
   totalUsage(): TokenTotals | null {
     let reported = false;
     let inputTokens = 0;
     let outputTokens = 0;
     for (const message of this.messages) {
-      if (message.role !== 'assistant' || !message.usage) continue;
+      if (!message.usage) continue;
       reported = true;
       inputTokens += message.usage.inputTokens;
       outputTokens += message.usage.outputTokens;

@@ -6,7 +6,7 @@ are its implementation.
 
 | Subsystem | Entry point | What it owns |
 | --- | --- | --- |
-| Session | `src/agent_runtime/session/index.ts` | One conversation: history, participants, turns, checkpoints, queue, draft. |
+| Session | `src/agent_runtime/session/index.ts` | One conversation: history, participants, turns, checkpoints, queue, draft, compaction. |
 | Turn loop | `src/agent_runtime/chat.ts`, `turn.ts`, `agent.ts` | Running one agent turn: provider requests alternating with tool calls. |
 | Providers | `src/agent_runtime/providers/index.ts` | Which vendor serves a model, with which credential, with what fallback. |
 | Tools | `src/agent_runtime/tools/index.ts` | The tools a model may call and the toolbox a turn hands its transport. |
@@ -23,11 +23,12 @@ One user prompt, in the order a reader opens the files:
 1. `frontend/chat/Chat.tsx` — `send()` builds the user `Message` and calls
    `session.sendMessage(msg)`.
 2. `agent_runtime/session/index.ts` — `Session.sendMessage` routes the mentions through
-   `ParticipantRoster`, appends to `Transcript`, takes the pre-turn checkpoint, and hands the
-   round, with a `toolboxFor` factory, to `TurnRunner`, which builds one `Toolbox` per
-   participant.
+   `ParticipantRoster`, compacts the history first if the window is full
+   (`agent_runtime/compaction.ts`), appends to `Transcript`, takes the pre-turn checkpoint,
+   and hands the round, with a `toolboxFor` factory, to `TurnRunner`, which builds one
+   `Toolbox` per participant.
 3. `agent_runtime/session/turnRunner.ts` — the round loop; for each mentioned agent it calls
-   `participant.respond(history, …)`.
+   `participant.respond(history, …)` with the history from the latest compaction summary on.
 4. `agent_runtime/agent.ts` — `SessionAgent.respond` opens a `TurnContext`
    (`agent_runtime/turn.ts`) and calls `getResponse`.
 5. `agent_runtime/chat.ts` — `getResponse` asks `providerForModel(agent.model)` and loops:
@@ -63,6 +64,16 @@ collaborators in the same folder, each constructible on its own:
 
 Every turn gets a `Toolbox` built by the session from the tool registry, the permission
 context, the checkpoint barrier, and a `SubagentHost` bound to the acting agent.
+
+Context compaction lives in `agent_runtime/compaction.ts`. When the last reported window is
+over `COMPACTION_THRESHOLD`, `sendMessage` runs one tool-less turn of the answering
+participant's model over the rendered history and appends the result as a user-role message
+carrying a `compaction` record. The transcript keeps every earlier message; `activeContext`
+is the one function that cuts the history a provider is sent to the latest summary, and the
+session resets every provider runtime so a subscription process reads the summary rather
+than its own copy of the conversation. Checkpoints index the full transcript, so a chat
+rewind to before a summary restores the uncompacted context. `/compact` runs the same step
+by hand and toggles the `autoCompact` setting.
 
 ## Providers
 

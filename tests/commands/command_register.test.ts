@@ -16,7 +16,8 @@ import { providerFor } from '../../src/agent_runtime/providers';
 import { resolveModelReference } from '../../src/commands/agents/behavior';
 import type { Feedback } from '../../src/commands/feedback';
 import { loadSirusModelPreference, saveSirusModelPreference } from '../../src/persistence';
-
+import { isAutoCompactEnabled } from '../../src/agent_runtime/compaction';
+import { boundTransports } from '../../src/agent_runtime/providers';
 function runCommand(
   command: string,
   args: string[],
@@ -457,5 +458,57 @@ describe('credential commands', () => {
       text: 'Nothing to sign out of for claude.',
     });
     expect(providerFor('claude').sources.list()).not.toEqual([]);
+  });
+});
+
+describe('compact command', () => {
+  test('compacts the session now and sets automatic compaction', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'sirus-compact-command-'));
+    const previousDirectory = process.env.SIRUS_DATA_DIR;
+    process.env.SIRUS_DATA_DIR = directory;
+    const model = 'test-compact-command';
+    boundTransports[model] = {
+      getResponse: async () => ({
+        content: [{ type: 'text', text: 'Summary.' }],
+        stop_reason: 'end_turn',
+        usage: { inputTokens: 100, outputTokens: 10, contextTokens: 110 },
+      }),
+    };
+    try {
+      const session = new Session({ model });
+      session.append({ role: 'user', content: [{ type: 'text', text: 'hello' }] });
+      session.append({
+        role: 'assistant',
+        model,
+        content: [{ type: 'text', text: 'hi' }],
+        usage: { inputTokens: 149_000, outputTokens: 1_000, contextTokens: 150_000, contextWindow: 200_000 },
+      });
+
+      expect(await runCommand('compact', [], session)).toEqual({
+        kind: 'success',
+        text: 'Compacted 2 messages into a summary (ctx 150k → ~10). Automatic compaction is on.',
+      });
+      expect(session.getMessages().at(-1)?.compaction).toEqual({ messages: 2, tokensBefore: 150_000, trigger: 'manual' });
+
+      expect(await runCommand('compact', ['off'], session)).toEqual({
+        kind: 'success',
+        text: 'Automatic compaction set to off.',
+      });
+      expect(isAutoCompactEnabled()).toBe(false);
+      expect(await runCommand('compact', ['on'], session)).toEqual({
+        kind: 'success',
+        text: 'Automatic compaction set to on.',
+      });
+      expect(isAutoCompactEnabled()).toBe(true);
+
+      await expect(runCommand('compact', ['maybe'], session)).rejects.toThrow('Usage: /compact [on|off]');
+      expect(() => runCommand('compact', ['on', 'off'], session)).toThrow('Usage: /compact [on|off]');
+      expect(matchCommands('/comp').map(command => command.name)).toEqual(['compact']);
+    } finally {
+      delete boundTransports[model];
+      if (previousDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
+      else process.env.SIRUS_DATA_DIR = previousDirectory;
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });

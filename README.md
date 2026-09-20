@@ -95,6 +95,14 @@ Sirus can remember durable preferences and project decisions, then retrieve them
 
 Memory is enabled by default. Ask Sirus to remember, update, or forget something, or use `/memory off` to disable agent access. Memories are stored locally.
 
+### Context that compacts itself
+
+Long sessions fill the model's window. When the context gauge under the input reaches 80% of it, the next prompt first folds the conversation so far into a summary written by the participant about to answer, on its own model. The summary takes the place of the earlier messages in what the models read; the messages themselves stay in the chat, under a `context compacted` rule you can click to read the summary.
+
+Use `/compact` to fold the history now, and `/compact off` or `/compact on` to turn the automatic step off or on. `/undo` and `/rewind` treat a summary like any other message: rewinding the chat to before one brings the full conversation back into context.
+
+Claude and ChatGPT subscription runtimes also compact their own conversation, including in the middle of a very long turn. That stays on; Sirus's summary is the one shared across participants, models, and sessions restored from disk.
+
 ### Keep several tasks moving
 
 Create sessions, name them, and switch between them from the sidebar. Each session retains its working directory, conversation, participants, model choices, and permission mode. Existing sessions keep their model settings when you change models elsewhere.

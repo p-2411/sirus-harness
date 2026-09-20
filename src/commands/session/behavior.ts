@@ -1,15 +1,40 @@
+import { isAutoCompactEnabled, setAutoCompactEnabled } from '../../agent_runtime/compaction';
 import {
   PERMISSION_MODE_NAMES,
   PERMISSION_MODES,
   parsePermissionMode,
   type PermissionMode,
 } from '../../agent_runtime/permissions/policy';
+import { formatTokens } from '../../agent_runtime/usage';
 import type { Feedback } from '../feedback';
 import type { CommandMenuItem, CommandSession } from '../types';
 
 export function clearSession(session: CommandSession): Feedback {
   session.clear();
   return { kind: 'success', text: 'History cleared.' };
+}
+
+// /compact folds the history into a summary now; /compact on|off says
+// whether sessions do that by themselves when the window fills.
+export async function compactCommand(
+  mode: string | undefined,
+  session: CommandSession,
+  signal?: AbortSignal,
+): Promise<Feedback> {
+  if (mode === 'on' || mode === 'off') {
+    setAutoCompactEnabled(mode === 'on');
+    return { kind: 'success', text: `Automatic compaction set to ${mode}.` };
+  }
+  if (mode !== undefined) throw new Error('Usage: /compact [on|off]');
+  const result = await session.compact(signal);
+  const size = result.tokensBefore > 0
+    ? ` (ctx ${formatTokens(result.tokensBefore)} → ~${formatTokens(result.tokensAfter)})`
+    : '';
+  return {
+    kind: 'success',
+    text: `Compacted ${result.messages} message${result.messages === 1 ? '' : 's'} into a summary${size}. `
+      + `Automatic compaction is ${isAutoCompactEnabled() ? 'on' : 'off'}.`,
+  };
 }
 
 export function renameSession(name: string, session: CommandSession): Feedback {

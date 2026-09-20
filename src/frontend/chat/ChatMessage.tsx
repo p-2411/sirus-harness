@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import type { ImageBlock, Message, MessageBlock, ToolCallBlock, ToolResultBlock } from '../../agent_runtime/types';
+import type { CompactionInfo, ImageBlock, Message, MessageBlock, ToolCallBlock, ToolResultBlock } from '../../agent_runtime/types';
 import { Box, Text, type DOMElement } from 'ink';
 import { theme } from '../styles/theme';
 import { Markdown } from '../markdown/Markdown';
 import { describeImage } from '../../images';
+import { formatTokens } from '../../agent_runtime/usage';
 import { participantColor, type ParticipantColors } from '../MentionText';
 import { useClickable } from '../interaction/clickable';
 import {
@@ -357,6 +358,40 @@ function renderToolBlock(
 	);
 }
 
+// A compaction summary: one rule across the history saying what was folded
+// into it, and on a click the summary itself, since it is all the agents
+// now know of the conversation above it.
+function CompactionBoundary({ info, message, participantColors }: {
+	info: CompactionInfo;
+	message: Message;
+	participantColors?: ParticipantColors;
+}) {
+	const [expanded, setExpanded] = useState(false);
+	const toggle = useCallback(() => setExpanded(current => !current), []);
+	const ref = useRef<DOMElement>(null);
+	const hovered = useClickable(ref, toggle);
+	const summary = message.content
+		.filter((block): block is Extract<MessageBlock, { type: 'text' }> => block.type === 'text')
+		.map(block => block.text)
+		.join('\n');
+	const folded = `${info.messages} message${info.messages === 1 ? '' : 's'}`;
+	const size = info.tokensBefore > 0 ? ` · ${formatTokens(info.tokensBefore)} tokens` : '';
+	return (
+		<Box flexDirection="column" paddingX={3} marginBottom={1} flexShrink={0}>
+			<Box ref={ref}>
+				<Text color={hovered ? theme.accentSoft : theme.textMuted} wrap="truncate-end">
+					── context compacted · {folded} summarised{size} · {expanded ? 'hide' : 'show'} summary ──
+				</Text>
+			</Box>
+			{expanded && (
+				<Box marginTop={1} marginLeft={2}>
+					<Markdown participantColors={participantColors}>{summary}</Markdown>
+				</Box>
+			)}
+		</Box>
+	);
+}
+
 export function ChatMessage({
 	message,
 	model,
@@ -368,6 +403,9 @@ export function ChatMessage({
 	model?: string;
 	participantColors?: ParticipantColors;
 }) {
+	if (message.compaction) {
+		return <CompactionBoundary info={message.compaction} message={message} participantColors={participantColors} />;
+	}
 	const isUser = message.role === "user";
 	const participantName = message.participant ?? 'sirus';
 	const results = new Map(

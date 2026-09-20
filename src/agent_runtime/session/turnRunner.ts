@@ -1,5 +1,6 @@
 import { isAbortError } from '../../abort';
 import type { SessionAgent } from '../agent';
+import { activeContext } from '../compaction';
 import type { Toolbox } from '../tools';
 import { keyOf, type ParticipantRoster } from './roster';
 import type { Transcript } from './transcript';
@@ -48,9 +49,10 @@ export class TurnRunner {
     // one invocation with all mentions in history. Participants remain free to
     // invoke one another again in later rounds for a back-and-forth exchange.
     while (pending.length > 0) {
-      // Every participant in a round receives the same immutable snapshot and
-      // starts before any response is awaited, preserving parallel execution.
-      const history = [...transcript.history()];
+      // Every participant in a round receives the same immutable snapshot,
+      // from the latest compaction summary on, and starts before any response
+      // is awaited, preserving parallel execution.
+      const history = activeContext(transcript.history());
       const round = transcript.openRound(pending.map(({ participant }) => ({
         role: 'assistant' as const,
         participant: participant.name,

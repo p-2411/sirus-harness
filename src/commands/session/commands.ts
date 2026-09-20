@@ -1,10 +1,20 @@
-import { clearSession, permissionsCommand, permissionsMenuItems, renameSession } from './behavior';
+import { clearSession, compactCommand, permissionsCommand, permissionsMenuItems, renameSession } from './behavior';
 import type { CommandSpec } from '../types';
 
 export const clearCommand: CommandSpec = {
   name: 'clear',
   description: 'clear the history',
   run: (_args, context) => clearSession(context.session),
+};
+
+export const compactCommandSpec: CommandSpec = {
+  name: 'compact',
+  args: '[on|off]',
+  description: 'summarise the history to free context, or set automatic compaction',
+  run: (args, context) => {
+    if (args.length > 1) throw new Error('Usage: /compact [on|off]');
+    return compactCommand(args[0], context.session, context.signal);
+  },
 };
 
 export const renameCommand: CommandSpec = {

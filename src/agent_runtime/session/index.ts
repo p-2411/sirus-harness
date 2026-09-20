@@ -1,5 +1,13 @@
 import crypto from 'crypto';
 import type { SessionAgent } from '../agent';
+import {
+  activeContext,
+  isAutoCompactEnabled,
+  needsCompaction,
+  summarizeHistory,
+  type CompactionResult,
+  type CompactionTrigger,
+} from '../compaction';
 import { isMemoryAccessEnabled } from '../memory-access';
 import { DEFAULT_PERMISSION_MODE, type PermissionContext, type PermissionMode } from '../permissions/policy';
 import { DEFAULT_MODEL } from '../providers/catalog';
@@ -8,7 +16,7 @@ import { createToolbox, type Toolbox } from '../tools/toolbox';
 import type { Message, ThinkingLevel } from '../types';
 import type { ContextUsage } from '../usage';
 import { parseFileMentions, resolveFileMentions } from '../../fileMentions';
-import { isAbortError } from '../../abort';
+import { TurnCancelledError, isAbortError } from '../../abort';
 import { ChangeFeed } from './changeFeed';
 import {
   CheckpointLog,
@@ -28,6 +36,7 @@ import { TurnRunner } from './turnRunner';
 // callers have always found it.
 export { DEFAULT_MODEL, NAME_PATTERN_SOURCE, defaultDirectoryActivity, isAutoSendable };
 export { SESSION_NAME_LIMIT } from './naming';
+export type { CompactionResult } from '../compaction';
 export type {
   Checkpoint,
   DirectoryActivity,
@@ -163,6 +172,8 @@ export class Session {
   private lastTurnCancelled = false;
   private rewinding = false;
   private activeTurnStartedAt: number | null = null;
+  // The compaction in flight, if one is: cancel() stops it like a turn.
+  private compaction: AbortController | null = null;
 
   constructor(options: SessionOptions = {}) {
     const resolved = resolveSessionOptions(options);
@@ -228,6 +239,7 @@ export class Session {
     if (this.rewinding || this.checkpoints.isRestoringDirectory()) {
       throw new Error('Wait for the rewind to finish before sending a message.');
     }
+    if (this.compaction) throw new Error('Wait for the context compaction to finish before sending a message.');
 
     if (this.activeSends === 0) {
       this.turnFailed = false;
@@ -264,6 +276,14 @@ export class Session {
       if (this.activeSends === 1) this.transcript.startConversationIfNeeded(Date.now());
       accepted = true;
       this.append(stored);
+      // A full window is folded before the turn starts: the summary of the
+      // conversation up to this prompt goes in ahead of it, so the provider
+      // reads the summary and then the prompt. The participant about to
+      // answer writes the summary, on its own model. The prompt is already
+      // in the history, as a prompt whose turn fails would be.
+      if (isAutoCompactEnabled() && needsCompaction(this.getContextUsage())) {
+        await this.runCompaction('auto', targets[0], { keep: 1 });
+      }
       // Start the provider immediately, while the pre-turn snapshot is taken
       // in parallel. Every mutating tool call waits for this barrier, so agent
       // writes cannot race ahead of the checkpoint.
@@ -298,15 +318,83 @@ export class Session {
     return this.roster.activeSubagentCount();
   }
 
-  // Stops this session's turns and subagents, including detached workers.
+  // Stops this session's turns and subagents, including detached workers,
+  // and a compaction in flight.
   cancel(): boolean {
-    return this.roster.cancel();
+    const cancelled = this.roster.cancel();
+    if (!this.compaction) return cancelled;
+    this.compaction.abort(new TurnCancelledError());
+    return true;
+  }
+
+  // Folds the history since the last summary into a new one, on the given
+  // participant's model, and starts every provider runtime afresh so each
+  // reads the summary rather than the conversation it stands for. The last
+  // `keep` messages stay out of the summary and after it: the prompt a turn
+  // is about to send.
+  private async runCompaction(
+    trigger: CompactionTrigger,
+    agent: SessionAgent,
+    options: { signal?: AbortSignal; keep?: number } = {},
+  ): Promise<CompactionResult> {
+    const { signal, keep = 0 } = options;
+    const context = activeContext(this.transcript.history());
+    const messages = context.slice(0, context.length - keep);
+    if (messages.length === 0) throw new Error('There is no history to compact.');
+    if (messages.length === 1 && messages[0].compaction) throw new Error('The history is already compacted.');
+    const controller = new AbortController();
+    const forward = () => controller.abort(signal?.reason);
+    if (signal?.aborted) forward();
+    else signal?.addEventListener('abort', forward, { once: true });
+    this.compaction = controller;
+    this.changes.notify();
+    try {
+      const usage = this.getContextUsage();
+      const summary = await summarizeHistory({
+        messages,
+        agent,
+        directory: this.directory,
+        trigger,
+        usage,
+        signal: controller.signal,
+      });
+      this.transcript.compact(summary, this.transcript.length - keep);
+      this.roster.resetRuntimes();
+      return {
+        messages: messages.length,
+        tokensBefore: usage?.tokens ?? 0,
+        tokensAfter: summary.usage?.contextTokens ?? 0,
+      };
+    } finally {
+      signal?.removeEventListener('abort', forward);
+      this.compaction = null;
+      this.changes.notify();
+    }
+  }
+
+  // Folds the whole active history into a summary now, on the default
+  // participant's model. Like a rewind, it waits for nothing else to be
+  // running and nothing else runs meanwhile.
+  async compact(signal?: AbortSignal): Promise<CompactionResult> {
+    if (this.activeSends > 0 || this.rewinding || this.compaction) {
+      throw new Error('Wait for the current operation to finish before compacting.');
+    }
+    this.setStatus('working');
+    try {
+      return await this.runCompaction('manual', this.roster.default, { signal });
+    } finally {
+      this.setStatus(this.turnFailed ? 'error' : 'idle');
+    }
+  }
+
+  isCompacting(): boolean {
+    return this.compaction !== null;
   }
 
   // A provider-side conversation must not outlive the history it mirrors.
   // Checkpoints go with it: they point into the history that was cleared.
   clear(): void {
-    if (this.activeSends > 0 || this.rewinding) throw new Error('Wait for the current operation to finish before clearing the session.');
+    if (this.activeSends > 0 || this.rewinding || this.compaction) throw new Error('Wait for the current operation to finish before clearing the session.');
     if (this.transcript.isEmpty()) return;
     this.stopNaming();
     this.transcript.clear();
@@ -325,7 +413,7 @@ export class Session {
   async rewind(checkpointId: string, options: RewindOptions): Promise<RewindResult> {
     if (!options.files && !options.chat) throw new Error('Nothing to restore: choose files, chat, or both.');
     if (this.rewinding) throw new Error('Wait for the current rewind to finish.');
-    if (this.activeSends > 0) throw new Error('Wait for the current turn to finish before rewinding.');
+    if (this.activeSends > 0 || this.compaction) throw new Error('Wait for the current turn to finish before rewinding.');
     if (options.chat && this.roster.hasWorkingSubagents()) {
       throw new Error('Wait for this session’s subagents to finish before rewinding its chat.');
     }

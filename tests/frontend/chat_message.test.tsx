@@ -246,3 +246,53 @@ describe('chat message', () => {
     expect(output).not.toMatch(/[›⌄]/);
   });
 });
+
+describe('compaction boundary', () => {
+  const summary = {
+    role: 'user' as const,
+    content: [{ type: 'text' as const, text: 'Earlier conversation compacted: the summary body.' }],
+    compaction: { messages: 12, tokensBefore: 165_000, trigger: 'auto' as const },
+  };
+
+  test('renders a compaction summary as a rule rather than a user message', () => {
+    const output = stripAnsi(renderToString(
+      <ChatMessage message={summary} model="gpt-5.6-sol" />,
+      { columns: 120 },
+    ));
+    expect(output).toContain('context compacted · 12 messages summarised · 165k tokens · show summary');
+    expect(output).not.toContain('you');
+    expect(output).not.toContain('gpt-5.6-sol');
+    expect(output).not.toContain('the summary body');
+  });
+
+  test('shows the summary on a click and hides it on the next', async () => {
+    const stdout = Object.assign(new PassThrough(), { columns: 120 }) as unknown as NodeJS.WriteStream;
+    const frames: string[] = [];
+    stdout.on('data', data => frames.push(stripAnsi(data.toString())));
+    const app = render(<ChatMessage message={summary} />, {
+      stdout, debug: true, patchConsole: false, exitOnCtrlC: false,
+    });
+    try {
+      await app.waitUntilRenderFlush();
+      expect(frames.at(-1)).not.toContain('the summary body');
+      await new Promise<void>(resolve => setImmediate(resolve));
+      const rule = { col: 6, line: 0 };
+      expect(pressAt(rule)).toBe(true);
+      expect(releaseAt(rule)).toBe(true);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      await app.waitUntilRenderFlush();
+      expect(frames.at(-1)).toContain('hide summary');
+      expect(frames.at(-1)).toContain('the summary body');
+
+      expect(pressAt(rule)).toBe(true);
+      expect(releaseAt(rule)).toBe(true);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      await app.waitUntilRenderFlush();
+      expect(frames.at(-1)).toContain('show summary');
+      expect(frames.at(-1)).not.toContain('the summary body');
+    } finally {
+      app.unmount();
+      await app.waitUntilExit();
+    }
+  });
+});

@@ -1,6 +1,7 @@
 import type { PermissionMode } from '../agent_runtime/permissions/policy';
 import type {
   Checkpoint,
+  CompactionResult,
   RewindOptions,
   RewindResult,
   TokenTotals,
@@ -37,6 +38,7 @@ export type { Notify } from '../agent_runtime/providers/login';
 export interface CommandSession {
   changeParticipantModel(participantName: string, newModel: string): void;
   clear(): void;
+  compact(signal?: AbortSignal): Promise<CompactionResult>;
   getCheckpoints(): Checkpoint[];
   getContextUsage(): ContextUsage | null;
   getDirectory(): string;

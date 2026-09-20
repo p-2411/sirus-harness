@@ -96,9 +96,10 @@ export function formatElapsed(ms: number): string {
 
 // The line at the foot of the history while a turn runs: what the agents are
 // doing, or that they are waiting on the user, and for how long.
-function TurnStatus({ messages, awaitingApproval, startedAt }: {
+function TurnStatus({ messages, awaitingApproval, compacting, startedAt }: {
   messages: readonly Message[];
   awaitingApproval: boolean;
+  compacting: boolean;
   startedAt: number;
 }) {
   const [now, setNow] = useState(() => Date.now());
@@ -106,7 +107,9 @@ function TurnStatus({ messages, awaitingApproval, startedAt }: {
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
-  const phase = awaitingApproval ? 'waiting for your approval' : turnPhase(messages);
+  const phase = awaitingApproval ? 'waiting for your approval'
+    : compacting ? 'compacting context'
+      : turnPhase(messages);
   return (
     <Box paddingX={3} marginBottom={1}>
       <Spinner />
@@ -492,6 +495,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         <TurnStatus
           messages={messages}
           awaitingApproval={approvals.length > 0}
+          compacting={currSession.isCompacting()}
           startedAt={currSession.getActiveTurnStartedAt() ?? commandStartedAt ?? Date.now()}
         />
       )}

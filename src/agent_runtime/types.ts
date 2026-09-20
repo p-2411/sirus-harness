@@ -46,6 +46,20 @@ export interface Usage {
   contextWindow?: number;
 }
 
+// The record a compaction summary carries: the messages before it in the
+// transcript were folded into its text, and providers read the history from
+// it onward. Those messages stay in the transcript for the reader and for
+// rewinds; only the request history starts here.
+export interface CompactionInfo {
+  // How many earlier transcript messages the summary stands in for.
+  messages: number;
+  // The window those messages occupied when compaction was decided, as the
+  // last response had reported it; zero when nothing had been reported.
+  tokensBefore: number;
+  // The window filling up, or the user asking.
+  trigger: 'auto' | 'manual';
+}
+
 export interface Message {
   role: 'user' | 'assistant';
   content: MessageBlock[];
@@ -54,10 +68,16 @@ export interface Message {
   // are treated as coming from the default participant.
   participant?: string;
   // Captured on agent responses so the UI can show the model that produced a
-  // historical message even if that participant changes models later.
+  // historical message even if that participant changes models later. On a
+  // compaction summary, the model that wrote the summary.
   model?: string;
-  // Present on agent responses whose provider reported token usage.
+  // Present on agent responses whose provider reported token usage, and on a
+  // compaction summary, where the context figure is the summary's own size:
+  // the window the next request starts from.
   usage?: Usage;
+  // Present on a compaction summary: a user-role message every provider is
+  // sent as plain text, standing in for the transcript before it.
+  compaction?: CompactionInfo;
 }
 
 // The reasoning depth a user picks per agent. Providers translate the shared

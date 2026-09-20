@@ -43,6 +43,12 @@ const usageSchema = z.object({
   contextWindow: z.number().optional(),
 });
 
+const compactionSchema = z.object({
+  messages: z.number().int().nonnegative(),
+  tokensBefore: z.number().nonnegative(),
+  trigger: z.enum(['auto', 'manual']),
+});
+
 const messageSchema = z.object({
   role: z.enum(['user', 'assistant']),
   content: z.array(z.discriminatedUnion('type', [
@@ -54,6 +60,9 @@ const messageSchema = z.object({
   participant: z.string().min(1).optional(),
   model: z.string().min(1).optional(),
   usage: usageSchema.optional(),
+  // A compaction summary; absent on every ordinary message and in files
+  // written before compaction existed.
+  compaction: compactionSchema.optional(),
 });
 
 const participantSchema = z.object({
