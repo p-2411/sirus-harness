@@ -1,8 +1,9 @@
-// How full an agent's context window is, for the status row and /usage.
+// How full an agent's context window is, for the status row and /usage. The
+// runtime reports both figures with every usage update; there is nothing
+// until its first.
 export interface ContextUsage {
   tokens: number;
-  // Absent when neither the provider nor Sirus knows the model's window.
-  window?: number;
+  window: number;
 }
 
 export function formatTokens(count: number): string {

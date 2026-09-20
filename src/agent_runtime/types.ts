@@ -1,22 +1,8 @@
 export interface TextBlock {
   type: 'text';
   text: string;
-  // Snapshot of a mentioned file; render compactly while providers receive text.
+  // Snapshot of a mentioned file; render compactly while runtimes receive text.
   filePath?: string;
-}
-
-export interface ToolCallBlock {
-  type: 'tool_call';
-  id: string;
-  name: string;
-  arguments: Record<string, unknown>;
-}
-
-export interface ToolResultBlock {
-  type: 'tool_result';
-  callId: string;
-  result: string;
-  isError: boolean;
 }
 
 export const IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] as const;
@@ -25,7 +11,7 @@ export type ImageMediaType = typeof IMAGE_MEDIA_TYPES[number];
 
 // An image the user attached to a message. The bytes live in a file under
 // the application-state directory, so the persisted history stays small and
-// each provider reads the file only when it builds a request.
+// the runtime reads the file only when it builds a prompt.
 export interface ImageBlock {
   type: 'image';
   path: string;
@@ -33,55 +19,90 @@ export interface ImageBlock {
   bytes: number;
 }
 
-export type MessageBlock = TextBlock | ImageBlock | ToolCallBlock | ToolResultBlock;
-
-// Token accounting for one agent turn, as the provider reported it. Totals
-// cover every request of the turn; context is the size of the last request,
-// which is what the model had in its window when it finished.
-export interface Usage {
-  inputTokens: number;
-  outputTokens: number;
-  contextTokens: number;
-  // The model's window, when the provider states it.
-  contextWindow?: number;
+// Reasoning the runtime streamed as thought chunks. Rendered as thinking;
+// never part of what a rebuilt runtime is reseeded with.
+export interface ThoughtBlock {
+  type: 'thought';
+  text: string;
 }
 
-// The record a compaction summary carries: the messages before it in the
-// transcript were folded into its text, and providers read the history from
-// it onward. Those messages stay in the transcript for the reader and for
-// rewinds; only the request history starts here.
-export interface CompactionInfo {
-  // How many earlier transcript messages the summary stands in for.
-  messages: number;
-  // The window those messages occupied when compaction was decided, as the
-  // last response had reported it; zero when nothing had been reported.
-  tokensBefore: number;
-  // The window filling up, or the user asking.
-  trigger: 'auto' | 'manual';
+// The runtime folded its own conversation at this point. The summary is what
+// it reported, when it reported one; a rebuilt runtime is reseeded from here.
+export interface CompactionBlock {
+  type: 'compaction';
+  summary?: string;
 }
 
+// ACP's vocabulary for what a tool call does. The kind picks the verb and the
+// icon; the title is the line.
+export const TOOL_KINDS = ['read', 'edit', 'delete', 'move', 'search', 'execute', 'think', 'fetch', 'switch_mode', 'other'] as const;
+
+export type ToolKind = typeof TOOL_KINDS[number];
+
+export const TOOL_CALL_STATUSES = ['pending', 'in_progress', 'completed', 'failed'] as const;
+
+export type ToolCallStatus = typeof TOOL_CALL_STATUSES[number];
+
+export interface ToolCallDiff {
+  type: 'diff';
+  path: string;
+  // Null for a new file.
+  oldText: string | null;
+  newText: string;
+}
+
+// Text the call produced: content blocks and terminal output alike.
+export interface ToolCallText {
+  type: 'text';
+  text: string;
+}
+
+export type ToolCallContent = ToolCallDiff | ToolCallText;
+
+export interface ToolCallLocation {
+  path: string;
+  line?: number;
+}
+
+// One tool call as the runtime reported it, with every later update folded
+// in. The runtime ran it; Sirus only records what the updates carried.
+export interface ToolCallBlock {
+  type: 'tool_call';
+  id: string;
+  title: string;
+  kind: ToolKind;
+  status: ToolCallStatus;
+  locations: ToolCallLocation[];
+  content: ToolCallContent[];
+  // The call's arguments and result, as the runtime chose to expose them.
+  input?: unknown;
+  output?: unknown;
+}
+
+export type MessageBlock = TextBlock | ImageBlock | ThoughtBlock | CompactionBlock | ToolCallBlock;
+
+// One entry of a participant's transcript. The same object sits in every
+// transcript it was delivered to, so the session's timeline is the union of
+// the transcripts ordered by seq.
 export interface Message {
+  // Session-wide order, stamped when the entry enters its first transcript.
+  // A checkpoint records the seq at capture; a rewind drops everything from
+  // that seq on.
+  seq: number;
   role: 'user' | 'assistant';
   content: MessageBlock[];
-  // Present on agent messages so a shared multi-participant transcript keeps
-  // the identity of the agent that produced it. Legacy messages omit it and
-  // are treated as coming from the default participant.
+  // Assistant entries: the participant that wrote it.
   participant?: string;
-  // Captured on agent responses so the UI can show the model that produced a
-  // historical message even if that participant changes models later. On a
-  // compaction summary, the model that wrote the summary.
+  // The participants whose transcripts hold this entry besides its author: a
+  // user prompt's targets, a response's mentioned peers. Absent means none.
+  to?: string[];
+  // Captured on assistant entries so the UI can show the model that produced
+  // a historical message even if that participant changes models later.
   model?: string;
-  // Present on agent responses whose provider reported token usage, and on a
-  // compaction summary, where the context figure is the summary's own size:
-  // the window the next request starts from.
-  usage?: Usage;
-  // Present on a compaction summary: a user-role message every provider is
-  // sent as plain text, standing in for the transcript before it.
-  compaction?: CompactionInfo;
 }
 
-// The reasoning depth a user picks per agent. Providers translate the shared
-// level into whatever their models accept.
+// The reasoning depth a user picks per agent. Runtimes translate the shared
+// level into whatever effort option the vendor exposes.
 export const THINKING_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 
 export type ThinkingLevel = typeof THINKING_LEVELS[number];
@@ -100,4 +121,12 @@ export function parseThinkingLevel(value: unknown): ThinkingLevel | null {
   return typeof value === 'string' && (THINKING_LEVELS as readonly string[]).includes(value)
     ? value as ThinkingLevel
     : null;
+}
+
+// The prose of a message: its text blocks joined with exactly one newline.
+export function textOf(message: Pick<Message, 'content'>): string {
+  return message.content
+    .filter((block): block is TextBlock => block.type === 'text')
+    .map(block => block.text)
+    .join('\n');
 }
