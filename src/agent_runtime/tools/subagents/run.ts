@@ -4,32 +4,25 @@ import os from 'os';
 import path from 'path';
 import { abortable, isAbortError, TurnCancelledError } from '../../../abort';
 import type { SessionAgent } from '../../agent';
-import type { PermissionContext } from '../../permissions/policy';
 import { servableModelIds, servesModel } from '../../providers';
 import type { Message } from '../../types';
-import { createToolbox } from '../toolbox';
 import { allSubagents, notifySubagents, registerSubagent, type SubagentRun } from './index';
 import { CHECK_WAIT_LIMIT_MS, describeRun, finalMessageOf, renderTranscript, summarizeChanges } from './report';
 
-// A subagent is one detached run of the agent loop, owned by the agent that
-// spawned it: it receives a single task, works with the ordinary tools in the
-// owner's directory, and hands back a final message plus a summary of what it
-// changed. Only the owner can see or steer a run.
+// A subagent is one detached worker owned by the agent that spawned it: it
+// receives a single task, runs its vendor's own tools in the owner's
+// directory under the owner's session mode and gate, and hands back a final
+// message plus a summary of what it changed. Only the owner can see or
+// steer a run.
 
 export interface SubagentSpawnOptions {
-  // Where the run works: the owner's turn directory.
-  directory: string;
   callId?: string;
   // The owner's turn: when it is cancelled, so is the run.
   signal?: AbortSignal;
-  permissions?: PermissionContext;
-  // The owner's pre-turn checkpoint. A worker's writes wait for it too, so a
-  // delegated write cannot beat the snapshot either.
-  beforeMutation?: () => Promise<void>;
 }
 
-// While a run works its transcript streams into a temporary file, so the
-// owner can look in on it with the ordinary file tools. The stream file is a
+// While a run works its record streams into a temporary file, so the owner
+// can look in on it with its ordinary file tools. The stream file is a
 // convenience: losing it must never fail the run itself.
 
 let exitCleanupInstalled = false;
@@ -69,7 +62,7 @@ export function writeStreamFile(run: SubagentRun): void {
   try {
     writeFileSync(run.streamFile, streamContents(run), 'utf8');
   } catch {
-    // ignore: the transcript stays available through CheckAgent
+    // ignore: the record stays available through CheckAgent
   }
 }
 
@@ -105,32 +98,35 @@ export function startSubagent(
     throw new Error(`Unknown model "${model}". Try: ${servableModelIds().join(', ')}`);
   }
   const id = `sub-${crypto.randomUUID().slice(0, 8)}`;
+  const worker = owner.createSubagent(id, model);
+  // The worker's record: the task, then the one entry its turn fills in.
+  // Its seqs are its own; nothing of it enters the session's timeline.
+  const task: Message = { seq: 0, role: 'user', content: [{ type: 'text', text: prompt }] };
+  const entry: Message = { seq: 1, role: 'assistant', participant: worker.name, model, content: [] };
+  worker.transcript.append(task);
+  worker.transcript.append(entry);
   const run: SubagentRun = {
     id,
     callId: options.callId ?? null,
-    sessionId: options.permissions?.sessionId ?? null,
+    sessionId: owner.sessionId,
     owner,
-    worker: owner.createSubagent(id, model),
+    worker,
     model,
     prompt,
-    directory: options.directory,
+    directory: owner.directory,
     status: 'working',
     streamFile: null,
     startedAt: Date.now(),
     finishedAt: null,
-    content: [],
+    content: entry.content,
     finalMessage: null,
     changes: [],
     error: null,
-    // The worker answers to the owner's session and mode, as itself.
-    permissions: options.permissions
-      ? { ...options.permissions, requester: { subagent: id }, model }
-      : null,
   };
   registerSubagent(run);
   run.streamFile = createStreamFile(run);
   installExitCleanup();
-  completions.set(run.id, execute(run, options.signal, options.beforeMutation));
+  completions.set(run.id, execute(run, task, entry, options.signal));
   notifySubagents();
   return run;
 }
@@ -159,32 +155,15 @@ export async function cancelSubagent(run: SubagentRun, signal?: AbortSignal): Pr
   return describeRun(run, false);
 }
 
-async function execute(
-  run: SubagentRun,
-  parentSignal?: AbortSignal,
-  beforeMutation?: () => Promise<void>,
-): Promise<void> {
-  const task: Message = { role: 'user', content: [{ type: 'text', text: run.prompt }] };
+async function execute(run: SubagentRun, task: Message, entry: Message, parentSignal?: AbortSignal): Promise<void> {
   try {
-    const turn = run.worker.respond([task], {
-      directory: run.directory,
+    await run.worker.respond({ text: run.prompt }, {
+      entry,
+      carried: [task],
+      onUpdate: () => writeStreamFile(run),
       ...(parentSignal ? { signal: parentSignal } : {}),
-      // A worker's own toolbox: the same tools minus delegation, so it cannot
-      // spawn a worker of its own, under the owner's gate and barrier.
-      toolbox: createToolbox({
-        audience: { subagent: true },
-        directory: run.directory,
-        ...(run.permissions ? { permissions: run.permissions } : {}),
-        ...(beforeMutation ? { beforeMutation } : {}),
-      }),
     });
-    for await (const snapshot of turn.changes()) {
-      run.content = snapshot.content;
-      writeStreamFile(run);
-    }
-    const response = await turn.result;
-    run.content = response.content;
-    run.finalMessage = finalMessageOf(response.content);
+    run.finalMessage = finalMessageOf(entry.content);
     run.status = 'done';
   } catch (error) {
     if (isAbortError(error)) {
@@ -196,7 +175,7 @@ async function execute(
     }
   } finally {
     // Whatever happened, the changes made so far are what the caller must know about.
-    run.changes = summarizeChanges(run.content, run.directory);
+    run.changes = summarizeChanges(entry.content, run.directory);
     run.finishedAt = Date.now();
     removeStreamFile(run);
     run.worker.resetRuntime();

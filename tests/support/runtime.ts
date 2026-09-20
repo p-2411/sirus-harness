@@ -31,10 +31,15 @@ export interface ScriptedRuntime extends Omit<Runtime, 'context' | 'model'> {
   thinkingLevel: string;
 }
 
+// The turn each model currently runs. Read at prompt time, so rebinding a
+// model mid-test also changes what its warm runtimes do next.
+const turns = new Map<string, ScriptedTurn>();
+
 // Binds a scripted runtime to a model id so sessions run without an agent
 // process. Unbind in afterEach.
 export function bindScriptedRuntime(model: string, turn: ScriptedTurn): ScriptedBinding {
   const binding: ScriptedBinding = { starts: [], runtimes: [] };
+  turns.set(model, turn);
   boundRuntimes[model] = options => {
     binding.starts.push(options);
     const runtime: ScriptedRuntime = {
@@ -49,10 +54,20 @@ export function bindScriptedRuntime(model: string, turn: ScriptedTurn): Scripted
       async prompt(input, signal) {
         runtime.prompts.push(input);
         if (signal.aborted) throw signal.reason;
-        await turn(input, update => {
-          if (update.type === 'context') runtime.context = update.usage;
-          options.onUpdate(update);
-        }, options, signal);
+        // Like the ACP client: the turn is over the moment the signal fires,
+        // whatever the scripted turn is still waiting on.
+        const aborted = new Promise<never>((_, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+        const current = turns.get(model);
+        if (!current) throw new Error(`No scripted turn bound for ${model}`);
+        await Promise.race([
+          current(input, update => {
+            if (update.type === 'context') runtime.context = update.usage;
+            options.onUpdate(update);
+          }, options, signal),
+          aborted,
+        ]);
         if (signal.aborted) throw signal.reason;
         return { stopReason: 'end_turn' };
       },
@@ -79,6 +94,7 @@ export function bindScriptedRuntime(model: string, turn: ScriptedTurn): Scripted
 
 export function unbindRuntime(model: string): void {
   delete boundRuntimes[model];
+  turns.delete(model);
 }
 
 // A turn that says one thing.

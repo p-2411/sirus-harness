@@ -1,13 +1,13 @@
 import path from 'path';
 import type { SessionAgent } from '../../agent';
-import type { PermissionContext } from '../../permissions/policy';
 import type { MessageBlock } from '../../types';
 
-// Subagents: one detached run of the agent loop per delegated task. This file
-// is the process-wide index of runs and the change notification the UI
-// subscribes to; the lifecycle is in `run.ts` and what a run says about itself
-// is in `report.ts`, both imported directly (`run.ts` reads this index, so a
-// re-export of it here would close the loop).
+// Subagents: one detached runtime per delegated task, a worker like a
+// participant with a record of its own. This file is the process-wide index
+// of runs and the change notification the UI subscribes to; the lifecycle is
+// in `run.ts` and what a run says about itself is in `report.ts`, both
+// imported directly (`run.ts` reads this index, so a re-export of it here
+// would close the loop).
 //
 // Ownership lives on the SessionAgent that spawned a run; this index exists so
 // the chat, the notifications and the rewind interlock can see runs they do
@@ -21,7 +21,7 @@ export interface SubagentRun {
   callId: string | null;
   // The session the owning agent belongs to, so the UI can tell two sessions
   // sharing a call id apart.
-  sessionId: string | null;
+  sessionId: string;
   // The agent that spawned the run, and the agent that does its work.
   owner: SessionAgent;
   worker: SessionAgent;
@@ -32,13 +32,12 @@ export interface SubagentRun {
   streamFile: string | null;
   startedAt: number;
   finishedAt: number | null;
+  // The worker's response as it stands: the content of its one assistant
+  // entry, mutated in place while it works.
   content: MessageBlock[];
   finalMessage: string | null;
   changes: string[];
   error: string | null;
-  // The owner's permission context: the run answers to the same mode and
-  // prompts, as itself.
-  permissions: PermissionContext | null;
 }
 
 const runs = new Map<string, SubagentRun>();

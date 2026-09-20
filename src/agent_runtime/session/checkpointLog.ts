@@ -112,14 +112,14 @@ export class CheckpointLog {
     this.checkpoints = [];
   }
 
-  // Captures the directory as it stood before a turn. The caller starts the
-  // provider in parallel and makes every mutating tool wait on this promise,
-  // so agent writes cannot race ahead of the snapshot.
-  async capture(messageIndex: number, text: string): Promise<void> {
+  // Captures the directory as it stood before a turn. The vendors run their
+  // tools themselves and cannot wait on a barrier, so the caller awaits this
+  // before any runtime is prompted.
+  async capture(seq: number, text: string): Promise<void> {
     const summary = checkpointSummary(text);
     const captured = await captureCheckpoint(this.directory, summary);
     if (!captured) return;
-    this.checkpoints.push({ ...captured, messageIndex, summary });
+    this.checkpoints.push({ ...captured, seq, summary });
     this.changes.notify();
   }
 

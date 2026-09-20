@@ -1,9 +1,10 @@
 import { servableModelIds, servesModel } from '../providers';
-import { SessionAgent, type Participant } from '../agent';
-import type { Message, ThinkingLevel } from '../types';
+import { SessionAgent, type Participant, type RuntimeHost } from '../agent';
+import type { PermissionMode } from '../permissions/policy';
+import { textOf, type Message, type ThinkingLevel } from '../types';
 import { rootTextRanges, type RootTextRange } from '../../mentions';
 import type { ChangeFeed } from './changeFeed';
-import { textOf } from './transcript';
+import type { Transcript } from './transcript';
 
 export type { Participant };
 
@@ -20,6 +21,7 @@ export interface RosterOptions {
   model: string;
   defaultParticipant: string;
   participants: readonly Participant[];
+  host: RuntimeHost;
 }
 
 // The one @name grammar, shared by the mention scanner and by name
@@ -30,6 +32,10 @@ const NAME_PATTERN = new RegExp(`^${NAME_PATTERN_SOURCE}$`);
 // The trailing guard leaves scoped package names such as @scope/package as
 // ordinary prompt text rather than participant mentions.
 const mentionPattern = new RegExp(`(?<![\\w@])@(${NAME_PATTERN_SOURCE})(?![A-Za-z0-9_\\/-])`, 'g');
+
+// `/model subagent <model>` addresses the session's subagents, so no
+// participant may take the name.
+const RESERVED_NAMES = new Set(['subagent']);
 
 interface MentionMatch {
   name: string;
@@ -67,8 +73,8 @@ function requireKnownModel(model: string): void {
 
 // A model following a newly introduced @name is host routing metadata, not
 // part of the conversation. Strip it before either the UI history or any
-// provider sees the turn.
-export function stripCreationModels(message: Message, mentions: readonly Mention[]): Message {
+// runtime sees the turn.
+export function stripCreationModels<T extends Pick<Message, 'content'>>(message: T, mentions: readonly Mention[]): T {
   const spans = mentions
     .flatMap(mention => mention.modelSpan ? [mention.modelSpan] : [])
     .sort((left, right) => right.start - left.start);
@@ -107,12 +113,14 @@ export function stripCreationModels(message: Message, mentions: readonly Mention
 export class ParticipantRoster {
   private readonly sessionId: string;
   private readonly defaultName: string;
+  private readonly host: RuntimeHost;
   private readonly agents: SessionAgent[];
   private readonly defaultAgent: SessionAgent;
 
   constructor(private readonly changes: ChangeFeed, options: RosterOptions) {
     this.sessionId = options.sessionId;
     this.defaultName = options.defaultParticipant;
+    this.host = options.host;
     const restored = options.participants.map(participant => this.createAgent(participant));
     this.defaultAgent = restored.find(agent => keyOf(agent.name) === keyOf(this.defaultName))
       ?? this.createAgent({ name: this.defaultName, model: options.model });
@@ -124,13 +132,21 @@ export class ParticipantRoster {
     return this.defaultAgent;
   }
 
+  all(): readonly SessionAgent[] {
+    return this.agents;
+  }
+
+  *transcripts(): Iterable<Transcript> {
+    for (const agent of this.agents) yield agent.transcript;
+  }
+
   toParticipants(): Participant[] {
     return this.agents.map(agent => agent.toParticipant());
   }
 
   add(name: string, model: string): void {
     const normalizedName = bareName(name);
-    if (!NAME_PATTERN.test(normalizedName)) {
+    if (!NAME_PATTERN.test(normalizedName) || RESERVED_NAMES.has(keyOf(normalizedName))) {
       throw new Error(`Invalid participant name: @${normalizedName}`);
     }
     if (this.find(normalizedName)) {
@@ -143,7 +159,7 @@ export class ParticipantRoster {
 
   changeModel(participantName: string, newModel: string): void {
     requireKnownModel(newModel);
-    this.require(participantName).model = newModel;
+    this.require(participantName).setModel(newModel);
     this.changes.notify();
   }
 
@@ -155,11 +171,13 @@ export class ParticipantRoster {
     const participant = this.require(participantName);
     if (participant.thinkingLevel === level) return;
     participant.thinkingLevel = level;
-    // Subscription transports keep provider-owned sessions whose thinking
-    // options are fixed at creation. Recreate just this participant's runtime;
-    // its complete shared history is replayed on the next turn.
-    participant.resetRuntime();
     this.changes.notify();
+  }
+
+  // Applies to every live runtime now; a runtime started later starts in
+  // the session's mode anyway.
+  setPermissionMode(mode: PermissionMode): void {
+    for (const agent of this.agents) agent.setPermissionMode(mode);
   }
 
   // Reads the @names out of a user prompt without creating anything, so a
@@ -248,29 +266,30 @@ export class ParticipantRoster {
     return cancelled;
   }
 
-  // Drops what every provider keeps between turns: a provider-side
-  // conversation must not outlive the history it mirrors.
+  // Drops every vendor runtime: a runtime's conversation must not outlive
+  // the record it mirrors.
   resetRuntimes(): void {
     for (const agent of this.agents) agent.resetRuntime();
   }
 
-  private find(name: string): SessionAgent | undefined {
+  find(name: string): SessionAgent | undefined {
     const key = keyOf(bareName(name));
     return this.agents.find(agent => keyOf(agent.name) === key);
   }
 
-  private require(name: string): SessionAgent {
+  require(name: string): SessionAgent {
     const participant = this.find(name);
     if (!participant) throw new Error(`Participant ${name} not found`);
     return participant;
   }
 
   // The session's default agent keeps the session id as its runtime id, so
-  // a provider session created before multi-agent support carries on.
+  // the sidebar row it had before multi-agent support carries on.
   private createAgent(participant: Participant): SessionAgent {
     const isDefault = keyOf(participant.name) === keyOf(this.defaultName);
     return new SessionAgent({
       ...participant,
+      host: this.host,
       runtimeId: isDefault
         ? this.sessionId
         : `${this.sessionId}/participants/${encodeURIComponent(keyOf(participant.name))}`,

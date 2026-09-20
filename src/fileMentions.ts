@@ -72,7 +72,7 @@ function readTextFile(filePath: string): { text: string; bytes: number } {
   }
 }
 
-export function resolveFileMentions(message: Message, directory: string): Message {
+export function resolveFileMentions<T extends Pick<Message, 'content'>>(message: T, directory: string): T {
   const text = message.content.filter(block => block.type === 'text').map(block => block.text).join('\n');
   const mentions = parseFileMentions(text, directory);
   if (mentions.length === 0) return message;

@@ -2,13 +2,12 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { boundTransports } from '../../src/agent_runtime/providers';
-import { Session } from '../../src/agent_runtime/session';
+import { Session, type Draft } from '../../src/agent_runtime/session';
 import * as naming from '../../src/agent_runtime/session/naming';
-import type { Message } from '../../src/agent_runtime/types';
+import { bindScriptedRuntime, textTurn, unbindRuntime } from '../support/runtime';
 
 const model = 'test-background-session-naming';
-const prompt = (text: string): Message => ({ role: 'user', content: [{ type: 'text', text }] });
+const prompt = (text: string): Draft => ({ role: 'user', content: [{ type: 'text', text }] });
 const flush = () => new Promise<void>(resolve => setImmediate(resolve));
 let directory: string;
 let previousDataDirectory: string | undefined;
@@ -21,14 +20,12 @@ beforeEach(() => {
   process.env.SIRUS_DATA_DIR = path.join(directory, 'data');
   generate = spyOn(naming, 'generateSessionName').mockImplementation(() =>
     new Promise(resolve => { finishNaming = resolve; }));
-  boundTransports[model] = {
-    getResponse: async () => ({ content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' }),
-  };
+  bindScriptedRuntime(model, textTurn('Done'));
 });
 
 afterEach(() => {
   generate.mockRestore();
-  delete boundTransports[model];
+  unbindRuntime(model);
   if (previousDataDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
   else process.env.SIRUS_DATA_DIR = previousDataDirectory;
   rmSync(directory, { recursive: true, force: true });
@@ -138,7 +135,7 @@ describe('background session naming', () => {
   test('rewinding away the first prompt discards an in-flight name', async () => {
     const session = new Session({
       name: 'Session 9', directory, model, autoNamePending: true,
-      checkpoints: [{ id: 'a'.repeat(40), messageIndex: 0, summary: 'Old task', createdAt: Date.now() }],
+      checkpoints: [{ id: 'a'.repeat(40), seq: 0, summary: 'Old task', createdAt: Date.now() }],
     });
     await session.sendMessage(prompt('Old task'));
     await session.rewind('a'.repeat(40), { files: false, chat: true });

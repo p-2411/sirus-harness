@@ -2,13 +2,12 @@ import { describe, expect, spyOn, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { Session } from '../../src/agent_runtime/session';
-import { boundTransports } from '../../src/agent_runtime/providers';
-import type { Message } from '../../src/agent_runtime/types';
+import { Session, type Draft } from '../../src/agent_runtime/session';
 import { loadSessionSnapshots, saveSessionSnapshots } from '../../src/persistence';
+import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
 
-const prompt: Message = { role: 'user', content: [{ type: 'text', text: 'Continue' }] };
-const response: Message = { role: 'assistant', content: [{ type: 'text', text: 'Done' }] };
+const prompt: Draft = { role: 'user', content: [{ type: 'text', text: 'Continue' }] };
+const response: Draft = { role: 'assistant', participant: 'sirus', content: [{ type: 'text', text: 'Done' }] };
 
 describe('session conversation recency', () => {
   test('keeps replies through exactly five minutes in place and persists a later conversation start', () => {
@@ -47,12 +46,10 @@ describe('session conversation recency', () => {
     const clock = spyOn(Date, 'now').mockImplementation(() => now);
     const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-recency-'));
     const model = 'test-conversation-recency';
-    boundTransports[model] = {
-      getResponse: async () => {
-        now += 10 * 60_000;
-        return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
-      },
-    };
+    bindScriptedRuntime(model, (_input, emit) => {
+      now += 10 * 60_000;
+      emit({ type: 'text', text: 'Done' });
+    });
     try {
       const session = new Session({ id: 'recency', name: 'Test', directory, model });
       await session.sendMessage(prompt);
@@ -71,14 +68,18 @@ describe('session conversation recency', () => {
       expect(session.getConversationStartedAt()).toBe(started);
     } finally {
       clock.mockRestore();
-      delete boundTransports[model];
+      unbindRuntime(model);
       rmSync(directory, { recursive: true, force: true });
     }
   });
 
   test('older snapshots fall back to their activity time', () => {
     const { conversationStartedAt, lastResponseFinishedAt, ...snapshot } = new Session().toSnapshot();
-    const restored = Session.fromSnapshot({ ...snapshot, messages: [prompt, response], updatedAt: 123_000 });
+    const restored = Session.fromSnapshot({
+      ...snapshot,
+      messages: [{ ...prompt, seq: 0 }, { ...response, seq: 1 }],
+      updatedAt: 123_000,
+    });
     expect(restored.getConversationStartedAt()).toBe(123_000);
     expect(restored.toSnapshot().lastResponseFinishedAt).toBe(123_000);
   });

@@ -2,7 +2,8 @@ import React from "react";
 import App from "./app";
 import { render } from "ink";
 import { installFrameCapture } from "./terminal/screen";
-import { disposeAll } from "../agent_runtime/providers";
+import { disposeAllRuntimes } from "../agent_runtime/runtime/runtime";
+import { stopSirusMcpServer } from "../agent_runtime/tools/server";
 import { closeAllMemoryStores } from "../memory/store";
 import { enableCheckpoints } from "../checkpoints";
 
@@ -20,10 +21,12 @@ const app = render(
   { alternateScreen: true, kittyKeyboard: { mode: 'auto' } },
 );
 
-// Provider subprocesses outlive individual turns. Tear them down when Ink
-// exits so their stdio handles cannot leave the CLI waiting for another Ctrl+C.
+// Agent processes outlive individual turns. Tear them down when Ink exits,
+// with the tool server they talk to, so their handles cannot leave the CLI
+// waiting for another Ctrl+C.
 const shutdown = () => {
-  disposeAll();
+  disposeAllRuntimes();
+  stopSirusMcpServer();
   closeAllMemoryStores();
 };
 void app.waitUntilExit().then(shutdown, shutdown);

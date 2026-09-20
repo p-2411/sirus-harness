@@ -2,20 +2,21 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
-import { Session } from '../../src/agent_runtime/session';
-import { boundTransports } from '../../src/agent_runtime/providers';
+import { Session, type Draft } from '../../src/agent_runtime/session';
+import type { RuntimeOptions } from '../../src/agent_runtime/runtime/runtime';
 import type { SubagentRun } from '../../src/agent_runtime/tools/subagents';
 import { checkSubagent } from '../../src/agent_runtime/tools/subagents/run';
 import { enableCheckpoints } from '../../src/checkpoints';
 import { TurnCancelledError } from '../../src/abort';
-import type { Message } from '../../src/agent_runtime/types';
+import { bindScriptedRuntime, unbindRuntime, type ScriptedBinding } from '../support/runtime';
 
 const model = 'test-checkpoint-session';
 const originalDataDirectory = process.env.SIRUS_DATA_DIR;
 let root: string;
 let project: string;
 let session: Session;
-const prompt: Message = { role: 'user', content: [{ type: 'text', text: 'Change the file' }] };
+const prompt: Draft = { role: 'user', content: [{ type: 'text', text: 'Change the file' }] };
+const isWorker = (options: RuntimeOptions) => options.systemPrompt.includes('You are a Sirus subagent');
 
 beforeEach(() => {
   root = mkdtempSync(path.join(os.tmpdir(), 'sirus-session-checkpoints-'));
@@ -30,41 +31,41 @@ beforeEach(() => {
 
 afterEach(() => {
   enableCheckpoints(false);
-  delete boundTransports[model];
+  unbindRuntime(model);
   if (originalDataDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
   else process.env.SIRUS_DATA_DIR = originalDataDirectory;
   rmSync(root, { recursive: true, force: true });
 });
 
-function writeResponse() {
-  boundTransports[model] = {
-    getResponse: async (_history, turn) => {
-      const result = await turn.toolbox!.run({
-        type: 'tool_call', id: 'write', name: 'WriteFile',
-        arguments: { path: 'file.txt', content: 'agent edit' },
-      }, turn.signal);
-      expect(result.isError).toBe(false);
-      return { content: [{ type: 'text', text: 'Edited.' }], stop_reason: 'end_turn' };
-    },
-  };
+// The vendor runs its own tools now: the scripted turn edits the file itself
+// and reports the call the way an adapter would.
+function writeResponse(content: string = 'agent edit'): ScriptedBinding {
+  return bindScriptedRuntime(model, (_input, emit, options) => {
+    writeFileSync(path.join(options.directory, 'file.txt'), content);
+    emit({ type: 'tool_call', call: {
+      type: 'tool_call', id: `write-${content}`, title: 'file.txt', kind: 'edit', status: 'completed',
+      locations: [{ path: path.join(options.directory, 'file.txt') }],
+      content: [{ type: 'diff', path: path.join(options.directory, 'file.txt'), oldText: null, newText: content }],
+    } });
+    emit({ type: 'text', text: 'Edited.' });
+  });
 }
 
 describe('session checkpoint integration', () => {
-  test('a mutating tool waits for the pre-turn snapshot, and rewind restores files and history', async () => {
-    writeResponse();
-    let resets = 0;
-    boundTransports[model].resetRuntime = () => { resets++; };
+  test('the snapshot is taken before the runtime is prompted, and rewind restores files and history', async () => {
+    const binding = writeResponse();
     await session.sendMessage(prompt);
     expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('agent edit');
     const [checkpoint] = session.getCheckpoints();
-    expect(checkpoint.messageIndex).toBe(0);
+    expect(checkpoint.seq).toBe(0);
     const result = await session.rewind(checkpoint.id, { files: true, chat: true });
     expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('user draft');
     expect(result.droppedMessages).toBe(2);
     expect(result.files?.restored).toEqual(['file.txt']);
     expect(session.getMessages()).toEqual([]);
     expect(session.getCheckpoints()).toEqual([]);
-    expect(resets).toBe(1);
+    // The runtime's conversation must not outlive the record it mirrored.
+    expect(binding.runtimes[0].disposed).toBe(true);
   });
 
   test('file-only and chat-only rewinds preserve the unselected scope', async () => {
@@ -81,60 +82,51 @@ describe('session checkpoint integration', () => {
     expect(session.getMessages()).toEqual([]);
   });
 
-  test('chat rewind restores history-based usage and activity while file-only rewind preserves them', async () => {
+  test('a chat rewind rebuilds the runtime from what is left of the record', async () => {
     let turn = 0;
-    boundTransports[model] = {
-      getResponse: async () => {
-        turn++;
-        return {
-          content: [{ type: 'text', text: `Response ${turn}` }],
-          stop_reason: 'end_turn',
-          usage: { inputTokens: turn * 100, outputTokens: turn * 10, contextTokens: turn * 110, contextWindow: 200_000 },
-        };
-      },
-    };
+    const binding = bindScriptedRuntime(model, (_input, emit) => {
+      turn++;
+      emit({ type: 'text', text: `Response ${turn}` });
+      emit({ type: 'context', usage: { tokens: turn * 110, window: 200_000 } });
+    });
     await session.sendMessage(prompt);
     await session.sendMessage(prompt);
-    session = Session.fromSnapshot({ ...session.toSnapshot(), updatedAt: 1_000 });
-    const checkpoints = session.getCheckpoints();
-    expect(session.getTotalUsage()).toEqual({ inputTokens: 300, outputTokens: 30 });
     expect(session.getContextUsage()).toEqual({ tokens: 220, window: 200_000 });
+    const checkpoints = session.getCheckpoints();
+    expect(checkpoints.map(checkpoint => checkpoint.seq)).toEqual([0, 2]);
 
     await session.rewind(checkpoints[1].id, { files: true, chat: false });
-    expect(session.getTotalUsage()).toEqual({ inputTokens: 300, outputTokens: 30 });
+    expect(binding.runtimes[0].disposed).toBe(false);
     expect(session.getContextUsage()).toEqual({ tokens: 220, window: 200_000 });
-    expect(session.getLastActivity()).toBe(1_000);
 
     await session.rewind(checkpoints[1].id, { files: false, chat: true });
-    expect(session.getTotalUsage()).toEqual({ inputTokens: 100, outputTokens: 10 });
-    expect(session.getContextUsage()).toEqual({ tokens: 110, window: 200_000 });
-    expect(session.getLastActivity()).toBeGreaterThan(1_000);
-
-    await session.rewind(checkpoints[0].id, { files: false, chat: true });
-    expect(session.getTotalUsage()).toBeNull();
-    expect(session.getContextUsage()).toBeNull();
+    expect(binding.runtimes[0].disposed).toBe(true);
+    expect(session.getMessages()).toHaveLength(2);
+    await session.sendMessage(prompt);
+    expect(binding.runtimes[1].prompts[0].text).toBe([
+      'Earlier conversation, for context:',
+      'User: Change the file',
+      '@sirus: Response 1',
+      '',
+      'Change the file',
+    ].join('\n'));
+    expect(session.getContextUsage()).toEqual({ tokens: 330, window: 200_000 });
   });
 
-  test('queued prompts capture their own pre-turn files and history position with matching usage', async () => {
+  test('queued prompts capture their own pre-turn files and history position', async () => {
     let releaseFirst!: () => void;
     const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
     let turnNumber = 0;
-    boundTransports[model] = {
-      getResponse: async (_history, turn) => {
-        const number = ++turnNumber;
-        if (number === 1) await firstGate;
-        const result = await turn.toolbox!.run({
-          type: 'tool_call', id: `write-${number}`, name: 'WriteFile',
-          arguments: { path: 'file.txt', content: `edit ${number}` },
-        }, turn.signal);
-        expect(result.isError).toBe(false);
-        return {
-          content: [{ type: 'text', text: `Response ${number}` }],
-          stop_reason: 'end_turn',
-          usage: { inputTokens: number * 100, outputTokens: number * 10, contextTokens: number * 110, contextWindow: 200_000 },
-        };
-      },
-    };
+    bindScriptedRuntime(model, async (_input, emit, options) => {
+      const number = ++turnNumber;
+      if (number === 1) await firstGate;
+      writeFileSync(path.join(options.directory, 'file.txt'), `edit ${number}`);
+      emit({ type: 'tool_call', call: {
+        type: 'tool_call', id: `write-${number}`, title: 'file.txt', kind: 'edit', status: 'completed',
+        locations: [{ path: path.join(options.directory, 'file.txt') }], content: [],
+      } });
+      emit({ type: 'text', text: `Response ${number}` });
+    });
     let unsubscribe = () => {};
     const completed = new Promise<void>(resolve => {
       unsubscribe = session.subscribe(() => {
@@ -152,27 +144,23 @@ describe('session checkpoint integration', () => {
     }
 
     const checkpoints = session.getCheckpoints();
-    expect(checkpoints.map(checkpoint => checkpoint.messageIndex)).toEqual([0, 2]);
+    expect(checkpoints.map(checkpoint => checkpoint.seq)).toEqual([0, 2]);
     expect(checkpoints.map(checkpoint => checkpoint.summary)).toEqual(['Change the file', 'Second queued change']);
     expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('edit 2');
     expect(session.getQueuedMessageCount()).toBe(0);
-    expect(session.getTotalUsage()).toEqual({ inputTokens: 300, outputTokens: 30 });
 
     await session.rewind(checkpoints[1].id, { files: true, chat: true });
     expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('edit 1');
     expect(session.getMessages()).toHaveLength(2);
-    expect(session.getTotalUsage()).toEqual({ inputTokens: 100, outputTokens: 10 });
-    expect(session.getContextUsage()).toEqual({ tokens: 110, window: 200_000 });
 
     await session.rewind(checkpoints[0].id, { files: true, chat: true });
     expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('user draft');
     expect(session.getMessages()).toHaveLength(0);
-    expect(session.getTotalUsage()).toBeNull();
   });
 
-  test.each([new Error('provider failed'), new TurnCancelledError()])(
+  test.each([new Error('runtime failed'), new TurnCancelledError()])(
     'settles a snapshot before a failed or cancelled turn can be cleared: %s', async error => {
-      boundTransports[model] = { getResponse: async () => { throw error; } };
+      bindScriptedRuntime(model, () => { throw error; });
       await expect(session.sendMessage(prompt)).rejects.toThrow(error.message);
       expect(session.getCheckpoints()).toHaveLength(1);
       expect(session.getStatus()).toBe(error.name === 'AbortError' ? 'idle' : 'error');
@@ -199,7 +187,7 @@ describe('session checkpoint integration', () => {
   });
 
   test('leaves history intact when file restoration fails', async () => {
-    const invalidCheckpoint = { id: 'a'.repeat(40), messageIndex: 0, summary: 'Unavailable', createdAt: Date.now() };
+    const invalidCheckpoint = { id: 'a'.repeat(40), seq: 0, summary: 'Unavailable', createdAt: Date.now() };
     session = new Session({
       id: 'missing',
       name: 'Missing checkpoint',
@@ -210,7 +198,7 @@ describe('session checkpoint integration', () => {
       permissionMode: 'auto',
     });
     await expect(session.rewind(invalidCheckpoint.id, { files: true, chat: true })).rejects.toThrow();
-    expect(session.getMessages()).toEqual([prompt]);
+    expect(session.getMessages()).toEqual([{ ...prompt, seq: 0 }]);
     expect(session.getCheckpoints()).toEqual([invalidCheckpoint]);
     await session.rewind(invalidCheckpoint.id, { files: false, chat: true });
     expect(session.getMessages()).toEqual([]);
@@ -223,12 +211,10 @@ describe('session checkpoint integration', () => {
     const other = new Session({ id: 'other', name: 'Other session', directory: project, model });
     let finish!: () => void;
     const gate = new Promise<void>(resolve => { finish = resolve; });
-    boundTransports[model] = {
-      getResponse: async () => {
-        await gate;
-        return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
-      },
-    };
+    bindScriptedRuntime(model, async (_input, emit) => {
+      await gate;
+      emit({ type: 'text', text: 'Done' });
+    });
     const turn = other.sendMessage(prompt);
     try {
       await expect(session.rewind(checkpoint.id, { files: true, chat: true }))
@@ -253,19 +239,16 @@ describe('session checkpoint integration', () => {
       let release!: () => void;
       const gate = new Promise<void>(resolve => { release = resolve; });
       let worker!: SubagentRun;
-      boundTransports[model] = {
-        getResponse: async (_history, turn) => {
-          if (turn.agent.subagent) await gate;
-          else worker = turn.agent.spawnSubagent('Keep working', model, {
-            directory: turn.directory,
-          });
-          return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
-        },
-      };
+      bindScriptedRuntime(model, async (_input, emit, options) => {
+        if (isWorker(options)) await gate;
+        else worker = owner.subagentHostFor('sirus')!.spawn('Keep working', { callId: 'spawn' }) as SubagentRun;
+        emit({ type: 'text', text: 'Done' });
+      });
       try {
         await owner.sendMessage(prompt);
         expect(owner.getStatus()).toBe('idle');
         expect(worker.status).toBe('working');
+        expect(worker.directory).toBe(project);
         await expect(session.rewind(checkpoint.id, { files: true, chat: false }))
           .rejects.toThrow('Subagents are working in this directory');
         expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('agent edit');
@@ -294,15 +277,11 @@ describe('session checkpoint integration', () => {
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     let worker!: SubagentRun;
-    boundTransports[model] = {
-      getResponse: async (_history, turn) => {
-        if (turn.agent.subagent) await gate;
-        else worker = turn.agent.spawnSubagent('Keep working', model, {
-          directory: turn.directory,
-        });
-        return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
-      },
-    };
+    bindScriptedRuntime(model, async (_input, emit, options) => {
+      if (isWorker(options)) await gate;
+      else worker = other.subagentHostFor('sirus')!.spawn('Keep working', { callId: 'spawn' }) as SubagentRun;
+      emit({ type: 'text', text: 'Done' });
+    });
     try {
       await other.sendMessage(prompt);
       expect(other.getStatus()).toBe('idle');

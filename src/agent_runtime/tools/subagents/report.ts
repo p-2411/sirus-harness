@@ -1,12 +1,12 @@
 import path from 'path';
-import type { MessageBlock, ToolCallBlock, ToolResultBlock } from '../../types';
+import type { MessageBlock, ToolCallBlock } from '../../types';
 import type { SubagentRun } from './index';
 
 // Everything a subagent run says about itself: to the model that asked, and
 // as plain text in the stream file the owner can read while it works.
 
 // Long enough that a caller rarely has to poll, short enough to stay under the
-// tool-call timeouts of the provider runtimes a subscription model goes through.
+// tool-call timeouts of the vendor runtimes.
 export const CHECK_WAIT_LIMIT_MS = 60_000;
 const PROGRESS_TAIL_CHARS = 2_000;
 const RESULT_PREVIEW_CHARS = 120;
@@ -54,13 +54,13 @@ export function describeRun(run: SubagentRun, waited: boolean): Record<string, u
   return { ...base, finalMessage: run.finalMessage, changes: run.changes };
 }
 
-// The subagent's closing words: whatever text follows its last tool round.
+// The subagent's closing words: whatever text follows its last tool call.
 // A run that never used a tool, or only spoke before doing so, hands back all
 // of its text instead.
 export function finalMessageOf(content: readonly MessageBlock[]): string {
   let lastToolIndex = -1;
   content.forEach((block, index) => {
-    if (block.type !== 'text') lastToolIndex = index;
+    if (block.type === 'tool_call') lastToolIndex = index;
   });
   const textOf = (blocks: readonly MessageBlock[]) => blocks
     .filter((block): block is Extract<MessageBlock, { type: 'text' }> => block.type === 'text')
@@ -72,71 +72,57 @@ export function finalMessageOf(content: readonly MessageBlock[]): string {
     || '(the subagent finished without a final message)';
 }
 
-interface FileChange {
-  created: boolean;
-  replaced: boolean;
-  edits: number;
+// The paths a tool call touched: what the runtime listed, or the diffs it
+// carried when it listed nothing.
+function touchedPaths(call: ToolCallBlock): string[] {
+  const paths = call.locations.map(location => location.path);
+  if (paths.length > 0) return paths;
+  return call.content.flatMap(block => block.type === 'diff' ? [block.path] : []);
 }
 
-// What the subagent did to the world, read off its successful tool calls
-// rather than asked of the model, so it is complete and never invented.
+// What the subagent did to the world, read off its completed tool calls
+// rather than asked of the model, so it is complete and never invented. The
+// vendor ran the tools; the kind and the locations say what they touched.
 export function summarizeChanges(content: readonly MessageBlock[], directory: string): string[] {
-  const results = new Map<string, ToolResultBlock>();
-  for (const block of content) {
-    if (block.type === 'tool_result') results.set(block.callId, block);
-  }
-
-  const files = new Map<string, FileChange>();
+  const files = new Map<string, Set<string>>();
   const commands: string[] = [];
   const memories: string[] = [];
-  const fileChange = (target: string): FileChange => {
+  const touch = (target: string, verb: string) => {
     const key = displayPath(target, directory);
-    let change = files.get(key);
-    if (!change) {
-      change = { created: false, replaced: false, edits: 0 };
-      files.set(key, change);
+    let verbs = files.get(key);
+    if (!verbs) {
+      verbs = new Set();
+      files.set(key, verbs);
     }
-    return change;
+    verbs.add(verb);
   };
 
   for (const block of content) {
-    if (block.type !== 'tool_call') continue;
-    const result = results.get(block.id);
-    if (!result || result.isError) continue;
-    const args = block.arguments;
-    switch (block.name) {
-      case 'WriteFile': {
-        if (typeof args.path !== 'string') break;
-        const change = fileChange(args.path);
-        if (parsedField(result.result, 'created') === true) change.created = true;
-        else change.replaced = true;
+    if (block.type !== 'tool_call' || block.status !== 'completed') continue;
+    switch (block.kind) {
+      case 'edit':
+        for (const target of touchedPaths(block)) touch(target, 'Edited');
         break;
+      case 'delete':
+        for (const target of touchedPaths(block)) touch(target, 'Deleted');
+        break;
+      case 'move':
+        for (const target of touchedPaths(block)) touch(target, 'Moved');
+        break;
+      case 'execute':
+        commands.push(block.title);
+        break;
+      default: {
+        // Sirus's own memory tools arrive as ordinary calls named after them.
+        const input = block.input && typeof block.input === 'object' ? block.input as Record<string, unknown> : {};
+        if (/\bSaveMemory\b/.test(block.title)) memories.push(`Saved ${String(input.scope)} memory "${String(input.name)}"`);
+        else if (/\bDeleteMemory\b/.test(block.title)) memories.push(`Deleted ${String(input.scope)} memory "${String(input.name)}"`);
       }
-      case 'EditFile':
-        if (typeof args.path === 'string') fileChange(args.path).edits++;
-        break;
-      case 'RunShell':
-        if (typeof args.command === 'string') commands.push(args.command);
-        break;
-      case 'SaveMemory':
-        memories.push(`Saved ${String(args.scope)} memory "${String(args.name)}"`);
-        break;
-      case 'DeleteMemory':
-        if (parsedField(result.result, 'deleted') === true) {
-          memories.push(`Deleted ${String(args.scope)} memory "${String(args.name)}"`);
-        }
-        break;
     }
   }
 
   const summary: string[] = [];
-  for (const [file, change] of files) {
-    const verb = change.created ? 'Created' : change.replaced ? 'Replaced' : 'Edited';
-    const edits = change.edits > 0 && (change.created || change.replaced)
-      ? `, then made ${change.edits} edit${change.edits === 1 ? '' : 's'}`
-      : change.edits > 1 ? ` (${change.edits} edits)` : '';
-    summary.push(`${verb} ${file}${edits}`);
-  }
+  for (const [file, verbs] of files) summary.push(`${[...verbs].join(' and ')} ${file}`);
   for (const command of commands) summary.push(`Ran: ${truncate(command, COMMAND_PREVIEW_CHARS)}`);
   summary.push(...memories);
   return summary;
@@ -148,30 +134,13 @@ function displayPath(target: string, directory: string): string {
   return relative && !relative.startsWith('..') && !path.isAbsolute(relative) ? relative : absolute;
 }
 
-function parsedField(json: string, field: string): unknown {
-  try {
-    const parsed: unknown = JSON.parse(json);
-    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>)[field] : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 function truncate(text: string, limit: number): string {
   const single = text.replace(/\s+/g, ' ').trim();
   return single.length > limit ? `${single.slice(0, limit - 1)}…` : single;
 }
 
-function previewArguments(toolCall: ToolCallBlock): string {
-  const entries = Object.entries(toolCall.arguments).map(([name, value]) => {
-    const text = typeof value === 'string' ? value : JSON.stringify(value) ?? String(value);
-    return `${name}: ${truncate(text, RESULT_PREVIEW_CHARS)}`;
-  });
-  return entries.join(', ');
-}
-
-// The subagent's transcript as plain text: what it said, what it called, and
-// the first line of what came back.
+// The subagent's record as plain text: what it said, what it called, and
+// how each call ended.
 export function renderTranscript(content: readonly MessageBlock[]): string {
   const lines: string[] = [];
   for (const block of content) {
@@ -180,10 +149,8 @@ export function renderTranscript(content: readonly MessageBlock[]): string {
     } else if (block.type === 'image') {
       lines.push(`[image ${path.basename(block.path)}]`);
     } else if (block.type === 'tool_call') {
-      lines.push(`▸ ${block.name} ${previewArguments(block)}`);
-    } else {
-      const firstLine = block.result.split('\n').find(line => line.trim()) ?? '';
-      lines.push(`  ${block.isError ? '✗' : '✓'} ${truncate(firstLine, RESULT_PREVIEW_CHARS)}`);
+      const mark = block.status === 'completed' ? '✓' : block.status === 'failed' ? '✗' : '…';
+      lines.push(`${mark} ${block.kind} ${truncate(block.title, RESULT_PREVIEW_CHARS)}`);
     }
   }
   return lines.join('\n');

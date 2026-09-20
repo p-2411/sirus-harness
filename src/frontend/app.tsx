@@ -164,6 +164,7 @@ export default function App({ launchDirectory = process.cwd() }: { launchDirecto
   }
 
   function deleteSession(session: Session) {
+    session.dispose();
     setWorkspace(current => {
       const index = current.sessions.indexOf(session);
       if (index === -1) return current;

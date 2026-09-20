@@ -1,20 +1,23 @@
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import * as naming from '../../src/agent_runtime/session/naming';
-import { boundTransports } from '../../src/agent_runtime/providers';
-import type { TurnContext } from '../../src/agent_runtime/turn';
-import type { Message } from '../../src/agent_runtime/types';
+import type { RuntimeOptions } from '../../src/agent_runtime/runtime/runtime';
+import type { Draft } from '../../src/agent_runtime/session';
 import type { SubagentRun } from '../../src/agent_runtime/tools/subagents';
-import { availableTools } from '../../src/agent_runtime/tools';
 import { Session } from '../../src/agent_runtime/session';
+import { bindScriptedRuntime, textTurn, unbindRuntime, type ScriptedTurn } from '../support/runtime';
 
 const testModel = 'test-session-model';
 const secondTestModel = 'test-second-session-model';
 const thirdTestModel = 'test-third-session-model';
 
+// A worker's runtime starts with the subagent contract; that is how a
+// scripted turn shared by an owner and its workers tells them apart.
+const isWorker = (options: RuntimeOptions) => options.systemPrompt.includes('You are a Sirus subagent');
+
 afterEach(() => {
-  delete boundTransports[testModel];
-  delete boundTransports[secondTestModel];
-  delete boundTransports[thirdTestModel];
+  unbindRuntime(testModel);
+  unbindRuntime(secondTestModel);
+  unbindRuntime(thirdTestModel);
 });
 
 describe('Session model', () => {
@@ -45,12 +48,7 @@ describe('Session model', () => {
   });
 
   test('auto-names a default session from its first prompt but preserves a custom name', async () => {
-    boundTransports[testModel] = {
-      getResponse: async () => ({
-        content: [{ type: 'text', text: 'Done' }],
-        stop_reason: 'end_turn',
-      }),
-    };
+    bindScriptedRuntime(testModel, textTurn('Done'));
     const generate = spyOn(naming, 'generateSessionName').mockResolvedValue('Queued message workflow');
     try {
       const automatic = new Session({ name: 'Session 3', directory: process.cwd(), model: testModel, autoNamePending: true });
@@ -81,28 +79,30 @@ describe('Session model', () => {
     }
   });
 
-  test('reports latest context usage and aggregates session token totals', () => {
-    const session = new Session({
-      id: 'usage',
-      name: 'Usage',
-      model: testModel,
-      messages: [
-        {
-          role: 'assistant',
-          model: 'claude-sonnet-5',
-          content: [{ type: 'text', text: 'First' }],
-          usage: { inputTokens: 100, outputTokens: 20, contextTokens: 120, contextWindow: 200_000 },
-        },
-        {
-          role: 'assistant',
-          model: 'gpt-5.6-sol',
-          content: [{ type: 'text', text: 'Second' }],
-          usage: { inputTokens: 250, outputTokens: 50, contextTokens: 300, contextWindow: 400_000 },
-        },
-      ],
+  test('reports the context the runtime last reported, per participant', async () => {
+    bindScriptedRuntime(testModel, (_input, emit) => {
+      emit({ type: 'context', usage: { tokens: 120, window: 200_000 } });
+      emit({ type: 'text', text: 'First' });
+      emit({ type: 'context', usage: { tokens: 300, window: 200_000 } });
     });
-    expect(session.getContextUsage()).toEqual({ tokens: 300, window: 400_000 });
-    expect(session.getTotalUsage()).toEqual({ inputTokens: 350, outputTokens: 70 });
+    bindScriptedRuntime(secondTestModel, (_input, emit) => {
+      emit({ type: 'context', usage: { tokens: 50, window: 400_000 } });
+      emit({ type: 'text', text: 'Second' });
+    });
+    const session = new Session({ id: 'usage', name: 'Usage', model: testModel });
+    session.addParticipant('reviewer', secondTestModel);
+    expect(session.getContextUsage()).toBeNull();
+
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: '@reviewer look' }] });
+    // The default participant has not reported: the last responder's shows.
+    expect(session.getContextUsage()).toEqual({ tokens: 50, window: 400_000 });
+    expect(session.getContextUsage('reviewer')).toEqual({ tokens: 50, window: 400_000 });
+    expect(session.getContextUsage('sirus')).toBeNull();
+
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Now you' }] });
+    expect(session.getContextUsage()).toEqual({ tokens: 300, window: 200_000 });
+    // Nothing of it survives a restore: the gauge waits for the runtime.
+    expect(Session.fromSnapshot(session.toSnapshot()).getContextUsage()).toBeNull();
   });
 
   test('changing a participant model changes it for that session only', () => {
@@ -111,6 +111,18 @@ describe('Session model', () => {
     a.changeParticipantModel('sirus', 'claude-fable-5-1');
     expect(a.getModel()).toBe('claude-fable-5-1');
     expect(b.getModel()).toBe('gpt-5.6-luna');
+  });
+
+  test('keeps the subagent model as a session setting', () => {
+    const session = new Session({ name: 'Delegation' });
+    expect(session.getSubagentModel()).toBeNull();
+    session.setSubagentModel('claude-sonnet-5');
+    expect(session.getSubagentModel()).toBe('claude-sonnet-5');
+    expect(Session.fromSnapshot(session.toSnapshot()).getSubagentModel()).toBe('claude-sonnet-5');
+    expect(() => session.setSubagentModel('no-such-model')).toThrow(/Unknown model/);
+    session.setSubagentModel(null);
+    expect(session.toSnapshot().subagentModel).toBeUndefined();
+    expect(() => session.addParticipant('subagent', 'claude-sonnet-5')).toThrow(/Invalid participant name/);
   });
 
   test('is empty until its first message and becomes empty again when cleared', () => {
@@ -135,81 +147,84 @@ describe('Session model', () => {
     expect(restored.getMessages()).toEqual(original.getMessages());
   });
 
-  test('sends a message through the agent runtime and returns the updated history', async () => {
+  test('prompts the participant runtime with the session wiring and returns the timeline', async () => {
     const session = new Session({ id: 'session-id', name: 'Test', directory: '/projects/test', model: testModel });
     session.setThinkingLevel('medium');
-    let receivedMessages: Message[] | undefined;
-    let receivedTurn: TurnContext | undefined;
-
-    boundTransports[testModel] = {
-      getResponse: async (messages, turn) => {
-        receivedMessages = [...messages];
-        receivedTurn = turn;
-        return {
-          content: [{ type: 'text', text: 'Hello back' }],
-          stop_reason: 'end_turn',
-        };
-      },
-    };
+    const binding = bindScriptedRuntime(testModel, textTurn('Hello back'));
 
     const messages = await session.sendMessage({
       role: 'user',
       content: [{ type: 'text', text: 'Hello' }],
     });
 
-    expect(receivedMessages).toEqual([
-      { role: 'user', content: [{ type: 'text', text: 'Hello' }] },
-    ]);
-    expect(receivedTurn?.agent.model).toBe(testModel);
-    expect(receivedTurn?.agent.name).toBe('sirus');
-    expect(receivedTurn?.agent.runtimeId).toBe('session-id');
-    expect(receivedTurn?.directory).toBe('/projects/test');
-    expect(receivedTurn?.agent.thinkingLevel).toBe('medium');
-    // The turn is handed a toolbox, not a gate: the session's permission
-    // context and its checkpoint barrier are bound inside it.
-    expect(receivedTurn?.toolbox).not.toBeNull();
-    expect(receivedTurn?.toolbox?.tools.map(tool => tool.name))
-      .toEqual(availableTools().map(tool => tool.name));
-    expect(receivedTurn?.signal).toBeInstanceOf(AbortSignal);
-    expect(receivedTurn?.turnPrompt).toBeUndefined();
+    expect(binding.starts).toHaveLength(1);
+    const options = binding.starts[0];
+    expect(options.model).toBe(testModel);
+    expect(options.directory).toBe('/projects/test');
+    expect(options.thinkingLevel).toBe('medium');
+    expect(options.permissionMode).toBe('auto');
+    expect(options.systemPrompt).toContain('You are Sirus');
+    expect(options.mcpServer).toMatchObject({ name: 'sirus', url: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\//) });
+    expect(options.mcpServer?.headers.map(header => header.name)).toEqual(['Authorization', 'X-Sirus-Requester']);
+    expect(options.mcpServer?.headers[1].value).toBe('sirus');
+    expect(binding.runtimes[0].prompts).toEqual([{ text: 'Hello', images: [] }]);
     expect(messages).toEqual([
-      { role: 'user', content: [{ type: 'text', text: 'Hello' }] },
+      { seq: 0, role: 'user', to: ['sirus'], content: [{ type: 'text', text: 'Hello' }] },
       {
+        seq: 1,
         role: 'assistant',
         participant: 'sirus',
         model: testModel,
         content: [{ type: 'text', text: 'Hello back' }],
       },
     ]);
-    expect(session.getMessages()).toBe(messages);
+    expect(session.getMessages()).toEqual(messages);
   });
 
-  test('makes a streaming assistant response visible before the provider finishes', async () => {
+  test('keeps the runtime warm between turns and reseeds a rebuilt one from the record', async () => {
+    const binding = bindScriptedRuntime(testModel, textTurn('Sure'));
+    const session = new Session({ id: 'warm', name: 'Warm', model: testModel });
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'First' }] });
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Second' }] });
+    expect(binding.starts).toHaveLength(1);
+    expect(binding.runtimes[0].prompts.map(prompt => prompt.text)).toEqual(['First', 'Second']);
+
+    // A rewound session rebuilds the runtime and hands it what is left.
+    const restored = Session.fromSnapshot(session.toSnapshot());
+    await restored.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Third' }] });
+    expect(binding.starts).toHaveLength(2);
+    expect(binding.runtimes[1].prompts[0].text).toBe([
+      'Earlier conversation, for context:',
+      'User: First',
+      '@sirus: Sure',
+      'User: Second',
+      '@sirus: Sure',
+      '',
+      'Third',
+    ].join('\n'));
+  });
+
+  test('makes a streaming assistant response visible before the runtime finishes', async () => {
     const session = new Session({ id: 'stream-session', name: 'Test', model: testModel });
     let finish!: () => void;
     const gate = new Promise<void>(resolve => { finish = resolve; });
 
-    boundTransports[testModel] = {
-      getResponse: async (_messages, turn) => {
-        turn.updateStream([{ type: 'text', text: 'Working' }]);
-        await gate;
-        return {
-          content: [{ type: 'text', text: 'Working now.' }],
-          stop_reason: 'end_turn',
-          usage: { inputTokens: 120, outputTokens: 8, contextTokens: 128, contextWindow: 400_000 },
-        };
-      },
-    };
+    bindScriptedRuntime(testModel, async (_input, emit) => {
+      emit({ type: 'text', text: 'Working' });
+      await gate;
+      emit({ type: 'text', text: ' now.' });
+      emit({ type: 'context', usage: { tokens: 128, window: 400_000 } });
+    });
 
     const turn = session.sendMessage({
       role: 'user',
       content: [{ type: 'text', text: 'Start' }],
     });
-    // The transcript pulls snapshots from the turn; let that pull run.
     await new Promise(resolve => setTimeout(resolve, 0));
 
     expect(session.getAssistantVersion()).toBeGreaterThan(0);
     expect(session.getMessages().at(-1)).toEqual({
+      seq: 1,
       role: 'assistant',
       participant: 'sirus',
       model: testModel,
@@ -220,9 +235,46 @@ describe('Session model', () => {
     await turn;
     expect(session.getMessages().at(-1)).toMatchObject({
       content: [{ type: 'text', text: 'Working now.' }],
-      usage: { inputTokens: 120, outputTokens: 8, contextTokens: 128, contextWindow: 400_000 },
     });
     expect(session.getContextUsage()).toEqual({ tokens: 128, window: 400_000 });
+  });
+
+  test('records tool calls, thoughts and compaction as the runtime reports them', async () => {
+    bindScriptedRuntime(testModel, (_input, emit) => {
+      emit({ type: 'thought', text: 'Let me look.' });
+      emit({ type: 'tool_call', call: { type: 'tool_call', id: 'call-1', title: 'cat file.txt', kind: 'execute', status: 'pending', locations: [], content: [] } });
+      emit({ type: 'tool_call', call: { type: 'tool_call', id: 'call-1', title: 'cat file.txt', kind: 'execute', status: 'completed', locations: [], content: [{ type: 'text', text: 'hi' }], output: 'hi' } });
+      emit({ type: 'compaction', status: 'in_progress' });
+      emit({ type: 'compaction', status: 'completed', summary: 'Read the file.' });
+      emit({ type: 'text', text: 'It says hi.' });
+    });
+    const session = new Session({ id: 'tools', name: 'Tools', model: testModel });
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'What does file.txt say?' }] });
+    expect(session.getMessages().at(-1)?.content).toEqual([
+      { type: 'thought', text: 'Let me look.' },
+      { type: 'tool_call', id: 'call-1', title: 'cat file.txt', kind: 'execute', status: 'completed', locations: [], content: [{ type: 'text', text: 'hi' }], output: 'hi' },
+      { type: 'compaction', summary: 'Read the file.' },
+      { type: 'text', text: 'It says hi.' },
+    ]);
+  });
+
+  test('/compact sends the slash command to the default participant and records the boundary', async () => {
+    const binding = bindScriptedRuntime(testModel, (input, emit) => {
+      if (input.text === '/compact') emit({ type: 'compaction', status: 'completed' });
+      else emit({ type: 'text', text: 'Done' });
+    });
+    const session = new Session({ id: 'compact', name: 'Compact', model: testModel });
+    await expect(session.compact()).rejects.toThrow('There is no history to compact.');
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Work' }] });
+    await session.compact();
+    expect(binding.runtimes[0].prompts.map(prompt => prompt.text)).toEqual(['Work', '/compact']);
+    expect(session.getMessages().map(message => message.content)).toEqual([
+      [{ type: 'text', text: 'Work' }],
+      [{ type: 'text', text: 'Done' }],
+      [{ type: 'compaction' }],
+    ]);
+    expect(session.getStatus()).toBe('idle');
+    expect(session.isCompacting()).toBe(false);
   });
 
   test('keeps queued messages on the session in FIFO order', () => {
@@ -244,25 +296,28 @@ describe('Session model', () => {
   test('drains queued prompts in order without a mounted chat', async () => {
     const pending: Array<() => void> = [];
     const prompts: string[] = [];
-    boundTransports[testModel] = {
-      getResponse: async messages => {
-        const block = messages.at(-1)!.content[0];
-        if (block.type === 'text') prompts.push(block.text);
-        await new Promise<void>(resolve => pending.push(resolve));
-        return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
-      },
-    };
+    bindScriptedRuntime(testModel, async (input, emit) => {
+      prompts.push(input.text);
+      await new Promise<void>(resolve => pending.push(resolve));
+      emit({ type: 'text', text: 'Done' });
+    });
     const session = new Session({ id: 'background-queue', name: 'Queue', model: testModel });
     const first = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'first' }] });
     session.queueMessage('second');
     session.queueMessage('third');
+    const untilPending = async () => {
+      while (pending.length === 0) await new Promise(resolve => setTimeout(resolve, 0));
+    };
+    await untilPending();
     pending.shift()!();
     await first;
+    // The next prompt is on its way to the runtime once its checkpoint is taken.
+    await untilPending();
     expect(prompts).toEqual(['first', 'second']);
     expect(session.getStatus()).toBe('working');
     expect(session.getQueuedMessageCount()).toBe(1);
     pending.shift()!();
-    await new Promise(resolve => setTimeout(resolve, 0));
+    await untilPending();
     expect(prompts).toEqual(['first', 'second', 'third']);
     expect(session.getQueuedMessageCount()).toBe(0);
     pending.shift()!();
@@ -272,12 +327,11 @@ describe('Session model', () => {
 
   test('pauses the background queue at commands that may need user input', async () => {
     let finish!: () => void;
-    boundTransports[testModel] = {
-      getResponse: async () => {
-        await new Promise<void>(resolve => { finish = resolve; });
-        return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
-      },
-    };
+    const gate = new Promise<void>(resolve => { finish = resolve; });
+    bindScriptedRuntime(testModel, async (_input, emit) => {
+      await gate;
+      emit({ type: 'text', text: 'Done' });
+    });
     const session = new Session({ id: 'command-queue', name: 'Queue', model: testModel });
     const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'first' }] });
     session.queueMessage('/login');
@@ -292,19 +346,18 @@ describe('Session model', () => {
   test('cancelling sends that session queue next and leaves other sessions running', async () => {
     let finish!: () => void;
     const gate = new Promise<void>(resolve => { finish = resolve; });
-    boundTransports[testModel] = {
-      getResponse: async () => {
-        await gate;
-        return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
-      },
-    };
+    bindScriptedRuntime(testModel, async (_input, emit) => {
+      await gate;
+      emit({ type: 'text', text: 'Done' });
+    });
     const first = new Session({ id: 'cancel-first', name: 'First', model: testModel });
     const second = new Session({ id: 'cancel-second', name: 'Second', model: testModel });
-    const message: Message = { role: 'user', content: [{ type: 'text', text: 'start' }] };
+    const message: Draft = { role: 'user', content: [{ type: 'text', text: 'start' }] };
     const firstTurn = first.sendMessage(message);
     const secondTurn = second.sendMessage(message);
     first.queueMessage('after cancel');
     second.queueMessage('keep');
+    await new Promise(resolve => setTimeout(resolve, 0));
     expect(first.cancel()).toBe(true);
     await expect(firstTurn).rejects.toThrow();
     // the cancelled turn is followed by what was waiting behind it
@@ -325,40 +378,40 @@ describe('Session model', () => {
     let finish!: () => void;
     const gate = new Promise<void>(resolve => { finish = resolve; });
     const workers: SubagentRun[] = [];
-    boundTransports[testModel] = {
-      getResponse: async (_messages, turn) => {
-        if (turn.agent.subagent) await gate;
-        else workers.push(turn.agent.spawnSubagent('background task', testModel, {
-          directory: process.cwd(),
-          signal: turn.signal,
-        }));
-        return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
-      },
-    };
+    const sessions: Session[] = [];
+    bindScriptedRuntime(testModel, async (_input, emit, options) => {
+      if (isWorker(options)) await gate;
+      else {
+        const owner = sessions.find(candidate => candidate.getId() === options.mcpServer?.url && false) ?? sessions[workers.length];
+        workers.push(owner.subagentHostFor('sirus')!.spawn('background task', { callId: `spawn-${workers.length}` }) as SubagentRun);
+      }
+      emit({ type: 'text', text: 'Done' });
+    });
     const first = new Session({ id: 'detached-first', name: 'First', model: testModel });
     const second = new Session({ id: 'detached-second', name: 'Second', model: testModel });
-    const message: Message = { role: 'user', content: [{ type: 'text', text: 'start' }] };
+    sessions.push(first, second);
+    const message: Draft = { role: 'user', content: [{ type: 'text', text: 'start' }] };
     await first.sendMessage(message);
     await second.sendMessage(message);
     expect(first.getStatus()).toBe('idle');
     expect(workers.map(run => run.status)).toEqual(['working', 'working']);
+    expect(first.getActiveSubagentCount()).toBe(1);
     expect(first.cancel()).toBe(true);
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(workers.map(run => run.status)).toEqual(['cancelled', 'working']);
     finish();
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(workers[1].status).toBe('done');
+    expect(workers[1].finalMessage).toBe('Done');
   });
 
   test('tracks the active turn start independently of the chat view', async () => {
     let finish!: () => void;
     const gate = new Promise<void>(resolve => { finish = resolve; });
-    boundTransports[testModel] = {
-      getResponse: async () => {
-        await gate;
-        return { content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' };
-      },
-    };
+    bindScriptedRuntime(testModel, async (_input, emit) => {
+      await gate;
+      emit({ type: 'text', text: 'Done' });
+    });
     const session = new Session({ id: 'elapsed-session', name: 'Elapsed', model: testModel });
 
     const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Start' }] });
@@ -368,33 +421,33 @@ describe('Session model', () => {
     expect(session.getActiveTurnStartedAt()).toBeNull();
   });
 
-  test('cancels the whole active turn even when a provider ignores its signal', async () => {
+  test('cancels the whole active turn and keeps what had streamed', async () => {
     const session = new Session({ id: 'cancel-session', name: 'Test', model: testModel });
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
-    let providerSignal: AbortSignal | undefined;
-    boundTransports[testModel] = {
-      getResponse: async (_messages, turn) => {
-        providerSignal = turn.signal;
-        turn.updateStream([{ type: 'text', text: 'Partial' }]);
-        await gate;
-        return { content: [{ type: 'text', text: 'Too late' }], stop_reason: 'end_turn' };
-      },
-    };
+    let runtimeSignal: AbortSignal | undefined;
+    bindScriptedRuntime(testModel, async (_input, emit, _options, signal) => {
+      runtimeSignal = signal;
+      emit({ type: 'text', text: 'Partial' });
+      await gate;
+      emit({ type: 'text', text: 'Too late' });
+    });
 
     const turn = session.sendMessage({
       role: 'user',
       content: [{ type: 'text', text: 'Start' }],
     });
-    await Promise.resolve();
+    while (!runtimeSignal) await new Promise(resolve => setTimeout(resolve, 0));
 
     expect(session.cancel()).toBe(true);
     await expect(turn).rejects.toMatchObject({ name: 'AbortError' });
-    expect(providerSignal?.aborted).toBe(true);
+    expect(runtimeSignal?.aborted).toBe(true);
     expect(session.getStatus()).toBe('idle');
+    expect(session.wasLastTurnCancelled()).toBe(true);
     expect(session.getMessages()).toEqual([
-      { role: 'user', content: [{ type: 'text', text: 'Start' }] },
+      { seq: 0, role: 'user', to: ['sirus'], content: [{ type: 'text', text: 'Start' }] },
       {
+        seq: 1,
         role: 'assistant',
         participant: 'sirus',
         model: testModel,
@@ -406,13 +459,7 @@ describe('Session model', () => {
   });
 
   test('creates a named participant from a mention and targets it thereafter', async () => {
-    const calls: Array<{ model: string; turn: TurnContext; messages: Message[] }> = [];
-    boundTransports[testModel] = {
-      getResponse: async (messages, turn) => {
-        calls.push({ model: turn.agent.model, turn, messages: [...messages] });
-        return { content: [{ type: 'text', text: 'reviewed' }], stop_reason: 'end_turn' };
-      },
-    };
+    const binding = bindScriptedRuntime(testModel, textTurn('reviewed'));
     const session = new Session({ id: 'session-id', name: 'Test', model: secondTestModel });
 
     await session.sendMessage({
@@ -428,36 +475,22 @@ describe('Session model', () => {
       { name: 'sirus', model: secondTestModel },
       { name: 'Reviewer', model: testModel },
     ]);
-    expect(calls).toHaveLength(2);
-    expect(calls[0].model).toBe(testModel);
-    expect(calls[0].turn.agent).toMatchObject({
-      name: 'Reviewer',
-      runtimeId: 'session-id/participants/reviewer',
-    });
-    expect(calls[0].turn.directory).toBe(process.cwd());
-    expect(calls[0].messages[0]).toEqual({
+    expect(binding.starts).toHaveLength(1);
+    expect(binding.starts[0].systemPrompt).toContain('You are @Reviewer');
+    expect(binding.starts[0].mcpServer?.headers[1].value).toBe('Reviewer');
+    expect(binding.starts[0].directory).toBe(process.cwd());
+    expect(binding.runtimes[0].prompts.map(prompt => prompt.text))
+      .toEqual(['@Reviewer inspect this', '@reviewer check it again']);
+    expect(session.getMessages()[0]).toEqual({
+      seq: 0,
       role: 'user',
+      to: ['Reviewer'],
       content: [{ type: 'text', text: '@Reviewer inspect this' }],
-    });
-    expect(session.getMessages()[0]).toEqual(calls[0].messages[0]);
-    expect(calls[1].messages.at(-1)).toEqual({
-      role: 'user',
-      content: [{ type: 'text', text: '@reviewer check it again' }],
     });
     expect(session.getMessages().filter(message => message.role === 'assistant'))
       .toEqual([
-        {
-          role: 'assistant',
-          participant: 'Reviewer',
-          model: testModel,
-          content: [{ type: 'text', text: 'reviewed' }],
-        },
-        {
-          role: 'assistant',
-          participant: 'Reviewer',
-          model: testModel,
-          content: [{ type: 'text', text: 'reviewed' }],
-        },
+        { seq: 1, role: 'assistant', participant: 'Reviewer', model: testModel, content: [{ type: 'text', text: 'reviewed' }] },
+        { seq: 3, role: 'assistant', participant: 'Reviewer', model: testModel, content: [{ type: 'text', text: 'reviewed' }] },
       ]);
   });
 
@@ -467,20 +500,16 @@ describe('Session model', () => {
     const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
     const secondGate = new Promise<void>(resolve => { releaseSecond = resolve; });
     const started: string[] = [];
-    boundTransports[testModel] = {
-      getResponse: async () => {
-        started.push('first');
-        await firstGate;
-        return { content: [{ type: 'text', text: 'first response' }], stop_reason: 'end_turn' };
-      },
-    };
-    boundTransports[secondTestModel] = {
-      getResponse: async () => {
-        started.push('second');
-        await secondGate;
-        return { content: [{ type: 'text', text: 'second response' }], stop_reason: 'end_turn' };
-      },
-    };
+    bindScriptedRuntime(testModel, async (_input, emit) => {
+      started.push('first');
+      await firstGate;
+      emit({ type: 'text', text: 'first response' });
+    });
+    bindScriptedRuntime(secondTestModel, async (_input, emit) => {
+      started.push('second');
+      await secondGate;
+      emit({ type: 'text', text: 'second response' });
+    });
     const session = new Session();
     const turn = session.sendMessage({
       role: 'user',
@@ -490,16 +519,18 @@ describe('Session model', () => {
       }],
     });
 
-    await Promise.resolve();
+    while (started.length < 2) await new Promise(resolve => setTimeout(resolve, 0));
     expect(started).toEqual(['first', 'second']);
     releaseSecond();
-    await Promise.resolve();
-    expect(session.getMessages()).toHaveLength(1);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(session.getMessages()).toHaveLength(2);
     releaseFirst();
     await turn;
 
     expect(session.getMessages()[0]).toEqual({
+      seq: 0,
       role: 'user',
+      to: ['first', 'second'],
       content: [{ type: 'text', text: '@first @second @FIRST compare' }],
     });
     expect(session.getMessages().slice(1).map(message => [message.participant, message.content[0]]))
@@ -510,16 +541,7 @@ describe('Session model', () => {
   });
 
   test('does not strip a model name following an existing participant mention', async () => {
-    let receivedText: string | undefined;
-    boundTransports[testModel] = {
-      getResponse: async messages => {
-        receivedText = messages.at(-1)?.content
-          .filter(block => block.type === 'text')
-          .map(block => block.text)
-          .join('\n');
-        return { content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn' };
-      },
-    };
+    const binding = bindScriptedRuntime(testModel, textTurn('done'));
     const session = new Session();
     session.addParticipant('Claude', testModel);
 
@@ -528,7 +550,7 @@ describe('Session model', () => {
       content: [{ type: 'text', text: '@Claude claude-opus-5 is still relevant here' }],
     });
 
-    expect(receivedText).toBe('@Claude claude-opus-5 is still relevant here');
+    expect(binding.runtimes[0].prompts[0].text).toBe('@Claude claude-opus-5 is still relevant here');
   });
 
   test('rejects an unknown mention without a model before changing the session', async () => {
@@ -542,13 +564,7 @@ describe('Session model', () => {
   });
 
   test('does not treat a scoped package name as a participant mention', async () => {
-    let calls = 0;
-    boundTransports[testModel] = {
-      getResponse: async () => {
-        calls++;
-        return { content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn' };
-      },
-    };
+    const binding = bindScriptedRuntime(testModel, textTurn('done'));
     const session = new Session({ id: 'session-id', name: 'Test', model: testModel });
 
     await session.sendMessage({
@@ -556,24 +572,20 @@ describe('Session model', () => {
       content: [{ type: 'text', text: 'Upgrade @scope/package for me' }],
     });
 
-    expect(calls).toBe(1);
+    expect(binding.runtimes[0].prompts).toHaveLength(1);
     expect(session.getParticipants()).toEqual([{ name: 'sirus', model: testModel }]);
   });
 
   test('does not invoke or create participants from mentions inside Markdown blocks', async () => {
     const calls: string[] = [];
-    boundTransports[testModel] = {
-      getResponse: async () => {
-        calls.push('sirus');
-        return { content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn' };
-      },
-    };
-    boundTransports[secondTestModel] = {
-      getResponse: async () => {
-        calls.push('reviewer');
-        return { content: [{ type: 'text', text: 'reviewed' }], stop_reason: 'end_turn' };
-      },
-    };
+    bindScriptedRuntime(testModel, (_input, emit) => {
+      calls.push('sirus');
+      emit({ type: 'text', text: 'done' });
+    });
+    bindScriptedRuntime(secondTestModel, (_input, emit) => {
+      calls.push('reviewer');
+      emit({ type: 'text', text: 'reviewed' });
+    });
     const session = new Session({ id: 'team-id', name: 'Team', model: testModel });
     session.addParticipant('reviewer', secondTestModel);
     const text = [
@@ -600,23 +612,19 @@ describe('Session model', () => {
 
     expect(calls).toEqual(['sirus']);
     expect(session.getParticipants().map(participant => participant.name)).toEqual(['sirus', 'reviewer']);
-    expect(session.getMessages()[0]).toEqual({ role: 'user', content: [{ type: 'text', text }] });
+    expect(session.getMessages()[0]).toEqual({ seq: 0, role: 'user', to: ['sirus'], content: [{ type: 'text', text }] });
   });
 
   test('runs only top-level mentions when blocked examples appear in the same message', async () => {
     const calls: string[] = [];
-    boundTransports[testModel] = {
-      getResponse: async () => {
-        calls.push('reviewer');
-        return { content: [{ type: 'text', text: 'reviewed' }], stop_reason: 'end_turn' };
-      },
-    };
-    boundTransports[secondTestModel] = {
-      getResponse: async () => {
-        calls.push('verifier');
-        return { content: [{ type: 'text', text: 'verified' }], stop_reason: 'end_turn' };
-      },
-    };
+    bindScriptedRuntime(testModel, (_input, emit) => {
+      calls.push('reviewer');
+      emit({ type: 'text', text: 'reviewed' });
+    });
+    bindScriptedRuntime(secondTestModel, (_input, emit) => {
+      calls.push('verifier');
+      emit({ type: 'text', text: 'verified' });
+    });
     const session = new Session();
     session.addParticipant('reviewer', testModel);
     session.addParticipant('verifier', secondTestModel);
@@ -634,18 +642,11 @@ describe('Session model', () => {
 
   test('does not delegate from an agent mention inside a Markdown block', async () => {
     let reviewerCalls = 0;
-    boundTransports[testModel] = {
-      getResponse: async () => ({
-        content: [{ type: 'text', text: '> @reviewer this is a quoted example' }],
-        stop_reason: 'end_turn',
-      }),
-    };
-    boundTransports[secondTestModel] = {
-      getResponse: async () => {
-        reviewerCalls++;
-        return { content: [{ type: 'text', text: 'reviewed' }], stop_reason: 'end_turn' };
-      },
-    };
+    bindScriptedRuntime(testModel, textTurn('> @reviewer this is a quoted example'));
+    bindScriptedRuntime(secondTestModel, (_input, emit) => {
+      reviewerCalls++;
+      emit({ type: 'text', text: 'reviewed' });
+    });
     const session = new Session({ id: 'team-id', name: 'Team', model: testModel });
     session.addParticipant('reviewer', secondTestModel);
 
@@ -655,43 +656,26 @@ describe('Session model', () => {
     expect(session.getMessages()).toHaveLength(2);
   });
 
-  test('lets agents mention existing participants across multiple delegation rounds', async () => {
-    const calls: Array<{ model: string; turn: TurnContext; messages: Message[] }> = [];
+  test('delivers whole messages to mentioned participants across delegation rounds', async () => {
+    const calls: Array<{ model: string; text: string }> = [];
     let sirusCalls = 0;
-    boundTransports[testModel] = {
-      getResponse: async (messages, turn) => {
-        calls.push({ model: turn.agent.model, turn, messages: [...messages] });
+    const record = (model: string): ScriptedTurn => (input, emit) => {
+      calls.push({ model, text: input.text });
+      if (model === testModel) {
         sirusCalls++;
-        return {
-          content: [{
-            type: 'text',
-            text: sirusCalls === 1 ? '@reviewer please review this.' : 'Thanks, review complete.',
-          }],
-          stop_reason: 'end_turn',
-        };
-      },
+        emit({ type: 'text', text: sirusCalls === 1 ? '@reviewer please review this.' : 'Thanks, review complete.' });
+      } else if (model === secondTestModel) {
+        // Sirus can be invoked again for a genuine back-and-forth while the
+        // verifier runs alongside it in the same next round.
+        emit({ type: 'text', text: '@sirus has the context. @verifier please verify.' });
+      } else {
+        // Agent output cannot use the user-only creation syntax.
+        emit({ type: 'text', text: 'Verified. @new-agent test-session-model join us.' });
+      }
     };
-    boundTransports[secondTestModel] = {
-      getResponse: async (messages, turn) => {
-        calls.push({ model: turn.agent.model, turn, messages: [...messages] });
-        return {
-          // Sirus can be invoked again for a genuine back-and-forth while the
-          // verifier runs alongside it in the same next round.
-          content: [{ type: 'text', text: '@sirus has the context. @verifier please verify.' }],
-          stop_reason: 'end_turn',
-        };
-      },
-    };
-    boundTransports[thirdTestModel] = {
-      getResponse: async (messages, turn) => {
-        calls.push({ model: turn.agent.model, turn, messages: [...messages] });
-        return {
-          // Agent output cannot use the user-only creation syntax.
-          content: [{ type: 'text', text: 'Verified. @new-agent test-session-model join us.' }],
-          stop_reason: 'end_turn',
-        };
-      },
-    };
+    bindScriptedRuntime(testModel, record(testModel));
+    bindScriptedRuntime(secondTestModel, record(secondTestModel));
+    bindScriptedRuntime(thirdTestModel, record(thirdTestModel));
     const session = new Session({ id: 'team-id', name: 'Team', model: testModel });
     session.addParticipant('reviewer', secondTestModel);
     session.addParticipant('verifier', thirdTestModel);
@@ -703,29 +687,27 @@ describe('Session model', () => {
 
     expect(calls.map(call => call.model))
       .toEqual([testModel, secondTestModel, testModel, thirdTestModel]);
-    expect(calls[1].turn.turnPrompt).toContain('@sirus mentioned you');
-    expect(calls[2].turn.turnPrompt).toContain('@reviewer mentioned you');
-    expect(calls[3].turn.turnPrompt).toContain('@reviewer mentioned you');
-    expect(calls[1].messages.at(-1)?.participant).toBe('sirus');
-    expect(calls[2].messages.at(-1)?.participant).toBe('reviewer');
-    expect(calls[3].messages.at(-1)?.participant).toBe('reviewer');
-    expect(session.getMessages().filter(message => message.role === 'assistant')
-      .map(message => message.participant)).toEqual(['sirus', 'reviewer', 'sirus', 'verifier']);
+    expect(calls[0].text).toBe('Start the review');
+    // A mentioned participant gets the sender's whole message, attributed.
+    expect(calls[1].text).toBe('@sirus wrote:\n@reviewer please review this.');
+    expect(calls[2].text).toBe('@reviewer wrote:\n@sirus has the context. @verifier please verify.');
+    expect(calls[3].text).toBe('@reviewer wrote:\n@sirus has the context. @verifier please verify.');
+    const responses = session.getMessages().filter(message => message.role === 'assistant');
+    expect(responses.map(message => message.participant)).toEqual(['sirus', 'reviewer', 'sirus', 'verifier']);
+    // Delivery is recorded on the entry, so a restore puts it back where it went.
+    expect(responses[0].to).toEqual(['reviewer']);
+    expect(responses[1].to).toEqual(['sirus', 'verifier']);
+    expect(responses[2].to).toBeUndefined();
     expect(session.getParticipants().map(participant => participant.name))
       .toEqual(['sirus', 'reviewer', 'verifier']);
   });
 
   test('ignores an agent mentioning itself', async () => {
     let calls = 0;
-    boundTransports[testModel] = {
-      getResponse: async () => {
-        calls++;
-        return {
-          content: [{ type: 'text', text: '@sirus I should not invoke myself.' }],
-          stop_reason: 'end_turn',
-        };
-      },
-    };
+    bindScriptedRuntime(testModel, (_input, emit) => {
+      calls++;
+      emit({ type: 'text', text: '@sirus I should not invoke myself.' });
+    });
     const session = new Session({ id: 'team-id', name: 'Team', model: testModel });
 
     await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Start' }] });
@@ -740,26 +722,17 @@ describe('Session model', () => {
     const reviewerGate = new Promise<void>(resolve => { releaseReviewer = resolve; });
     const verifierGate = new Promise<void>(resolve => { releaseVerifier = resolve; });
     const started: string[] = [];
-    boundTransports[testModel] = {
-      getResponse: async () => ({
-        content: [{ type: 'text', text: '@reviewer @verifier compare this.' }],
-        stop_reason: 'end_turn',
-      }),
-    };
-    boundTransports[secondTestModel] = {
-      getResponse: async () => {
-        started.push('reviewer');
-        await reviewerGate;
-        return { content: [{ type: 'text', text: 'reviewed' }], stop_reason: 'end_turn' };
-      },
-    };
-    boundTransports[thirdTestModel] = {
-      getResponse: async () => {
-        started.push('verifier');
-        await verifierGate;
-        return { content: [{ type: 'text', text: 'verified' }], stop_reason: 'end_turn' };
-      },
-    };
+    bindScriptedRuntime(testModel, textTurn('@reviewer @verifier compare this.'));
+    bindScriptedRuntime(secondTestModel, async (_input, emit) => {
+      started.push('reviewer');
+      await reviewerGate;
+      emit({ type: 'text', text: 'reviewed' });
+    });
+    bindScriptedRuntime(thirdTestModel, async (_input, emit) => {
+      started.push('verifier');
+      await verifierGate;
+      emit({ type: 'text', text: 'verified' });
+    });
     const session = new Session({ id: 'team-id', name: 'Team', model: testModel });
     session.addParticipant('reviewer', secondTestModel);
     session.addParticipant('verifier', thirdTestModel);
@@ -768,7 +741,7 @@ describe('Session model', () => {
       role: 'user',
       content: [{ type: 'text', text: 'Delegate this' }],
     });
-    for (let tick = 0; tick < 20 && started.length < 2; tick++) await Promise.resolve();
+    while (started.length < 2) await new Promise(resolve => setTimeout(resolve, 0));
     releaseVerifier();
     releaseReviewer();
     expect(started).toEqual(['reviewer', 'verifier']);
@@ -779,9 +752,7 @@ describe('Session model', () => {
   });
 
   test('persists all participants and their model choices in snapshots', () => {
-    boundTransports[testModel] = {
-      getResponse: async () => ({ content: [], stop_reason: 'end_turn' }),
-    };
+    bindScriptedRuntime(testModel, textTurn(''));
     const session = new Session({ name: 'Team' });
     session.addParticipant('reviewer', testModel);
 
@@ -792,40 +763,60 @@ describe('Session model', () => {
       { name: 'reviewer', model: testModel },
     ]);
   });
+
+  test('restores delivered entries into every transcript they reached', async () => {
+    bindScriptedRuntime(testModel, textTurn('@reviewer over to you'));
+    const reviewer = bindScriptedRuntime(secondTestModel, textTurn('noted'));
+    const session = new Session({ id: 'restore', name: 'Restore', model: testModel });
+    session.addParticipant('reviewer', secondTestModel);
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Begin' }] });
+
+    const restored = Session.fromSnapshot(session.toSnapshot());
+    await restored.sendMessage({ role: 'user', content: [{ type: 'text', text: '@reviewer again' }] });
+    // The reviewer's new runtime is reseeded with what reached the reviewer
+    // and nothing the user said only to sirus.
+    expect(reviewer.runtimes[1].prompts[0].text).toBe([
+      'Earlier conversation, for context:',
+      '@sirus: @reviewer over to you',
+      '@reviewer: noted',
+      '',
+      '@reviewer again',
+    ].join('\n'));
+  });
 });
 
 describe('Session subscriptions', () => {
   test('tracks working, idle, and error turn states', async () => {
     let finish!: () => void;
     let shouldFail = false;
-    boundTransports[testModel] = {
-      getResponse: async (_messages, turn) => {
-        await new Promise<void>(resolve => { finish = resolve; });
-        if (shouldFail) {
-          turn.updateStream([{ type: 'text', text: 'Partial before failure' }]);
-          throw new Error('provider failed');
-        }
-        return { content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn' };
-      },
-    };
+    bindScriptedRuntime(testModel, async (_input, emit) => {
+      await new Promise<void>(resolve => { finish = resolve; });
+      if (shouldFail) {
+        emit({ type: 'text', text: 'Partial before failure' });
+        throw new Error('runtime failed');
+      }
+      emit({ type: 'text', text: 'done' });
+    });
     const session = new Session({ id: 'status-id', name: 'Status', model: testModel });
 
     expect(session.getStatus()).toBe('idle');
     const successfulTurn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Start' }] });
     expect(session.getStatus()).toBe('working');
-    await Promise.resolve();
+    while (!finish) await new Promise(resolve => setTimeout(resolve, 0));
     finish();
     await successfulTurn;
     expect(session.getStatus()).toBe('idle');
 
     shouldFail = true;
+    finish = undefined as unknown as () => void;
     const failedTurn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Again' }] });
     expect(session.getStatus()).toBe('working');
-    await Promise.resolve();
+    while (!finish) await new Promise(resolve => setTimeout(resolve, 0));
     finish();
-    await expect(failedTurn).rejects.toThrow('provider failed');
+    await expect(failedTurn).rejects.toThrow('runtime failed');
     expect(session.getStatus()).toBe('error');
     expect(session.getMessages().at(-1)).toEqual({
+      seq: 3,
       role: 'assistant',
       participant: 'sirus',
       model: testModel,
@@ -886,36 +877,46 @@ describe('Session subscriptions', () => {
     session.changeParticipantModel('sirus', 'claude-fable-5-1');
     expect(session.getVersion()).toBe(before + 2);
   });
+
+  test('switches every live runtime when the permission mode changes', async () => {
+    const binding = bindScriptedRuntime(testModel, textTurn('ok'));
+    const session = new Session({ id: 'modes', name: 'Modes', model: testModel });
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'hi' }] });
+    session.setPermissionMode('ask');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(binding.runtimes[0].permissionMode).toBe('ask');
+    expect(session.getModeNotice()).toBeNull();
+  });
 });
 
 describe('session-owned subagent cancellation', () => {
   test('cancels its detached workers after the parent finishes without cancelling another session', async () => {
     const { listAllSubagents } = await import('../../src/agent_runtime/tools/subagents');
     const { checkSubagent } = await import('../../src/agent_runtime/tools/subagents/run');
-    const workers = new Map<string, import('../../src/agent_runtime/tools/subagents').SubagentRun>();
+    const workers = new Map<string, SubagentRun>();
     let finishWorkers!: () => void;
     const workerGate = new Promise<void>(resolve => { finishWorkers = resolve; });
-    boundTransports[secondTestModel] = {
-      getResponse: async () => {
-        await workerGate;
-        return { content: [{ type: 'text', text: 'Worker done' }], stop_reason: 'end_turn' };
-      },
-    };
-    boundTransports[testModel] = {
-      getResponse: async (_messages, turn) => {
-        workers.set(turn.agent.runtimeId, turn.agent.spawnSubagent('Work', secondTestModel, {
-          directory: turn.directory,
-        }));
-        return { content: [{ type: 'text', text: 'Worker started' }], stop_reason: 'end_turn' };
-      },
-    };
-    const first = new Session({ id: 'owned-first', name: 'First', model: testModel });
-    const second = new Session({ id: 'owned-second', name: 'Second', model: testModel });
-    const message: Message = { role: 'user', content: [{ type: 'text', text: 'Start' }] };
+    const sessions: Session[] = [];
+    bindScriptedRuntime(secondTestModel, async (_input, emit) => {
+      await workerGate;
+      emit({ type: 'text', text: 'Worker done' });
+    });
+    bindScriptedRuntime(testModel, (_input, emit, options) => {
+      const owner = sessions[workers.size];
+      workers.set(owner.getId(), owner.subagentHostFor('sirus')!.spawn('Work', { callId: 'spawn' }) as SubagentRun);
+      expect(options.mcpServer?.headers[1].value).toBe('sirus');
+      emit({ type: 'text', text: 'Worker started' });
+    });
+    const first = new Session({ id: 'owned-first', name: 'First', model: testModel, subagentModel: secondTestModel });
+    const second = new Session({ id: 'owned-second', name: 'Second', model: testModel, subagentModel: secondTestModel });
+    sessions.push(first, second);
+    const message: Draft = { role: 'user', content: [{ type: 'text', text: 'Start' }] };
     try {
       await first.sendMessage(message);
       await second.sendMessage(message);
       expect(first.getStatus()).toBe('idle');
+      expect(workers.get(first.getId())?.model).toBe(secondTestModel);
+      expect(workers.get(first.getId())?.sessionId).toBe('owned-first');
       expect(first.cancel()).toBe(true);
       await checkSubagent(workers.get(first.getId())!, true);
       expect(workers.get(first.getId())?.status).toBe('cancelled');
