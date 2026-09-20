@@ -6,9 +6,9 @@ import { PassThrough } from 'node:stream';
 import { useState, type ReactNode } from 'react';
 import { Box, render } from 'ink';
 import stripAnsi from 'strip-ansi';
-import { boundTransports } from '../../src/agent_runtime/providers';
+import type { PromptInput } from '../../src/agent_runtime/runtime/runtime';
 import { Session } from '../../src/agent_runtime/session';
-import type { Message } from '../../src/agent_runtime/types';
+import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
 import Chat, { promptHistory } from '../../src/frontend/chat/Chat';
 import * as fileSearch from '../../src/fileSearch';
 import { InputBar } from '../../src/frontend/chat/InputBar';
@@ -17,7 +17,7 @@ const model = 'test-file-mentions-integration';
 const projects: string[] = [];
 
 afterEach(() => {
-  delete boundTransports[model];
+  unbindRuntime(model);
   for (const project of projects.splice(0)) rmSync(project, { recursive: true, force: true });
 });
 
@@ -254,13 +254,14 @@ describe('file mentions through the terminal', () => {
   test('sends selected file contents only to the addressed agent and keeps history and rendering compact', async () => {
     const contents = 'Unique attachment contents. @intruder should never become a participant.';
     const directory = project({ 'notes.txt': contents });
-    const calls: { participant: string; messages: readonly Message[] }[] = [];
-    boundTransports[model] = {
-      getResponse: async (messages, turn) => {
-        calls.push({ participant: turn.agent.name, messages: structuredClone(messages) });
-        return { content: [{ type: 'text', text: 'Reviewed the attachment.' }], stop_reason: 'end_turn' };
-      },
-    };
+    const calls: { participant: string; prompt: PromptInput }[] = [];
+    // Who a runtime answers for is the requester it carries to the Sirus MCP
+    // server, which is the participant's own name.
+    bindScriptedRuntime(model, (input, emit, options) => {
+      const requester = options.mcpServer?.headers.find(header => header.name === 'X-Sirus-Requester');
+      calls.push({ participant: requester?.value ?? '', prompt: input });
+      emit({ type: 'text', text: 'Reviewed the attachment.' });
+    });
     const session = new Session({
       id: 'file-mention-integration',
       name: 'File mention integration',
@@ -281,7 +282,7 @@ describe('file mentions through the terminal', () => {
       await ui.type('\r');
       await ui.until(() => ui.output().includes('Reviewed the attachment.'));
       expect(calls.map(call => call.participant)).toEqual(['reviewer']);
-      expect(JSON.stringify(calls[0]!.messages)).toContain(contents);
+      expect(calls[0]!.prompt.text).toContain(contents);
       expect(session.getParticipants().map(participant => participant.name)).toEqual(['sirus', 'reviewer']);
       expect(promptHistory(session.getMessages())).toEqual(['@reviewer Read @notes.txt']);
       expect(ui.output()).toContain('@notes.txt');
@@ -297,12 +298,10 @@ describe('file mentions through the terminal', () => {
   test('a missing file restores the editable draft without starting a provider or recording a message', async () => {
     const directory = project({});
     let calls = 0;
-    boundTransports[model] = {
-      getResponse: async () => {
-        calls++;
-        return { content: [{ type: 'text', text: 'Unexpected response' }], stop_reason: 'end_turn' };
-      },
-    };
+    bindScriptedRuntime(model, (_input, emit) => {
+      calls++;
+      emit({ type: 'text', text: 'Unexpected response' });
+    });
     const session = new Session({ id: 'missing-file-integration', name: 'Missing file', directory, model });
     const ui = terminal(<Chat currSession={session} />);
     try {
@@ -322,13 +321,11 @@ describe('file mentions through the terminal', () => {
     const contents = 'export const siblingProjectValue = 42;';
     const root = project({ 'current/local.txt': 'Current project', 'proj/file.tsx': contents });
     const directory = path.join(root, 'current');
-    const received: Message[][] = [];
-    boundTransports[model] = {
-      getResponse: async messages => {
-        received.push(structuredClone([...messages]));
-        return { content: [{ type: 'text', text: 'Read the sibling file.' }], stop_reason: 'end_turn' };
-      },
-    };
+    const received: PromptInput[] = [];
+    bindScriptedRuntime(model, (input, emit) => {
+      received.push(input);
+      emit({ type: 'text', text: 'Read the sibling file.' });
+    });
     const session = new Session({ id: 'sibling-file-integration', name: 'Sibling file', directory, model });
     const ui = terminal(<Chat currSession={session} />);
     try {
@@ -344,7 +341,7 @@ describe('file mentions through the terminal', () => {
       await ui.type('\r');
       await ui.until(() => ui.output().includes('Read the sibling file.'));
       expect(received).toHaveLength(1);
-      expect(JSON.stringify(received[0])).toContain(contents);
+      expect(received[0]!.text).toContain(contents);
       expect(promptHistory(session.getMessages())).toEqual(['@../proj/file.tsx']);
       expect(ui.output()).toContain('@../proj/file.tsx');
       expect(ui.output()).not.toContain('attached:');

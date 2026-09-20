@@ -120,7 +120,8 @@ export function PromptBar({ mode, feedback, participantColors, queuedMessages, s
               <Box>
                 <Text color={theme.accentSoft}>›{' '}</Text>
                 <Text color={theme.textSubtle}>
-                  {mode.type === 'approval' ? '↑↓ choose · enter to select · y / a / n' : '↑↓ choose · enter to select'}
+                  ↑↓ choose · enter to select
+                  {mode.type === 'approval' && ` · ${approvalChoices(mode.request).map(choice => choice.key).join(' / ')}`}
                 </Text>
               </Box>
             )}

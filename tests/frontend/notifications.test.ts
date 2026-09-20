@@ -3,9 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { Session, type SessionStatus } from '../../src/agent_runtime/session';
-import { pendingApprovals, resolveApproval } from '../../src/agent_runtime/permissions/approvals';
-import { authorizeToolCall } from '../../src/agent_runtime/permissions/policy';
-import { toolRegistry } from '../../src/agent_runtime/tools';
+import type { RequestPermissionResponse } from '@agentclientprotocol/sdk';
+import { pendingApprovals, requestPermission, resolveApproval } from '../../src/agent_runtime/permissions/approvals';
 import { loadNotificationPreference, loadMemoryAccessPreference, saveMemoryAccessPreference } from '../../src/persistence';
 import { notificationMode, setNotificationMode, shouldNotify, terminalNotificationSequence } from '../../src/frontend/terminal/notifications';
 import { parseFocusEvent, recordFocusEvent, resetFocusState } from '../../src/frontend/terminal/window-focus';
@@ -133,11 +132,17 @@ describe('notification event subscriptions', () => {
 
   test('never uses a previous turn as the completion summary', () => {
     const session = new Session();
+    session.addParticipant('reviewer', session.getModel());
     session.append({ role: 'assistant', content: [{ type: 'text', text: 'Old answer.' }] });
     session.append({ role: 'user', content: [{ type: 'text', text: 'New request.' }] });
     expect(turnSummary(session, 'idle')).toBe('Turn finished.');
     session.append({ role: 'assistant', participant: 'reviewer', content: [{ type: 'text', text: 'Current progress.' }] });
-    session.append({ role: 'user', content: [{ type: 'tool_result', callId: '1', result: 'done', isError: false }] });
+    // An entry that is nothing but tool activity has no closing words of its
+    // own, so the summary keeps walking back through this turn.
+    session.append({ role: 'assistant', participant: 'sirus', content: [{
+      type: 'tool_call', id: 'call-1', kind: 'read', title: 'notes.md',
+      status: 'completed', locations: [], content: [],
+    }] });
     expect(turnSummary(session, 'idle')).toBe('@reviewer: Current progress.');
   });
 
@@ -146,19 +151,21 @@ describe('notification event subscriptions', () => {
     let sessions: Session[] = [];
     const sent: string[] = [];
     const stop = subscribeApprovalNotifications(() => sessions, (title, body) => sent.push(`${title}: ${body}`));
-    const approvals: Promise<string | null>[] = [];
-    const request = (id: string) => authorizeToolCall(
-      toolRegistry.find(tool => tool.name === 'WriteFile'),
-      { type: 'tool_call', id, name: 'WriteFile', arguments: { path: 'example.txt', content: 'test' } },
-      directory,
-      { sessionId: session.getId(), mode: () => 'ask', requester: { participant: 'reviewer' }, model: session.getModel() },
+    const approvals: Promise<RequestPermissionResponse>[] = [];
+    const request = (id: string) => requestPermission(
+      { sessionId: session.getId(), requester: { participant: 'reviewer' } },
+      {
+        sessionId: 'acp-session',
+        toolCall: { toolCallId: id, kind: 'edit', title: 'example.txt', rawInput: { path: 'example.txt' } },
+        options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+      },
     );
     try {
       sessions = [session];
       approvals.push(request('first'));
       approvals.push(request('second'));
       expect(sent).toHaveLength(2);
-      expect(sent[0]).toContain('Sirus · First name: @reviewer wants to run WriteFile');
+      expect(sent[0]).toContain('Sirus · First name: @reviewer wants to edit example.txt');
       for (const approval of pendingApprovals(session.getId())) resolveApproval(approval.id, 'allow');
       await Promise.all(approvals);
       expect(sent).toHaveLength(2);

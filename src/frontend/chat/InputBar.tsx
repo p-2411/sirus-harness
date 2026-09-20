@@ -35,6 +35,8 @@ interface InputBarProps {
   directory?: string;
   mode?: InputMode;
   permissionMode?: PermissionMode;
+  // what the vendor made of that mode, when it could not honour it
+  modeNotice?: string | null;
   // shift+tab in text mode
   onCyclePermissionMode?: () => void;
   // images waiting to go with the next message, oldest first
@@ -74,6 +76,7 @@ export function InputBar({
   directory,
   mode = TEXT_MODE,
   permissionMode,
+  modeNotice,
   onCyclePermissionMode,
   attachments = NO_ATTACHMENTS,
   onPasteImage,
@@ -87,7 +90,7 @@ export function InputBar({
   contextUsage,
 }: InputBarProps) {
   const participantColors = participantColorMap(participants);
-  const status: StatusRowProps = { activeSubagents, permissionMode, model, thinkingLevel, contextUsage };
+  const status: StatusRowProps = { activeSubagents, permissionMode, modeNotice, model, thinkingLevel, contextUsage };
 
   // ── The draft, and the waiting message standing in front of it ──────────
   // Identity survives edits and earlier messages draining from the queue.

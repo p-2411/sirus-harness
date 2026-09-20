@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { renderToString } from 'ink';
 import stripAnsi from 'strip-ansi';
-import { boundTransports } from '../../src/agent_runtime/providers';
+import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
 import { Session } from '../../src/agent_runtime/session';
 import {
   SESSION_STATUS_APPEARANCE,
@@ -134,22 +134,25 @@ describe('sidebar session status', () => {
   test('shows a hollow circle while working and a filled circle after an error', async () => {
     const model = 'sidebar-status-model';
     let finish!: () => void;
-    boundTransports[model] = {
-      getResponse: async () => {
-        await new Promise<void>(resolve => { finish = resolve; });
-        throw new Error('provider failed');
-      },
-    };
+    let started!: () => void;
+    // Starting a runtime is asynchronous now, so wait for the turn itself.
+    const running = new Promise<void>(resolve => { started = resolve; });
+    bindScriptedRuntime(model, async () => {
+      started();
+      await new Promise<void>(resolve => { finish = resolve; });
+      throw new Error('runtime failed');
+    });
     const session = new Session({ id: 'status-id', name: 'Active', model });
 
     const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Go' }] });
-    await Promise.resolve();
+    await running;
     expect(render(session)).toContain('○ Active');
 
     finish();
-    await expect(turn).rejects.toThrow('provider failed');
+    await expect(turn).rejects.toThrow('runtime failed');
     expect(render(session)).toContain('● Active');
 
-    delete boundTransports[model];
+    session.dispose();
+    unbindRuntime(model);
   });
 });

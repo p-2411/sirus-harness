@@ -4,7 +4,7 @@ import { PassThrough } from 'node:stream';
 import { useState, useSyncExternalStore } from 'react';
 import stripAnsi from 'strip-ansi';
 import { InputBar } from '../../src/frontend/chat/InputBar';
-import { ApprovalPrompt } from '../../src/frontend/chat/ApprovalPrompt';
+import { ApprovalPrompt, approvalChoices } from '../../src/frontend/chat/ApprovalPrompt';
 import { InputFeedback, QueuedRow, SecretInput } from '../../src/frontend/chat/InputRows';
 import { SubagentStatusRow } from '../../src/frontend/chat/StatusRow';
 import {
@@ -20,6 +20,8 @@ import type { Feedback } from '../../src/commands/feedback';
 import { Session } from '../../src/agent_runtime/session';
 import Sidebar from '../../src/frontend/Sidebar';
 import type { ApprovalRequest } from '../../src/agent_runtime/permissions/approvals';
+import type { PermissionOption } from '@agentclientprotocol/sdk';
+import type { ToolCallBlock } from '../../src/agent_runtime/types';
 
 describe('session input drafts', () => {
   test('edits and restores drafts when switching session panes with Option+arrows', async () => {
@@ -165,6 +167,19 @@ describe('input status', () => {
     expect(output).toContain('ctx 150k (75%) · claude-sonnet-5');
   });
 
+  test('qualifies the mode with what the vendor made of it', () => {
+    const notice = 'auto approve is unavailable on claude-haiku-4-5; the agent is on Manual';
+    const output = stripAnsi(renderToString(
+      <SubagentStatusRow permissionMode="auto" modeNotice={notice} />,
+      { columns: 120 },
+    ));
+    expect(output).toContain(`auto approve · ${notice} · shift+tab`);
+    expect(stripAnsi(renderToString(
+      <SubagentStatusRow permissionMode="auto" modeNotice={null} />,
+      { columns: 120 },
+    ))).toContain('auto approve · shift+tab');
+  });
+
   test('lists queued messages in order on single lines', () => {
     const output = stripAnsi(renderToString(
       <QueuedRow messages={['fix the test', 'then update\nthe readme']} />,
@@ -238,30 +253,87 @@ describe('input cursor editing', () => {
 });
 
 describe('approval prompt', () => {
-  test('renders removed and added edit lines inline', () => {
-    const request: ApprovalRequest = {
+  // Both adapters offer all four options; the prompt follows their order.
+  const OPTIONS: PermissionOption[] = [
+    { optionId: 'allow', name: 'Yes', kind: 'allow_once' },
+    { optionId: 'always', name: 'Yes, and don’t ask again', kind: 'allow_always' },
+    { optionId: 'reject', name: 'No', kind: 'reject_once' },
+    { optionId: 'never', name: 'No, and don’t ask again', kind: 'reject_always' },
+  ];
+
+  function approval(toolCall: ToolCallBlock, options: PermissionOption[] = OPTIONS): ApprovalRequest {
+    return {
       id: 'approval-1',
       sessionId: 'session-1',
       requester: { participant: 'sirus' },
-      call: {
-        type: 'tool_call',
-        id: 'call-1',
-        name: 'EditFile',
-        arguments: { path: 'src/app.ts', old_text: 'old', new_text: 'new' },
-      },
-      toolClass: 'write',
-      reason: 'write',
-      detail: ['src/app.ts', '- old', '+ new'],
-      allowanceKey: 'write:src/app.ts',
+      toolCall,
+      options,
     };
-    const output = stripAnsi(renderToString(
-      <ApprovalPrompt request={request} waiting={1} selected={0} />,
-      { columns: 100 },
-    ));
-    expect(output).toContain('@sirus wants to run EditFile · 1 more waiting');
+  }
+
+  const render = (request: ApprovalRequest, waiting = 0) => stripAnsi(renderToString(
+    <ApprovalPrompt request={request} waiting={waiting} selected={0} />,
+    { columns: 100 },
+  ));
+
+  test('names the call the way the transcript does and lists the vendor’s options', () => {
+    const output = render(approval({
+      type: 'tool_call',
+      id: 'call-1',
+      kind: 'edit',
+      title: 'src/app.ts',
+      status: 'pending',
+      locations: [{ path: 'src/app.ts' }],
+      content: [{ type: 'diff', path: 'src/app.ts', oldText: 'old', newText: 'new' }],
+    }), 1);
+
+    expect(output).toContain('@sirus wants to edit src/app.ts · 1 more waiting');
+    expect(output).toContain('src/app.ts');
     expect(output).toContain('- old');
     expect(output).toContain('+ new');
-    expect(output).toContain('Allow once');
+    for (const label of ['Allow once', 'Allow for this session', 'Deny', 'Deny for this session']) {
+      expect(output).toContain(label);
+    }
+  });
+
+  test('offers only what the vendor offered', () => {
+    const output = render(approval({
+      type: 'tool_call',
+      id: 'call-2',
+      kind: 'execute',
+      title: 'bun test',
+      status: 'pending',
+      locations: [],
+      content: [],
+      input: { command: 'bun test --coverage' },
+    }, OPTIONS.filter(option => option.kind !== 'allow_always')));
+
+    expect(output).toContain('@sirus wants to run bun test');
+    expect(output).toContain('$ bun test --coverage');
+    expect(output).not.toContain('Allow for this session');
+    // Keys and decisions follow the option kinds, in the vendor's order.
+    expect(approvalChoices(approval({
+      type: 'tool_call', id: 'call-2', kind: 'execute', title: 'bun test',
+      status: 'pending', locations: [], content: [],
+    })).map(choice => `${choice.key}:${choice.decision}`))
+      .toEqual(['y:allow', 'a:allow-session', 'n:deny', 'd:deny']);
+  });
+
+  test('cuts an unrecognised input down to a readable line', () => {
+    const output = render(approval({
+      type: 'tool_call',
+      id: 'call-3',
+      kind: 'other',
+      title: 'sirus - SaveMemory',
+      status: 'pending',
+      locations: [],
+      content: [],
+      input: { note: 'x'.repeat(400) },
+    }));
+
+    expect(output).toContain('@sirus wants to tool sirus - SaveMemory');
+    expect(output).toContain('…');
+    expect(output).not.toContain('x'.repeat(300));
   });
 });
 

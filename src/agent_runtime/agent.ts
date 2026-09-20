@@ -107,10 +107,11 @@ export class SessionAgent {
   // The credential the runtime is on; a source that worked stays first.
   private source: Source | null = null;
   private turn: AbortController | null = null;
-  // Where the runtime's updates go: the recorder of the turn in flight. The
-  // runtime outlives turns, so it is handed one stable callback and this is
-  // what that callback reads.
+  // Where the runtime's updates go: the recorder of the turn in flight, and
+  // the entry it fills. The runtime outlives turns, so it is handed one
+  // stable callback and this is what that callback reads.
   private record: ((update: RuntimeUpdate) => void) | null = null;
+  private entry: Message | null = null;
   private readonly subagents = new Map<string, SubagentRun>();
 
   constructor(options: AgentOptions) {
@@ -172,6 +173,7 @@ export class SessionAgent {
     else outer?.addEventListener('abort', follow, { once: true });
     this.turn = controller;
     const { signal } = controller;
+    this.entry = options.entry;
     this.record = this.recorder(options.entry, options.onUpdate);
     try {
       throwIfAborted(signal);
@@ -206,6 +208,7 @@ export class SessionAgent {
       outer?.removeEventListener('abort', follow);
       this.turn = null;
       this.record = null;
+      this.entry = null;
     }
   }
 
@@ -400,13 +403,28 @@ export class SessionAgent {
     return cancelled;
   }
 
+  // The tool call the vendor reported for the SpawnAgent it is running now:
+  // the newest one still open and not yet tied to a run. The MCP request
+  // carries no vendor call id, and the chat decorates the row by it.
+  private openSpawnCallId(): string | undefined {
+    const taken = new Set([...this.subagents.values()].map(run => run.callId));
+    const blocks = this.entry?.content ?? [];
+    for (let index = blocks.length - 1; index >= 0; index--) {
+      const block = blocks[index];
+      if (block.type !== 'tool_call' || taken.has(block.id)) continue;
+      if (block.status === 'completed' || block.status === 'failed') continue;
+      if (/SpawnAgent/.test(block.title)) return block.id;
+    }
+    return undefined;
+  }
+
   // The agent's own delegation, as the narrow port the agent tools speak to
   // over the MCP server. A worker outlives the tool call that started it:
   // the call's signal ends with its request, and stopping a worker is the
   // session's cancel or CancelAgent.
   subagentHost(): SubagentHost {
     return {
-      spawn: (prompt, call) => this.spawnSubagent(prompt, { callId: call.callId }),
+      spawn: (prompt, call) => this.spawnSubagent(prompt, { callId: this.openSpawnCallId() ?? call.callId }),
       check: (id, wait, signal) => this.checkSubagent(id, wait, signal),
       cancel: (id, signal) => this.cancelSubagent(id, signal),
       list: () => this.describeSubagents(),

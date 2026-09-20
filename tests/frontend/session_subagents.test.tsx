@@ -1,41 +1,49 @@
-import { expect, test } from 'bun:test';
+import { afterAll, expect, test } from 'bun:test';
 import { Box, render, renderToString } from 'ink';
 import { PassThrough } from 'stream';
 import stripAnsi from 'strip-ansi';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { Session } from '../../src/agent_runtime/session';
-import { boundTransports } from '../../src/agent_runtime/providers';
-import { listAllSubagents, type SubagentRun } from '../../src/agent_runtime/tools/subagents';
+import { findSubagentByCall, listAllSubagents, type SubagentRun } from '../../src/agent_runtime/tools/subagents';
 import { checkSubagent } from '../../src/agent_runtime/tools/subagents/run';
+import { sirusMcpServerEntry, stopSirusMcpServer } from '../../src/agent_runtime/tools/server';
 import Chat from '../../src/frontend/chat/Chat';
 import { ChatMessage } from '../../src/frontend/chat/ChatMessage';
-import { pendingApprovals, resolveApproval } from '../../src/agent_runtime/permissions/approvals';
-import { authorizeToolCall } from '../../src/agent_runtime/permissions/policy';
-import { toolRegistry } from '../../src/agent_runtime/tools';
-import type { Message, ToolCallBlock } from '../../src/agent_runtime/types';
+import {
+  pendingApprovals,
+  requestPermission,
+  resolveApproval,
+} from '../../src/agent_runtime/permissions/approvals';
+import type { ToolCallBlock } from '../../src/agent_runtime/types';
+import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
+
+afterAll(() => stopSirusMcpServer());
+
+// SpawnAgent reaches Sirus over the session's own MCP server, the way a
+// vendor runtime calls it, so the runs the chat decorates are real ones.
+async function spawnWorker(session: Session): Promise<SubagentRun> {
+  const entry = await sirusMcpServerEntry(session.getId(), 'sirus');
+  const client = new Client({ name: 'session-subagents-test', version: '0' });
+  await client.connect(new StreamableHTTPClientTransport(new URL(entry.url), {
+    requestInit: { headers: Object.fromEntries(entry.headers.map(header => [header.name, header.value])) },
+  }));
+  try {
+    const result = await client.callTool({ name: 'SpawnAgent', arguments: { prompt: 'Work' } });
+    const [block] = result.content as { text: string }[];
+    const { id } = JSON.parse(block.text) as { id: string };
+    return listAllSubagents().find(run => run.id === id)!;
+  } finally {
+    await client.close();
+  }
+}
 
 test('the input status follows only the displayed session’s workers, including detached workers', async () => {
   const model = 'test-session-status-workers';
-  const workers: SubagentRun[] = [];
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
-  boundTransports[model] = {
-    getResponse: async (_messages, turn) => {
-      if (turn.agent.subagent) await gate;
-      else {
-        // Through the session's own toolbox, so the worker is spawned by the
-        // production path: toolbox → subagent host → startSubagent → the
-        // worker's own subagent toolbox.
-        const spawned = await turn.toolbox!.run({
-          type: 'tool_call', id: 'reused-provider-call', name: 'SpawnAgent',
-          arguments: { prompt: 'Work', model },
-        }, turn.signal);
-        expect(spawned.isError).toBe(false);
-        const { id } = JSON.parse(spawned.result) as { id: string };
-        workers.push(listAllSubagents().find(run => run.id === id)!);
-      }
-      return { content: [{ type: 'text', text: 'Done.' }], stop_reason: 'end_turn' };
-    },
-  };
+  bindScriptedRuntime(model, async () => { await gate; });
+  const workers: SubagentRun[] = [];
   const first = new Session({ id: 'status-first', name: 'First', model });
   const second = new Session({ id: 'status-second', name: 'Second', model });
   const empty = new Session({ id: 'status-empty', name: 'Empty', model });
@@ -61,15 +69,12 @@ test('the input status follows only the displayed session’s workers, including
     await new Promise<void>(resolve => setImmediate(resolve));
     await app.waitUntilRenderFlush();
   };
-  const send = (session: Session) => session.sendMessage({
-    role: 'user', content: [{ type: 'text', text: 'Start a worker' }],
-  });
   try {
     await flush();
     expect(output).not.toContain('active subagent');
-    await send(first);
-    await send(second);
-    await send(first);
+    workers.push(await spawnWorker(first));
+    workers.push(await spawnWorker(second));
+    workers.push(await spawnWorker(first));
     await flush();
     expect(first.getStatus()).toBe('idle');
     expect(first.getActiveSubagentCount()).toBe(2);
@@ -78,16 +83,13 @@ test('the input status follows only the displayed session’s workers, including
     expect(output).toContain('2 active subagents');
     expect(output).not.toContain('3 active subagents');
 
-    // Each worker answers to its owner's session, as itself: the session's
-    // permission context, re-stamped with the run's own requester and model.
+    // Each worker belongs to its owner's session and runs on the session's
+    // subagent model, which while unset is the spawner's own.
     const [worker] = workers;
     expect(worker.sessionId).toBe(first.getId());
-    expect(worker.permissions).toMatchObject({
-      sessionId: first.getId(),
-      requester: { subagent: worker.id },
-      model,
-    });
-    expect(worker.permissions?.mode()).toBe(first.getPermissionMode());
+    expect(worker.model).toBe(model);
+    expect(findSubagentByCall(worker.callId!, first.getId())).toBe(worker);
+    expect(findSubagentByCall(worker.callId!, second.getId())).toBeUndefined();
 
     app.rerender(pane(second));
     await flush();
@@ -106,14 +108,18 @@ test('the input status follows only the displayed session’s workers, including
     await flush();
     expect(first.getActiveSubagentCount()).toBe(0);
     expect(output).toContain('1 active subagent');
-    const message: Message = { role: 'assistant', content: [{
-      type: 'tool_call', id: 'reused-provider-call', name: 'SpawnAgent', arguments: { model },
-    }] };
+
+    // The same call id in two sessions decorates only the row of the session
+    // whose run it is.
+    const call: ToolCallBlock = {
+      type: 'tool_call', id: worker.callId!, kind: 'other', title: 'sirus - SpawnAgent',
+      status: 'completed', locations: [], content: [],
+    };
     const toolRow = (session: Session) => stripAnsi(renderToString(
-      <ChatMessage message={message} sessionId={session.getId()} />, { columns: 140 },
+      <ChatMessage message={{ seq: 0, role: 'assistant', content: [call] }} sessionId={session.getId()} />,
+      { columns: 140 },
     ));
     expect(toolRow(first)).toContain('cancelled');
-    expect(toolRow(second)).toContain('working');
     expect(toolRow(second)).not.toContain('cancelled');
 
     release();
@@ -133,7 +139,8 @@ test('the input status follows only the displayed session’s workers, including
     app.cleanup();
     stdin.destroy();
     stdout.destroy();
-    delete boundTransports[model];
+    for (const session of [first, second, empty]) session.dispose();
+    unbindRuntime(model);
   }
 });
 
@@ -141,16 +148,19 @@ test('tool approval indicators do not leak between sessions reusing a call ID', 
   const first = new Session({ id: 'approval-status-first', name: 'First' });
   const second = new Session({ id: 'approval-status-second', name: 'Second' });
   const call: ToolCallBlock = {
-    type: 'tool_call', id: 'reused-approval-call', name: 'WriteFile',
-    arguments: { path: 'example.txt', content: 'test' },
+    type: 'tool_call', id: 'reused-approval-call', kind: 'edit', title: 'example.txt',
+    status: 'pending', locations: [{ path: 'example.txt' }], content: [],
   };
-  const writeFile = toolRegistry.find(tool => tool.name === 'WriteFile');
-  const pending = authorizeToolCall(writeFile, call, second.getDirectory(), {
-    sessionId: second.getId(), mode: () => 'ask',
-    requester: { participant: 'sirus' }, model: second.getModel(),
-  });
+  const pending = requestPermission(
+    { sessionId: second.getId(), requester: { participant: 'sirus' } },
+    {
+      sessionId: 'acp-session',
+      toolCall: { toolCallId: call.id, kind: 'edit', title: 'example.txt' },
+      options: [{ optionId: 'reject', name: 'No', kind: 'reject_once' }],
+    },
+  );
   const row = (session: Session) => stripAnsi(renderToString(
-    <ChatMessage message={{ role: 'assistant', content: [call] }} sessionId={session.getId()} />,
+    <ChatMessage message={{ seq: 0, role: 'assistant', content: [call] }} sessionId={session.getId()} />,
     { columns: 140 },
   ));
   try {
@@ -161,4 +171,8 @@ test('tool approval indicators do not leak between sessions reusing a call ID', 
     for (const approval of pendingApprovals(second.getId())) resolveApproval(approval.id, 'deny');
     await pending;
   }
+  // The vendor moves on, but the transcript keeps saying what the user chose.
+  expect(row(second)).toContain('declined by user');
+  expect(row(first)).not.toContain('declined by user');
+  for (const session of [first, second]) session.dispose();
 });

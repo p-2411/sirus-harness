@@ -268,15 +268,21 @@ export class Session {
     this.timeline.restoreSeq(stamped);
   }
 
+  // The transcripts an entry belongs in. A name the roster does not know
+  // falls back to the default participant, so a restored file whose
+  // participant list drifted still lands somewhere.
   private transcriptsFor(entry: Message) {
     const names = new Set<string>((entry.to ?? []).map(keyOf));
     if (entry.role === 'assistant') names.add(keyOf(entry.participant ?? this.roster.default.name));
-    if (names.size === 0) names.add(keyOf(this.roster.default.name));
-    return this.roster.all().filter(agent => names.has(keyOf(agent.name))).map(agent => agent.transcript);
+    const known = this.roster.all().filter(agent => names.has(keyOf(agent.name)));
+    return (known.length > 0 ? known : [this.roster.default]).map(agent => agent.transcript);
   }
 
   // Seeds one entry into the history without running a turn.
   append(message: Draft): void {
+    for (const name of [...(message.to ?? []), ...(message.participant ? [message.participant] : [])]) {
+      if (!this.roster.find(name)) throw new Error(`Participant ${name} not found`);
+    }
     const to = this.transcriptsFor({ ...message, seq: -1 });
     this.timeline.add(message, to, this.activeSends === 0);
   }

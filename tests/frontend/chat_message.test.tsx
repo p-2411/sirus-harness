@@ -4,26 +4,47 @@ import { PassThrough } from 'node:stream';
 import { pressAt, releaseAt } from '../../src/frontend/interaction/clickable';
 import stripAnsi from 'strip-ansi';
 import {
+  callDetail,
   ChatMessage,
   messageSegments,
+  toolLine,
   ToolRunGroup,
 } from '../../src/frontend/chat/ChatMessage';
-import type { MessageBlock, ToolCallBlock, ToolResultBlock } from '../../src/agent_runtime/types';
+import type { MessageBlock, ToolCallBlock } from '../../src/agent_runtime/types';
+
+// Everything ACP guarantees on a tool call, so each case writes only the
+// fields it is about.
+function toolCall(call: Partial<ToolCallBlock> & { id: string }): ToolCallBlock {
+  return {
+    type: 'tool_call',
+    kind: 'other',
+    title: '',
+    status: 'completed',
+    locations: [],
+    content: [],
+    ...call,
+  };
+}
 
 const calls: ToolCallBlock[] = [
-  { type: 'tool_call', id: 'call-1', name: 'ReadFile', arguments: { path: 'one.ts' } },
-  { type: 'tool_call', id: 'call-2', name: 'RunShell', arguments: { command: 'bun test' } },
+  toolCall({ id: 'call-1', kind: 'read', title: 'one.ts' }),
+  toolCall({ id: 'call-2', kind: 'execute', title: 'bun test' }),
 ];
 
-const results: ToolResultBlock[] = [
-  { type: 'tool_result', callId: 'call-1', result: 'one', isError: false },
-  { type: 'tool_result', callId: 'call-2', result: 'passed', isError: false },
-];
+// Where a marker sits in a rendered frame, so a click lands on the row that
+// carries it rather than on a line number the layout might move.
+function cellOf(frame: string, marker: string): { col: number; line: number } {
+  const lines = frame.split('\n');
+  const line = lines.findIndex(text => text.includes(marker));
+  expect(line).toBeGreaterThanOrEqual(0);
+  return { col: lines[line].indexOf(marker) + 1, line };
+}
 
 describe('chat message', () => {
   test('renders the participant that produced an assistant message', () => {
     const output = stripAnsi(renderToString(
       <ChatMessage message={{
+        seq: 0,
         role: 'assistant',
         participant: 'reviewer',
         content: [{ type: 'text', text: 'Looks good.' }],
@@ -39,6 +60,7 @@ describe('chat message', () => {
     const output = stripAnsi(renderToString(
       <ChatMessage
         message={{
+          seq: 0,
           role: 'assistant',
           participant: 'codex',
           content: [{ type: 'text', text: 'Done.' }],
@@ -55,7 +77,7 @@ describe('chat message', () => {
   test('does not render a model next to user messages', () => {
     const output = stripAnsi(renderToString(
       <ChatMessage
-        message={{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }}
+        message={{ seq: 0, role: 'user', content: [{ type: 'text', text: 'Hello' }] }}
         model="gpt-5.6-sol"
       />,
       { columns: 120 },
@@ -67,11 +89,11 @@ describe('chat message', () => {
 
   test('aligns user messages right and assistant messages left', () => {
     const userOutput = stripAnsi(renderToString(
-      <ChatMessage message={{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }} />,
+      <ChatMessage message={{ seq: 0, role: 'user', content: [{ type: 'text', text: 'Hello' }] }} />,
       { columns: 40 },
     ));
     const assistantOutput = stripAnsi(renderToString(
-      <ChatMessage message={{ role: 'assistant', content: [{ type: 'text', text: 'Hello' }] }} />,
+      <ChatMessage message={{ seq: 1, role: 'assistant', content: [{ type: 'text', text: 'Hello' }] }} />,
       { columns: 40 },
     ));
     const userLines = userOutput.split('\n');
@@ -83,122 +105,132 @@ describe('chat message', () => {
     expect(assistantLines[1]).toStartWith('   Hello');
   });
 
-  test('renders the subject of a tool call in full and nothing else', () => {
+  test('leads a tool row with the kind’s verb and the vendor’s title, not its input', () => {
     const output = stripAnsi(renderToString(
       <ChatMessage message={{
+        seq: 0,
         role: 'assistant',
-        content: [{
-          type: 'tool_call',
+        content: [toolCall({
           id: 'call-1',
-          name: 'SearchMemories',
-          arguments: { query: 'abcdefghijk', limit: 5 },
-        }],
+          kind: 'search',
+          title: 'abcdefghijk',
+          input: { query: 'abcdefghijk', limit: 5 },
+        })],
       }} />,
       { columns: 120 },
     ));
 
-    expect(output).toContain('● SearchMemories abcdefghijk');
+    expect(output).toContain('● Search abcdefghijk');
     expect(output).not.toContain('limit');
+  });
+
+  test('names every ACP kind by its verb', () => {
+    expect(toolLine({ kind: 'read', title: 'one.ts' })).toBe('Read one.ts');
+    expect(toolLine({ kind: 'delete', title: 'old.ts' })).toBe('Delete old.ts');
+    expect(toolLine({ kind: 'move', title: 'a → b' })).toBe('Move a → b');
+    expect(toolLine({ kind: 'think', title: '' })).toBe('Think');
+    expect(toolLine({ kind: 'fetch', title: 'https://example.com' })).toBe('Fetch https://example.com');
+    expect(toolLine({ kind: 'switch_mode', title: 'auto' })).toBe('Mode auto');
+    expect(toolLine({ kind: 'other', title: 'sirus - SpawnAgent' })).toBe('Tool sirus - SpawnAgent');
+    // A title the caller has less room for than a row does.
+    expect(toolLine({ kind: 'execute', title: 'bun test --coverage' }, 8)).toBe('Run bun tes…');
   });
 
   test('shows a file change as its line counts until expanded', () => {
     const output = stripAnsi(renderToString(
       <ChatMessage message={{
+        seq: 0,
         role: 'assistant',
-        content: [{
-          type: 'tool_call',
+        content: [toolCall({
           id: 'call-1',
-          name: 'EditFile',
-          arguments: { path: 'src/app.ts', old_text: 'a\nb', new_text: 'a\nb\nc\nd' },
-        }, { type: 'tool_result', callId: 'call-1', result: '{}', isError: false }],
+          kind: 'edit',
+          title: 'src/app.ts',
+          locations: [{ path: 'src/app.ts' }],
+          content: [{ type: 'diff', path: 'src/app.ts', oldText: 'a\nb', newText: 'a\nb\nc\nd' }],
+        })],
       }} />,
       { columns: 120 },
     ));
 
-    expect(output).toContain('● EditFile src/app.ts +4 −2');
+    expect(output).toContain('● Edit src/app.ts +4 −2');
     expect(output).not.toMatch(/[›⌄]/);
     expect(output).not.toContain('- a');
     expect(output).not.toContain('+ c');
   });
 
   test('shows file changes inside grouped tool activity as line counts', () => {
-    const edit: ToolCallBlock = {
-      type: 'tool_call',
+    const edit = toolCall({
       id: 'edit-1',
-      name: 'WriteFile',
-      arguments: { path: 'src/new.ts', content: 'first\nsecond' },
-    };
+      kind: 'edit',
+      title: 'src/new.ts',
+      content: [{ type: 'diff', path: 'src/new.ts', oldText: null, newText: 'first\nsecond' }],
+    });
     const output = stripAnsi(renderToString(
-      <ToolRunGroup blocks={[
-        calls[0],
-        edit,
-        results[0],
-        { type: 'tool_result', callId: 'edit-1', result: '{}', isError: false },
-      ]} />,
+      <ToolRunGroup calls={[calls[0], edit]} />,
       { columns: 120 },
     ));
 
-    expect(output).toContain('● WriteFile src/new.ts +2');
+    expect(output).toContain('● Edit src/new.ts +2');
+    expect(output).not.toContain('−');
     expect(output).not.toMatch(/[›⌄]/);
     expect(output).not.toContain('+ first');
   });
 
   test('reveals file rows when a running group completes, diffs on click, and respects manual collapse', async () => {
-    const edit: ToolCallBlock = {
-      type: 'tool_call', id: 'live-edit', name: 'WriteFile',
-      arguments: { path: 'new.ts', content: 'new content' },
-    };
-    const pending = [calls[0], edit, results[0]];
-    const completed = [...pending, {
-      type: 'tool_result' as const, callId: edit.id, result: '{}', isError: false,
-    }];
+    const edit = toolCall({
+      id: 'live-edit',
+      kind: 'edit',
+      title: 'new.ts',
+      status: 'in_progress',
+      content: [{ type: 'diff', path: 'new.ts', oldText: null, newText: 'new content' }],
+    });
+    const pending = [calls[0], edit];
+    const completed = [calls[0], { ...edit, status: 'completed' as const }];
     const stdout = Object.assign(new PassThrough(), { columns: 120 }) as unknown as NodeJS.WriteStream;
     const frames: string[] = [];
     stdout.on('data', data => frames.push(stripAnsi(data.toString())));
-    const app = render(<ToolRunGroup blocks={pending} />, {
+    const app = render(<ToolRunGroup calls={pending} />, {
       stdout, debug: true, patchConsole: false, exitOnCtrlC: false,
     });
     try {
       await app.waitUntilRenderFlush();
-      expect(frames.at(-1)).not.toContain('WriteFile');
-      app.rerender(<ToolRunGroup blocks={completed} />);
+      expect(frames.at(-1)).not.toContain('new.ts');
+      app.rerender(<ToolRunGroup calls={completed} />);
       await app.waitUntilRenderFlush();
-      expect(frames.at(-1)).toContain('● WriteFile new.ts +1');
+      expect(frames.at(-1)).toContain('● Edit new.ts +1');
       expect(frames.at(-1)).not.toMatch(/[›⌄]/);
       expect(frames.at(-1)).not.toContain('+ new content');
 
       await new Promise<void>(resolve => setImmediate(resolve));
-      const row = { col: 5, line: 3 };
+      const row = cellOf(frames.at(-1)!, '● Edit new.ts');
       expect(pressAt(row)).toBe(true);
       expect(releaseAt(row)).toBe(true);
       await new Promise<void>(resolve => setImmediate(resolve));
       await app.waitUntilRenderFlush();
-      expect(frames.at(-1)).toContain('● WriteFile new.ts +1');
+      expect(frames.at(-1)).toContain('● Edit new.ts +1');
       expect(frames.at(-1)).not.toMatch(/[›⌄]/);
       expect(frames.at(-1)).toContain('+ new content');
 
-      const summary = { col: 3, line: 1 };
+      const summary = cellOf(frames.at(-1)!, 'Ran 2 commands');
       expect(pressAt(summary)).toBe(true);
       expect(releaseAt(summary)).toBe(true);
       await new Promise<void>(resolve => setImmediate(resolve));
       await app.waitUntilRenderFlush();
-      expect(frames.at(-1)).not.toContain('WriteFile');
-      app.rerender(<ToolRunGroup blocks={[...completed]} />);
+      expect(frames.at(-1)).not.toContain('new.ts');
+      app.rerender(<ToolRunGroup calls={[...completed]} />);
       await app.waitUntilRenderFlush();
-      expect(frames.at(-1)).not.toContain('WriteFile');
+      expect(frames.at(-1)).not.toContain('new.ts');
     } finally {
       app.unmount();
       await app.waitUntilExit();
     }
   });
 
-  test('collapses consecutive tool activity only when it contains multiple calls', () => {
+  test('collapses consecutive tool calls only when there are two or more', () => {
     const content: MessageBlock[] = [
       { type: 'text', text: 'First' },
       calls[0],
-      results[0],
       calls[1],
-      results[1],
       { type: 'text', text: 'Second' },
       { ...calls[0], id: 'call-3' },
     ];
@@ -215,23 +247,32 @@ describe('chat message', () => {
 
   test('summarizes completed and running tool groups while collapsed', () => {
     const completed = stripAnsi(renderToString(
-      <ToolRunGroup blocks={[...calls, ...results]} />,
+      <ToolRunGroup calls={calls} />,
       { columns: 120 },
     ));
     const running = stripAnsi(renderToString(
-      <ToolRunGroup blocks={[...calls, results[0]]} />,
+      <ToolRunGroup calls={[calls[0], { ...calls[1], status: 'in_progress' }]} />,
       { columns: 120 },
     ));
 
     expect(completed).toContain('Ran 2 commands');
-    expect(completed).not.toContain('ReadFile');
+    expect(completed).not.toContain('one.ts');
     expect(running).toContain('Running 2 commands.');
-    expect(running).not.toContain('RunShell');
+    expect(running).not.toContain('bun test');
+  });
+
+  test('counts a failed call as finished', () => {
+    const output = stripAnsi(renderToString(
+      <ToolRunGroup calls={[calls[0], { ...calls[1], status: 'failed' }]} />,
+      { columns: 120 },
+    ));
+
+    expect(output).toContain('Ran 2 commands');
   });
 
   test('expands a tool group into compact indented one-line calls', () => {
     const output = stripAnsi(renderToString(
-      <ToolRunGroup blocks={[...calls, ...results]} defaultExpanded />,
+      <ToolRunGroup calls={calls} defaultExpanded />,
       { columns: 120 },
     ));
     const lines = output.split('\n');
@@ -239,44 +280,131 @@ describe('chat message', () => {
     expect(lines).toHaveLength(5);
     expect(lines[0]).toBe('');
     expect(lines[1]).toContain('Ran 2 commands');
-    expect(lines[2]).toContain('● ReadFile one.ts');
-    expect(lines[3]).toContain('● RunShell bun test');
+    expect(lines[2]).toContain('● Read one.ts');
+    expect(lines[3]).toContain('● Run bun test');
     expect(lines[4]).toBe('');
     expect(lines[2].indexOf('●')).toBeGreaterThan(lines[1].indexOf('Ran'));
     expect(output).not.toMatch(/[›⌄]/);
   });
+
 });
 
-describe('compaction boundary', () => {
-  const summary = {
-    role: 'user' as const,
-    content: [{ type: 'text' as const, text: 'Earlier conversation compacted: the summary body.' }],
-    compaction: { messages: 12, tokensBefore: 165_000, trigger: 'auto' as const },
+describe('what an expanded row reveals', () => {
+  test('shows the diff of a change, then what the call produced', () => {
+    expect(callDetail(toolCall({
+      id: 'call-1',
+      kind: 'edit',
+      title: 'src/app.ts',
+      content: [
+        { type: 'diff', path: 'src/app.ts', oldText: 'a', newText: 'b' },
+        { type: 'text', text: 'written' },
+      ],
+      input: { path: 'src/app.ts' },
+    }))).toEqual([
+      { sign: '-', text: 'a' },
+      { sign: '+', text: 'b' },
+      { sign: ' ', text: 'written' },
+    ]);
+  });
+
+  test('falls back to a string output, then to the input', () => {
+    expect(callDetail(toolCall({ id: 'call-2', kind: 'execute', title: 'bun test', output: '12 pass' })))
+      .toEqual([{ sign: ' ', text: '12 pass' }]);
+    expect(callDetail(toolCall({
+      id: 'call-3',
+      kind: 'fetch',
+      title: 'example.com',
+      input: { url: 'https://example.com', timeout: 30 },
+    }))).toEqual([
+      { sign: ' ', text: 'url: https://example.com' },
+      { sign: ' ', text: 'timeout: 30' },
+    ]);
+  });
+
+  test('cuts a long preview and says how much is left', () => {
+    const detail = callDetail(toolCall({
+      id: 'call-4',
+      kind: 'read',
+      title: 'long.txt',
+      content: [{ type: 'text', text: Array.from({ length: 11 }, (_, index) => `line ${index}`).join('\n') }],
+    }));
+
+    expect(detail).toHaveLength(9);
+    expect(detail.at(-1)).toEqual({ sign: '…', text: '3 more lines' });
+  });
+});
+
+describe('thinking', () => {
+  const message = {
+    seq: 3,
+    role: 'assistant' as const,
+    content: [{ type: 'thought' as const, text: 'Weighing\nthe options carefully.' }],
   };
 
-  test('renders a compaction summary as a rule rather than a user message', () => {
+  test('collapses a thought to one line and expands it on a click', async () => {
+    const stdout = Object.assign(new PassThrough(), { columns: 120 }) as unknown as NodeJS.WriteStream;
+    const frames: string[] = [];
+    stdout.on('data', data => frames.push(stripAnsi(data.toString())));
+    const app = render(<ChatMessage message={message} />, {
+      stdout, debug: true, patchConsole: false, exitOnCtrlC: false,
+    });
+    try {
+      await app.waitUntilRenderFlush();
+      expect(frames.at(-1)).toContain('thinking Weighing the options carefully.');
+      await new Promise<void>(resolve => setImmediate(resolve));
+      const row = cellOf(frames.at(-1)!, 'thinking');
+      expect(pressAt(row)).toBe(true);
+      expect(releaseAt(row)).toBe(true);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      await app.waitUntilRenderFlush();
+      expect(frames.at(-1)).not.toContain('thinking Weighing');
+      expect(frames.at(-1)).toContain('Weighing');
+      expect(frames.at(-1)).toContain('the options carefully.');
+    } finally {
+      app.unmount();
+      await app.waitUntilExit();
+    }
+  });
+});
+
+describe('compaction rule', () => {
+  const message = {
+    seq: 7,
+    role: 'assistant' as const,
+    participant: 'sirus',
+    content: [{ type: 'compaction' as const, summary: 'Earlier conversation: the summary body.' }],
+  };
+
+  test('renders a compaction block as a rule across the message', () => {
     const output = stripAnsi(renderToString(
-      <ChatMessage message={summary} model="gpt-5.6-sol" />,
+      <ChatMessage message={message} model="gpt-5.6-sol" />,
       { columns: 120 },
     ));
-    expect(output).toContain('context compacted · 12 messages summarised · 165k tokens · show summary');
-    expect(output).not.toContain('you');
-    expect(output).not.toContain('gpt-5.6-sol');
+    expect(output).toContain('── context compacted · show summary ──');
     expect(output).not.toContain('the summary body');
+  });
+
+  test('offers no summary when the runtime reported none', () => {
+    const output = stripAnsi(renderToString(
+      <ChatMessage message={{ ...message, content: [{ type: 'compaction' }] }} />,
+      { columns: 120 },
+    ));
+    expect(output).toContain('── context compacted ──');
+    expect(output).not.toContain('summary');
   });
 
   test('shows the summary on a click and hides it on the next', async () => {
     const stdout = Object.assign(new PassThrough(), { columns: 120 }) as unknown as NodeJS.WriteStream;
     const frames: string[] = [];
     stdout.on('data', data => frames.push(stripAnsi(data.toString())));
-    const app = render(<ChatMessage message={summary} />, {
+    const app = render(<ChatMessage message={message} />, {
       stdout, debug: true, patchConsole: false, exitOnCtrlC: false,
     });
     try {
       await app.waitUntilRenderFlush();
       expect(frames.at(-1)).not.toContain('the summary body');
       await new Promise<void>(resolve => setImmediate(resolve));
-      const rule = { col: 6, line: 0 };
+      const rule = cellOf(frames.at(-1)!, 'context compacted');
       expect(pressAt(rule)).toBe(true);
       expect(releaseAt(rule)).toBe(true);
       await new Promise<void>(resolve => setImmediate(resolve));
