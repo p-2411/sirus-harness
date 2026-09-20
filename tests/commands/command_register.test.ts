@@ -16,8 +16,8 @@ import { providerFor } from '../../src/agent_runtime/providers';
 import { resolveModelReference } from '../../src/commands/agents/behavior';
 import type { Feedback } from '../../src/commands/feedback';
 import { loadSirusModelPreference, saveSirusModelPreference } from '../../src/persistence';
-import { isAutoCompactEnabled } from '../../src/agent_runtime/compaction';
-import { boundTransports } from '../../src/agent_runtime/providers';
+import { bindScriptedRuntime, textTurn, unbindRuntime } from '../support/runtime';
+
 function runCommand(
   command: string,
   args: string[],
@@ -50,7 +50,7 @@ describe('matchCommands', () => {
 
   test('filters by typed prefix', () => {
     expect(matchCommands('/mod').map(c => c.name)).toEqual(['model']);
-    expect(matchCommands('/model')[0].args).toBe('[agent] <model>');
+    expect(matchCommands('/model')[0].args).toBe('[agent|subagent] <model>');
   });
 
   test('returns nothing for a non-matching prefix', () => {
@@ -402,24 +402,27 @@ describe('credential commands', () => {
     expect(() => runCommand('version', ['latest'])).toThrow('Usage: /version');
   });
 
-  test('/usage includes session totals and the latest context', async () => {
-    const session = new Session({
-      id: 'usage',
-      name: 'Usage',
-      model: 'gpt-5.6-luna',
-      messages: [
-        {
-          role: 'assistant', content: [{ type: 'text', text: 'First.' }],
-          usage: { inputTokens: 1_000, outputTokens: 200, contextTokens: 1_200, contextWindow: 200_000 },
-        },
-        {
-          role: 'assistant', content: [{ type: 'text', text: 'Second.' }],
-          usage: { inputTokens: 2_000, outputTokens: 400, contextTokens: 2_400, contextWindow: 400_000 },
-        },
-      ],
+  test('/usage reports every participant window its runtime has reported', async () => {
+    const models = { sirus: 'usage-register-sirus', reviewer: 'usage-register-reviewer' };
+    bindScriptedRuntime(models.sirus, (_input, emit) => {
+      emit({ type: 'context', usage: { tokens: 12_000, window: 200_000 } });
+      emit({ type: 'text', text: 'First.' });
     });
-    const result = await runCommand('usage', [], session);
-    expect((result as Feedback).text).toContain('session · 3k in · 600 out · ctx 2.4k (1% of 400k)');
+    bindScriptedRuntime(models.reviewer, (_input, emit) => {
+      emit({ type: 'context', usage: { tokens: 8_000, window: 400_000 } });
+      emit({ type: 'text', text: 'Second.' });
+    });
+    try {
+      const session = new Session({ id: 'usage', name: 'Usage', model: models.sirus });
+      session.addParticipant('reviewer', models.reviewer);
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: '@sirus @reviewer hello' }] });
+      const result = await runCommand('usage', [], session);
+      expect((result as Feedback).text)
+        .toContain('session · @sirus ctx 12k (6% of 200k) · @reviewer ctx 8k (2% of 400k)');
+    } finally {
+      unbindRuntime(models.sirus);
+      unbindRuntime(models.reviewer);
+    }
   });
 
   test('/usage says when a provider has nothing configured', async () => {
@@ -427,7 +430,7 @@ describe('credential commands', () => {
     const text = (result as { text: string }).text;
     expect(text).toContain('claude · not configured');
     expect(text).toContain('gpt · not configured');
-    expect(text).toContain('session · no usage reported yet');
+    expect(text).toContain('session · no context reported yet');
   });
 
   test('/logout leaves the subscription when that is active', () => {
@@ -462,53 +465,53 @@ describe('credential commands', () => {
 });
 
 describe('compact command', () => {
-  test('compacts the session now and sets automatic compaction', async () => {
+  test('asks the participant runtime to fold its own conversation', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'sirus-compact-command-'));
     const previousDirectory = process.env.SIRUS_DATA_DIR;
     process.env.SIRUS_DATA_DIR = directory;
     const model = 'test-compact-command';
-    boundTransports[model] = {
-      getResponse: async () => ({
-        content: [{ type: 'text', text: 'Summary.' }],
-        stop_reason: 'end_turn',
-        usage: { inputTokens: 100, outputTokens: 10, contextTokens: 110 },
-      }),
-    };
+    const binding = bindScriptedRuntime(model, (_input, emit) => {
+      emit({ type: 'compaction', status: 'completed', summary: 'Summary.' });
+    });
     try {
       const session = new Session({ model });
       session.append({ role: 'user', content: [{ type: 'text', text: 'hello' }] });
-      session.append({
-        role: 'assistant',
-        model,
-        content: [{ type: 'text', text: 'hi' }],
-        usage: { inputTokens: 149_000, outputTokens: 1_000, contextTokens: 150_000, contextWindow: 200_000 },
-      });
+      session.append({ role: 'assistant', model, content: [{ type: 'text', text: 'hi' }] });
 
       expect(await runCommand('compact', [], session)).toEqual({
         kind: 'success',
-        text: 'Compacted 2 messages into a summary (ctx 150k → ~10). Automatic compaction is on.',
+        text: 'Compacted @sirus\'s context.',
       });
-      expect(session.getMessages().at(-1)?.compaction).toEqual({ messages: 2, tokensBefore: 150_000, trigger: 'manual' });
+      // The vendors take /compact as a prompt; nothing else asks for it.
+      expect(binding.runtimes[0].prompts[0].text).toEndWith('/compact');
+      expect(session.getMessages().at(-1)?.content).toEqual([{ type: 'compaction', summary: 'Summary.' }]);
 
-      expect(await runCommand('compact', ['off'], session)).toEqual({
-        kind: 'success',
-        text: 'Automatic compaction set to off.',
-      });
-      expect(isAutoCompactEnabled()).toBe(false);
-      expect(await runCommand('compact', ['on'], session)).toEqual({
-        kind: 'success',
-        text: 'Automatic compaction set to on.',
-      });
-      expect(isAutoCompactEnabled()).toBe(true);
-
-      await expect(runCommand('compact', ['maybe'], session)).rejects.toThrow('Usage: /compact [on|off]');
-      expect(() => runCommand('compact', ['on', 'off'], session)).toThrow('Usage: /compact [on|off]');
+      expect(() => runCommand('compact', ['on'], session)).toThrow('Usage: /compact');
       expect(matchCommands('/comp').map(command => command.name)).toEqual(['compact']);
     } finally {
-      delete boundTransports[model];
+      unbindRuntime(model);
       if (previousDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
       else process.env.SIRUS_DATA_DIR = previousDirectory;
       rmSync(directory, { recursive: true, force: true });
     }
+  });
+});
+
+describe('subagent model command', () => {
+  test('sets, shows and clears the model spawned subagents run on', () => {
+    const session = new Session();
+    expect(runCommand('model', ['subagent'], session))
+      .toEqual({ kind: 'info', text: 'Subagents run on each participant\'s own model.' });
+    expect(runCommand('model', ['subagent', 'haiku'], session))
+      .toEqual({ kind: 'success', text: 'Subagents run on claude-haiku-4-5.' });
+    expect(session.getSubagentModel()).toBe('claude-haiku-4-5');
+    expect(session.getModel()).toBe('gpt-5.6-luna');
+    expect(runCommand('model', ['subagent'], session))
+      .toEqual({ kind: 'info', text: 'Subagents run on claude-haiku-4-5.' });
+    expect(runCommand('model', ['subagent', 'default'], session))
+      .toEqual({ kind: 'success', text: 'Subagents run on each participant\'s own model.' });
+    expect(session.getSubagentModel()).toBeNull();
+    expect(() => runCommand('model', ['subagent', 'nope'], session)).toThrow(/unknown model/i);
+    expect(() => runCommand('model', ['subagent', 'haiku', 'extra'], session)).toThrow('Usage: /model subagent');
   });
 });

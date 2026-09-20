@@ -43,11 +43,6 @@ const settingsFileSchema = z.object({
   memory: z.object({
     enabled: z.boolean(),
   }).optional(),
-  // Whether a session folds its history into a summary on its own when the
-  // model's window fills; absent means it does.
-  compaction: z.object({
-    auto: z.boolean(),
-  }).optional(),
   apiKeys: z.object({
     claude: z.string().min(1).optional(),
     gpt: z.string().min(1).optional(),
@@ -66,7 +61,6 @@ export interface SettingsShape {
   subscriptions: SubscriptionPreferences;
   providerSources: StoredProviderSources;
   memoryEnabled: boolean;
-  autoCompact: boolean;
   apiKeys: StoredApiKeys;
   sirusModel: string | null;
   notifications: NotificationPreference;
@@ -78,14 +72,13 @@ const DEFAULTS: SettingsShape = {
   subscriptions: { claude: false, gpt: false },
   providerSources: {},
   memoryEnabled: true,
-  autoCompact: true,
   apiKeys: {},
   sirusModel: null,
   notifications: 'background',
 };
 
-// How one setting maps onto the file. Only `memoryEnabled`, `autoCompact`
-// and the cleared Sirus model are not a plain key of the same name.
+// How one setting maps onto the file. Only `memoryEnabled` and the cleared
+// Sirus model are not a plain key of the same name.
 interface Codec<K extends keyof SettingsShape> {
   // The stored value, or undefined when the file does not carry it.
   read: (file: SettingsFile) => SettingsShape[K] | undefined;
@@ -104,10 +97,6 @@ const CODECS: { [K in keyof SettingsShape]: Codec<K> } = {
   memoryEnabled: {
     read: file => file.memory?.enabled,
     write: (file, value) => { file.memory = { enabled: value }; },
-  },
-  autoCompact: {
-    read: file => file.compaction?.auto,
-    write: (file, value) => { file.compaction = { auto: value }; },
   },
   apiKeys: {
     read: file => file.apiKeys,

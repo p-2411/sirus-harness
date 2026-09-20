@@ -25,7 +25,7 @@ export const logoutCommandSpec: CommandSpec = {
 
 export const usageCommandSpec: CommandSpec = {
   name: 'usage',
-  description: 'remaining subscription allowance and session tokens',
+  description: 'remaining subscription allowance and each participant\'s context',
   run: (args, context) => {
     if (args.length > 0) throw new Error('Usage: /usage');
     return usageCommand(context.signal, context.session);

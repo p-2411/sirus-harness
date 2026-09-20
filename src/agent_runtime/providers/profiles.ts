@@ -2,6 +2,11 @@ import path from 'path';
 import { mkdirSync } from 'fs';
 import { dataDirectory } from '../../dataDirectory';
 import { VENDOR_INFO, type Vendor } from './catalog';
+import type { Source } from './sources';
+
+// The environment an agent process is started with: this process's, minus
+// every credential of the vendor's it must not inherit, plus the one the
+// source names. A credential is nothing more than this environment.
 
 export function subscriptionEnvironment(vendor: Vendor, profile = 'default'): NodeJS.ProcessEnv {
   const info = VENDOR_INFO[vendor];
@@ -14,5 +19,16 @@ export function subscriptionEnvironment(vendor: Vendor, profile = 'default'): No
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     env[info.profileDirEnv] = directory;
   }
+  return env;
+}
+
+// An API key goes in under the name the vendor's harness reads; a
+// subscription points the child at its profile.
+export function sourceEnvironment(vendor: Vendor, source: Source): NodeJS.ProcessEnv {
+  if (source.kind === 'subscription') return subscriptionEnvironment(vendor, source.profile);
+  const info = VENDOR_INFO[vendor];
+  const env = { ...process.env };
+  for (const key of info.scrubEnv) delete env[key];
+  env[info.credentialEnv] = source.key;
   return env;
 }

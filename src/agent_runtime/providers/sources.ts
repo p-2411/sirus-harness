@@ -103,8 +103,8 @@ export function createSourceStore(vendor: VendorInfo): SourceStore {
     if (!settings.set({ providerSources, apiKeys })) {
       throw new Error('Could not save provider sources');
     }
-    // Owners first: they drop cached transports and per-runtime state before
-    // any observer asks what the active source now is.
+    // Owners first: they drop their per-runtime bookkeeping before any
+    // observer asks what the active source now is.
     for (const listener of own) listener();
     notifyProviderSourceChange();
   };

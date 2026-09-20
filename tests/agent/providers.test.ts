@@ -1,203 +1,31 @@
-import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'fs';
 import os from 'os';
 import path from 'path';
-import { boundTransports, disposeAll, providerFor } from '../../src/agent_runtime/providers';
-import { modelInfo } from '../../src/agent_runtime/providers/catalog';
+import { providerFor, servableModelIds, servesModel } from '../../src/agent_runtime/providers';
+import { modelInfo, VENDOR_INFO } from '../../src/agent_runtime/providers/catalog';
+import { sourceEnvironment } from '../../src/agent_runtime/providers/profiles';
 import { maskApiKey, type Source } from '../../src/agent_runtime/providers/sources';
-import { AnthropicProvider } from '../../src/agent_runtime/providers/anthropic/index';
-import { OpenAIProvider } from '../../src/agent_runtime/providers/openai/index';
-import {
-  anthropicThinkingConfig,
-  anthropicUsage,
-  toAnthropicMessages,
-} from '../../src/agent_runtime/providers/anthropic/api';
-import { openAIUsage, toOpenAIContinuationInput, toOpenAIInput } from '../../src/agent_runtime/providers/openai/api';
-import { codexTurnUsage } from '../../src/agent_runtime/providers/openai/codex-subscription';
-import { SessionAgent } from '../../src/agent_runtime/agent';
-import { TurnContext } from '../../src/agent_runtime/turn';
-import { createToolbox } from '../../src/agent_runtime/tools/toolbox';
-import type { Message, ToolResultBlock } from '../../src/agent_runtime/types';
-
-const toolHistory: Message[] = [
-  { role: 'user', content: [{ type: 'text', text: 'Read a file' }] },
-  {
-    role: 'assistant',
-    content: [
-      { type: 'text', text: 'I will read it.' },
-      {
-        type: 'tool_call',
-        id: 'call_123',
-        name: 'ReadFile',
-        arguments: { path: 'hello.txt' },
-      },
-      {
-        type: 'tool_result',
-        callId: 'call_123',
-        result: 'hello',
-        isError: false,
-      },
-      { type: 'text', text: 'The file says hello.' },
-    ],
-  },
-];
-
-describe('provider tool history', () => {
-  test('maps shared thinking levels to adaptive and legacy Claude requests', () => {
-    expect(anthropicThinkingConfig('claude-fable-5-1', 'max')).toEqual({
-      thinking: { type: 'adaptive' },
-      output_config: { effort: 'max' },
-    });
-    expect(anthropicThinkingConfig('claude-opus-5', 'xhigh')).toEqual({
-      thinking: { type: 'adaptive' },
-      output_config: { effort: 'xhigh' },
-    });
-    expect(anthropicThinkingConfig('claude-haiku-4-5', 'high')).toEqual({
-      thinking: { type: 'enabled', budget_tokens: 4096 },
-    });
-  });
-
-  test('labels named participants in provider history', () => {
-    const history: Message[] = [{
-      role: 'assistant',
-      participant: 'reviewer',
-      content: [{ type: 'text', text: 'I found an issue.' }],
-    }];
-
-    expect(toOpenAIInput(history)).toEqual([
-      { role: 'assistant', content: '[Response from @reviewer]' },
-      { role: 'assistant', content: 'I found an issue.' },
-    ]);
-    expect(toAnthropicMessages(history)).toEqual([{
-      role: 'assistant',
-      content: [
-        { type: 'text', text: '[Response from @reviewer]' },
-        { type: 'text', text: 'I found an issue.' },
-      ],
-    }]);
-  });
-
-  test('OpenAI receives function calls and matching outputs', () => {
-    expect(toOpenAIInput(toolHistory)).toEqual([
-      { role: 'user', content: 'Read a file' },
-      { role: 'assistant', content: 'I will read it.' },
-      {
-        type: 'function_call',
-        call_id: 'call_123',
-        name: 'ReadFile',
-        arguments: '{"path":"hello.txt"}',
-      },
-      {
-        type: 'function_call_output',
-        call_id: 'call_123',
-        output: 'hello',
-      },
-      { role: 'assistant', content: 'The file says hello.' },
-    ]);
-  });
-
-  test('OpenAI manually replays raw output before tool results', () => {
-    const input = toOpenAIInput([
-      { role: 'user', content: [{ type: 'text', text: 'Read a file' }] },
-    ]);
-    const output = [{
-      type: 'function_call' as const,
-      id: 'fc_123',
-      call_id: 'call_123',
-      name: 'ReadFile',
-      arguments: '{"path":"hello.txt"}',
-      status: 'completed' as const,
-    }];
-    const toolResults: ToolResultBlock[] = [{
-      type: 'tool_result',
-      callId: 'call_123',
-      result: 'hello',
-      isError: false,
-    }];
-
-    expect(toOpenAIContinuationInput(input, output, toolResults)).toEqual([
-      { role: 'user', content: 'Read a file' },
-      output[0],
-      {
-        type: 'function_call_output',
-        call_id: 'call_123',
-        output: 'hello',
-      },
-    ]);
-  });
-
-  test('Anthropic counts cached input and the completed output in context', () => {
-    expect(anthropicUsage({
-      input_tokens: 100,
-      cache_read_input_tokens: 900,
-      cache_creation_input_tokens: 200,
-      output_tokens: 300,
-    })).toEqual({ inputTokens: 1_200, outputTokens: 300, contextTokens: 1_500 });
-    expect(anthropicUsage({
-      input_tokens: 100, output_tokens: 300, cache_read_input_tokens: null, cache_creation_input_tokens: null,
-    }))
-      .toEqual({ inputTokens: 100, outputTokens: 300, contextTokens: 400 });
-  });
-
-  test('OpenAI counts the completed output in context', () => {
-    expect(openAIUsage({ input_tokens: 100, output_tokens: 300 }))
-      .toEqual({ inputTokens: 100, outputTokens: 300, contextTokens: 400 });
-  });
-
-  test('Codex keeps the complete latest request as active context', () => {
-    expect(codexTurnUsage(
-      { totalTokens: 1_000, inputTokens: 800, outputTokens: 200, reasoningOutputTokens: 75 },
-      { totalTokens: 350, inputTokens: 250, outputTokens: 100, reasoningOutputTokens: 75 },
-      { totalTokens: 400, inputTokens: 300, outputTokens: 100, reasoningOutputTokens: 20 },
-      400_000,
-    )).toEqual({
-      inputTokens: 500,
-      outputTokens: 100,
-      contextTokens: 350,
-      contextWindow: 400_000,
-    });
-  });
-
-  test('Anthropic receives tool use and matching tool results', () => {
-    expect(toAnthropicMessages(toolHistory)).toEqual([
-      { role: 'user', content: [{ type: 'text', text: 'Read a file' }] },
-      {
-        role: 'assistant',
-        content: [
-          { type: 'text', text: 'I will read it.' },
-          {
-            type: 'tool_use',
-            id: 'call_123',
-            name: 'ReadFile',
-            input: { path: 'hello.txt' },
-          },
-        ],
-      },
-      {
-        role: 'user',
-        content: [{
-          type: 'tool_result',
-          tool_use_id: 'call_123',
-          content: 'hello',
-          is_error: false,
-        }],
-      },
-      {
-        role: 'assistant',
-        content: [{ type: 'text', text: 'The file says hello.' }],
-      },
-    ]);
-  });
-});
+import { bindScriptedRuntime, textTurn, unbindRuntime } from '../support/runtime';
 
 test('maps a model id to its vendor', () => {
   expect(modelInfo('claude-fable-5-1')?.vendor).toBe('claude');
 });
 
-const keylessTurn = () => new TurnContext(
-  new SessionAgent({ name: 'sirus', model: 'claude-sonnet-5', runtimeId: 'credentials' }),
-  { directory: '/tmp' },
-);
+test('serves the catalog plus whatever a scripted runtime is bound to', () => {
+  const model = 'test-served-model';
+  expect(servesModel(model)).toBe(false);
+  bindScriptedRuntime(model, textTurn('Hello.'));
+  try {
+    expect(servesModel(model)).toBe(true);
+    expect(servesModel('claude-opus-5')).toBe(true);
+    expect(servesModel('gpt-2')).toBe(false);
+    expect(servableModelIds()).toContain(model);
+    expect(servableModelIds()).toContain('gpt-5.6-luna');
+  } finally {
+    unbindRuntime(model);
+  }
+});
 
 describe('provider credentials', () => {
   let directory: string;
@@ -223,14 +51,9 @@ describe('provider credentials', () => {
   const claudeSources = (): Source[] => providerFor('claude').sources.list();
   const storedClaudeKey = () => claudeSources().find(source => source.kind === 'api' && !source.fromEnv);
 
-  test('reports no credentials when neither a stored key nor the env var exists', async () => {
+  test('reports no credentials when neither a stored key nor the env var exists', () => {
     expect(claudeSources()).toEqual([]);
     expect(providerFor('claude').activeSource()).toBeNull();
-    const failure = await providerFor('claude')
-      .getResponse([{ role: 'user', content: [{ type: 'text', text: 'hi' }] }], keylessTurn())
-      .catch(error => error as Error);
-    expect((failure as Error).message).toMatch(/\/login/);
-    expect((failure as Error).message).not.toMatch(/ANTHROPIC_API/);
   });
 
   test('falls back to the environment variable', () => {
@@ -271,22 +94,67 @@ describe('provider credentials', () => {
     expect(maskApiKey('sk-proj-openai-key-value-5555')).toBe('sk-proj-…5555');
     expect(maskApiKey('abc')).toBe('…');
   });
+
+  // The sidebar row: the source a runtime is on, then the one the most recent
+  // runtime started on, and the preferred one once the runtimes are gone.
+  test('reports the source each runtime is on until the list changes', () => {
+    const provider = providerFor('claude');
+    const stored = provider.sources.addApiKey('sk-ant-stored-abcd');
+    provider.sources.addSubscription('work');
+    const subscription = provider.sources.list()[0];
+    expect(provider.activeSource()).toMatchObject({ kind: 'subscription', profile: 'work' });
+
+    provider.markActive('sirus', stored);
+    expect(provider.activeSource()).toMatchObject({ id: stored.id });
+    expect(provider.activeSource('sirus')).toMatchObject({ id: stored.id });
+    // A runtime nothing was recorded for falls back to the preferred source.
+    expect(provider.activeSource('reviewer')).toMatchObject({ id: subscription.id });
+
+    provider.markActive('reviewer', subscription);
+    expect(provider.activeSource('sirus')).toMatchObject({ id: stored.id });
+    provider.clearActive('sirus');
+    expect(provider.activeSource('sirus')).toMatchObject({ id: subscription.id });
+
+    // Any change to the list invalidates every per-runtime choice.
+    provider.markActive('sirus', stored);
+    provider.sources.addApiKey('sk-ant-another-9999');
+    expect(provider.activeSource('sirus')).toMatchObject({ key: 'sk-ant-another-9999' });
+  });
+
+  test('a runtime started under another data directory is not the active source', () => {
+    const provider = providerFor('claude');
+    const stored = provider.sources.addApiKey('sk-ant-stored-abcd');
+    provider.sources.addSubscription('work');
+    provider.markActive('sirus', stored);
+    const other = mkdtempSync(path.join(os.tmpdir(), 'sirus-credentials-other-'));
+    try {
+      process.env.SIRUS_DATA_DIR = other;
+      expect(providerFor('claude').activeSource('sirus')).toBeNull();
+    } finally {
+      process.env.SIRUS_DATA_DIR = directory;
+      rmSync(other, { recursive: true, force: true });
+    }
+  });
 });
 
-describe('API providers without credentials', () => {
+// The credential is nothing but the environment the agent process is started
+// with, so this is where an API key and a profile become one.
+describe('credential environments', () => {
   let directory: string;
   let previous: Record<string, string | undefined>;
 
   beforeEach(() => {
-    directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-provider-test-'));
+    directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-credential-env-'));
     previous = {
       SIRUS_DATA_DIR: process.env.SIRUS_DATA_DIR,
-      ANTHROPIC_API: process.env.ANTHROPIC_API,
-      OPENAI_SECRET: process.env.OPENAI_SECRET,
+      ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+      CLAUDE_CODE_OAUTH_TOKEN: process.env.CLAUDE_CODE_OAUTH_TOKEN,
+      CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
+      OPENAI_API_KEY: process.env.OPENAI_API_KEY,
     };
     process.env.SIRUS_DATA_DIR = directory;
-    delete process.env.ANTHROPIC_API;
-    delete process.env.OPENAI_SECRET;
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'inherited-token';
+    delete process.env.CLAUDE_CONFIG_DIR;
   });
 
   afterEach(() => {
@@ -297,103 +165,30 @@ describe('API providers without credentials', () => {
     rmSync(directory, { recursive: true, force: true });
   });
 
-  test('fail before any request with a hint to /login', async () => {
-    const messages: Message[] = [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }];
-    const turnFor = (model: string) => new TurnContext(
-      new SessionAgent({ name: 'sirus', model, runtimeId: 'test' }),
-      { directory: '/tmp' },
-    );
-    await expect(AnthropicProvider.getResponse(messages, turnFor('claude-sonnet-5')))
-      .rejects.toThrow(/No Anthropic API key. Run \/login/);
-    await expect(OpenAIProvider.getResponse(messages, turnFor('gpt-5.6-sol')))
-      .rejects.toThrow(/No OpenAI API key. Run \/login/);
-  });
-});
-
-describe('Codex subscription runtime lifecycle', () => {
-  beforeEach(async () => {
-    // Other tests can populate the process-wide runtime before this suite runs.
-    disposeAll();
-    await Promise.resolve();
+  test('an API key goes in under the name the vendor harness reads', () => {
+    const env = sourceEnvironment('claude', { id: 'k', kind: 'api', key: 'sk-ant-run-1234' });
+    expect(env[VENDOR_INFO.claude.credentialEnv]).toBe('sk-ant-run-1234');
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+    expect(env.CLAUDE_CONFIG_DIR).toBeUndefined();
+    expect(sourceEnvironment('gpt', { id: 'k', kind: 'api', key: 'sk-proj-run-5678' }).OPENAI_API_KEY)
+      .toBe('sk-proj-run-5678');
   });
 
-  afterEach(async () => {
-    disposeAll();
-    await Promise.resolve();
-    mock.restore();
+  test('a subscription points the process at its own profile and inherits no key', () => {
+    const shared = sourceEnvironment('claude', { id: 'default', kind: 'subscription', profile: 'default' });
+    expect(shared.CLAUDE_CONFIG_DIR).toBeUndefined();
+    expect(shared.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(shared.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+
+    const isolated = sourceEnvironment('claude', { id: 'work', kind: 'subscription', profile: 'work' });
+    expect(isolated.CLAUDE_CONFIG_DIR).toBe(path.join(directory, 'subscriptions', 'claude', 'work'));
+    expect(isolated.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(sourceEnvironment('gpt', { id: 'work', kind: 'subscription', profile: 'work' }).CODEX_HOME)
+      .toBe(path.join(directory, 'subscriptions', 'gpt', 'work'));
   });
 
-  test('closes the process-wide app-server when the frontend exits', async () => {
-    const { CodexRpc } = await import('../../src/agent_runtime/providers/openai/codex-rpc');
-    const { getCodexRpc } = await import('../../src/agent_runtime/providers/openai/codex-subscription');
-    const close = mock(() => {});
-    const rpc = {
-      isAlive: true,
-      close,
-      onNotification: mock(() => () => {}),
-      onRequest: mock(() => {}),
-    } as unknown as Awaited<ReturnType<typeof CodexRpc.start>>;
-    const start = spyOn(CodexRpc, 'start').mockResolvedValue(rpc);
-
-    await getCodexRpc();
-    disposeAll();
-    await Promise.resolve();
-
-    expect(start).toHaveBeenCalledTimes(1);
-    expect(close).toHaveBeenCalledTimes(1);
-
-    // Cleanup is safe if more than one exit path observes the same shutdown.
-    disposeAll();
-    await Promise.resolve();
-    expect(close).toHaveBeenCalledTimes(1);
-  });
-
-  test('starts tool-enabled threads with workspace write access', async () => {
-    const { CodexRpc } = await import('../../src/agent_runtime/providers/openai/codex-rpc');
-    const { codexSubscriptionTransport } = await import(
-      '../../src/agent_runtime/providers/openai/codex-subscription'
-    );
-
-    let notify: (method: string, params: Record<string, unknown>) => void = () => {};
-    const request = mock(async (method: string, params: Record<string, unknown> = {}) => {
-      if (method === 'config/read') return { config: {} };
-      if (method === 'thread/start') return { thread: { id: 'thread-write-test' } };
-      if (method === 'turn/start') {
-        queueMicrotask(() => notify('turn/completed', {
-          threadId: 'thread-write-test',
-          turn: { status: 'completed' },
-        }));
-        return { turn: { id: 'turn-write-test' } };
-      }
-      throw new Error(`Unexpected request: ${method}`);
-    });
-    const rpc = {
-      isAlive: true,
-      close: mock(() => {}),
-      request,
-      onNotification: mock((handler: typeof notify) => {
-        notify = handler;
-        return () => {};
-      }),
-      onRequest: mock(() => {}),
-    } as unknown as Awaited<ReturnType<typeof CodexRpc.start>>;
-    spyOn(CodexRpc, 'start').mockResolvedValue(rpc);
-
-    const turn = new TurnContext(
-      new SessionAgent({ name: 'worker', model: 'gpt-5.6-sol', runtimeId: 'write-test' }),
-      { directory: '/tmp', toolbox: createToolbox({ directory: '/tmp' }) },
-    );
-    await codexSubscriptionTransport().getResponse(
-      [{ role: 'user', content: [{ type: 'text', text: 'Edit the file' }] }],
-      turn,
-    );
-
-    const threadStart = request.mock.calls.find(([method]) => method === 'thread/start');
-    expect(threadStart?.[1]).toMatchObject({
-      sandbox: 'danger-full-access',
-      approvalPolicy: 'never',
-    });
-    expect((threadStart?.[1]?.dynamicTools as Array<{ name: string }>).map(tool => tool.name))
-      .toContain('WriteFile');
+  test('rejects a profile name that could escape the profile directory', () => {
+    expect(() => sourceEnvironment('claude', { id: 'bad', kind: 'subscription', profile: '../escape' }))
+      .toThrow(/profile/i);
   });
 });

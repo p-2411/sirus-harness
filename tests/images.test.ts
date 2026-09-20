@@ -8,11 +8,7 @@ import {
 } from '../src/images';
 import { Session } from '../src/agent_runtime/session';
 import { loadSessionSnapshots, saveSessionSnapshots } from '../src/persistence';
-import { toAnthropicMessages } from '../src/agent_runtime/providers/anthropic/api';
-import { toOpenAIInput } from '../src/agent_runtime/providers/openai/api';
-import { codexTurnInput } from '../src/agent_runtime/providers/openai/codex-subscription';
-import { latestUserText, transcript, unseenImages } from '../src/agent_runtime/providers/subscription';
-import type { ImageBlock, Message } from '../src/agent_runtime/types';
+import type { ImageBlock } from '../src/agent_runtime/types';
 
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=', 'base64');
 let directory: string;
@@ -115,67 +111,5 @@ describe('image storage', () => {
     const content = restored.snapshots[0]!.messages[0]!.content;
     expect(content).toEqual([image]);
     expect(imageData(content[0] as ImageBlock)).toBe(PNG.toString('base64'));
-  });
-});
-
-describe('provider image inputs', () => {
-  test('preserves interleaved text and images for both APIs', () => {
-    const image = attach();
-    const messages: Message[] = [{ role: 'user', content: [
-      { type: 'text', text: 'Before' }, image, { type: 'text', text: 'After' },
-    ] }];
-    expect(toOpenAIInput(messages)).toEqual([{ role: 'user', content: [
-      { type: 'input_text', text: 'Before' },
-      { type: 'input_image', image_url: imageDataUrl(image), detail: 'auto' },
-      { type: 'input_text', text: 'After' },
-    ] }]);
-    expect(toAnthropicMessages(messages)).toEqual([{ role: 'user', content: [
-      { type: 'text', text: 'Before' },
-      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: imageData(image) } },
-      { type: 'text', text: 'After' },
-    ] }]);
-  });
-
-  test('supports image-only turns through both APIs and the Codex runtime', () => {
-    const image = attach();
-    const messages: Message[] = [{ role: 'user', content: [image] }];
-    expect(toOpenAIInput(messages)).toEqual([{ role: 'user', content: [
-      { type: 'input_image', image_url: imageDataUrl(image), detail: 'auto' },
-    ] }]);
-    expect(toAnthropicMessages(messages)).toEqual([{ role: 'user', content: [
-      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: imageData(image) } },
-    ] }]);
-    expect(codexTurnInput('', [image])).toEqual([{ type: 'localImage', path: image.path }]);
-    expect(latestUserText(messages)).toBe('');
-  });
-
-  test('replaces missing or tampered images with a note in every provider', () => {
-    const image = attach();
-    writeFileSync(image.path, Buffer.alloc(image.bytes));
-    const note = '[An attached image is no longer available.]';
-    expect(toOpenAIInput([{ role: 'user', content: [image] }])).toEqual([{ role: 'user', content: note }]);
-    expect(toAnthropicMessages([{ role: 'user', content: [image] }])).toEqual([
-      { role: 'user', content: [{ type: 'text', text: note }] },
-    ]);
-    expect(codexTurnInput('Continue', [image])).toEqual([
-      { type: 'text', text: note }, { type: 'text', text: 'Continue' },
-    ]);
-    unlinkSync(image.path);
-    expect(codexTurnInput('', [image])).toEqual([{ type: 'text', text: note }]);
-  });
-
-  test('sends historical images once per subscription participant and replays after reset', () => {
-    const first = attach();
-    const second = attach();
-    const messages: Message[] = [
-      { role: 'user', content: [first] },
-      { role: 'assistant', content: [{ type: 'text', text: 'Seen' }] },
-      { role: 'user', content: [second] },
-    ];
-    expect(unseenImages(messages, true, 0)).toEqual([first, second]);
-    expect(unseenImages(messages, false, 1)).toEqual([second]);
-    expect(unseenImages(messages, false, 3)).toEqual([]);
-    expect(unseenImages(messages, true, 3)).toEqual([first, second]);
-    expect(transcript(messages)).toContain(`[attached image ${path.basename(first.path)}]`);
   });
 });

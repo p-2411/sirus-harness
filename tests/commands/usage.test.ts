@@ -3,12 +3,15 @@ import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import { Session } from '../../src/agent_runtime/session';
-import { CodexRpc } from '../../src/agent_runtime/providers/openai/codex-rpc';
-import { disposeAll, providerFor } from '../../src/agent_runtime/providers';
+import { CodexRpc } from '../../src/agent_runtime/providers/openai/codex-account';
+import { providerFor } from '../../src/agent_runtime/providers';
 import { usageCommand } from '../../src/commands/authentication/behavior';
 import { cachedSubscriptionRemaining, readSubscriptionUsage } from '../../src/agent_runtime/providers/usage';
 import { loadSubscriptionLimitCache, saveSubscriptionLimitCache } from '../../src/persistence';
 import { TurnCancelledError } from '../../src/abort';
+import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
+
+const CONTEXT_MODEL = 'usage-command-model';
 
 describe('/usage subscription allowance', () => {
   let directory: string;
@@ -19,58 +22,60 @@ describe('/usage subscription allowance', () => {
     directory = mkdtempSync(path.join(tmpdir(), 'sirus-allowance-'));
     process.env.SIRUS_DATA_DIR = directory;
     providerFor('gpt').sources.addSubscription('default');
-    disposeAll();
   });
 
-  afterEach(async () => {
-    disposeAll();
-    await Promise.resolve();
+  afterEach(() => {
+    unbindRuntime(CONTEXT_MODEL);
     mock.restore();
     if (previous === undefined) delete process.env.SIRUS_DATA_DIR;
     else process.env.SIRUS_DATA_DIR = previous;
     rmSync(directory, { recursive: true, force: true });
   });
 
-  function fakeRuntime(limits: () => unknown | Promise<unknown>) {
+  // The account helper starts one app-server per call; this is the only thing
+  // standing in for that process.
+  function fakeAppServer(limits: () => unknown | Promise<unknown>) {
     const request = mock(async (method: string) => {
       if (method === 'account/read') return { account: { type: 'chatgpt', planType: 'plus' } };
       if (method === 'account/rateLimits/read') return limits();
       throw new Error(`Unexpected request: ${method}`);
     });
     spyOn(CodexRpc, 'start').mockResolvedValue({
-      isAlive: true, request, close: mock(() => {}),
-      onNotification: mock(() => () => {}), onRequest: mock(() => {}),
+      request, close: mock(() => {}),
     } as unknown as CodexRpc);
     return request;
   }
 
-  test('fetches allowance without a model turn and includes session token totals', async () => {
-    const request = fakeRuntime(() => ({ rateLimits: {
+  test('fetches allowance without a model turn and reports each participant context', async () => {
+    const request = fakeAppServer(() => ({ rateLimits: {
       primary: { usedPercent: 30, windowDurationMins: 300, resetsAt: 1_800_000_000 },
     } }));
-    const session = new Session({ name: 'Usage' });
-    session.append({ role: 'assistant', content: [{ type: 'text', text: 'Done' }],
-      usage: { inputTokens: 1000, outputTokens: 200, contextTokens: 1200, contextWindow: 400_000 } });
+    bindScriptedRuntime(CONTEXT_MODEL, (_input, emit) => {
+      emit({ type: 'context', usage: { tokens: 12_000, window: 200_000 } });
+      emit({ type: 'text', text: 'Done' });
+    });
+    const session = new Session({ name: 'Usage', model: CONTEXT_MODEL });
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Hello' }] });
     const result = await usageCommand(undefined, session);
     // A login recorded before accounts were labelled is identified by asking the provider.
     expect(result.text).toContain('gpt · plus plan · 5h 70%');
-    expect(result.text).toContain('session · 1k in · 200 out · ctx 1.2k');
+    expect(result.text).toContain('session · @sirus ctx 12k (6% of 200k)');
     expect(request.mock.calls.map(([method]) => method).sort())
       .toEqual(['account/rateLimits/read', 'account/read']);
   });
 
-  test('a quota read failure displays unavailable without hiding session data', async () => {
-    fakeRuntime(() => { throw new Error('Unavailable'); });
+  test('a quota read failure displays unavailable without hiding the session', async () => {
+    fakeAppServer(() => { throw new Error('Unavailable'); });
     const result = await usageCommand(undefined, new Session());
     expect(result.text).toContain('gpt · plus plan · 5h unavailable');
-    expect(result.text).toContain('session · no usage reported yet');
+    expect(result.text).toContain('session · no context reported yet');
     expect(result.text).not.toContain('100% remaining');
   });
 
   test('cancels a pending quota read', async () => {
     let started!: () => void;
     const ready = new Promise<void>(resolve => { started = resolve; });
-    fakeRuntime(() => { started(); return new Promise(() => {}); });
+    fakeAppServer(() => { started(); return new Promise(() => {}); });
     const controller = new AbortController();
     const pending = readSubscriptionUsage('gpt', controller.signal);
     await ready;
@@ -80,7 +85,7 @@ describe('/usage subscription allowance', () => {
 
   test('persists successful reads by account and keeps the cache when refresh fails', async () => {
     let fail = false;
-    fakeRuntime(() => {
+    fakeAppServer(() => {
       if (fail) throw new Error('offline');
       return { rateLimits: { secondary: { usedPercent: 100, windowDurationMins: 10080 } } };
     });

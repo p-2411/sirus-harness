@@ -34,10 +34,10 @@ Review this project's most recent commit for a concrete regression. Read the rel
 Type `/model` to find the exact model identifier for the other provider. In the following prompt, replace `MODEL_ID` with that identifier. Do not send the placeholder literally.
 
 ```text
-@reviewer MODEL_ID Review the work above against the original task. Read the changed code and relevant tests. Focus on concrete correctness problems and missing edge cases. Do not edit files. If you find no issue, say so and explain what you checked.
+@reviewer MODEL_ID Read the uncommitted changes in this project and review them against this task: [the task you gave above]. Read the changed code and relevant tests. Focus on concrete correctness problems and missing edge cases. Do not edit files. If you find no issue, say so and explain what you checked.
 ```
 
-Sirus creates a named participant in the same conversation. The read-only request is a task instruction; use `/permissions ask` if you also want approval prompts before writes and shell commands. Review the findings yourself and give the original participant any follow-up. Ask one participant at a time to edit overlapping files.
+Sirus creates a named participant with a conversation of its own: it reads the message that named it, not your earlier turns, so tell it where to look. The read-only request is a task instruction; use `/permissions ask` if you also want the agent to ask you before every action that is not a read. Review the findings yourself and give the original participant any follow-up. Ask one participant at a time to edit overlapping files.
 
 With only one connected provider, you can still complete the first task and request a review using an available model. A cross-provider review requires both providers to be connected.
 

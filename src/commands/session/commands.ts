@@ -9,11 +9,10 @@ export const clearCommand: CommandSpec = {
 
 export const compactCommandSpec: CommandSpec = {
   name: 'compact',
-  args: '[on|off]',
-  description: 'summarise the history to free context, or set automatic compaction',
+  description: 'ask the agent to compact its context now',
   run: (args, context) => {
-    if (args.length > 1) throw new Error('Usage: /compact [on|off]');
-    return compactCommand(args[0], context.session, context.signal);
+    if (args.length > 0) throw new Error('Usage: /compact');
+    return compactCommand(context.session, context.signal);
   },
 };
 

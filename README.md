@@ -44,12 +44,12 @@ Type `/` to browse commands, or `/help` for the full command and keyboard refere
 | Understand an unfamiliar codebase | “Trace a request from the entry point to the database. Explain the main components and where changes usually belong.” |
 | Ship a feature | “Add pagination to this endpoint, follow the existing conventions, and test the edge cases.” |
 | Debug a stubborn problem | “Reproduce this failure, find the root cause, and make the smallest fix that addresses it.” |
-| Get another perspective | “Review the changes above for correctness and regressions. Point to concrete issues in the code.” |
+| Get another perspective | “@reviewer claude-sonnet-5 Read the uncommitted changes in this project and review them for correctness and regressions.” |
 | Divide up a larger task | “Delegate an inspection of the API and an inspection of its tests to separate subagents, then combine their findings into a plan.” |
 | Work from visual context | Attach a screenshot and ask: “Find the component responsible for this layout and fix the spacing.” |
 | Carry decisions into future sessions | “Remember for this project: database changes need a migration and a rollback plan.” |
 
-Agents can read, search, create, and edit files, run shell commands and tests, and use provider-supported web search and page access. Your prompts set the scope: ask for an explanation, a review, or an implementation.
+Each agent runs its own vendor's tools: reading, searching, creating and editing files, running shell commands and tests, and web search and page access. Sirus adds its memory and delegation tools on top, the same ones on every vendor. Your prompts set the scope: ask for an explanation, a review, or an implementation.
 
 ## What makes Sirus different
 
@@ -60,7 +60,7 @@ Choose the model for each participant and adjust its reasoning depth. Bring in a
 Create a named participant by mentioning a new name followed by a supported model and a prompt:
 
 ```text
-@reviewer claude-sonnet-5 Review the changes above for bugs and missing tests.
+@reviewer claude-sonnet-5 Read the uncommitted changes in this project and review them for bugs and missing tests.
 ```
 
 Then address that participant by name:
@@ -69,13 +69,15 @@ Then address that participant by name:
 @reviewer Check whether the latest fix resolves the issues you found.
 ```
 
-Participants share the session history and can mention each other to request input. Set a participant's model with `/model @reviewer <model>` and reasoning depth with `/thinking @reviewer high`. Use `/model` to see the model names supported by your installation.
+Each participant keeps its own conversation. It reads the prompts you address to it, and whatever another participant says in a message that mentions it, attributed to the sender. A prompt that mentions nobody goes to `@sirus`. Set a participant's model with `/model @reviewer <model>` and reasoning depth with `/thinking @reviewer high`. Use `/model` to see the model names supported by your installation.
 
 ### Delegate work, follow the results
 
 For work that can be split into independent tasks, Sirus can spawn autonomous subagents and collect their findings. Each receives a focused assignment and returns a final report with a summary of its changes. You can follow their activity in the interface while the parent agent coordinates the work.
 
-Named participants are collaborators in the shared conversation; subagents receive only their delegated task. Subagents work in the same project directory, so assignments should avoid overlapping edits.
+Named participants are collaborators you can address and follow in the chat; subagents receive only their delegated task and report back to the agent that spawned them. Subagents work in the same project directory, so assignments should avoid overlapping edits.
+
+A subagent runs on the model of the participant that spawned it. Use `/model subagent <model>` to put every subagent in the session on one model, `/model subagent` to see which, and `/model subagent default` to go back to the spawning participant's own.
 
 ### Explore with an undo button
 
@@ -97,11 +99,9 @@ Memory is enabled by default. Ask Sirus to remember, update, or forget something
 
 ### Context that compacts itself
 
-Long sessions fill the model's window. When the context gauge under the input reaches 80% of it, the next prompt first folds the conversation so far into a summary written by the participant about to answer, on its own model. The summary takes the place of the earlier messages in what the models read; the messages themselves stay in the chat, under a `context compacted` rule you can click to read the summary.
+Long sessions fill the model's window. Each participant's runtime folds its own conversation when its window fills, the way Claude Code and Codex do on their own, including in the middle of a very long turn. Sirus records where that happened: a `context compacted` rule appears in that participant's part of the chat, with the summary the runtime reported.
 
-Use `/compact` to fold the history now, and `/compact off` or `/compact on` to turn the automatic step off or on. `/undo` and `/rewind` treat a summary like any other message: rewinding the chat to before one brings the full conversation back into context.
-
-Claude and ChatGPT subscription runtimes also compact their own conversation, including in the middle of a very long turn. That stays on; Sirus's summary is the one shared across participants, models, and sessions restored from disk.
+Use `/compact` to ask for it now. There is nothing to turn on or off: compaction belongs to the runtime. `/undo` and `/rewind` treat the rule like any other entry, and rewinding the chat to before one puts the whole conversation back.
 
 ### Keep several tasks moving
 
@@ -119,21 +119,23 @@ Attach an image with `Ctrl+V` or `/image /path/to/screenshot.png` to work from a
 
 Put project guidance in `SIRUS.md` or `AGENTS.md` in the session's working directory. Sirus automatically includes it for session participants, but not spawned subagents. Subagents receive project guidance only through their parent's task instructions. If both exist, `SIRUS.md` **replaces** `AGENTS.md`; they are not merged, even when `SIRUS.md` is empty or unreadable.
 
-Guidance is snapshotted when first needed in each turn: it stays fixed through tool continuations, and edits take effect on the next turn. Only regular files are read, up to 32 KiB; symbolic links are rejected, including dangling links. Truncation and read errors are reported in the model's prompt. Repository guidance is subordinate to Sirus's operating contract and your request, cannot grant tool permissions, and is never included in custom internal prompts such as the permission judge's.
+Guidance is read when a participant's runtime starts and stays fixed for as long as that runtime lives, so edits take effect the next time it is built, such as after `/clear`, a chat rewind, or `/memory on` or `off`. Only regular files are read, up to 32 KiB; symbolic links are rejected, including dangling links. Truncation and read errors are reported in the model's prompt. Repository guidance is subordinate to Sirus's operating contract and your request, cannot grant tool permissions, and is never included in Sirus's own internal prompts, such as the one that names a session.
 
 Automatic discovery is limited to the session directory. Ancestor/git-root lookup, nested rules, `CLAUDE.md`, and global instruction files are not loaded automatically; agents can still inspect relevant files using tools.
 
 ### Choose how much approval you want
 
-Permission settings apply to the session's participants and subagents:
+The mode applies to the session's participants and subagents. It is the vendor's own mode: Sirus asks each runtime to switch, and the agent decides what to ask about.
 
 | Mode | Behavior |
 | --- | --- |
-| `auto` — default | Allows ordinary work, checks shell commands, and prompts for operations classified as sensitive or requiring review. |
-| `ask` | Prompts before file writes, shell commands, and spawning agents. |
-| `bypass` | Runs tool calls without approval prompts. |
+| `auto` (the default) | The agent's own reviewer decides, and asks only about what it judges unsafe. |
+| `ask` | The agent asks before every action that is not a read. |
+| `bypass` | Nothing is asked. |
 
-Use `/permissions` to choose a mode, or `Shift+Tab` to cycle through them. At an approval prompt, allow once, allow eligible operations for the session, or deny. These are tool approval controls, not an operating-system sandbox.
+Use `/permissions` to choose a mode, or `Shift+Tab` to cycle through them. At a prompt, allow once, allow for this session, deny, or deny for this session.
+
+Two things differ by vendor. In `ask` and `auto`, Codex runs edits and commands inside the working directory in a sandbox that can write there and reach no network, so those run without asking and only what leaves the sandbox reaches you. Claude's `auto` mode depends on the model: where the model does not support it the session falls back to asking, and the status row says so. These are tool approval controls, not an operating-system sandbox.
 
 ### Your subscriptions, as many as you want—or an API key
 
@@ -141,9 +143,7 @@ Put your existing Claude and ChatGPT subscriptions to work in Sirus. Connect as 
 
 Sirus can fall back to another configured source for the same provider when a request fails. If that source is an API key, its API usage is billed by that provider.
 
-Use `/usage` to see reported subscription allowance, session token usage, and context usage. `/logout` lets you choose a saved account or key to remove.
-
-GPT-6 Astra requests a 1,050,000-token Codex window with automatic compaction at 900,000 tokens. Codex reserves headroom, so its usable window can be smaller; the context gauge always prefers the runtime's reported limit. Other models retain their existing settings. Restart Sirus after upgrading to apply the new thread configuration. Local configuration does not override provider-side availability or limits.
+Use `/usage` to see reported subscription allowance and how full each participant's context window is. `/logout` lets you choose a saved account or key to remove.
 
 ## Everyday controls
 
