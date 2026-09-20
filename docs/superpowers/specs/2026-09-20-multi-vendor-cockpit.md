@@ -68,20 +68,27 @@ and rewind; memory; sessions saved to disk.
    `session.compaction`. `/compact` in Sirus sends `/compact` as the prompt;
    both adapters list it as a slash command. The transcript-level compaction
    added on 2026-09-20 goes away with the shared transcript.
-8. **Sirus's permission gate answers `session/request_permission`.** The
-   request carries the tool call (kind, title, locations, raw input) and the
-   options allow once, allow always, reject once, reject always. ask/auto/
-   bypass and the judge stay; `allow-session` maps to allow always. The
-   classifier learns ACP shapes: kind `execute` with its command goes through
-   today's shell rules, `edit`, `delete` and `move` with their locations
-   through today's write rules, and `read`, `search`, `fetch` and `think` are
-   reads. Claude runs in `default` mode: reads never ask, everything else
-   calls back. Codex runs in the adapter's `read-only` mode (displayed "Ask
-   for approval"): a workspace-write sandbox with no network, every action
-   outside it forwarded to Sirus. This changes Codex participants:
-   in-workspace edits and commands run sandboxed without a prompt, and only
-   escalations reach the gate. The alternative, `agent-full-access`, never
-   asks at all, so the gate would see nothing.
+8. **Sirus's modes are the vendor's modes.** ask, auto and bypass switch
+   the session with `session/set_mode` to the vendor mode of the matching
+   kind, which both adapters tag in the mode's metadata: `standard` (Claude
+   `default`, Codex `read-only`, displayed "Ask for approval"), `auto_review`
+   (Claude `auto`, Codex `agent`) and `full_access` (Claude
+   `bypassPermissions`, Codex `agent-full-access`), taking the first mode of
+   that kind in the vendor's order. In ask mode the vendor asks about every
+   action that is not a read; in auto mode its own reviewer decides and
+   escalates only what it judges unsafe; in bypass nothing is asked.
+   Whatever the vendor escalates arrives as `session/request_permission`
+   with the tool call (kind, title, locations, raw input) and the options
+   allow once, allow always, reject once, reject always. Sirus's handler
+   shows the prompt and returns the user's choice; `allow-session` maps to
+   allow always. The judge, the classifier and Sirus's own tool-call
+   description go: the vendor's reviewer replaces the judge, and the prompt
+   is rendered from the ACP shape. Codex's `standard` and `auto_review`
+   modes carry a workspace-write sandbox with no network, so in-workspace
+   edits and commands run on Codex without a prompt and only escalations
+   reach the user. Claude's auto mode is per model: when the model lacks it
+   the adapter falls back to manual and reports it, and Sirus shows that in
+   the status row.
 9. **Checkpoint before the turn, not per write.** Native tools cannot wait on
    a barrier, so the pre-turn snapshot is awaited before `session/prompt`.
    Chat rewind works on a session-wide sequence number stamped on every
@@ -120,7 +127,10 @@ types and both adapters' sources. The protocol is at version 1; the
   diffs and terminal output. Claude maps its eight file, shell, search and
   web tools onto these; unlisted tools such as NotebookEdit arrive as kind
   `other` with raw input, one reason they stay off the allowlist.
-- Permissions: `session/request_permission`, as in decision 8.
+- Permissions: `session/set_mode` over vendor modes tagged by kind
+  (`standard`, `auto_review`, `full_access`), and
+  `session/request_permission` for what the vendor escalates, as in
+  decision 8.
 - Model selection: there is no `session/set_model`. `session/new` returns
   `configOptions`; `model` is a select option set by
   `session/set_config_option` (Claude also exposes effort and fast mode,
@@ -171,9 +181,10 @@ checkpoints.
   protocol version 1 and `session.compaction` as the only client capability;
   `session/new` with the working directory, the Sirus MCP server, and the
   vendor's extras (Claude: the tool allowlist, the system prompt,
-  `settingSources: []`, `permissionMode: "default"`; Codex: mode and config
-  arrive through the environment); `session/set_config_option` for `model`
-  when it differs from the default. Each turn is one `session/prompt`;
+  `settingSources: []`; Codex: config arrives through the environment);
+  `session/set_mode` to the vendor mode for Sirus's current mode, and
+  `session/set_config_option` for `model` when it differs from the default.
+  Each turn is one `session/prompt`;
   `session/cancel` stops it. Runtimes stay warm between turns.
 - The vendor's conversation is authoritative while its runtime lives. Sirus
   records the participant's transcript from `session/update`: message and
@@ -213,16 +224,17 @@ terminals and elicitations are not advertised and never arrive.
 `codex-models.json`, the tool loop in `chat.ts` and `fallback.ts`'s
 continuation handling, `tools/files.ts`, `tools/shell.ts`,
 `tools/search.ts`, `tools/web.ts`, `providers/subscription.ts` (replay),
-`agent_runtime/compaction.ts`, `MODEL_ONLY_CONFIG`, the shared `Transcript`.
-The direct dependencies on `@anthropic-ai/sdk`, `openai`,
+`agent_runtime/compaction.ts`, `MODEL_ONLY_CONFIG`, the shared `Transcript`,
+`permissions/judge.ts`, `permissions/classify.ts`, `permissions/describe.ts`
+and `judgeModelFor` in the catalog. The direct dependencies on `@anthropic-ai/sdk`, `openai`,
 `@anthropic-ai/claude-agent-sdk` and `@openai/codex` go; the two adapters and
 `@agentclientprotocol/sdk` come in at pinned versions.
 
 What stays: `provider.ts`'s source list and fallback order, with the
 transport reduced to the launch spec; `catalog.ts` for the `@name model`
 syntax and defaults; `tools/agents.ts` and `tools/subagents/`;
-`tools/memories.ts`; permissions; checkpoints; memory; persistence;
-commands; the frontend.
+`tools/memories.ts`; the approval queue and mode setting in
+`permissions/`; checkpoints; memory; persistence; commands; the frontend.
 
 ## Delivery
 
@@ -235,7 +247,7 @@ that do not share files, and integrates them itself:
 2. The Sirus MCP server over loopback HTTP with participant identity.
 3. Per-participant transcripts: sequence numbers, the merged timeline,
    delivery by mention, rewind on sequence, reseeding.
-4. The permission handler and the classifier mapping.
+4. The permission handler and the mode mapping.
 5. Frontend: ACP tool call rendering, the gauge, the compaction rule.
 6. Deletions, catalog cleanup, docs; tests move with the code.
 
@@ -251,3 +263,7 @@ and what the chat shows. This is the go/no-go the old phase 1 provided.
   latency is paid once per runtime, not per turn.
 - Adapter drift. Both adapters move fast; versions are pinned exactly and
   bumped deliberately.
+- Claude's auto mode is per model. A model without it drops the session to
+  manual, and the status row has to say so, or auto silently means ask.
+- The two reviewers draw the line in different places, so auto mode prompts
+  differently on Claude and Codex. Today's judge behaved the same on both.
