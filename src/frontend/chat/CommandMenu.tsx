@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
 import { matchCommands } from '../../commands/registry';
 import { theme } from '../styles/theme';
@@ -26,6 +27,33 @@ export function moveCommandMenuSelection(
   return {
     selected,
     offset: Math.min(offset, Math.max(0, length - COMMAND_MENU_VISIBLE_ITEMS)),
+  };
+}
+
+// The commands `/…` currently matches, and where the menu sits in them. The
+// selection belongs to the input that produced it: typing anything moves it
+// back to the first match.
+export function useCommandMenu(input: string, active: boolean) {
+  const [navigation, setNavigation] = useState({ input: '', selected: 0, offset: 0 });
+  const matches = active ? matchCommands(input) : [];
+  const current = navigation.input === input ? navigation : { input, selected: 0, offset: 0 };
+  useEffect(() => {
+    setNavigation({ input, selected: 0, offset: 0 });
+  }, [input]);
+  return {
+    matches,
+    selected: current.selected,
+    offset: current.offset,
+    move(delta: number) {
+      setNavigation(previous => ({
+        input,
+        ...moveCommandMenuSelection(
+          previous.input === input ? previous : { selected: 0, offset: 0 },
+          delta,
+          matches.length,
+        ),
+      }));
+    },
   };
 }
 

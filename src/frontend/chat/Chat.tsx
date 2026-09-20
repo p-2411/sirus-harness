@@ -7,7 +7,8 @@ import { theme } from '../styles/theme';
 import { HORSE } from '../branding/horse';
 import { ChatMessage } from './ChatMessage';
 import { Spinner } from './Spinner';
-import { InputBar, InputFeedback, type InputMode } from './InputBar';
+import { InputBar, type InputMode } from './InputBar';
+import { InputFeedback } from './InputRows';
 import {
   commandMenu,
   executeCommand,

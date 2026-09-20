@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Box, Text } from 'ink';
 import stringWidth from 'string-width';
 import type { Participant } from '../../agent_runtime/session';
@@ -41,6 +42,42 @@ export function mentionMenuItems(
     ...creation,
     ...agents.reverse(),
   ];
+}
+
+// Which item the menu has selected and which slice of it is on screen. The
+// closest match sits at the bottom, so the window is tracked from its bottom
+// edge: file results arriving above the agents leave the selection where it is.
+export function useMentionMenu({ active, input, cursor, participants, files }: {
+  active: boolean;
+  input: string;
+  cursor: number;
+  participants: readonly Participant[];
+  files: readonly string[];
+}) {
+  const [navigation, setNavigation] = useState({ key: '', selected: '', bottomGap: 0 });
+  const items = active ? mentionMenuItems(input.slice(0, cursor), participants, files) : [];
+  const key = `${input}\0${cursor}`;
+  const saved = navigation.key === key ? items.findIndex(item => item.key === navigation.selected) : -1;
+  const selected = saved >= 0 ? saved : Math.max(0, items.length - 1);
+  const offset = Math.max(0, items.length - MENTION_MENU_VISIBLE_ITEMS
+    - (saved >= 0 ? navigation.bottomGap : 0));
+  return {
+    items,
+    selected,
+    offset,
+    move(delta: -1 | 1) {
+      if (items.length === 0) return;
+      const next = (selected + delta + items.length) % items.length;
+      const nextOffset = next < offset ? next
+        : next >= offset + MENTION_MENU_VISIBLE_ITEMS ? next - MENTION_MENU_VISIBLE_ITEMS + 1
+        : offset;
+      setNavigation({
+        key,
+        selected: items[next].key,
+        bottomGap: Math.max(0, items.length - MENTION_MENU_VISIBLE_ITEMS - nextOffset),
+      });
+    },
+  };
 }
 
 export function MentionMenu({ items, participants, selected, offset, loading = false, error = null }: {

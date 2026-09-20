@@ -3,19 +3,17 @@ import { render as renderInk, renderToString } from 'ink';
 import { PassThrough } from 'node:stream';
 import { useState, useSyncExternalStore } from 'react';
 import stripAnsi from 'strip-ansi';
+import { InputBar } from '../../src/frontend/chat/InputBar';
+import { ApprovalPrompt } from '../../src/frontend/chat/ApprovalPrompt';
+import { InputFeedback, QueuedRow, SecretInput } from '../../src/frontend/chat/InputRows';
+import { SubagentStatusRow } from '../../src/frontend/chat/StatusRow';
 import {
   applyInputEdit,
-  InputBar,
-  ApprovalPrompt,
-  InputFeedback,
   normalizeNewlines,
   onFirstLine,
   onLastLine,
-  SecretInput,
-  QueuedRow,
-  SubagentStatusRow,
   type InputState,
-} from '../../src/frontend/chat/InputBar';
+} from '../../src/frontend/chat/editor';
 import { moveSelection, SelectMenu } from '../../src/frontend/chat/SelectMenu';
 import type { CommandMenuEntry, CommandMenuItem } from '../../src/commands/registry';
 import type { Feedback } from '../../src/commands/feedback';
