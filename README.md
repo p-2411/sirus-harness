@@ -20,7 +20,7 @@ Run `sirus` on its own to open the current directory. The npm package includes t
 Inside Sirus:
 
 1. Type `/login` and choose Claude or ChatGPT, then sign in with an existing subscription or enter an API key through the masked input. Repeat `/login` to connect more accounts—as many as you want.
-2. Type `/model` and select a model from the provider you connected.
+2. Optionally type `/model` and pick a model. Left alone, a new session asks Jev, TypeSafe AI's routing model, which of your connected vendors' latest models fits the task in your first prompt; see "A model picked for the task" below.
 3. Give Sirus a task:
 
 ```text
@@ -70,6 +70,12 @@ Then address that participant by name:
 ```
 
 Each participant keeps its own conversation. It reads the prompts you address to it, and whatever another participant says in a message that mentions it, attributed to the sender. A prompt that mentions nobody goes to `@sirus`. Set a participant's model with `/model @reviewer <model>` and reasoning depth with `/thinking @reviewer high`. Use `/model` to see the model names supported by your installation.
+
+### A model picked for the task
+
+With a `JEV_API` key in the environment, a new session does not start on a fixed model. Its first prompt goes to Jev, a fast decision model from TypeSafe AI, which chooses between the latest model of each vendor you have connected and that still has allowance: today `claude-fable-5-1` and `gpt-6-astra`. Jev sees the prompt, the names of files it mentions and the project's name, and each model's strengths as recorded in Sirus's catalog. The pick shows in the model label under the input, like any model.
+
+Your own choice comes first: `/model <model>` before the first prompt pins the session to it and Jev is not asked. Without a key, without a confident answer, or with a single usable vendor, the session starts on the saved `/model` default or `gpt-5.6-luna` as before. A vendor whose subscription allowance the sidebar shows at 0% is left out of the choice.
 
 ### Delegate work, follow the results
 

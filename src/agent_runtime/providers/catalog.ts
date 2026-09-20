@@ -9,6 +9,12 @@
 export interface ModelInfo {
   id: string;
   vendor: Vendor;
+  // The vendor's newest model: what Jev chooses between when it picks a new
+  // session's model. One per vendor.
+  latest?: true;
+  // What that model is good at, as the criteria Jev is given. Researched, and
+  // the owner's to correct; it decides the routing more than anything else.
+  strengths?: string;
 }
 
 export interface VendorInfo {
@@ -81,11 +87,21 @@ export const MODELS: readonly ModelInfo[] = [
   { id: 'gpt-5.6-luna', vendor: 'gpt' },
   { id: 'gpt-5.6-terra', vendor: 'gpt' },
   { id: 'gpt-5.6-sol', vendor: 'gpt' },
-  { id: 'gpt-6-astra', vendor: 'gpt' },
+  {
+    id: 'gpt-6-astra',
+    vendor: 'gpt',
+    latest: true,
+    strengths: 'OpenAI\'s most capable model. A 1M-token context window that holds a whole mid-sized repository or many documents at once, with earlier context still searchable, so it suits work that spans many files or sources, large refactors, and long multi-step tasks in one session. Strong on math and coding, and on browser and computer-use tasks. Reasoning effort is adjustable from low to max, so it also handles routine and medium-sized work without over-thinking.',
+  },
   { id: 'claude-opus-5', vendor: 'claude' },
   { id: 'claude-sonnet-5', vendor: 'claude' },
   { id: 'claude-haiku-4-5', vendor: 'claude' },
-  { id: 'claude-fable-5-1', vendor: 'claude' },
+  {
+    id: 'claude-fable-5-1',
+    vendor: 'claude',
+    latest: true,
+    strengths: 'Anthropic\'s most capable model, built for the most demanding reasoning and long-horizon agentic engineering: hard debugging, careful multi-step changes, architecture and design judgement, security-sensitive review, and precise writing. Thinks before every answer and can spend many minutes on one hard turn, which is wasted on quick lookups, small edits, or simple questions. 1M-token context.',
+  },
 ];
 
 // The model a new session starts with when nothing else has been chosen.
@@ -111,4 +127,9 @@ export function modelsOf(vendor: Vendor): string[] {
 
 export function vendorOf(id: string): Vendor | undefined {
   return modelInfo(id)?.vendor;
+}
+
+// The vendor's newest model, or undefined for a vendor that marks none.
+export function latestModelOf(vendor: Vendor): ModelInfo | undefined {
+  return MODELS.find(model => model.vendor === vendor && model.latest);
 }

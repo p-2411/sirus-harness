@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import * as naming from '../../src/agent_runtime/session/naming';
+import * as router from '../../src/agent_runtime/router';
 import type { RuntimeOptions } from '../../src/agent_runtime/runtime/runtime';
 import type { Draft } from '../../src/agent_runtime/session';
 import type { SubagentRun } from '../../src/agent_runtime/tools/subagents';
@@ -103,6 +104,45 @@ describe('Session model', () => {
     expect(session.getContextUsage()).toEqual({ tokens: 300, window: 200_000 });
     // Nothing of it survives a restore: the gauge waits for the runtime.
     expect(Session.fromSnapshot(session.toSnapshot()).getContextUsage()).toBeNull();
+  });
+
+  test('asks Jev for a draft\'s model on its first prompt unless the user picked one', async () => {
+    const binding = bindScriptedRuntime(testModel, textTurn('Done'));
+    const alternative = bindScriptedRuntime(secondTestModel, textTurn('Done'));
+    const route = spyOn(router, 'routeSessionModel').mockResolvedValue({ model: secondTestModel, confidence: 0.9 });
+    try {
+      const routed = new Session({ name: 'Routed', directory: process.cwd(), model: testModel, routePending: true });
+      await routed.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Review the auth module carefully' }] });
+      expect(route).toHaveBeenCalledTimes(1);
+      expect(route.mock.calls[0]?.[0]).toEqual({ prompt: 'Review the auth module carefully', directory: process.cwd() });
+      expect(routed.getModel()).toBe(secondTestModel);
+      expect(alternative.starts).toHaveLength(1);
+      expect(binding.starts).toHaveLength(0);
+      // The pick was made: a later prompt does not ask again.
+      await routed.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Again' }] });
+      expect(route).toHaveBeenCalledTimes(1);
+
+      // The user's own /model pick settles the draft's model instead.
+      const pinned = new Session({ name: 'Pinned', model: secondTestModel, routePending: true });
+      pinned.changeParticipantModel('sirus', testModel);
+      await pinned.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Go' }] });
+      expect(route).toHaveBeenCalledTimes(1);
+      expect(pinned.getModel()).toBe(testModel);
+
+      // No confident answer leaves the draft on the model it started with.
+      route.mockResolvedValue(null);
+      const unsure = new Session({ name: 'Unsure', model: testModel, routePending: true });
+      await unsure.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Go' }] });
+      expect(route).toHaveBeenCalledTimes(2);
+      expect(unsure.getModel()).toBe(testModel);
+
+      // A prompt the session rejects never reaches Jev.
+      const rejected = new Session({ name: 'Rejected', model: testModel, routePending: true });
+      await expect(rejected.sendMessage({ role: 'user', content: [{ type: 'text', text: '@nobody help' }] })).rejects.toThrow();
+      expect(route).toHaveBeenCalledTimes(2);
+    } finally {
+      route.mockRestore();
+    }
   });
 
   test('changing a participant model changes it for that session only', () => {

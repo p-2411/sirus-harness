@@ -41,7 +41,9 @@ function createDraft(
   preference: string | null = loadSirusModelPreference(),
 ): Session {
   const model = preference && isKnownModel(preference) ? preference : DEFAULT_MODEL;
-  return new Session({ name: nextSessionName(sessions), directory, model, autoNamePending: true });
+  // The draft starts on the fallback; its first prompt asks Jev for better,
+  // unless the user picks a model first.
+  return new Session({ name: nextSessionName(sessions), directory, model, autoNamePending: true, routePending: true });
 }
 
 export function startSession(

@@ -4,6 +4,7 @@ import { isMemoryAccessEnabled } from '../memory-access';
 import { requestPermission } from '../permissions/approvals';
 import { DEFAULT_PERMISSION_MODE, type PermissionMode } from '../permissions/policy';
 import { getSystemPrompt, systemPromptFor } from '../prompt';
+import { routeSessionModel, routingCandidates } from '../router';
 import { servableModelIds, servesModel } from '../providers';
 import { DEFAULT_MODEL } from '../providers/catalog';
 import { registerToolSession, sirusMcpServerEntry, unregisterToolSession } from '../tools/server';
@@ -74,6 +75,9 @@ export interface SessionOptions {
   inputContent?: string;
   // A newly-created session may still take its name from its first prompt.
   autoNamePending?: boolean;
+  // A newly-created session whose model nobody chose: its first prompt asks
+  // Jev which model fits, unless /model picks one first.
+  routePending?: boolean;
   timing?: SessionTiming;
 }
 
@@ -114,6 +118,7 @@ interface ResolvedSessionOptions {
   subagentModel: string | null;
   inputContent: string;
   autoNamePending: boolean;
+  routePending: boolean;
   updatedAt: number;
   conversationStartedAt: number;
   lastResponseFinishedAt: number | null;
@@ -136,6 +141,7 @@ function resolveSessionOptions(options: SessionOptions = {}): ResolvedSessionOpt
     subagentModel: options.subagentModel ?? null,
     inputContent: options.inputContent ?? '',
     autoNamePending: options.autoNamePending ?? false,
+    routePending: options.routePending ?? false,
     updatedAt,
     conversationStartedAt: timing.conversationStartedAt ?? updatedAt,
     // A session restored with history has already had a response, even when
@@ -168,6 +174,7 @@ export class Session {
   // away and back does not discard them.
   private inputContent: string;
   private autoNamePending: boolean;
+  private routePending: boolean;
   private namingController: AbortController | null = null;
 
   private activeSends = 0;
@@ -187,6 +194,7 @@ export class Session {
     this.subagentModel = resolved.subagentModel;
     this.inputContent = resolved.inputContent;
     this.autoNamePending = resolved.autoNamePending;
+    this.routePending = resolved.routePending;
     this.roster = new ParticipantRoster(this.changes, {
       sessionId: this.id,
       model: resolved.model,
@@ -325,6 +333,16 @@ export class Session {
       // not part of the conversation. Strip it before either the UI history or
       // any runtime sees the turn.
       const stored = stripCreationModels(resolved, mentions);
+      // Jev reads the user's own words, like the naming does, and its pick
+      // must land before any runtime starts: the turn waits for it.
+      if (this.routePending) {
+        this.routePending = false;
+        const pick = await routeSessionModel(
+          { prompt: textOf(stripCreationModels(message, mentions)), directory: this.directory },
+          routingCandidates(),
+        );
+        if (pick && pick.model !== this.roster.default.model) this.roster.changeModel(this.roster.default.name, pick.model);
+      }
       if (this.timeline.isEmpty() && this.autoNamePending) {
         // Name from the user's text, not the contents of resolved attachments.
         this.startNaming(textOf(stripCreationModels(message, mentions)));
@@ -610,8 +628,11 @@ export class Session {
     this.roster.setThinkingLevel(level, participantName);
   }
 
+  // The user's own pick for the default participant settles the draft's
+  // model: Jev is not asked.
   changeParticipantModel(participantName: string, newModel: string): void {
     this.roster.changeModel(participantName, newModel);
+    if (keyOf(participantName.replace(/^@/, '')) === keyOf(this.roster.default.name)) this.routePending = false;
   }
 
   getSubagentModel(): string | null {
