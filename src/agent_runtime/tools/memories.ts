@@ -32,9 +32,6 @@ export const memoryTools: Tool[] = [
         description: 'Scoped references to related memories. Global memories may only link to global memories.',
       },
     },
-    // Memories live in Sirus's own store, not in the working directory: they
-    // are outside what a checkpoint captures and what the gate guards.
-    effect: 'read',
     requires: 'memory',
     async run(args, { directory }) {
       const target = memoryTarget(args.scope, directory);
@@ -52,7 +49,6 @@ export const memoryTools: Tool[] = [
       scope: { type: 'string', enum: ['global', 'project'], description: 'The scope containing the memory.' },
       name: { type: 'string', description: 'The exact memory name.' },
     },
-    effect: 'read',
     requires: 'memory',
     async run(args, { directory }) {
       const target = memoryTarget(args.scope, directory);
@@ -73,7 +69,6 @@ export const memoryTools: Tool[] = [
       query: { type: 'string', description: 'A natural-language description of the memory to recall.' },
       limit: { type: 'integer', description: 'Maximum number of matches to return, from 1 to 50.' },
     },
-    effect: 'read',
     requires: 'memory',
     async run(args, { directory }) {
       const scope = memorySearchScope(args.scope);
@@ -89,7 +84,6 @@ export const memoryTools: Tool[] = [
       scope: { type: 'string', enum: ['global', 'project'], description: 'The scope containing the memory.' },
       name: { type: 'string', description: 'The exact memory name to delete.' },
     },
-    effect: 'read',
     requires: 'memory',
     async run(args, { directory }) {
       const target = memoryTarget(args.scope, directory);
