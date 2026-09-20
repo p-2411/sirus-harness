@@ -1,14 +1,25 @@
-import { abortReason, throwIfAborted } from '../../abort';
+import crypto from 'crypto';
+import type {
+  PermissionOption,
+  PermissionOptionKind,
+  RequestPermissionRequest,
+  RequestPermissionResponse,
+} from '@agentclientprotocol/sdk';
+import { toolCallBlockFrom } from '../runtime/runtime';
 import type { ToolCallBlock } from '../types';
-import type { ToolClass } from './classify';
-import type { JudgeVerdict } from './judge';
+import type { PermissionContext } from './policy';
 
-// The prompts the user is looking at, what they have already allowed for a
-// session, and what the judge has already decided. One process-wide store,
-// because the UI subscribes to it once and the gate is called from every
-// turn of every session.
+// The prompts the user is looking at and what they decided. One process-wide
+// store, because the UI subscribes to it once and every runtime's escalations
+// land here, whatever session they belong to. Nothing is kept as an
+// allowance: "allow for this session" answers the vendor's allow-always
+// option, and the vendor remembers that itself.
 
 export type Requester = { participant: string } | { subagent: string };
+
+export function describeRequester(requester: Requester): string {
+  return 'participant' in requester ? `@${requester.participant}` : `subagent ${requester.subagent}`;
+}
 
 export type ApprovalDecision = 'allow' | 'allow-session' | 'deny';
 
@@ -16,26 +27,19 @@ export interface ApprovalRequest {
   id: string;
   sessionId: string;
   requester: Requester;
-  call: ToolCallBlock;
-  toolClass: ToolClass;
-  // why this prompt appeared, shown beside the tool name
-  reason: string;
-  // what the user is approving, one item per line
-  detail: string[];
-  // the allowance "allow for this session" would record; null when the
-  // operation is sensitive and allowances cannot cover it
-  allowanceKey: string | null;
+  // The call as the vendor described it: title, kind, locations, content and
+  // raw input. The prompt renders from this and nothing else.
+  toolCall: ToolCallBlock;
+  // The vendor's options, in its order.
+  options: PermissionOption[];
 }
 
 interface PendingEntry {
   request: ApprovalRequest;
-  resolve: (decision: ApprovalDecision) => void;
-  reject: (error: Error) => void;
+  settle: (decision: ApprovalDecision) => void;
 }
 
 const pending: PendingEntry[] = [];
-const allowances = new Map<string, Set<string>>();
-const judgeCache = new Map<string, Map<string, JudgeVerdict>>();
 const listeners = new Set<() => void>();
 let version = 0;
 
@@ -60,66 +64,96 @@ export function pendingApprovals(sessionId?: string): ApprovalRequest[] {
     .filter(request => sessionId === undefined || request.sessionId === sessionId);
 }
 
+export function isAwaitingApproval(callId: string, sessionId?: string): boolean {
+  return pending.some(entry => entry.request.toolCall.id === callId
+    && (sessionId === undefined || entry.request.sessionId === sessionId));
+}
+
+// What the user decided per tool call, so the transcript can say "declined by
+// user" after the vendor has moved on. Per session and capped: a session can
+// run for days, and the vendor never asks about an old call again.
+const DECISIONS_PER_SESSION = 256;
+const decisions = new Map<string, Map<string, ApprovalDecision>>();
+
+function rememberDecision(sessionId: string, callId: string, decision: ApprovalDecision): void {
+  let remembered = decisions.get(sessionId);
+  if (!remembered) {
+    remembered = new Map();
+    decisions.set(sessionId, remembered);
+  }
+  remembered.delete(callId);
+  remembered.set(callId, decision);
+  // A Map iterates in insertion order, so the first key is the oldest.
+  if (remembered.size > DECISIONS_PER_SESSION) remembered.delete(remembered.keys().next().value!);
+}
+
+export function lastDecision(callId: string, sessionId: string): ApprovalDecision | undefined {
+  return decisions.get(sessionId)?.get(callId);
+}
+
 export function resolveApproval(id: string, decision: ApprovalDecision): boolean {
   const index = pending.findIndex(entry => entry.request.id === id);
   if (index === -1) return false;
   const [entry] = pending.splice(index, 1);
-  if (decision === 'allow-session' && entry.request.allowanceKey) {
-    let keys = allowances.get(entry.request.sessionId);
-    if (!keys) {
-      keys = new Set();
-      allowances.set(entry.request.sessionId, keys);
-    }
-    keys.add(entry.request.allowanceKey);
-  }
+  rememberDecision(entry.request.sessionId, entry.request.toolCall.id, decision);
   notifyListeners();
-  entry.resolve(decision);
+  entry.settle(decision);
   return true;
 }
 
-export function isAwaitingApproval(callId: string, sessionId?: string): boolean {
-  return pending.some(entry => entry.request.call.id === callId
-    && (sessionId === undefined || entry.request.sessionId === sessionId));
-}
+// The option kinds each decision prefers, best first. Both adapters offer all
+// four, but only the kinds are trusted, never the order or the ids.
+const OPTION_KINDS: Record<ApprovalDecision, readonly PermissionOptionKind[]> = {
+  allow: ['allow_once', 'allow_always'],
+  'allow-session': ['allow_always', 'allow_once'],
+  deny: ['reject_once', 'reject_always'],
+};
 
-// Already allowed for this session by an earlier "allow for this session".
-export function hasAllowance(sessionId: string, key: string): boolean {
-  return allowances.get(sessionId)?.has(key) ?? false;
-}
-
-// The judge is a model call: the same command in the same session is only
-// ever paid for once.
-export function cachedJudgeVerdict(sessionId: string, command: string): JudgeVerdict | undefined {
-  return judgeCache.get(sessionId)?.get(command);
-}
-
-export function rememberJudgeVerdict(sessionId: string, command: string, verdict: JudgeVerdict): void {
-  let cache = judgeCache.get(sessionId);
-  if (!cache) {
-    cache = new Map();
-    judgeCache.set(sessionId, cache);
+function optionFor(decision: ApprovalDecision, options: readonly PermissionOption[]): PermissionOption | undefined {
+  for (const kind of OPTION_KINDS[decision]) {
+    const option = options.find(candidate => candidate.kind === kind);
+    if (option) return option;
   }
-  cache.set(command, verdict);
+  // No kind matched: vendors list allows first and rejects last.
+  return decision === 'deny' ? options[options.length - 1] : options[0];
 }
 
-// Puts one prompt in front of the user and waits. A cancelled turn withdraws
-// its prompt and throws the abort reason.
-export function requestApproval(request: ApprovalRequest, signal?: AbortSignal): Promise<ApprovalDecision> {
-  throwIfAborted(signal);
-  return new Promise<ApprovalDecision>((resolve, reject) => {
-    const entry: PendingEntry = { request, resolve, reject };
+const CANCELLED: RequestPermissionResponse = { outcome: { outcome: 'cancelled' } };
+
+// Puts one vendor escalation in front of the user and answers it with the
+// option matching their choice. A cancelled turn withdraws its prompt and
+// answers `cancelled` instead of throwing: the vendor is waiting on a reply
+// and the runtime has to send one.
+export function requestPermission(
+  context: PermissionContext,
+  request: RequestPermissionRequest,
+  signal?: AbortSignal,
+): Promise<RequestPermissionResponse> {
+  if (signal?.aborted) return Promise.resolve(CANCELLED);
+  const approval: ApprovalRequest = {
+    id: crypto.randomUUID(),
+    sessionId: context.sessionId,
+    requester: context.requester,
+    toolCall: toolCallBlockFrom(request.toolCall),
+    options: request.options,
+  };
+  return new Promise<RequestPermissionResponse>(resolve => {
     const onAbort = () => {
-      const index = pending.indexOf(entry);
+      const index = pending.findIndex(entry => entry.request === approval);
       if (index !== -1) pending.splice(index, 1);
       notifyListeners();
-      reject(abortReason(signal!));
+      resolve(CANCELLED);
     };
     signal?.addEventListener('abort', onAbort, { once: true });
-    entry.resolve = decision => {
-      signal?.removeEventListener('abort', onAbort);
-      resolve(decision);
-    };
-    pending.push(entry);
+    pending.push({
+      request: approval,
+      settle: decision => {
+        signal?.removeEventListener('abort', onAbort);
+        const option = optionFor(decision, approval.options);
+        // Only an empty option list leaves nothing to select.
+        resolve(option ? { outcome: { outcome: 'selected', optionId: option.optionId } } : CANCELLED);
+      },
+    });
     notifyListeners();
   });
 }
