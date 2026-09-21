@@ -69,8 +69,28 @@ const listeners = new Set<() => void>();
 let version = 0;
 
 export function notifySubagents(): void {
+  if (progressNotify) {
+    clearTimeout(progressNotify);
+    progressNotify = null;
+  }
   version++;
   for (const listener of listeners) listener();
+}
+
+// A working run publishes every chunk its vendor streams, and the worker
+// strip re-renders on each one. Progress reaches listeners at most this
+// often, like the session's own streaming throttle; a status change goes
+// through `notifySubagents` and is never held back.
+const PROGRESS_NOTIFY_MS = 100;
+let progressNotify: ReturnType<typeof setTimeout> | null = null;
+
+export function notifySubagentProgress(): void {
+  if (progressNotify) return;
+  progressNotify = setTimeout(() => {
+    progressNotify = null;
+    notifySubagents();
+  }, PROGRESS_NOTIFY_MS);
+  progressNotify.unref?.();
 }
 
 export function subscribeSubagents(listener: () => void): () => void {
@@ -118,6 +138,33 @@ export function activeSubagentCount(directory?: string): number {
 
 export function allSubagents(): Iterable<SubagentRun> {
   return runs.values();
+}
+
+// What the session file keeps of one run. The live parts stay behind: the
+// agent doing the work, the session it belongs to, and the content array,
+// which is the assistant entry of the transcript and would otherwise be
+// written twice.
+export function workerRecord(run: SubagentRun): WorkerRecord {
+  return {
+    id: run.id,
+    callId: run.callId,
+    owner: run.owner,
+    model: run.model,
+    thinkingLevel: run.thinkingLevel,
+    context: run.context,
+    prompt: run.prompt,
+    directory: run.directory,
+    branch: run.branch,
+    status: run.status,
+    startedAt: run.startedAt,
+    finishedAt: run.finishedAt,
+    transcript: [...run.transcript],
+    finalMessage: run.finalMessage,
+    changes: [...run.changes],
+    error: run.error,
+    reported: run.reported,
+    dismissed: run.dismissed,
+  };
 }
 
 export type { SubagentSpawnOptions } from './run';

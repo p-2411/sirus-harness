@@ -2,18 +2,6 @@ export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function requiredBoolean(
-  args: Record<string, unknown>,
-  name: string,
-  toolName: string,
-): boolean {
-  const value = args[name];
-  if (typeof value !== 'boolean') {
-    throw new TypeError(`${toolName} requires ${name} to be a boolean`);
-  }
-  return value;
-}
-
 export function requiredString(
   args: Record<string, unknown>,
   name: string,

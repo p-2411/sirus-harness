@@ -1,4 +1,4 @@
-import { modelCommand, thinkingCommandSpec } from './agents/commands';
+import { agentsCommandSpec, modelCommand, thinkingCommandSpec } from './agents/commands';
 import {
   loginCommandSpec,
   logoutCommandSpec,
@@ -36,6 +36,7 @@ export const commandRegistry: readonly CommandSpec[] = [
   clearCommand,
   compactCommandSpec,
   thinkingCommandSpec,
+  agentsCommandSpec,
   loginCommandSpec,
   logoutCommandSpec,
   usageCommandSpec,

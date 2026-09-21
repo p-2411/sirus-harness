@@ -34,9 +34,14 @@ worker's model and thinking level for the task.
    With `owner`, the worker's runtime is a `session/fork` of the owner's,
    started in the worker's directory with the worker's own MCP entry; the
    task is its first prompt. Both adapters support it. A forked runtime shares
-   the owner's adapter process: if that process goes, the worker is
-   interrupted. If the fork fails the worker starts fresh, reseeded from the
-   owner's transcript as text.
+   the owner's adapter process: if that process goes, the worker's next
+   attempt starts a fresh runtime reseeded from its own record, so nothing
+   is lost. If the fork fails the worker starts fresh, reseeded from the
+   owner's transcript as text. Found in the build: neither vendor gives a
+   fork a system prompt of its own (Claude ignores the one on the resume
+   that opens the fork, Codex's instructions file is the process's), so a
+   forked worker carries the subagent contract at the top of its first
+   prompt instead.
 5. **Mid-run messages.** `MessageAgent` (owner) and the panel's message action
    (user) send text into a running worker through the `_session/steering`
    request both adapters implement, recorded in the worker's transcript as a
@@ -114,3 +119,15 @@ WorkerRecord[]`.
 Typecheck; the suite with the scripted runtime taught `fork` and `steer`; real
 runs on Claude of a worktree worker, a forked worker, a steered worker and a
 restart with a working run; Codex when its quota returns.
+
+## Profiles (2026-09-21)
+
+Decision 7's candidates are described by a `ModelProfile` rather than a
+`strengths` sentence: the researched summary, published benchmarks under their
+own metric names covering coding, research and writing, what users report in
+practice, and list price per million tokens. Each candidate's criteria end
+with its own vendor's remaining allowance, rendered by the same function the
+session router uses, so `routeWorker` still takes the allowance list but the
+state no longer carries one. Jev is told to weigh benchmarks and reviews
+against what the task demands, cost against its size, and allowance against
+both. Questions, threshold, timeout and fallbacks are unchanged.

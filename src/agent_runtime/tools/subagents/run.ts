@@ -1,184 +1,177 @@
 import crypto from 'crypto';
-import { mkdirSync, unlinkSync, writeFileSync } from 'fs';
-import os from 'os';
-import path from 'path';
 import { abortable, isAbortError, TurnCancelledError } from '../../../abort';
 import type { SessionAgent } from '../../agent';
+import { FORKED_WORKER_HANDOVER } from '../../prompt';
 import { servableModelIds, servesModel } from '../../providers';
-import type { Message } from '../../types';
-import { allSubagents, notifySubagents, registerSubagent, type SubagentRun } from './index';
-import { CHECK_WAIT_LIMIT_MS, describeRun, finalMessageOf, renderTranscript, summarizeChanges } from './report';
+import { transcriptText } from '../../session/transcript';
+import type { Message, ThinkingLevel } from '../../types';
+import type { WorkerContext } from '../types';
+import {
+  notifySubagentProgress,
+  notifySubagents,
+  registerSubagent,
+  type SubagentRun,
+} from './index';
+import { describeRun, finalMessageOf, summarizeChanges } from './report';
+import { createWorktree } from './worktree';
 
-// A subagent is one detached worker owned by the agent that spawned it: it
-// receives a single task, runs its vendor's own tools in the owner's
-// directory under the owner's session mode and gate, and hands back a final
-// message plus a summary of what it changed. Only the owner can see or
-// steer a run.
+// A worker is a background task of the session: it receives one task, runs
+// its vendor's own tools in its own worktree under the session's mode and
+// gate, and when it ends its report is delivered to the agent that spawned
+// it, which wakes that agent. Nobody waits on it here; the owner asks after
+// it with CheckAgent, sends it instructions with MessageAgent, and stops it
+// with CancelAgent.
 
 export interface SubagentSpawnOptions {
+  model: string;
+  thinkingLevel: ThinkingLevel;
+  // Fresh, or started from the owner's conversation so far.
+  context: WorkerContext;
+  // The SpawnAgent tool call that started the run, so the chat can decorate
+  // the row that anchors it.
   callId?: string;
-  // The owner's turn: when it is cancelled, so is the run.
-  signal?: AbortSignal;
 }
 
-// While a run works its record streams into a temporary file, so the owner
-// can look in on it with its ordinary file tools. The stream file is a
-// convenience: losing it must never fail the run itself.
-
-let exitCleanupInstalled = false;
-
-function streamContents(run: SubagentRun): string {
-  return [
-    `Sirus subagent ${run.id}`,
-    `model: ${run.model}`,
-    `status: ${run.status}`,
-    `started: ${new Date(run.startedAt).toISOString()}`,
-    'task:',
-    run.prompt,
-    '',
-    '--- output ---',
-    renderTranscript(run.content),
-    '',
-  ].join('\n');
-}
-
-function streamDirectory(): string {
-  return path.join(os.tmpdir(), 'sirus-subagents');
-}
-
-export function createStreamFile(run: SubagentRun): string | null {
-  const file = path.join(streamDirectory(), `${run.id}.log`);
-  try {
-    mkdirSync(streamDirectory(), { recursive: true, mode: 0o700 });
-    writeFileSync(file, streamContents(run), { encoding: 'utf8', mode: 0o600 });
-    return file;
-  } catch {
-    return null;
-  }
-}
-
-export function writeStreamFile(run: SubagentRun): void {
-  if (!run.streamFile) return;
-  try {
-    writeFileSync(run.streamFile, streamContents(run), 'utf8');
-  } catch {
-    // ignore: the record stays available through CheckAgent
-  }
-}
-
-export function removeStreamFile(run: SubagentRun): void {
-  if (!run.streamFile) return;
-  try {
-    unlinkSync(run.streamFile);
-  } catch {
-    // already gone
-  }
-  run.streamFile = null;
-}
-
-// Subagents die with the process; do not leave their half-written streams
-// behind in the temporary directory.
-export function installExitCleanup(): void {
-  if (exitCleanupInstalled) return;
-  exitCleanupInstalled = true;
-  process.on('exit', () => {
-    for (const run of allSubagents()) removeStreamFile(run);
-  });
-}
-
+// What each run is still doing, so cancelling one can wait for it to wind
+// down. A finished run's entry resolves at once.
 const completions = new Map<string, Promise<void>>();
 
-export function startSubagent(
+export async function startSubagent(
   owner: SessionAgent,
   prompt: string,
-  model: string,
   options: SubagentSpawnOptions,
-): SubagentRun {
-  if (!servesModel(model)) {
-    throw new Error(`Unknown model "${model}". Try: ${servableModelIds().join(', ')}`);
+): Promise<SubagentRun> {
+  if (!servesModel(options.model)) {
+    throw new Error(`Unknown model "${options.model}". Try: ${servableModelIds().join(', ')}`);
   }
   const id = `sub-${crypto.randomUUID().slice(0, 8)}`;
-  const worker = owner.createSubagent(id, model);
-  // The worker's record: the task, then the one entry its turn fills in.
-  // Its seqs are its own; nothing of it enters the session's timeline.
+  const worktree = await createWorktree(owner.directory, owner.sessionId, id);
+  const worker = owner.createSubagent(id, options.model, options.thinkingLevel, worktree?.directory ?? owner.directory);
+
+  // With `owner` context the worker's first runtime is a fork of the owner's
+  // live one and inherits the conversation. A fork also inherits the owner's
+  // system prompt, whatever the fork was told, so the contract it is missing
+  // opens its first prompt; the conversation is already in the session it
+  // was forked from and is not repeated. When there is no live runtime to
+  // fork, or the vendor refuses, the worker starts fresh — its own system
+  // prompt carries the contract then — and reads that conversation as text.
+  let text = prompt;
+  if (options.context === 'owner') {
+    if (await worker.forkFrom(owner)) {
+      text = [FORKED_WORKER_HANDOVER, '', 'Your task:', prompt].join('\n');
+    } else {
+      const history = transcriptText(owner.transcript.entries());
+      if (history) {
+        text = ['Earlier conversation of the agent that spawned you, for context:', history, '', prompt].join('\n');
+      }
+    }
+  }
+
+  // The worker's record: the task, then the one entry its turn fills in, and
+  // afterwards whatever is sent into its turn. Its seqs are its own; nothing
+  // of it enters the session's timeline.
   const task: Message = { seq: 0, role: 'user', content: [{ type: 'text', text: prompt }] };
-  const entry: Message = { seq: 1, role: 'assistant', participant: worker.name, model, content: [] };
+  const entry: Message = { seq: 1, role: 'assistant', participant: id, model: options.model, content: [] };
   worker.transcript.append(task);
   worker.transcript.append(entry);
   const run: SubagentRun = {
     id,
     callId: options.callId ?? null,
     sessionId: owner.sessionId,
-    owner,
+    owner: owner.name,
     worker,
-    model,
+    model: options.model,
+    thinkingLevel: options.thinkingLevel,
+    context: options.context,
     prompt,
-    directory: owner.directory,
+    directory: worktree?.directory ?? owner.directory,
+    branch: worktree?.branch ?? null,
     status: 'working',
-    streamFile: null,
     startedAt: Date.now(),
     finishedAt: null,
+    transcript: worker.transcript.entries() as Message[],
     content: entry.content,
     finalMessage: null,
     changes: [],
     error: null,
+    reported: false,
+    dismissed: false,
   };
   registerSubagent(run);
-  run.streamFile = createStreamFile(run);
-  installExitCleanup();
-  completions.set(run.id, execute(run, task, entry, options.signal));
-  notifySubagents();
+  completions.set(run.id, execute(run, owner, { text, task, entry }));
+  // The caller owns the run map the session lists workers from, so it is the
+  // caller that announces the run: a listener woken here would re-read that
+  // map before the run had reached it.
   return run;
 }
 
-export async function checkSubagent(
-  run: SubagentRun,
-  wait: boolean,
-  signal?: AbortSignal,
-): Promise<Record<string, unknown>> {
-  if (wait && run.status === 'working') {
-    await abortable(Promise.race([
-      completions.get(run.id),
-      new Promise<void>(resolve => setTimeout(resolve, CHECK_WAIT_LIMIT_MS)),
-    ]), signal);
-  }
-  return describeRun(run, wait);
+// The run as it stands, without waiting: a worker reports back on its own.
+export function checkSubagent(run: SubagentRun): Record<string, unknown> {
+  return describeRun(run);
 }
 
-// Stops one working subagent and waits for it to wind down, so the caller
-// gets an accurate account of what it had changed before being stopped.
+// Resolves when the run has reached a terminal status, at once if it already
+// has. A restored record is one that already has.
+export function subagentDone(run: SubagentRun): Promise<void> {
+  if (run.status !== 'working') return Promise.resolve();
+  return completions.get(run.id) ?? Promise.resolve();
+}
+
+// Stops one working worker and waits for it to wind down, so the caller gets
+// an accurate account of what it had changed before being stopped.
 export async function cancelSubagent(run: SubagentRun, signal?: AbortSignal): Promise<Record<string, unknown>> {
   if (run.status === 'working') {
-    run.worker.cancel(new TurnCancelledError('Cancelled by CancelAgent'));
+    run.worker?.cancel(new TurnCancelledError('Cancelled by CancelAgent'));
     await abortable(completions.get(run.id) ?? Promise.resolve(), signal);
   }
-  return describeRun(run, false);
+  return describeRun(run);
 }
 
-async function execute(run: SubagentRun, task: Message, entry: Message, parentSignal?: AbortSignal): Promise<void> {
+// Sends text into the turn a worker is running, and records it in the
+// worker's own record as a message it received. One that has ended refuses
+// with its status: there is no turn to fold the text into.
+export async function messageSubagent(run: SubagentRun, text: string): Promise<Record<string, unknown>> {
+  if (run.status !== 'working' || !run.worker) {
+    throw new Error(`Subagent ${run.id} is ${run.status} and cannot be sent a message.`);
+  }
+  await run.worker.steer(text);
+  run.worker.transcript.append({
+    seq: run.transcript.length,
+    role: 'user',
+    content: [{ type: 'text', text }],
+  });
+  notifySubagents();
+  return { id: run.id, status: run.status, delivered: text };
+}
+
+interface WorkerTurn {
+  // What the worker's runtime is prompted with: the task, carrying the
+  // owner's conversation when a fork was asked for and could not be had.
+  text: string;
+  task: Message;
+  entry: Message;
+}
+
+async function execute(run: SubagentRun, owner: SessionAgent, turn: WorkerTurn): Promise<void> {
+  const worker = run.worker!;
   try {
-    await run.worker.respond({ text: run.prompt }, {
-      entry,
-      carried: [task],
-      onUpdate: () => writeStreamFile(run),
-      ...(parentSignal ? { signal: parentSignal } : {}),
+    await worker.respond({ text: turn.text }, {
+      entry: turn.entry,
+      carried: [turn.task],
+      onUpdate: () => notifySubagentProgress(),
     });
-    run.finalMessage = finalMessageOf(entry.content);
+    run.finalMessage = finalMessageOf(turn.entry.content);
     run.status = 'done';
   } catch (error) {
-    if (isAbortError(error)) {
-      run.error = error instanceof Error ? error.message : 'Cancelled';
-      run.status = 'cancelled';
-    } else {
-      run.error = error instanceof Error ? error.message : String(error);
-      run.status = 'failed';
-    }
+    run.error = error instanceof Error ? error.message : String(error);
+    run.status = isAbortError(error) ? 'cancelled' : 'failed';
   } finally {
-    // Whatever happened, the changes made so far are what the caller must know about.
-    run.changes = summarizeChanges(entry.content, run.directory);
+    // Whatever happened, the changes made so far are what the owner must know
+    // about, and the owner is told: finishing a worker wakes it.
+    run.changes = summarizeChanges(turn.entry.content, run.directory);
     run.finishedAt = Date.now();
-    removeStreamFile(run);
-    run.worker.resetRuntime();
+    worker.resetRuntime();
     notifySubagents();
+    owner.workerFinished(run);
   }
 }

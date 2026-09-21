@@ -8,8 +8,32 @@ import { pendingApprovals, requestPermission, resolveApproval } from '../../src/
 import { loadNotificationPreference, loadMemoryAccessPreference, saveMemoryAccessPreference } from '../../src/persistence';
 import { notificationMode, setNotificationMode, shouldNotify, terminalNotificationSequence } from '../../src/frontend/terminal/notifications';
 import { parseFocusEvent, recordFocusEvent, resetFocusState } from '../../src/frontend/terminal/window-focus';
-import { subscribeApprovalNotifications, subscribeSessionNotifications, turnSummary } from '../../src/frontend/useNotifications';
+import {
+  subscribeApprovalNotifications,
+  subscribeSessionNotifications,
+  subscribeWorkerNotifications,
+  turnSummary,
+} from '../../src/frontend/useNotifications';
 import { notifyCommandSpec } from '../../src/commands/notifications/commands';
+import {
+  notifySubagents,
+  registerSubagent,
+  unregisterSubagent,
+  type SubagentRun,
+} from '../../src/agent_runtime/tools/subagents';
+
+// A worker record as the notifications read it, with only the fields each
+// case is about spelled out.
+function workerRun(run: Partial<SubagentRun> & { id: string }): SubagentRun {
+  return {
+    callId: null, sessionId: 'session', owner: 'sirus', worker: null,
+    model: 'claude-sonnet-5', thinkingLevel: 'medium', context: 'fresh',
+    prompt: 'Work', directory: '/project', branch: null, status: 'working',
+    startedAt: Date.now(), finishedAt: null, transcript: [], content: [],
+    finalMessage: null, changes: [], error: null, reported: false, dismissed: false,
+    ...run,
+  };
+}
 
 let directory: string;
 let previousDirectory: string | undefined;
@@ -176,6 +200,57 @@ describe('notification event subscriptions', () => {
       stop();
       for (const approval of pendingApprovals(session.getId())) resolveApproval(approval.id, 'deny');
       await Promise.all(approvals);
+    }
+  });
+
+  test('announces a worker that finishes while nothing on screen waits for it', () => {
+    const session = new Session({ id: 'worker-owner', name: 'Background work' });
+    // The record a restart brings back is already terminal before anything
+    // subscribes, so reopening the app never announces last session's work.
+    const restored = workerRun({ id: 'sub-restored', sessionId: session.getId(), status: 'interrupted' });
+    const finishing = workerRun({ id: 'sub-finishing', sessionId: session.getId() });
+    const stopped = workerRun({ id: 'sub-stopped', sessionId: session.getId() });
+    for (const run of [restored, finishing, stopped]) registerSubagent(run);
+    const sent: string[] = [];
+    const stop = subscribeWorkerNotifications(() => [session], (title, body) => sent.push(`${title}: ${body}`));
+    const lines = (id: string) => sent.filter(line => line.includes(id));
+    try {
+      notifySubagents();
+      expect(sent).toEqual([]);
+      finishing.status = 'done';
+      finishing.finalMessage = 'Rewrote the loader.\nIt is on its branch.';
+      // The user stopped this one themselves and needs no telling.
+      stopped.status = 'cancelled';
+      notifySubagents();
+      expect(lines('sub-finishing')).toEqual([
+        'Sirus · Background work: Worker sub-finishing done; its report went to @sirus: Rewrote the loader.',
+      ]);
+      expect(lines('sub-stopped')).toEqual([]);
+      expect(lines('sub-restored')).toEqual([]);
+      notifySubagents();
+      expect(lines('sub-finishing')).toHaveLength(1);
+      stop();
+    } finally {
+      stop();
+      for (const run of [restored, finishing, stopped]) unregisterSubagent(run.id);
+    }
+  });
+
+  test('leaves a busy session to announce its own turn', () => {
+    const session = new Session({ id: 'worker-busy-owner', name: 'Busy' });
+    const statusSpy = spyOn(session, 'getStatus').mockImplementation(() => 'working');
+    const run = workerRun({ id: 'sub-quiet', sessionId: session.getId() });
+    registerSubagent(run);
+    const sent: string[] = [];
+    const stop = subscribeWorkerNotifications(() => [session], (title, body) => sent.push(`${title}: ${body}`));
+    try {
+      run.status = 'failed';
+      notifySubagents();
+      expect(sent.filter(line => line.includes('sub-quiet'))).toEqual([]);
+    } finally {
+      stop();
+      unregisterSubagent(run.id);
+      statusSpy.mockRestore();
     }
   });
 });

@@ -19,6 +19,7 @@ import {
 	findSubagentByCall,
 	getSubagentsVersion,
 	subscribeSubagents,
+	type SubagentRun,
 	type SubagentStatus,
 } from '../../agent_runtime/tools/subagents';
 import {
@@ -176,9 +177,11 @@ function finished(call: ToolCallBlock): boolean {
 }
 
 // A SpawnAgent call is a Sirus tool the vendor reports as kind `other` under
-// its own title. Its row follows the run it started rather than the call:
-// amber while the subagent works, green once it is done, red if it failed. A
-// run from an earlier process left no record, so its dot stays neutral.
+// its own title. Its row is the worker's anchor in the history: it follows
+// the run rather than the call — amber while the worker works, green once it
+// is done, red if it failed, muted when it was stopped or the process it
+// lived in ended. A run from an earlier process left no record, so its dot
+// stays neutral.
 function isSpawnAgent(call: ToolCallBlock): boolean {
 	return call.kind === 'other' && /\bSpawnAgent\b/.test(call.title);
 }
@@ -190,16 +193,22 @@ const subagentColors: Record<SubagentIndicator, string> = {
 	done: theme.success,
 	failed: theme.danger,
 	cancelled: theme.textMuted,
+	interrupted: theme.textMuted,
 	unknown: theme.textSubtle,
 };
 
-function useSubagentStatus(call: ToolCallBlock, sessionId?: string): SubagentIndicator | null {
+// The worker this call started, and how its row should read. The record
+// carries what the call never did: the model it got, its id and its branch.
+function useSubagentRun(call: ToolCallBlock, sessionId?: string): {
+	run?: SubagentRun;
+	status: SubagentIndicator | null;
+} {
 	useSyncExternalStore(subscribeSubagents, getSubagentsVersion);
 	const run = sessionId === undefined ? undefined : findSubagentByCall(call.id, sessionId);
-	if (run) return run.status;
-	if (!isSpawnAgent(call)) return null;
-	if (call.status === 'failed') return 'failed';
-	return call.status === 'completed' ? 'unknown' : 'working';
+	if (run) return { run, status: run.status };
+	if (!isSpawnAgent(call)) return { status: null };
+	if (call.status === 'failed') return { status: 'failed' };
+	return { status: call.status === 'completed' ? 'unknown' : 'working' };
 }
 
 // User-visible permission state: only an approval that needs their input or
@@ -210,12 +219,6 @@ function usePermissionStatus(call: ToolCallBlock, sessionId?: string): { text: s
 	if (isAwaitingApproval(call.id, sessionId)) return { text: 'waiting for approval', color: theme.pending };
 	if (lastDecision(call.id, sessionId) === 'deny') return { text: 'declined by user', color: theme.danger };
 	return null;
-}
-
-// The model a run is on. The tool call carries none: the subagent model is a
-// session setting, so only the run itself knows which one it got.
-function subagentModel(call: ToolCallBlock, sessionId?: string): string | undefined {
-	return (sessionId === undefined ? undefined : findSubagentByCall(call.id, sessionId))?.model;
 }
 
 const statusColors: Record<ToolCallStatus, string> = {
@@ -233,21 +236,22 @@ function ToolSummary({ call, indent = '', hovered = false, sessionId }: {
 	indent?: string;
 	hovered?: boolean;
 }) {
-	const subagent = useSubagentStatus(call, sessionId);
+	const { run, status: subagent } = useSubagentRun(call, sessionId);
 	const permission = usePermissionStatus(call, sessionId);
 	const color = subagent ? subagentColors[subagent] : statusColors[call.status];
 	const title = singleLine(call.title);
-	const model = subagentModel(call, sessionId);
 	const counts = editCounts(call);
 	return (
 		<Text wrap="truncate-end">
 			<Text color={color}>{indent}●</Text>
 			<Text color={hovered ? theme.textMuted : theme.textSubtle}> {toolVerb(call.kind)}</Text>
-			{model && <Text color={theme.textSubtle} dimColor> {model}</Text>}
+			{run && <Text color={theme.textSubtle} dimColor> {run.model}</Text>}
 			{title && <Text color={theme.textSubtle} dimColor> {title}</Text>}
 			{counts && <Text color={theme.success}> +{counts.added}</Text>}
 			{counts && counts.removed > 0 && <Text color={theme.danger}> −{counts.removed}</Text>}
+			{run && <Text color={theme.textSubtle} dimColor> · {run.id}</Text>}
 			{subagent && subagent !== 'unknown' && <Text color={color}> · {subagent}</Text>}
+			{run?.branch && <Text color={theme.textSubtle} dimColor> · {run.branch}</Text>}
 			{permission && <Text color={permission.color}> · {permission.text}</Text>}
 		</Text>
 	);
@@ -396,6 +400,16 @@ function CompactionRule({ block, participantColors }: {
 	);
 }
 
+// A worker reports back as an assistant entry it wrote itself, addressed to
+// the participant that spawned it. Its author is a run id, never a name on
+// the roster, so the header says what it is instead of borrowing a
+// participant's colour.
+const WORKER_PARTICIPANT = /^sub-[0-9a-f]+$/i;
+
+export function isWorkerParticipant(name: string): boolean {
+	return WORKER_PARTICIPANT.test(name);
+}
+
 // An attached image: the terminal cannot show it, so its row says what it is.
 export function ImageLine({ image }: { image: ImageBlock }) {
 	return <Text color={theme.textMuted}>▣ {describeImage(image)}</Text>;
@@ -414,6 +428,7 @@ export function ChatMessage({
 }) {
 	const isUser = message.role === "user";
 	const participantName = message.participant ?? 'sirus';
+	const isWorker = !isUser && isWorkerParticipant(participantName);
 	return (
 		// no bars, no boxes — bold speaker label, body aligned flush beneath,
 		// whitespace doing the separating
@@ -426,11 +441,13 @@ export function ChatMessage({
 		>
 			<Text>
 				<Text
-					color={isUser ? theme.highlight : participantColor(participantName, participantColors)}
+					color={isUser ? theme.highlight
+						: isWorker ? theme.textMuted : participantColor(participantName, participantColors)}
 					bold
 				>
 					{isUser ? "you" : participantName}
 				</Text>
+				{isWorker && <Text color={theme.textMuted}> · worker</Text>}
 				{!isUser && model && <Text color={theme.textSubtle} dimColor> {model}</Text>}
 			</Text>
 			{messageSegments(message.content).map((block, index) => {

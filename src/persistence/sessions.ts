@@ -11,6 +11,7 @@ import {
   type ToolCallBlock,
 } from '../agent_runtime/types';
 import type { SessionSnapshot } from '../agent_runtime/session';
+import type { WorkerRecord } from '../agent_runtime/tools/subagents';
 import { readJson, writeJson } from './atomicJson';
 
 // The session file: the whole conversation graph, validated on the way in and
@@ -108,6 +109,31 @@ const participantSchema = z.object({
   thinkingLevel: z.enum(THINKING_LEVELS).optional(),
 });
 
+// One delegated run of the session, kept so its record survives a restart:
+// where it worked, what it produced, and whether its owner ever heard about
+// it. `content` is not stored — it is the content array of the transcript's
+// assistant entry, and restoring points at that.
+const workerSchema = z.object({
+  id: z.string().min(1),
+  callId: z.string().min(1).nullable(),
+  owner: z.string().min(1),
+  model: z.string().min(1),
+  thinkingLevel: z.enum(THINKING_LEVELS),
+  context: z.enum(['fresh', 'owner']),
+  prompt: z.string(),
+  directory: z.string().min(1),
+  branch: z.string().min(1).nullable(),
+  status: z.enum(['working', 'done', 'failed', 'cancelled', 'interrupted']),
+  startedAt: z.number(),
+  finishedAt: z.number().nullable(),
+  transcript: z.array(messageSchema),
+  finalMessage: z.string().nullable(),
+  changes: z.array(z.string()),
+  error: z.string().nullable(),
+  reported: z.boolean(),
+  dismissed: z.boolean(),
+});
+
 const checkpointSchema = z.object({
   id: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i),
   // `messageIndex` is the name files carried before entries had seqs; the
@@ -136,6 +162,9 @@ const sessionSchema = z.object({
   // default (auto approve).
   permissionMode: z.enum(['ask', 'auto', 'bypass']).optional(),
   subagentModel: z.string().min(1).optional(),
+  // Every worker the session's participants spawned; absent for a session
+  // that never delegated and in files written before workers were kept.
+  workers: z.array(workerSchema).optional(),
   // Directory snapshots taken before each turn; absent before checkpoints
   // existed and for sessions that never had one.
   checkpoints: z.array(checkpointSchema).optional(),
@@ -227,6 +256,16 @@ function toMessage(stored: StoredMessage, index: number, defaultParticipant: str
   };
 }
 
+// A worker's own record reads back like a small transcript of its own: its
+// entries are stamped as they were written, and the assistant one among them
+// is the response the session hands the UI.
+function toWorkerRecord(stored: z.infer<typeof workerSchema>): WorkerRecord {
+  return {
+    ...stored,
+    transcript: stored.transcript.map((message, index) => toMessage(message, index, stored.id)),
+  };
+}
+
 // Both stored shapes become one modern snapshot here, so `Session` has a
 // single way back in. A file written before multi-agent support carries one
 // `model` and no clocks: it becomes a lone `sirus` participant whose history
@@ -250,6 +289,7 @@ function toSnapshot(stored: StoredSession, fallbackSessionDirectory: string): Se
     })),
     autoNamePending: stored.autoNamePending ?? false,
     updatedAt: stored.updatedAt ?? 0,
+    ...(stored.workers ? { workers: stored.workers.map(toWorkerRecord) } : {}),
     ...(stored.permissionMode ? { permissionMode: stored.permissionMode } : {}),
     ...(stored.subagentModel ? { subagentModel: stored.subagentModel } : {}),
     ...(stored.conversationStartedAt !== undefined ? { conversationStartedAt: stored.conversationStartedAt } : {}),

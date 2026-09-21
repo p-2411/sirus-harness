@@ -10,6 +10,11 @@ import {
   toolLine,
   ToolRunGroup,
 } from '../../src/frontend/chat/ChatMessage';
+import {
+  registerSubagent,
+  unregisterSubagent,
+  type SubagentRun,
+} from '../../src/agent_runtime/tools/subagents';
 import type { MessageBlock, ToolCallBlock } from '../../src/agent_runtime/types';
 
 // Everything ACP guarantees on a tool call, so each case writes only the
@@ -422,5 +427,73 @@ describe('compaction rule', () => {
       app.unmount();
       await app.waitUntilExit();
     }
+  });
+});
+
+// A worker record as the chat reads it, with only the fields each case is
+// about spelled out.
+function workerRun(run: Partial<SubagentRun> & { id: string; callId: string }): SubagentRun {
+  return {
+    sessionId: 'session', owner: 'sirus', worker: null,
+    model: 'claude-sonnet-5', thinkingLevel: 'medium', context: 'fresh',
+    prompt: 'Work', directory: '/project', branch: null, status: 'working',
+    startedAt: Date.now(), finishedAt: null, transcript: [], content: [],
+    finalMessage: null, changes: [], error: null, reported: false, dismissed: false,
+    ...run,
+  };
+}
+
+describe('the SpawnAgent row', () => {
+  const call: ToolCallBlock = toolCall({ id: 'spawn-call', title: 'sirus - SpawnAgent' });
+  const row = (sessionId?: string) => renderToString(
+    <ChatMessage message={{ seq: 0, role: 'assistant', content: [call] }} sessionId={sessionId} />,
+    { columns: 140 },
+  );
+
+  test('names the run it started and follows it to the end', () => {
+    const run = workerRun({
+      id: 'sub-1234', callId: call.id, status: 'done', branch: 'sirus/sub-1234',
+    });
+    registerSubagent(run);
+    try {
+      expect(stripAnsi(row('session')))
+        .toContain('● Tool claude-sonnet-5 sirus - SpawnAgent · sub-1234 · done · sirus/sub-1234');
+      // A run of another session never decorates this one's row.
+      expect(stripAnsi(row('elsewhere'))).not.toContain('sub-1234');
+    } finally {
+      unregisterSubagent(run.id);
+    }
+  });
+
+  test('names a run the process left behind by that status', () => {
+    const run = workerRun({ id: 'sub-5678', callId: call.id, status: 'interrupted' });
+    registerSubagent(run);
+    try {
+      expect(stripAnsi(row('session'))).toContain('· sub-5678 · interrupted');
+    } finally {
+      unregisterSubagent(run.id);
+    }
+  });
+
+  test('says nothing of a run no record survives', () => {
+    const output = stripAnsi(row('session'));
+    expect(output).toContain('● Tool sirus - SpawnAgent');
+    expect(output).not.toContain('·');
+  });
+});
+
+describe('a worker report', () => {
+  const report = (participant: string) => stripAnsi(renderToString(
+    <ChatMessage message={{
+      seq: 0, role: 'assistant', participant,
+      content: [{ type: 'text', text: 'Done; the branch is ready.' }],
+    }} />,
+    { columns: 120 },
+  ));
+
+  test('says who wrote it without borrowing a participant name', () => {
+    expect(report('sub-1234')).toContain('sub-1234 · worker');
+    expect(report('sub-1234')).toContain('Done; the branch is ready.');
+    expect(report('reviewer')).not.toContain('worker');
   });
 });

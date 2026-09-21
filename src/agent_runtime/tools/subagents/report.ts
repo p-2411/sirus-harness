@@ -2,56 +2,87 @@ import path from 'path';
 import type { MessageBlock, ToolCallBlock } from '../../types';
 import type { SubagentRun } from './index';
 
-// Everything a subagent run says about itself: to the model that asked, and
-// as plain text in the stream file the owner can read while it works.
+// Everything a worker says about itself: to the model that asked after it,
+// and as the report that reaches its owner when it ends.
 
-// Long enough that a caller rarely has to poll, short enough to stay under the
-// tool-call timeouts of the vendor runtimes.
-export const CHECK_WAIT_LIMIT_MS = 60_000;
 const PROGRESS_TAIL_CHARS = 2_000;
 const RESULT_PREVIEW_CHARS = 120;
 const COMMAND_PREVIEW_CHARS = 100;
+
+// What a run that was working when Sirus quit says instead of a final message.
+export const INTERRUPTED_REASON = 'Sirus quit while it was working';
+
+function elapsedSeconds(run: SubagentRun): number {
+  return Math.round(((run.finishedAt ?? Date.now()) - run.startedAt) / 1000);
+}
 
 export function describeSubagents(subagents: readonly SubagentRun[]): Record<string, unknown>[] {
   return subagents.map(run => ({
     id: run.id,
     model: run.model,
+    thinkingLevel: run.thinkingLevel,
     status: run.status,
-    elapsedSeconds: Math.round(((run.finishedAt ?? Date.now()) - run.startedAt) / 1000),
+    elapsedSeconds: elapsedSeconds(run),
     task: truncate(run.prompt, COMMAND_PREVIEW_CHARS),
-    ...(run.streamFile ? { streamFile: run.streamFile } : {}),
+    branch: run.branch,
+    context: run.context,
   }));
 }
 
-export function describeRun(run: SubagentRun, waited: boolean): Record<string, unknown> {
-  const finishedAt = run.finishedAt ?? Date.now();
+// The run as it stands right now. A working run shows the tail of what it has
+// produced; a finished one shows what it ended with, which its owner has also
+// received as a message.
+export function describeRun(run: SubagentRun): Record<string, unknown> {
   const base = {
     id: run.id,
     model: run.model,
+    thinkingLevel: run.thinkingLevel,
     status: run.status,
-    elapsedSeconds: Math.round((finishedAt - run.startedAt) / 1000),
+    elapsedSeconds: elapsedSeconds(run),
+    ...(run.branch ? { branch: run.branch, worktree: run.directory } : {}),
   };
   if (run.status === 'working') {
     const transcript = renderTranscript(run.content);
     return {
       ...base,
-      streamFile: run.streamFile,
       toolCalls: run.content.filter(block => block.type === 'tool_call').length,
       progress: transcript.length > PROGRESS_TAIL_CHARS
         ? `…${transcript.slice(-PROGRESS_TAIL_CHARS)}`
         : transcript,
-      note: waited
-        ? `Still working after waiting ${CHECK_WAIT_LIMIT_MS / 1000} seconds. Call CheckAgent again with wait true to keep waiting.`
-        : 'Call CheckAgent with wait true to block until it finishes.',
+      note: 'Still working. It reports back to you as a message when it ends; MessageAgent sends it instructions meanwhile.',
     };
   }
   if (run.status === 'failed') {
     return { ...base, error: run.error, changes: run.changes };
   }
-  if (run.status === 'cancelled') {
+  if (run.status === 'cancelled' || run.status === 'interrupted') {
     return { ...base, reason: run.error, changes: run.changes };
   }
   return { ...base, finalMessage: run.finalMessage, changes: run.changes };
+}
+
+// The message the owner receives when a worker ends: who it was, where its
+// work is, what it touched and what it said. This is the whole of what the
+// owner is told, so it names the branch rather than assuming the owner still
+// remembers there was one.
+export function workerReport(run: SubagentRun): string {
+  const lines = [
+    `Subagent ${run.id} ${run.status} after ${elapsedSeconds(run)}s on ${run.model} (${run.thinkingLevel}).`,
+    `Task: ${truncate(run.prompt, COMMAND_PREVIEW_CHARS)}`,
+  ];
+  if (run.branch) {
+    lines.push(
+      `Its work is on branch ${run.branch}, in its own worktree at ${run.directory}, not in your working directory.`,
+      'Merge that branch or inspect the worktree yourself, or tell the user to; nothing else will.',
+    );
+  }
+  lines.push(run.changes.length > 0
+    ? `Changes:\n${run.changes.map(change => `- ${change}`).join('\n')}`
+    : 'Changes: none recorded.');
+  if (run.status === 'done') lines.push(`Final message:\n${run.finalMessage ?? '(none)'}`);
+  else if (run.status === 'failed') lines.push(`It failed: ${run.error ?? 'unknown error'}`);
+  else lines.push(`It stopped: ${run.error ?? INTERRUPTED_REASON}`);
+  return lines.join('\n');
 }
 
 // The subagent's closing words: whatever text follows its last tool call.

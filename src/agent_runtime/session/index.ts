@@ -8,7 +8,17 @@ import { routeSessionModel, routingCandidates } from '../router';
 import { servableModelIds, servesModel } from '../providers';
 import { DEFAULT_MODEL } from '../providers/catalog';
 import { registerToolSession, sirusMcpServerEntry, unregisterToolSession } from '../tools/server';
-import type { SubagentRun, WorkerRecord } from '../tools/subagents';
+import {
+  notifySubagents,
+  registerSubagent,
+  unregisterSubagent,
+  workerRecord,
+  type SubagentRun,
+  type WorkerRecord,
+} from '../tools/subagents';
+import { INTERRUPTED_REASON, workerReport } from '../tools/subagents/report';
+import { cancelSubagent, messageSubagent } from '../tools/subagents/run';
+import { removeWorktree } from '../tools/subagents/worktree';
 import type { SubagentHost } from '../tools/types';
 import { textOf, type Message, type ThinkingLevel } from '../types';
 import type { ContextUsage } from '../usage';
@@ -123,6 +133,7 @@ interface ResolvedSessionOptions {
   checkpoints: readonly Checkpoint[];
   permissionMode: PermissionMode;
   subagentModel: string | null;
+  workers: readonly WorkerRecord[];
   inputContent: string;
   autoNamePending: boolean;
   routePending: boolean;
@@ -146,6 +157,7 @@ function resolveSessionOptions(options: SessionOptions = {}): ResolvedSessionOpt
     checkpoints: options.checkpoints ?? [],
     permissionMode: options.permissionMode ?? DEFAULT_PERMISSION_MODE,
     subagentModel: options.subagentModel ?? null,
+    workers: options.workers ?? [],
     inputContent: options.inputContent ?? '',
     autoNamePending: options.autoNamePending ?? false,
     routePending: options.routePending ?? false,
@@ -184,12 +196,17 @@ export class Session {
   private routePending: boolean;
   private namingController: AbortController | null = null;
 
+  // Workers that ended while the session was busy, oldest first. Their
+  // reports go out as soon as it is free, ahead of the user's queued prompts.
+  private readonly pendingReports: SubagentRun[] = [];
+
   private activeSends = 0;
   private status: SessionStatus = 'idle';
   private turnFailed = false;
   private lastTurnCancelled = false;
   private rewinding = false;
   private compacting = false;
+  private disposed = false;
   private activeTurnStartedAt: number | null = null;
 
   constructor(options: SessionOptions = {}) {
@@ -215,6 +232,7 @@ export class Session {
       lastResponseFinishedAt: resolved.lastResponseFinishedAt,
     });
     this.restore(resolved.messages);
+    this.restoreWorkers(resolved.workers);
     this.checkpoints = new CheckpointLog(this.directory, resolved.checkpoints, this.changes);
     this.turns = new TurnRunner({ timeline: this.timeline, roster: this.roster });
     registerToolSession(this.id, {
@@ -233,6 +251,7 @@ export class Session {
       defaultParticipant: snapshot.defaultModel.name,
       participants: snapshot.participants,
       messages: snapshot.messages,
+      workers: snapshot.workers ?? [],
       checkpoints: snapshot.checkpoints ?? [],
       inputContent: snapshot.inputContent ?? '',
       autoNamePending: snapshot.autoNamePending ?? false,
@@ -259,14 +278,41 @@ export class Session {
       requestPermission: (agent, request, signal) =>
         requestPermission({ sessionId: this.id, requester: agent.requester }, request, signal),
       subagentModel: () => this.subagentModel,
-      forWorker: id => ({
+      forWorker: (id, directory) => ({
         ...host,
-        systemPrompt: () => getSystemPrompt(this.directory, 'sirus', true),
+        directory,
+        systemPrompt: () => getSystemPrompt(directory, 'sirus', true),
         mcpServer: () => sirusMcpServerEntry(this.id, `subagent:${id}`),
         forWorker: () => { throw new Error('A subagent cannot spawn a subagent'); },
       }),
+      workerFinished: run => this.workerFinished(run),
     };
     return host;
+  }
+
+  // Puts the session file's worker records back where they belong: in the
+  // run map of the participant that spawned them, and in the process index
+  // so the strip lists them. Nothing restarts; a run that was working when
+  // Sirus quit ended with the process.
+  private restoreWorkers(records: readonly WorkerRecord[]): void {
+    for (const record of records) {
+      const owner = this.roster.find(record.owner) ?? this.roster.default;
+      const transcript = record.transcript.map(entry => ({ ...entry }));
+      const interrupted = record.status === 'working';
+      const run: SubagentRun = {
+        ...record,
+        owner: owner.name,
+        transcript,
+        status: interrupted ? 'interrupted' : record.status,
+        finishedAt: interrupted ? Date.now() : record.finishedAt,
+        error: interrupted ? INTERRUPTED_REASON : record.error,
+        sessionId: this.id,
+        worker: null,
+        content: transcript.find(entry => entry.role === 'assistant')?.content ?? [],
+      };
+      owner.adoptSubagent(run);
+      registerSubagent(run);
+    }
   }
 
   // Puts restored entries back into the transcripts they were delivered to.
@@ -356,6 +402,7 @@ export class Session {
       }
       if (this.activeSends === 1) this.timeline.startConversationIfNeeded(Date.now());
       accepted = true;
+      this.appendRestoredReports();
       // The prompt enters the transcript of every participant it addresses,
       // and nothing else's.
       const entry = this.timeline.add(
@@ -390,12 +437,106 @@ export class Session {
   }
 
   // One participant's delegation port: what its SpawnAgent, CheckAgent,
-  // CancelAgent and ListAgents calls reach through the tool server.
+  // MessageAgent, CancelAgent and ListAgents calls reach through the tool
+  // server.
   subagentHostFor(participantName: string): SubagentHost | null {
     return this.roster.find(participantName)?.subagentHost() ?? null;
   }
 
-  // Stops this session's turns and subagents, including detached workers.
+  // A worker of this session ended. Its report goes to the agent that
+  // spawned it and wakes it, the way a message from another participant
+  // does; while the session is busy the report waits, and it goes out ahead
+  // of whatever the user queued behind the turn.
+  private workerFinished(run: SubagentRun): void {
+    if (run.reported || this.pendingReports.includes(run)) return;
+    this.pendingReports.push(run);
+    this.flushReports();
+  }
+
+  // Delivers whatever is waiting, unless something else has the session.
+  private flushReports(): void {
+    if (this.pendingReports.length === 0 || this.disposed) return;
+    if (this.activeSends > 0 || this.rewinding || this.compacting || this.checkpoints.isRestoringDirectory()) return;
+    void this.deliverReports();
+  }
+
+  // One turn for every report that is waiting: each worker's report enters
+  // the transcript of the agent that spawned it, and that agent answers, as
+  // it would a peer's message. The bookkeeping is `sendMessage`'s, since
+  // this is a turn of the session like any other; the failure of one is
+  // recorded in the status, because nobody is waiting on this.
+  private async deliverReports(): Promise<void> {
+    const pending = this.pendingReports.splice(0);
+    const invocations = this.reportInvocations(pending);
+    if (invocations.length === 0) return;
+    if (this.activeSends === 0) {
+      this.turnFailed = false;
+      this.lastTurnCancelled = false;
+      this.activeTurnStartedAt = Date.now();
+    }
+    this.activeSends++;
+    this.checkpoints.beginTurn();
+    this.setStatus('working');
+    try {
+      const [first] = invocations[0].entries;
+      await this.checkpoints.capture(first.seq, `Report from ${pending.map(run => `@${run.id}`).join(', ')}`);
+      await this.turns.run(invocations);
+    } catch (error) {
+      if (isAbortError(error)) this.lastTurnCancelled = true;
+      else this.turnFailed = true;
+    } finally {
+      this.timeline.markResponseFinished();
+      this.activeSends--;
+      this.checkpoints.endTurn();
+      if (this.activeSends === 0) this.activeTurnStartedAt = null;
+      this.setStatus(this.activeSends > 0
+        ? 'working'
+        : this.turnFailed ? 'error' : 'idle');
+      this.sendNextQueuedPrompt();
+    }
+  }
+
+  // The reports as entries in their owners' transcripts, one invocation per
+  // owner: two workers of the same agent wake it once, with both reports.
+  private reportInvocations(runs: readonly SubagentRun[]): { participant: SessionAgent; entries: Message[] }[] {
+    const invocations = new Map<string, { participant: SessionAgent; entries: Message[] }>();
+    for (const run of runs) {
+      const owner = this.roster.find(run.owner) ?? this.roster.default;
+      const entry = this.reportEntry(run, owner);
+      const existing = invocations.get(keyOf(owner.name));
+      if (existing) existing.entries.push(entry);
+      else invocations.set(keyOf(owner.name), { participant: owner, entries: [entry] });
+    }
+    return [...invocations.values()];
+  }
+
+  // The report itself: a message from the worker, addressed to its owner and
+  // attributed to the run, so the chat shows who spoke and the owner's next
+  // runtime reads it in the record like any other participant's message.
+  private reportEntry(run: SubagentRun, owner: SessionAgent): Message {
+    run.reported = true;
+    notifySubagents();
+    return this.timeline.add({
+      role: 'assistant',
+      participant: run.id,
+      model: run.model,
+      content: [{ type: 'text', text: workerReport(run) }],
+      to: [owner.name],
+    }, [owner.transcript], false);
+  }
+
+  // A run restored from the session file never received its report: nothing
+  // restarts on launch, so it is read into the owner's record at the start
+  // of the next prompt instead of starting a turn of its own.
+  private appendRestoredReports(): void {
+    for (const run of this.roster.workers()) {
+      if (run.worker !== null || run.reported || run.status === 'working') continue;
+      this.reportEntry(run, this.roster.find(run.owner) ?? this.roster.default);
+    }
+  }
+
+  // Stops this session's turns. Workers are background tasks and keep
+  // working: `cancelWorker`, CancelAgent and `dispose` stop those.
   cancel(): boolean {
     return this.roster.cancel();
   }
@@ -433,6 +574,7 @@ export class Session {
       this.activeTurnStartedAt = null;
       this.setStatus(this.turnFailed ? 'error' : 'idle');
       this.changes.notify();
+      this.flushReports();
     }
   }
 
@@ -493,6 +635,7 @@ export class Session {
     } finally {
       this.rewinding = false;
       if (options.files) this.checkpoints.endRestore();
+      this.flushReports();
     }
   }
 
@@ -543,9 +686,15 @@ export class Session {
   }
 
   // What is waiting behind the turn that just ended, when nothing about it
-  // needs a mounted Chat.
+  // needs a mounted Chat. A worker that finished during the turn is news the
+  // owner needs before it answers anything the user typed meanwhile, so the
+  // reports go first and the queue drains after the turn they start.
   private sendNextQueuedPrompt(): void {
     if (this.activeSends > 0) return;
+    if (this.pendingReports.length > 0) {
+      this.flushReports();
+      return;
+    }
     const next = this.queue.shiftAutoSendable();
     if (next === undefined) return;
     void this.sendMessage({ role: 'user', content: [{ type: 'text', text: next }] })
@@ -648,25 +797,32 @@ export class Session {
 
   // The session's workers, oldest first, restored records included.
   getWorkers(): SubagentRun[] {
-    throw new Error('not implemented');
+    return this.roster.workers();
   }
 
   // Stops one working worker and waits for it to wind down.
-  cancelWorker(id: string): Promise<void> {
-    void id;
-    throw new Error('not implemented');
+  async cancelWorker(id: string): Promise<void> {
+    await cancelSubagent(this.requireWorker(id));
   }
 
   // Sends text into a running worker's turn; rejects for one that has ended.
-  messageWorker(id: string, text: string): Promise<void> {
-    void id; void text;
-    throw new Error('not implemented');
+  async messageWorker(id: string, text: string): Promise<void> {
+    await messageSubagent(this.requireWorker(id), text);
   }
 
   // Clears a finished worker's line from the strip; its record stays.
   dismissWorker(id: string): void {
-    void id;
-    throw new Error('not implemented');
+    const run = this.requireWorker(id);
+    if (run.dismissed) return;
+    run.dismissed = true;
+    notifySubagents();
+    this.changes.notify();
+  }
+
+  private requireWorker(id: string): SubagentRun {
+    const run = this.roster.workers().find(candidate => candidate.id === id);
+    if (!run) throw new Error(`This session has no worker "${id}".`);
+    return run;
   }
 
   setSubagentModel(model: string | null): void {
@@ -725,6 +881,7 @@ export class Session {
 
   toSnapshot(): SessionSnapshot {
     const checkpoints = this.checkpoints.list();
+    const workers = this.getWorkers().map(workerRecord);
     return {
       id: this.id,
       name: this.name,
@@ -735,6 +892,7 @@ export class Session {
       inputContent: this.inputContent,
       permissionMode: this.permissionMode,
       ...(this.subagentModel ? { subagentModel: this.subagentModel } : {}),
+      ...(workers.length > 0 ? { workers } : {}),
       ...(checkpoints.length > 0 ? { checkpoints } : {}),
       updatedAt: this.timeline.lastActivity,
       conversationStartedAt: this.timeline.conversationStartedAt,
@@ -743,12 +901,34 @@ export class Session {
     };
   }
 
-  // A deleted session takes its runtimes and its tool server binding with it.
-  dispose(): void {
+  // A deleted session takes its runtimes, its workers and its tool server
+  // binding with it. The workers are the slow part — each one is stopped and
+  // waited for before its worktree can be removed — so this resolves when
+  // the last of them is gone; callers that only need the session out of the
+  // way need not wait.
+  async dispose(): Promise<void> {
+    this.disposed = true;
     this.cancel();
     this.stopNaming();
+    const workers = this.getWorkers();
     this.roster.resetRuntimes();
     unregisterToolSession(this.id);
+    await Promise.all(workers.map(run => this.disposeWorker(run)));
+  }
+
+  // One worker at the end of the session: stopped if it was still working,
+  // then its worktree removed and its record dropped from the process index.
+  // The branch it worked on stays behind for whoever merges it.
+  private async disposeWorker(run: SubagentRun): Promise<void> {
+    try {
+      await cancelSubagent(run);
+    } catch {
+      // A worker that refuses to stop must not keep the worktree, or the
+      // session, alive.
+    }
+    if (run.branch) await removeWorktree(this.directory, run.directory);
+    unregisterSubagent(run.id);
+    notifySubagents();
   }
 
   private setStatus(status: SessionStatus): void {

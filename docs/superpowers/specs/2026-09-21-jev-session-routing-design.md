@@ -56,3 +56,18 @@ saved default and the current fallback all keep working underneath.
 Typecheck and the suite; a real Jev call from a scratch script with the
 owner's key on a few prompts; the app started on a draft with both vendors
 connected.
+
+## Profiles (2026-09-21)
+
+Routing criteria are a profile per model rather than a `strengths` sentence.
+`ModelProfile` in the catalog holds the researched `strengths`, `benchmarks`
+(published results under their own metric names, each with its score and the
+version or date, spanning coding, research and writing; nothing is guessed
+where nothing is published), `reviews` (what users report in practice,
+including how each model behaves when the goal is under-specified), and `cost`
+(list price in USD per million input and output tokens). Remaining usage is
+not catalog data: the router renders each candidate's profile together with
+its vendor's live allowance, so the state no longer carries an allowance list
+of its own. `routeSessionModel` takes an optional `allowance` in its options,
+defaulting to `vendorAllowance()`. Candidates, threshold, timeout and
+fallbacks are unchanged.

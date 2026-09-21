@@ -3,6 +3,7 @@ import { SessionAgent, type Participant, type RuntimeHost } from '../agent';
 import type { PermissionMode } from '../permissions/policy';
 import { textOf, type Message, type ThinkingLevel } from '../types';
 import { rootTextRanges, type RootTextRange } from '../../mentions';
+import type { SubagentRun } from '../tools/subagents';
 import type { ChangeFeed } from './changeFeed';
 import type { Transcript } from './transcript';
 
@@ -255,15 +256,23 @@ export class ParticipantRoster {
     return this.agents.some(agent => agent.listSubagents().some(run => run.status === 'working'));
   }
 
-  // Stops every turn and subagent of every participant, including detached
-  // workers. True if there was one.
+  // Stops every turn in flight. Workers are background tasks of the session
+  // and keep running: they stop through the /agents panel, CancelAgent, or
+  // the session being deleted. True if there was a turn to stop.
   cancel(): boolean {
     let cancelled = false;
     for (const agent of this.agents) {
       if (agent.cancel()) cancelled = true;
-      if (agent.cancelSubagents() > 0) cancelled = true;
     }
     return cancelled;
+  }
+
+  // Every worker of this session, oldest first, records restored from the
+  // session file included.
+  workers(): SubagentRun[] {
+    return this.agents
+      .flatMap(agent => agent.listSubagents())
+      .sort((left, right) => left.startedAt - right.startedAt);
   }
 
   // Drops every vendor runtime: a runtime's conversation must not outlive

@@ -7,6 +7,7 @@ import { useFileSuggestions } from './FileMenu';
 import { DraftText, TrailingImages } from './DraftText';
 import { InputFeedback, QueuedRow } from './InputRows';
 import { SubagentStatusRow, type StatusRowProps } from './StatusRow';
+import { WorkerStrip } from './WorkerStrip';
 import { PromptBar, type PromptMode } from './PromptBar';
 import { applyInputEdit, normalizeNewlines, onFirstLine, onLastLine, type InputEdit, type InputState } from './editor';
 import { composeContent, removedPlaceholders, useDraftImages } from './draft';
@@ -17,6 +18,7 @@ import { getSelectionSnapshot, subscribeSelection } from '../interaction/selecti
 import type { Feedback } from '../../commands/feedback';
 import type { Participant, QueuedMessage } from '../../agent_runtime/session';
 import type { ImageBlock, MessageBlock } from '../../agent_runtime/types';
+import type { SubagentRun } from '../../agent_runtime/tools/subagents';
 import type { ContextUsage } from '../../agent_runtime/usage';
 import type { PermissionMode } from '../../agent_runtime/permissions/policy';
 
@@ -31,7 +33,8 @@ interface InputBarProps {
   disabled: boolean;
   feedback: Feedback | null;
   participants: readonly Participant[];
-  activeSubagents?: number;
+  // the session's background workers, for the strip above the status row
+  workers?: readonly SubagentRun[];
   directory?: string;
   mode?: InputMode;
   permissionMode?: PermissionMode;
@@ -61,6 +64,7 @@ interface InputBarProps {
 }
 
 const TEXT_MODE: InputMode = { type: 'text' };
+const NO_WORKERS: readonly SubagentRun[] = [];
 const NO_ATTACHMENTS: readonly ImageBlock[] = [];
 const NO_HISTORY: readonly string[] = [];
 const NO_QUEUE: readonly QueuedMessage[] = [];
@@ -72,7 +76,7 @@ export function InputBar({
   disabled,
   feedback,
   participants,
-  activeSubagents = 0,
+  workers = NO_WORKERS,
   directory,
   mode = TEXT_MODE,
   permissionMode,
@@ -90,7 +94,7 @@ export function InputBar({
   contextUsage,
 }: InputBarProps) {
   const participantColors = participantColorMap(participants);
-  const status: StatusRowProps = { activeSubagents, permissionMode, modeNotice, model, thinkingLevel, contextUsage };
+  const status: StatusRowProps = { permissionMode, modeNotice, model, thinkingLevel, contextUsage };
 
   // ── The draft, and the waiting message standing in front of it ──────────
   // Identity survives edits and earlier messages draining from the queue.
@@ -377,6 +381,7 @@ export function InputBar({
         feedback={feedback}
         participantColors={participantColors}
         queuedMessages={queuedMessages.map(message => message.text)}
+        workers={workers}
         status={status}
       />
     );
@@ -442,6 +447,7 @@ export function InputBar({
           </Box>
         </Box>
       </Box>
+      <WorkerStrip workers={workers} />
       <SubagentStatusRow {...status} />
     </>
   );

@@ -1,5 +1,5 @@
 // The single lines that sit around the input box: the last command's feedback,
-// the messages waiting to go out, and the masked prompt for a secret.
+// the messages waiting to go out, and the prompt for a value a command needs.
 import { Box, Text } from 'ink';
 import { theme } from '../styles/theme';
 import { MentionText, type ParticipantColors } from '../MentionText';
@@ -54,14 +54,19 @@ export function QueuedRow({ messages, selected = null, participantColors }: {
   );
 }
 
-// Secret entry echoes one dot per character so the user can see the paste
-// landed without the value ever reaching the screen (or a copied selection).
-export function SecretInput({ prompt, value }: { prompt: string; value: string }) {
+// One value a command asked for. A secret echoes one dot per character, so
+// the user can see the paste landed without the value ever reaching the
+// screen (or a copied selection); ordinary text is shown as it is typed.
+export function EntryInput({ prompt, value, masked }: {
+  prompt: string;
+  value: string;
+  masked: boolean;
+}) {
   return (
     <Box>
       <Text color={theme.accentSoft}>›{' '}</Text>
       <Text color={theme.textMuted}>{prompt}:{' '}</Text>
-      <Text color={theme.text}>{'•'.repeat(value.length)}</Text>
+      <Text color={theme.text}>{masked ? '•'.repeat(value.length) : value}</Text>
       <Text color={theme.accentSoft}>▌</Text>
     </Box>
   );

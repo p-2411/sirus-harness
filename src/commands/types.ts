@@ -19,7 +19,11 @@ export interface CommandMenuItem {
   label: string;
   description?: string;
   command: string;
+  // The item needs one more value the menu cannot offer as a choice. Both ask
+  // for it in the input bar and append what was typed as the command's final
+  // argument; a secret is echoed as dots, an input stays visible.
   secret?: { prompt: string };
+  input?: { prompt: string };
 }
 
 export type CommandMenuEntry = CommandMenuHeading | CommandMenuItem;

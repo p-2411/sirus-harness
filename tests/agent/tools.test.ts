@@ -33,25 +33,38 @@ const { saveMemoryAccessPreference } = await import('../../src/persistence');
 
 type SubagentHost = import('../../src/agent_runtime/tools').SubagentHost;
 type SubagentSpawnCall = import('../../src/agent_runtime/tools').SubagentSpawnCall;
+type WorkerContext = import('../../src/agent_runtime/tools').WorkerContext;
 
 const MEMORY_TOOLS = ['SaveMemory', 'GetMemory', 'SearchMemories', 'DeleteMemory'];
-const AGENT_TOOLS = ['SpawnAgent', 'CheckAgent', 'CancelAgent', 'ListAgents'];
+const AGENT_TOOLS = ['SpawnAgent', 'CheckAgent', 'MessageAgent', 'CancelAgent', 'ListAgents'];
 const SESSION = 'tools-test-session';
 
 let testDirectory: string;
 let previousDataDirectory: string | undefined;
 let memoryOn: boolean;
-let spawned: { prompt: string; call: SubagentSpawnCall }[];
+let spawned: { prompt: string; context: WorkerContext; call: SubagentSpawnCall }[];
+let messaged: { id: string; text: string }[];
 
 const findTool = (name: string) => toolRegistry.find(tool => tool.name === name) ?? null;
 
 const stubHost: SubagentHost = {
-  spawn(prompt, call) {
-    spawned.push({ prompt, call });
-    return { id: 'run-1', model: 'stub-model', status: 'working', streamFile: null };
+  async spawn(prompt, context, call) {
+    spawned.push({ prompt, context, call });
+    return {
+      id: 'run-1',
+      model: 'stub-model',
+      thinkingLevel: 'high',
+      status: 'working',
+      branch: 'sirus/run-1',
+      context,
+    };
   },
-  async check(id) { return { id, status: 'done' }; },
+  check(id) { return { id, status: 'done' }; },
   async cancel(id) { return { id, status: 'cancelled' }; },
+  async message(id, text) {
+    messaged.push({ id, text });
+    return { id, status: 'working', delivered: text };
+  },
   list() { return spawned.map((run, index) => ({ id: `run-${index + 1}`, task: run.prompt })); },
 };
 
@@ -61,6 +74,7 @@ beforeEach(() => {
   process.env.SIRUS_DATA_DIR = testDirectory;
   memoryOn = true;
   spawned = [];
+  messaged = [];
   registerToolSession(SESSION, {
     directory: testDirectory,
     memoryEnabled: () => memoryOn,
@@ -138,14 +152,26 @@ describe('tool registry', () => {
     }
   });
 
-  test('SpawnAgent takes the prompt only; the model is a session setting', () => {
+  test('SpawnAgent takes the prompt and an optional context; the model is a session setting', () => {
     const spawn = findTool('SpawnAgent');
-    expect(Object.keys(spawn?.args ?? {})).toEqual(['prompt']);
+    expect(Object.keys(spawn?.args ?? {})).toEqual(['prompt', 'context']);
     expect(spawn?.args.prompt).toEqual(expect.objectContaining({ type: 'string' }));
+    expect(spawn?.args.context).toEqual(expect.objectContaining({ type: 'string', enum: ['fresh', 'owner'], default: 'fresh' }));
     expect(spawn?.description).toContain('/model subagent');
+    // The owner is told what it gets back: an id, not a finished result.
+    expect(spawn?.description).toContain('return immediately');
+    expect(spawn?.description).toContain('starts your next turn');
     for (const name of AGENT_TOOLS) {
       expect(findTool(name)?.audience).toEqual({ subagent: false });
     }
+  });
+
+  test('CheckAgent no longer waits and MessageAgent carries an id and a message', () => {
+    expect(Object.keys(findTool('CheckAgent')?.args ?? {})).toEqual(['id']);
+    expect(findTool('CheckAgent')?.description).toContain('never waits');
+    expect(Object.keys(findTool('MessageAgent')?.args ?? {})).toEqual(['id', 'message']);
+    expect(Object.keys(findTool('CancelAgent')?.args ?? {})).toEqual(['id']);
+    expect(Object.keys(findTool('ListAgents')?.args ?? {})).toEqual([]);
   });
 
   test('a subagent audience sees no agent tools and disabled memory hides the memory tools', () => {
@@ -166,10 +192,14 @@ describe('Sirus MCP server', () => {
       expect(await toolNames(participant)).toEqual([...MEMORY_TOOLS, ...AGENT_TOOLS]);
       expect(await toolNames(worker)).toEqual(MEMORY_TOOLS);
 
+      // An argument with a default is the one kind a caller may leave out.
       const spawn = (await participant.listTools()).tools.find(tool => tool.name === 'SpawnAgent');
       expect(spawn?.inputSchema).toEqual({
         type: 'object',
-        properties: { prompt: expect.objectContaining({ type: 'string' }) },
+        properties: {
+          prompt: expect.objectContaining({ type: 'string' }),
+          context: expect.objectContaining({ enum: ['fresh', 'owner'], default: 'fresh' }),
+        },
         required: ['prompt'],
       });
     } finally {
@@ -217,19 +247,57 @@ describe('Sirus MCP server', () => {
     }
   });
 
-  test("SpawnAgent reaches the participant's own host with the prompt and a call id", async () => {
+  test("SpawnAgent reaches the participant's own host with the prompt, the context and a call id", async () => {
     const client = await connect('sirus');
     try {
       const result = await call(client, 'SpawnAgent', { prompt: 'Do the work' });
       expect(result.isError).toBe(false);
-      expect(JSON.parse(result.text)).toMatchObject({ id: 'run-1', model: 'stub-model', status: 'working', streamFile: null });
+      expect(JSON.parse(result.text)).toMatchObject({
+        id: 'run-1',
+        model: 'stub-model',
+        thinkingLevel: 'high',
+        status: 'working',
+        branch: 'sirus/run-1',
+        context: 'fresh',
+        note: expect.stringContaining('sirus/run-1'),
+      });
       expect(spawned).toHaveLength(1);
       expect(spawned[0].prompt).toBe('Do the work');
+      expect(spawned[0].context).toBe('fresh');
       expect(typeof spawned[0].call.callId).toBe('string');
-      expect(spawned[0].call.signal).toBeInstanceOf(AbortSignal);
+
+      const forked = await call(client, 'SpawnAgent', { prompt: 'Carry on', context: 'owner' });
+      expect(forked.isError).toBe(false);
+      expect(spawned[1].context).toBe('owner');
+
+      const wrong = await call(client, 'SpawnAgent', { prompt: 'Do the work', context: 'sideways' });
+      expect(wrong).toEqual({ isError: true, text: 'SpawnAgent requires context to be one of fresh, owner' });
+      expect(spawned).toHaveLength(2);
 
       const listed = await call(client, 'ListAgents', {});
-      expect(JSON.parse(listed.text)).toEqual({ subagents: [{ id: 'run-1', task: 'Do the work' }] });
+      expect(JSON.parse(listed.text)).toEqual({
+        subagents: [{ id: 'run-1', task: 'Do the work' }, { id: 'run-2', task: 'Carry on' }],
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('MessageAgent sends text into a run and CheckAgent answers without waiting', async () => {
+    const client = await connect('sirus');
+    try {
+      await call(client, 'SpawnAgent', { prompt: 'Do the work' });
+      const sent = await call(client, 'MessageAgent', { id: 'run-1', message: 'Use the new API instead' });
+      expect(sent.isError).toBe(false);
+      expect(JSON.parse(sent.text)).toEqual({ id: 'run-1', status: 'working', delivered: 'Use the new API instead' });
+      expect(messaged).toEqual([{ id: 'run-1', text: 'Use the new API instead' }]);
+
+      const blank = await call(client, 'MessageAgent', { id: 'run-1' });
+      expect(blank.isError).toBe(true);
+      expect(blank.text).toContain('message to be a non-empty string');
+
+      const checked = await call(client, 'CheckAgent', { id: 'run-1' });
+      expect(JSON.parse(checked.text)).toEqual({ id: 'run-1', status: 'done' });
     } finally {
       await client.close();
     }

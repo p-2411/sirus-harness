@@ -16,8 +16,8 @@ describe('command menu', () => {
 
     expect(lines).toHaveLength(6);
     expect(output).toContain('/model');
-    expect(output).toContain('/logout');
-    expect(output).not.toContain('/usage');
+    expect(output).toContain('/agents');
+    expect(output).not.toContain('/logout');
   });
 
   test('scrolls the six-command window to keep the selection visible', () => {
@@ -36,7 +36,7 @@ describe('command menu', () => {
 
     expect(lines).toHaveLength(6);
     expect(output).not.toContain('/model');
-    expect(output).toContain('› /usage');
+    expect(output).toContain('› /logout');
   });
 
   test('wraps navigation while resetting the visible window', () => {

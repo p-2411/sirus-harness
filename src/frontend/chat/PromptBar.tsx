@@ -1,20 +1,22 @@
 // The input bar while it is asking something of the user rather than
-// collecting a message. It answers with a decision, a menu choice or a secret
-// and then hands the bar back; the draft the user was typing waits untouched
-// in the session, so nothing here knows about it.
+// collecting a message. It answers with a decision, a menu choice or one
+// typed value and then hands the bar back; the draft the user was typing
+// waits untouched in the session, so nothing here knows about it.
 import { useEffect, useState } from 'react';
 import { Box, Text, useInput, usePaste } from 'ink';
 import { theme } from '../styles/theme';
 import { moveSelection, SelectMenu } from './SelectMenu';
 import { ApprovalPrompt, approvalChoices } from './ApprovalPrompt';
-import { InputFeedback, QueuedRow, SecretInput } from './InputRows';
+import { EntryInput, InputFeedback, QueuedRow } from './InputRows';
 import { SubagentStatusRow, type StatusRowProps } from './StatusRow';
+import { WorkerStrip } from './WorkerStrip';
 import { isMouseInput } from '../interaction/mouse';
 import { isFocusInput } from '../terminal/window-focus';
 import type { ParticipantColors } from '../MentionText';
 import type { Feedback } from '../../commands/feedback';
 import type { CommandMenuEntry, CommandMenuItem } from '../../commands/registry';
 import type { ApprovalDecision, ApprovalRequest } from '../../agent_runtime/permissions/approvals';
+import type { SubagentRun } from '../../agent_runtime/tools/subagents';
 
 export type PromptMode =
   | {
@@ -31,28 +33,31 @@ export type PromptMode =
     onCancel: () => void;
   }
   | {
-    type: 'secret';
+    type: 'entry';
     prompt: string;
+    // A secret is echoed as dots; everything else is typed in the open.
+    masked: boolean;
     onSubmit: (value: string) => void;
     onCancel: () => void;
   };
 
-export function PromptBar({ mode, feedback, participantColors, queuedMessages, status }: {
+export function PromptBar({ mode, feedback, participantColors, queuedMessages, workers, status }: {
   mode: PromptMode;
   feedback: Feedback | null;
   participantColors?: ParticipantColors;
   queuedMessages: readonly string[];
+  workers: readonly SubagentRun[];
   status: StatusRowProps;
 }) {
   const [selected, setSelected] = useState(0);
-  const [secret, setSecret] = useState('');
+  const [entry, setEntry] = useState('');
   useEffect(() => {
     setSelected(0);
-    setSecret('');
+    setEntry('');
   }, [mode]);
 
   usePaste(text => {
-    if (mode.type === 'secret') setSecret(current => current + text.trim());
+    if (mode.type === 'entry') setEntry(current => current + text.trim());
   });
 
   useInput((enteredInput, key) => {
@@ -86,14 +91,14 @@ export function PromptBar({ mode, feedback, participantColors, queuedMessages, s
     const isBackspace = key.backspace || key.delete;
     if (key.escape) mode.onCancel();
     else if (key.return) {
-      const value = secret.trim();
+      const value = entry.trim();
       if (value) mode.onSubmit(value);
-    } else if (key.ctrl && enteredInput === 'u') setSecret('');
-    else if (isBackspace) setSecret(current => current.slice(0, -1));
+    } else if (key.ctrl && enteredInput === 'u') setEntry('');
+    else if (isBackspace) setEntry(current => current.slice(0, -1));
     else if (!key.ctrl && !key.meta && !key.tab
       && !key.upArrow && !key.downArrow && !key.leftArrow && !key.rightArrow
       && !key.pageUp && !key.pageDown && !key.home && !key.end) {
-      setSecret(current => current + enteredInput);
+      setEntry(current => current + enteredInput);
     }
   });
 
@@ -114,8 +119,8 @@ export function PromptBar({ mode, feedback, participantColors, queuedMessages, s
         flexDirection="column"
       >
         <Box justifyContent="space-between">
-          {mode.type === 'secret'
-            ? <SecretInput prompt={mode.prompt} value={secret} />
+          {mode.type === 'entry'
+            ? <EntryInput prompt={mode.prompt} value={entry} masked={mode.masked} />
             : (
               <Box>
                 <Text color={theme.accentSoft}>›{' '}</Text>
@@ -128,6 +133,7 @@ export function PromptBar({ mode, feedback, participantColors, queuedMessages, s
           <Text color={theme.textSubtle}>{mode.type === 'approval' ? 'esc cancels the turn' : 'esc cancels'}</Text>
         </Box>
       </Box>
+      <WorkerStrip workers={workers} />
       <SubagentStatusRow {...status} />
     </>
   );

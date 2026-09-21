@@ -1,4 +1,12 @@
-import { changeModel, modelMenuItems, subagentModelCommand, thinkingCommand, thinkingMenuItems } from './behavior';
+import {
+  agentsCommand,
+  agentsMenuItems,
+  changeModel,
+  modelMenuItems,
+  subagentModelCommand,
+  thinkingCommand,
+  thinkingMenuItems,
+} from './behavior';
 import type { CommandSpec } from '../types';
 
 export const modelCommand: CommandSpec = {
@@ -18,6 +26,14 @@ export const modelCommand: CommandSpec = {
     throw new Error('Usage: /model [name|subagent] <model>');
   },
   menu: modelMenuItems,
+};
+
+export const agentsCommandSpec: CommandSpec = {
+  name: 'agents',
+  args: '[show|message|cancel|dismiss] [id]',
+  description: 'watch, steer, stop or clear the session\'s background workers',
+  run: (args, context) => agentsCommand(args, context.session),
+  menu: agentsMenuItems,
 };
 
 export const thinkingCommandSpec: CommandSpec = {

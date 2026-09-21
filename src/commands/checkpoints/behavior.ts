@@ -129,7 +129,7 @@ export function describeRewind(result: RewindResult): Feedback {
 async function rewindTo(checkpoint: Checkpoint, scope: RewindScope, session: CommandSession): Promise<Feedback> {
   const files = scope !== 'chat';
   if (files && defaultDirectoryActivity.subagentCount(session.getDirectory()) > 0) {
-    throw new Error('Subagents are still working in this directory. Wait for them or press escape to cancel them, then rewind.');
+    throw new Error('Workers are still working in this directory. Wait for them or cancel them with /agents, then rewind.');
   }
   return describeRewind(await session.rewind(checkpoint.id, { files, chat: scope !== 'files' }));
 }

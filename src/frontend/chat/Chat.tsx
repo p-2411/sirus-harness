@@ -303,7 +303,9 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     if (key.escape) {
       setInputMode({ type: 'text' });
       setFeedback(null);
-      // queued messages stay: the next one goes out once the turn has stopped
+      // The turn only: the session's workers keep going in the background and
+      // are stopped from /agents. Queued messages stay, and the next one goes
+      // out once the turn has stopped.
       currSession.cancel();
       commandAbort.current?.abort(new TurnCancelledError());
       return;
@@ -327,21 +329,24 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   });
 
   // A command with choices (like /login) turns the input bar into a
-  // picker; the chosen item runs as if the user had typed it. A secret is
-  // handed over as one final argument, so a key containing a space survives
-  // and is never echoed into the input.
+  // picker; the chosen item runs as if the user had typed it. An item that
+  // still needs a value asks for it in the bar and hands it over as one final
+  // argument, so a key or a message containing spaces survives whole and a
+  // secret is never echoed into the input.
   const openMenu = (items: readonly CommandMenuEntry[]) => {
     const close = () => setInputMode({ type: 'text' });
     const choose = (item: CommandMenuItem) => {
-      if (!item.secret) {
+      const asked = item.secret ?? item.input;
+      if (!asked) {
         close();
         send(item.command);
         return;
       }
       const { name, args } = parseCommandLine(item.command);
       setInputMode({
-        type: 'secret',
-        prompt: item.secret.prompt,
+        type: 'entry',
+        prompt: asked.prompt,
+        masked: item.secret !== undefined,
         onSubmit: value => {
           close();
           runCommand(name, [...args, value]);
@@ -550,7 +555,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         disabled={isLoading}
         feedback={panelFeedback ? null : feedback}
         participants={participants}
-        activeSubagents={currSession.getActiveSubagentCount()}
+        workers={currSession.getWorkers()}
         directory={currSession.getDirectory()}
         mode={effectiveInputMode}
         permissionMode={currSession.getPermissionMode()}

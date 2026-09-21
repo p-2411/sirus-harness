@@ -5,6 +5,10 @@
 export interface ToolArgumentSchema {
   type: 'array' | 'boolean' | 'integer' | 'number' | 'object' | 'string';
   description?: string;
+  // An argument the caller may leave out, and what it means when it does.
+  // Everything else is required, which is how every provider was told about
+  // these tools before any of them had an optional argument.
+  default?: unknown;
   [key: string]: unknown;
 }
 

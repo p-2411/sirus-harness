@@ -61,7 +61,10 @@ export function checkpointRepository(directory: string): string {
   return path.join(dataDirectory(), 'checkpoints', key);
 }
 
-function gitEnvironment(): NodeJS.ProcessEnv {
+// Also used by the worker worktrees, which run git against the project for
+// the same reason: a Sirus process launched from a hook must not reuse the
+// paths it inherited.
+export function gitEnvironment(): NodeJS.ProcessEnv {
   const env = { ...process.env, GIT_OPTIONAL_LOCKS: '0' };
   // A Sirus process launched from a Git hook may inherit paths into the
   // project's index/object store. Neither Git invocation may reuse them.
