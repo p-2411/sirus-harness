@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
+import { mkdtempSync, rmSync } from 'fs';
+import os from 'os';
+import path from 'path';
 import * as naming from '../../src/agent_runtime/session/naming';
 import * as router from '../../src/agent_runtime/router';
 import type { RuntimeOptions } from '../../src/agent_runtime/runtime/runtime';
@@ -156,10 +159,15 @@ describe('Session model', () => {
   });
 
   test('a draft\'s model is pending only while Jev is configured to pick one', async () => {
+    // Jev's key can also live in the settings, so the test gets a data
+    // directory of its own rather than reading the machine's.
+    const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-pending-'));
+    const previousDirectory = process.env.SIRUS_DATA_DIR;
     const previousKey = process.env.JEV_API;
     bindScriptedRuntime(testModel, textTurn('Done'));
     const route = spyOn(router, 'routeSessionModel').mockResolvedValue(null);
     try {
+      process.env.SIRUS_DATA_DIR = directory;
       delete process.env.JEV_API;
       expect(new Session({ model: testModel, routePending: true }).isModelPending()).toBe(false);
       process.env.JEV_API = 'ts-live-key-pending';
@@ -174,8 +182,11 @@ describe('Session model', () => {
       expect(pinned.isModelPending()).toBe(false);
     } finally {
       route.mockRestore();
+      if (previousDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
+      else process.env.SIRUS_DATA_DIR = previousDirectory;
       if (previousKey === undefined) delete process.env.JEV_API;
       else process.env.JEV_API = previousKey;
+      rmSync(directory, { recursive: true, force: true });
     }
   });
 
