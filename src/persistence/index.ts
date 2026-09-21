@@ -81,3 +81,21 @@ export function loadSirusModelPreference(directory?: string): string | null {
 export function saveSirusModelPreference(model: string, directory?: string): boolean {
   return openSettings(directory).set({ sirusModel: model });
 }
+
+export function loadJevApiKey(directory?: string): string | null {
+  return openSettings(directory).get('jevApiKey');
+}
+
+// Saving a key, or clearing one, also settles the one-time request: the
+// user has been through this already.
+export function saveJevApiKey(key: string | null, directory?: string): boolean {
+  return openSettings(directory).set({ jevApiKey: key, jevKeyRequested: true });
+}
+
+export function loadJevKeyRequested(directory?: string): boolean {
+  return openSettings(directory).get('jevKeyRequested');
+}
+
+export function saveJevKeyRequested(directory?: string): boolean {
+  return openSettings(directory).set({ jevKeyRequested: true });
+}

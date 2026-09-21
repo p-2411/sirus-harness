@@ -73,7 +73,7 @@ Each participant keeps its own conversation. It reads the prompts you address to
 
 ### A model picked for the task
 
-With a `JEV_API` key in the environment, a new session does not start on a fixed model. Its first prompt goes to Jev, a fast decision model from TypeSafe AI, which chooses between the latest model of each vendor you have connected and that still has allowance: today `claude-fable-5-1` and `gpt-6-astra`. Jev sees the prompt, the names of files it mentions and the project's name, and the profile Sirus's catalog keeps of each model: what it is good at, its published benchmark results, what people report from using it, and what it costs, alongside how much of that vendor's allowance is left. The pick shows in the model label under the input, like any model.
+With a TypeSafe AI key, a new session does not start on a fixed model. Sirus asks for the key once, on the first launch without one; `/jev` shows whether Jev is on and sets or removes the key later, and a `JEV_API` variable in the environment is used as it is. Without a key nothing is routed and every model stays on its default. With one, a new session does not start on a fixed model. Its first prompt goes to Jev, a fast decision model from TypeSafe AI, which chooses between the latest model of each vendor you have connected and that still has allowance: today `claude-fable-5-1` and `gpt-6-astra`. Jev sees the prompt, the names of files it mentions and the project's name, and the profile Sirus's catalog keeps of each model: what it is good at, its published benchmark results, what people report from using it, and what it costs, alongside how much of that vendor's allowance is left. The pick shows in the model label under the input, like any model.
 
 Jev also picks for subagents, unless `/model subagent` has pinned one. Each spawn asks it for the model and the reasoning depth that fit that task, choosing among every model the catalog offers for delegated work rather than only the latest ones, so routine work goes somewhere cheap and quick and the hard cases somewhere capable.
 
@@ -172,6 +172,7 @@ Use `/usage` to see reported subscription allowance and how full each participan
 | `/rename <name>` | Give the current session a useful name. |
 | `/thinking` | Show or change reasoning depth. |
 | `/agents` | Watch, message, cancel, or clear the session's subagents. |
+| `/jev` | Set or remove the TypeSafe AI key Jev picks models with. |
 | `/undo` / `/rewind` | Choose what to restore from a checkpoint. |
 | `/notify` | Configure desktop notifications. |
 | `/update` | Install the latest release. |

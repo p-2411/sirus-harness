@@ -52,6 +52,12 @@ const settingsFileSchema = z.object({
   sirusModel: z.string().min(1).optional(),
   // When to send desktop notifications; absent means background only.
   notifications: z.enum(['off', 'background', 'always']).optional(),
+  // The TypeSafe AI key Jev routes with, and whether Sirus has already asked
+  // for one once; absent means neither.
+  jev: z.object({
+    apiKey: z.string().min(1).optional(),
+    keyRequested: z.boolean().optional(),
+  }).passthrough().optional(),
 }).passthrough();
 
 type SettingsFile = z.infer<typeof settingsFileSchema>;
@@ -64,6 +70,10 @@ export interface SettingsShape {
   apiKeys: StoredApiKeys;
   sirusModel: string | null;
   notifications: NotificationPreference;
+  // The Jev key the user pasted, or null to leave routing to the environment.
+  jevApiKey: string | null;
+  // The one-time request for a Jev key has been made, answered or declined.
+  jevKeyRequested: boolean;
 }
 
 // The single list of settings: its keys drive both the fallbacks a read uses
@@ -75,6 +85,8 @@ const DEFAULTS: SettingsShape = {
   apiKeys: {},
   sirusModel: null,
   notifications: 'background',
+  jevApiKey: null,
+  jevKeyRequested: false,
 };
 
 // How one setting maps onto the file. Only `memoryEnabled` and the cleared
@@ -111,6 +123,20 @@ const CODECS: { [K in keyof SettingsShape]: Codec<K> } = {
   notifications: {
     read: file => file.notifications,
     write: (file, value) => { file.notifications = value; },
+  },
+  // Both Jev settings share one section, so each write keeps the other's
+  // field as the file already carries it.
+  jevApiKey: {
+    read: file => file.jev?.apiKey ?? (file.jev ? null : undefined),
+    write: (file, value) => {
+      const jev = { ...(file.jev as Record<string, unknown> | undefined ?? {}) };
+      if (value === null) delete jev.apiKey; else jev.apiKey = value;
+      file.jev = jev;
+    },
+  },
+  jevKeyRequested: {
+    read: file => file.jev?.keyRequested,
+    write: (file, value) => { file.jev = { ...(file.jev as Record<string, unknown> | undefined ?? {}), keyRequested: value }; },
   },
 };
 

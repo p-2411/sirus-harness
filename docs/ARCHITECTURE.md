@@ -187,7 +187,9 @@ so nothing fails silently.
 ## Routing
 
 `router.ts` is the only code that talks to Jev, TypeSafe AI's System One model, through
-`@typesafe-ai/sdk` on a key in `JEV_API`. Two routers of one shape: a set of candidate
+`@typesafe-ai/sdk` on a key from `JEV_API` in the environment or, failing that, the one
+`/jev` stored in the settings; `shouldRequestJevKey` is the one-time first-launch question
+`app.tsx` asks through the chat's entry prompt. Two routers of one shape: a set of candidate
 models, each judged on its catalog profile (what it is good at, published benchmark results
 under the metric's own name, what users report of it, its list price) together with what its
 vendor has left of its allowance, which is the one part the catalog cannot know; then a

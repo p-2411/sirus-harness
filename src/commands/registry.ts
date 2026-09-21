@@ -6,6 +6,7 @@ import {
 } from './authentication/commands';
 import { helpCommand } from './help/commands';
 import { memoryCommandSpec } from './memory/commands';
+import { jevCommandSpec } from './jev/commands';
 import { clearCommand, compactCommandSpec, exitCommand, permissionsCommandSpec, renameCommand } from './session/commands';
 import { updateCommandSpec, versionCommandSpec } from './update/commands';
 import { rewindCommandSpec, undoCommandSpec } from './checkpoints/commands';
@@ -40,6 +41,7 @@ export const commandRegistry: readonly CommandSpec[] = [
   loginCommandSpec,
   logoutCommandSpec,
   usageCommandSpec,
+  jevCommandSpec,
   updateCommandSpec,
   versionCommandSpec,
   memoryCommandSpec,

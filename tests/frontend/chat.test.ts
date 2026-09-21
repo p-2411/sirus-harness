@@ -1,4 +1,9 @@
 import { describe, expect, spyOn, test } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { loadJevApiKey } from '../../src/persistence';
+import { shouldRequestJevKey } from '../../src/agent_runtime/router';
 import { createElement } from 'react';
 import { Box, render } from 'ink';
 import { PassThrough } from 'node:stream';
@@ -82,6 +87,75 @@ test('Escape dismisses help, command suggestions, login stages and secret entry'
     app.unmount();
     stdin.destroy();
     stdout.destroy();
+  }
+});
+
+test('the first launch without a Jev key asks for one once, and esc declines for good', async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-jev-chat-'));
+  const previousDirectory = process.env.SIRUS_DATA_DIR;
+  const previousKey = process.env.JEV_API;
+  process.env.SIRUS_DATA_DIR = directory;
+  delete process.env.JEV_API;
+  const session = new Session();
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {}, ref() {}, unref() {} });
+  const stdout = Object.assign(new PassThrough(), { columns: 140, rows: 40 });
+  let output = '';
+  stdout.on('data', chunk => {
+    const frame = stripAnsi(chunk.toString());
+    if (frame.trim()) output = frame;
+  });
+  let asked = 0;
+  const app = render(createElement(Box, { height: 40, width: 140 },
+    createElement(Chat, { currSession: session, askJevKey: true, onJevKeyAsked: () => { asked++; } })), {
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    debug: true,
+    patchConsole: false,
+    exitOnCtrlC: false,
+  });
+  const flush = async () => {
+    await new Promise(resolve => setImmediate(resolve));
+    await app.waitUntilRenderFlush();
+  };
+  try {
+    await flush();
+    expect(shouldRequestJevKey()).toBe(true);
+    expect(asked).toBe(1);
+    expect(output).toContain('TypeSafe AI API key');
+    stdin.write('\u001b');
+    await new Promise(resolve => setTimeout(resolve, 100));
+    await flush();
+    expect(output).not.toContain('TypeSafe AI API key');
+    expect(output).toContain('Jev is off');
+    expect(loadJevApiKey(directory)).toBeNull();
+    expect(shouldRequestJevKey()).toBe(false);
+
+    // Pasting a key through /jev later stores it without echoing it.
+    stdin.write('/jev');
+    await flush();
+    stdin.write('\r');
+    await flush();
+    expect(output).toContain('Set API key');
+    stdin.write('\r');
+    await flush();
+    stdin.write('ts-live-key-abcdef');
+    await flush();
+    expect(output).not.toContain('ts-live-key-abcdef');
+    stdin.write('\r');
+    await flush();
+    expect(output).toContain('Saved TypeSafe AI key');
+    expect(loadJevApiKey(directory)).toBe('ts-live-key-abcdef');
+  } finally {
+    app.unmount();
+    await app.waitUntilExit();
+    app.cleanup();
+    stdin.destroy();
+    stdout.destroy();
+    if (previousDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
+    else process.env.SIRUS_DATA_DIR = previousDirectory;
+    if (previousKey === undefined) delete process.env.JEV_API;
+    else process.env.JEV_API = previousKey;
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 

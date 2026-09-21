@@ -17,7 +17,8 @@ import { providerFor } from '../../src/agent_runtime/providers';
 import { resolveModelReference } from '../../src/commands/agents/behavior';
 import type { SubagentRun } from '../../src/agent_runtime/tools/subagents';
 import type { Feedback } from '../../src/commands/feedback';
-import { loadSirusModelPreference, saveSirusModelPreference } from '../../src/persistence';
+import { loadJevApiKey, loadSirusModelPreference, saveSirusModelPreference } from '../../src/persistence';
+import { shouldRequestJevKey } from '../../src/agent_runtime/router';
 import { bindScriptedRuntime, textTurn, unbindRuntime } from '../support/runtime';
 
 function runCommand(
@@ -674,5 +675,66 @@ describe('/agents', () => {
     expect(matchCommands('/agents')[0].args).toBe('[show|message|cancel|dismiss] [id]');
     expect((runCommand('help', []) as Feedback).text)
       .toContain('/agents [show|message|cancel|dismiss] [id]');
+  });
+});
+
+describe('jev command', () => {
+  let directory: string;
+  let previousDirectory: string | undefined;
+  let previousKey: string | undefined;
+
+  beforeEach(() => {
+    directory = mkdtempSync(join(tmpdir(), 'sirus-jev-'));
+    previousDirectory = process.env.SIRUS_DATA_DIR;
+    previousKey = process.env.JEV_API;
+    process.env.SIRUS_DATA_DIR = directory;
+    delete process.env.JEV_API;
+  });
+
+  afterEach(() => {
+    if (previousDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
+    else process.env.SIRUS_DATA_DIR = previousDirectory;
+    if (previousKey === undefined) delete process.env.JEV_API;
+    else process.env.JEV_API = previousKey;
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  test('sets, shows and removes the key, settling the one-time request', () => {
+    expect(shouldRequestJevKey()).toBe(true);
+    expect(runCommand('jev', [])).toEqual({ kind: 'info', text: expect.stringMatching(/Jev is off/) });
+    const menu = commandMenu('jev', [], new Session())!;
+    expect(menu[0]).toMatchObject({ type: 'heading', label: expect.stringMatching(/Jev is off/) });
+    expect(menu.filter(item => item.type === 'item').map(item => item.command)).toEqual(['/jev key']);
+    expect(menu.find(item => item.type === 'item' && item.secret)).toMatchObject({ secret: { prompt: 'TypeSafe AI API key' } });
+
+    expect(runCommand('jev', ['key', 'ts-live-key-abcdef'])).toEqual({
+      kind: 'success',
+      text: expect.stringMatching(/Saved TypeSafe AI key .*cdef/),
+    });
+    expect(loadJevApiKey()).toBe('ts-live-key-abcdef');
+    expect(shouldRequestJevKey()).toBe(false);
+    expect(runCommand('jev', [])).toEqual({ kind: 'info', text: expect.stringMatching(/Jev is on, with the key/) });
+    expect(commandMenu('jev', [], new Session())!.filter(item => item.type === 'item').map(item => item.command))
+      .toEqual(['/jev key', '/jev off']);
+
+    expect(runCommand('jev', ['off'])).toEqual({ kind: 'success', text: expect.stringMatching(/Jev is off/) });
+    expect(loadJevApiKey()).toBeNull();
+    // Declined or removed, the request is not repeated on the next launch.
+    expect(shouldRequestJevKey()).toBe(false);
+    expect(() => runCommand('jev', ['nonsense'])).toThrow('Usage: /jev [key <key>|off]');
+  });
+
+  test('a key in the environment wins and cannot be removed here', () => {
+    process.env.JEV_API = 'ts-env-key-123456';
+    expect(shouldRequestJevKey()).toBe(false);
+    expect(runCommand('jev', [])).toEqual({ kind: 'info', text: expect.stringMatching(/JEV_API in the environment/) });
+    expect(commandMenu('jev', [], new Session())!.filter(item => item.type === 'item').map(item => item.command))
+      .toEqual(['/jev key']);
+    expect(() => runCommand('jev', ['off'])).toThrow(/environment/);
+  });
+
+  test('help lists /jev', () => {
+    const result = runCommand('help', []) as Feedback;
+    expect(result.text).toContain('/jev');
   });
 });

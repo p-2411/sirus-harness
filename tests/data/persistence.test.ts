@@ -17,6 +17,10 @@ import {
   saveSubscriptionPreferences,
   loadNotificationPreference,
   saveNotificationPreference,
+  loadJevApiKey,
+  loadJevKeyRequested,
+  saveJevApiKey,
+  saveJevKeyRequested,
 } from '../../src/persistence';
 
 let directory: string;
@@ -338,6 +342,22 @@ describe('subscription preference persistence', () => {
     expect(loadSubscriptionPreferences(directory)).toEqual({ claude: true, gpt: false });
     expect(loadSirusModelPreference(directory)).toBe('gpt-5.6-sol');
     expect(loadNotificationPreference(directory)).toBe('off');
+  });
+
+  test('keeps the Jev key and the one-time request beside the other settings', () => {
+    expect(loadJevApiKey(directory)).toBeNull();
+    expect(loadJevKeyRequested(directory)).toBe(false);
+    expect(saveJevKeyRequested(directory)).toBe(true);
+    expect(loadJevKeyRequested(directory)).toBe(true);
+    expect(loadJevApiKey(directory)).toBeNull();
+    expect(saveJevApiKey('ts-live-key-1234', directory)).toBe(true);
+    saveNotificationPreference('always', directory);
+    expect(loadJevApiKey(directory)).toBe('ts-live-key-1234');
+    expect(loadJevKeyRequested(directory)).toBe(true);
+    expect(saveJevApiKey(null, directory)).toBe(true);
+    expect(loadJevApiKey(directory)).toBeNull();
+    expect(loadJevKeyRequested(directory)).toBe(true);
+    expect(loadNotificationPreference(directory)).toBe('always');
   });
 
   test('defaults to API keys and restores enabled providers', () => {

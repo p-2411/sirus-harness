@@ -5,6 +5,7 @@ import { allProviders } from './providers';
 import { latestModelOf, workerModelsOf, VENDOR_INFO, type ModelProfile, type Vendor } from './providers/catalog';
 import type { Provider } from './providers/provider';
 import { cachedSubscriptionRemaining } from './providers/usage';
+import { loadJevApiKey, loadJevKeyRequested } from '../persistence';
 import { parseThinkingLevel, type ThinkingLevel } from './types';
 
 // Jev, TypeSafe AI's System One model, picks a new session's model from its
@@ -16,8 +17,28 @@ import { parseThinkingLevel, type ThinkingLevel } from './types';
 // answer, an error or an unsure answer all leave the session on the model it
 // started with.
 
-// The key comes from the environment like the vendors' own do.
+// The key comes from the environment like the vendors' own can, or from
+// the settings when the user pasted one through /jev. The environment wins,
+// so a checkout with a `.env` never asks.
 export const JEV_API_KEY_ENV = 'JEV_API';
+
+export type JevKeySource = 'env' | 'settings';
+
+// Where the key in use comes from, or null when Jev is not configured.
+export function jevKeySource(): JevKeySource | null {
+  if (process.env[JEV_API_KEY_ENV]?.trim()) return 'env';
+  return loadJevApiKey() ? 'settings' : null;
+}
+
+export function jevApiKey(): string | null {
+  return process.env[JEV_API_KEY_ENV]?.trim() || loadJevApiKey();
+}
+
+// Whether to ask the user for a key now: once, on the first launch without
+// one, and never again once they have answered or declined.
+export function shouldRequestJevKey(): boolean {
+  return jevApiKey() === null && !loadJevKeyRequested();
+}
 
 // One attempt, no retries: a pick that takes longer than this is not worth
 // the wait before the first turn.
@@ -126,7 +147,7 @@ export interface RoutingClient {
 }
 
 function defaultClient(): RoutingClient | null {
-  const apiKey = process.env[JEV_API_KEY_ENV]?.trim();
+  const apiKey = jevApiKey();
   return apiKey ? new TypeSafeClient({ apiKey }) : null;
 }
 
