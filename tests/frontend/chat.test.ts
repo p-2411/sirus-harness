@@ -90,6 +90,48 @@ test('Escape dismisses help, command suggestions, login stages and secret entry'
   }
 });
 
+test('the status row shows no model while Jev has yet to pick one', async () => {
+  const previousKey = process.env.JEV_API;
+  process.env.JEV_API = 'ts-live-key-status';
+  const session = new Session({ model: 'gpt-5.6-luna', routePending: true });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {}, ref() {}, unref() {} });
+  const stdout = Object.assign(new PassThrough(), { columns: 140, rows: 40 });
+  let output = '';
+  stdout.on('data', chunk => {
+    const frame = stripAnsi(chunk.toString());
+    if (frame.trim()) output = frame;
+  });
+  const app = render(createElement(Box, { height: 40, width: 140 }, createElement(Chat, { currSession: session })), {
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    debug: true,
+    patchConsole: false,
+    exitOnCtrlC: false,
+  });
+  const flush = async () => {
+    await new Promise(resolve => setImmediate(resolve));
+    await app.waitUntilRenderFlush();
+  };
+  try {
+    await flush();
+    expect(session.isModelPending()).toBe(true);
+    expect(output).not.toContain('gpt-5.6-luna');
+    // The user's own pick settles the draft and shows at once.
+    session.changeParticipantModel('sirus', 'gpt-5.6-terra');
+    await flush();
+    expect(session.isModelPending()).toBe(false);
+    expect(output).toContain('gpt-5.6-terra · high');
+  } finally {
+    app.unmount();
+    await app.waitUntilExit();
+    app.cleanup();
+    stdin.destroy();
+    stdout.destroy();
+    if (previousKey === undefined) delete process.env.JEV_API;
+    else process.env.JEV_API = previousKey;
+  }
+});
+
 test('the first launch without a Jev key asks for one once, and esc declines for good', async () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-jev-chat-'));
   const previousDirectory = process.env.SIRUS_DATA_DIR;

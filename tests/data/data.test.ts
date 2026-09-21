@@ -155,6 +155,30 @@ describe('Session model', () => {
     }
   });
 
+  test('a draft\'s model is pending only while Jev is configured to pick one', async () => {
+    const previousKey = process.env.JEV_API;
+    bindScriptedRuntime(testModel, textTurn('Done'));
+    const route = spyOn(router, 'routeSessionModel').mockResolvedValue(null);
+    try {
+      delete process.env.JEV_API;
+      expect(new Session({ model: testModel, routePending: true }).isModelPending()).toBe(false);
+      process.env.JEV_API = 'ts-live-key-pending';
+      const draft = new Session({ model: testModel, routePending: true });
+      expect(draft.isModelPending()).toBe(true);
+      expect(new Session({ model: testModel }).isModelPending()).toBe(false);
+      await draft.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Go' }] });
+      // Asked and answered, even with nothing chosen, the fallback is now the model.
+      expect(draft.isModelPending()).toBe(false);
+      const pinned = new Session({ model: testModel, routePending: true });
+      pinned.changeParticipantModel('sirus', testModel);
+      expect(pinned.isModelPending()).toBe(false);
+    } finally {
+      route.mockRestore();
+      if (previousKey === undefined) delete process.env.JEV_API;
+      else process.env.JEV_API = previousKey;
+    }
+  });
+
   test('changing a participant model changes it for that session only', () => {
     const a = new Session({ name: 'A' });
     const b = new Session({ name: 'B' });

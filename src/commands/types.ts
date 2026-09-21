@@ -47,6 +47,8 @@ export interface CommandSession {
   getName(): string;
   getPermissionMode(): PermissionMode;
   getThinkingLevel(participantName?: string): ThinkingLevel;
+  // A new session still waiting for Jev to pick its model.
+  isModelPending(): boolean;
   isEmpty(): boolean;
   rewind(checkpointId: string, options: RewindOptions): Promise<RewindResult>;
   setName(name: string): void;

@@ -591,8 +591,8 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         attachments={attachments}
         onPasteImage={pasteImage}
         onRemoveAttachment={removeAttachment}
-        model={currSession.getModel()}
-        thinkingLevel={currSession.getThinkingLevel()}
+        model={currSession.isModelPending() ? undefined : currSession.getModel()}
+        thinkingLevel={currSession.isModelPending() ? undefined : currSession.getThinkingLevel()}
         history={history}
         queuedMessages={currSession.getQueuedMessages()}
         onQueue={text => currSession.queueMessage(text)}

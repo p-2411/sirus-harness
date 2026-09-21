@@ -4,7 +4,7 @@ import { isMemoryAccessEnabled } from '../memory-access';
 import { requestPermission } from '../permissions/approvals';
 import { DEFAULT_PERMISSION_MODE, type PermissionMode } from '../permissions/policy';
 import { getSystemPrompt, systemPromptFor } from '../prompt';
-import { routeSessionModel, routingCandidates } from '../router';
+import { jevApiKey, routeSessionModel, routingCandidates } from '../router';
 import { servableModelIds, servesModel } from '../providers';
 import { DEFAULT_MODEL } from '../providers/catalog';
 import { registerToolSession, sirusMcpServerEntry, unregisterToolSession } from '../tools/server';
@@ -774,6 +774,14 @@ export class Session {
 
   getModel(): string {
     return this.roster.default.model;
+  }
+
+  // A draft whose model nobody has chosen yet, with Jev configured to choose
+  // one on the first prompt: the model it holds is the fallback, not a
+  // choice, so the status row shows none until the pick lands or /model
+  // makes one.
+  isModelPending(): boolean {
+    return this.routePending && jevApiKey() !== null;
   }
 
   getThinkingLevel(participantName?: string): ThinkingLevel {
