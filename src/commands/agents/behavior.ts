@@ -183,8 +183,9 @@ export function workerAge(run: SubagentRun, now: number = Date.now()): string {
   return formatWorkerElapsed((run.finishedAt ?? now) - run.startedAt);
 }
 
-// What the user is shown, in the order the strip shows it: the ones still
-// working first, then the finished ones they have not yet dismissed.
+// Every worker `/agents` offers, in the order it lists them: the ones still
+// working first, then the finished ones the user has not yet dismissed. The
+// strip has an order of its own, since it shows one line at a time.
 export function visibleWorkers(workers: readonly SubagentRun[]): SubagentRun[] {
   const shown = workers.filter(run => !run.dismissed);
   return [

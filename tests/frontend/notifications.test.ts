@@ -170,6 +170,22 @@ describe('notification event subscriptions', () => {
     expect(turnSummary(session, 'idle')).toBe('@reviewer: Current progress.');
   });
 
+  test('passes over an entry the chat never showed', () => {
+    const session = new Session();
+    session.addParticipant('reviewer', session.getModel());
+    session.append({ role: 'user', content: [{ type: 'text', text: 'Delegate it.' }] });
+    session.append({ role: 'assistant', participant: 'reviewer', content: [{ type: 'text', text: 'Spawned a worker.' }] });
+    // A worker's report is in the record for the runtimes alone: the user
+    // reads it under the SpawnAgent row, so it closes nobody's turn.
+    session.append({
+      role: 'assistant',
+      participant: 'reviewer',
+      hidden: true,
+      content: [{ type: 'text', text: 'Subagent sub-1234 done after 45s.' }],
+    });
+    expect(turnSummary(session, 'idle')).toBe('@reviewer: Spawned a worker.');
+  });
+
   test('notifies once for each new approval and uses the latest session list', async () => {
     const session = new Session({ name: 'First name' });
     let sessions: Session[] = [];

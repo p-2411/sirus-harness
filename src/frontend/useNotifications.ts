@@ -25,6 +25,8 @@ export function turnSummary(session: Session, status: SessionStatus): string {
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index];
     if (message.role === 'user') break;
+    // A hidden entry is nobody's closing words: it was never on screen.
+    if (message.hidden) continue;
     const line = firstLine(textOf(message));
     if (line) return `@${message.participant ?? 'sirus'}: ${line}`;
   }

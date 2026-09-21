@@ -22,7 +22,7 @@ import { Session } from '../../src/agent_runtime/session';
 import Sidebar from '../../src/frontend/Sidebar';
 import type { ApprovalRequest } from '../../src/agent_runtime/permissions/approvals';
 import type { PermissionOption } from '@agentclientprotocol/sdk';
-import type { SubagentRun } from '../../src/agent_runtime/tools/subagents';
+import { notifySubagents, type SubagentRun } from '../../src/agent_runtime/tools/subagents';
 import type { ToolCallBlock } from '../../src/agent_runtime/types';
 
 describe('session input drafts', () => {
@@ -411,29 +411,30 @@ function worker(run: Partial<SubagentRun> & { id: string }): SubagentRun {
 }
 
 describe('worker strip', () => {
-  test('lists the running workers first and what each is doing', () => {
-    const output = stripAnsi(renderToString(
-      <WorkerStrip workers={[
-        worker({
-          id: 'sub-done', status: 'done', model: 'claude-sonnet-5',
-          startedAt: 1_000, finishedAt: 136_000, branch: 'sirus/sub-done',
-        }),
-        worker({
-          id: 'sub-live', model: 'gpt-5.6-terra', thinkingLevel: 'high',
-          startedAt: Date.now() - 45_000, branch: 'sirus/sub-live',
-          content: [
-            { type: 'tool_call', id: 'one', kind: 'read', title: 'notes.md', status: 'completed', locations: [], content: [] },
-            { type: 'tool_call', id: 'two', kind: 'execute', title: 'bun test', status: 'pending', locations: [], content: [] },
-          ],
-        }),
-      ]} />,
+  const now = Date.now();
+  const running = [
+    worker({
+      id: 'sub-one', model: 'gpt-5.6-terra', thinkingLevel: 'high',
+      startedAt: now - 45_000, updatedAt: now - 2_000, branch: 'sirus/sub-one',
+      content: [
+        { type: 'tool_call', id: 'one', kind: 'read', title: 'notes.md', status: 'completed', locations: [], content: [] },
+        { type: 'tool_call', id: 'two', kind: 'execute', title: 'bun test', status: 'pending', locations: [], content: [] },
+      ],
+    }),
+    worker({ id: 'sub-two', startedAt: now - 45_000, updatedAt: now - 1_000 }),
+    worker({ id: 'sub-three', startedAt: now - 45_000, updatedAt: now }),
+  ];
+
+  test('shows the run that changed last, and how many are behind it', () => {
+    const lines = stripAnsi(renderToString(
+      <WorkerStrip workers={[running[0], running[1]]} />,
       { columns: 120 },
-    ));
-    const lines = output.split('\n').filter(Boolean);
-    expect(lines).toHaveLength(2);
-    expect(lines[0]).toContain('sub-live · gpt-5.6-terra high · 45s · Run bun test · sirus/sub-live');
-    // A finished worker keeps its line, showing how it ended and how long it took.
-    expect(lines[1]).toContain('sub-done · claude-sonnet-5 medium · 2m15s · done · sirus/sub-done');
+    )).split('\n').filter(Boolean);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('1/2 ● sub-two · claude-sonnet-5 medium · 45s · starting');
+    // Alone, a run needs no counter.
+    expect(stripAnsi(renderToString(<WorkerStrip workers={[running[0]]} />, { columns: 120 })))
+      .toContain('● sub-one · gpt-5.6-terra high · 45s · Run bun test · sirus/sub-one');
   });
 
   test('takes no vertical space without workers to show', () => {
@@ -444,6 +445,19 @@ describe('worker strip', () => {
     )).toBe('');
   });
 
+  test('keeps a finished line for a second, saying how it ended', () => {
+    const line = (finishedAt: number) => stripAnsi(renderToString(
+      <WorkerStrip workers={[worker({
+        id: 'sub-done', status: 'done', startedAt: finishedAt - 45_000, finishedAt,
+      })]} />,
+      { columns: 120 },
+    ));
+    expect(line(Date.now())).toContain('● sub-done · claude-sonnet-5 medium · 45s · done');
+    // A second later the strip belongs to the runs still working; `/agents`
+    // still lists the one that ended.
+    expect(line(Date.now() - 2_000)).toBe('');
+  });
+
   test('says a worker is starting until its first tool call', () => {
     const output = stripAnsi(renderToString(
       <WorkerStrip workers={[worker({ id: 'sub-new', startedAt: Date.now() })]} />,
@@ -451,5 +465,117 @@ describe('worker strip', () => {
     ));
     expect(output).toContain('sub-new · claude-sonnet-5 medium · 0s · starting');
     expect(output).not.toContain('·  · ');
+  });
+});
+
+describe('walking the worker strip from the input bar', () => {
+  // A worker as the strip reads it, each one fresher than the last, so the
+  // order the arrows walk is known.
+  function runs(): SubagentRun[] {
+    const now = Date.now();
+    return [
+      worker({ id: 'sub-one', startedAt: now - 45_000, updatedAt: now - 2_000 }),
+      worker({ id: 'sub-two', startedAt: now - 45_000, updatedAt: now - 1_000 }),
+      worker({ id: 'sub-three', startedAt: now - 45_000, updatedAt: now }),
+    ];
+  }
+
+  function Bar({ workers, send }: { workers: readonly SubagentRun[]; send: (text: string) => void }) {
+    const [draft, setDraft] = useState('');
+    return <InputBar
+      inputContent={draft}
+      setInputContent={setDraft}
+      send={send}
+      disabled={false}
+      feedback={null}
+      participants={[]}
+      workers={workers}
+    />;
+  }
+
+  test('↓ selects the freshest run, the arrows walk a frozen order, enter opens it', async () => {
+    const workers = runs();
+    const sent: string[] = [];
+    const stdin = Object.assign(new PassThrough(), {
+      isTTY: true, setRawMode() {}, ref() {}, unref() {},
+    });
+    const stdout = Object.assign(new PassThrough(), { columns: 100, rows: 30 });
+    let output = '';
+    stdout.on('data', chunk => {
+      const frame = stripAnsi(chunk.toString());
+      if (frame.trim()) output = frame;
+    });
+    const app = renderInk(<Bar workers={workers} send={text => sent.push(text)} />, {
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      stdout: stdout as unknown as NodeJS.WriteStream,
+      debug: true, patchConsole: false, exitOnCtrlC: false,
+    });
+    const flush = async () => {
+      await new Promise(resolve => setImmediate(resolve));
+      await app.waitUntilRenderFlush();
+    };
+    // The strip's own line, told apart from the input box that shares the ›.
+    const line = () => output.split('\n').find(text => text.includes('sub-')) ?? '';
+    const press = async (key: string) => { stdin.write(key); await flush(); };
+    const down = () => press('\u001b[B');
+    const up = () => press('\u001b[A');
+    // Ink holds a lone escape briefly in case a longer sequence follows it.
+    const escape = async () => {
+      stdin.write('\u001b');
+      await new Promise(resolve => setTimeout(resolve, 40));
+      await flush();
+    };
+    try {
+      await flush();
+      expect(line()).toContain('1/3 ● sub-three');
+      expect(line()).not.toContain('›');
+
+      await down();
+      expect(line()).toContain('› 1/3 ● sub-three');
+      await down();
+      expect(line()).toContain('› 2/3 ● sub-two');
+      await down();
+      expect(line()).toContain('› 3/3 ● sub-one');
+      // ↓ past the last line stays where it is.
+      await down();
+      expect(line()).toContain('› 3/3 ● sub-one');
+      await up();
+      expect(line()).toContain('› 2/3 ● sub-two');
+
+      // Nothing moves under the user: a run that finishes while selected only
+      // changes its status word, and a fresher run does not take its place.
+      workers[0].updatedAt = Date.now();
+      workers[1].status = 'cancelled';
+      workers[1].finishedAt = Date.now();
+      notifySubagents();
+      await flush();
+      expect(line()).toContain('› 2/3 ● sub-two');
+      expect(line()).toContain('cancelled');
+
+      // Escape gives the draft the keyboard back, and the strip follows the
+      // freshest run again.
+      await escape();
+      expect(line()).not.toContain('›');
+      expect(line()).toContain('● sub-one');
+
+      // Enter sends the run's actions down the path typing them would take.
+      await down();
+      expect(line()).toContain('› 1/');
+      await press('\r');
+      expect(sent).toEqual(['/agents sub-one']);
+      expect(line()).not.toContain('›');
+
+      // Typing carries on in the draft, character included.
+      await down();
+      expect(line()).toContain('›');
+      await press('h');
+      expect(line()).not.toContain('›');
+      expect(output).toContain('h▌');
+    } finally {
+      app.unmount();
+      await app.waitUntilExit();
+      stdin.destroy();
+      stdout.destroy();
+    }
   });
 });

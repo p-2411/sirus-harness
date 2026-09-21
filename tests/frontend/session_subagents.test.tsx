@@ -5,8 +5,14 @@ import stripAnsi from 'strip-ansi';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { Session } from '../../src/agent_runtime/session';
-import { findSubagent, findSubagentByCall, type SubagentRun } from '../../src/agent_runtime/tools/subagents';
+import {
+  findSubagent,
+  findSubagentByCall,
+  notifySubagents,
+  type SubagentRun,
+} from '../../src/agent_runtime/tools/subagents';
 import { subagentDone } from '../../src/agent_runtime/tools/subagents/run';
+import { workerReport } from '../../src/agent_runtime/tools/subagents/report';
 import { sirusMcpServerEntry, stopSirusMcpServer } from '../../src/agent_runtime/tools/server';
 import Chat from '../../src/frontend/chat/Chat';
 import { ChatMessage } from '../../src/frontend/chat/ChatMessage';
@@ -72,8 +78,7 @@ test('the worker strip follows only the displayed session’s workers', async ()
     await new Promise<void>(resolve => setImmediate(resolve));
     await app.waitUntilRenderFlush();
   };
-  // The strip is what sits between the input box and the status row, told
-  // apart from a worker's report in the history above it.
+  // The strip is the one line between the input box and the status row.
   const strip = () => {
     const lines = output.replace(/\n+$/, '').split('\n');
     const box = lines.map(line => line.includes('╰')).lastIndexOf(true);
@@ -91,9 +96,15 @@ test('the worker strip follows only the displayed session’s workers', async ()
     expect(first.getWorkers().map(run => run.id)).toEqual([mine.id, alsoMine.id]);
     expect(second.getWorkers().map(run => run.id)).toEqual([theirs.id]);
     expect(empty.getWorkers()).toEqual([]);
-    // One line per worker, saying which run it is and what it runs on.
-    expect(strip()).toContain(`${mine.id} · ${model}`);
-    expect(strip()).toContain(`${alsoMine.id} · ${model}`);
+    // One line: the run that changed last, and a counter for the one behind
+    // it. Stamp the order rather than trust two spawns to land in different
+    // milliseconds.
+    alsoMine.updatedAt = mine.updatedAt + 1;
+    notifySubagents();
+    await flush();
+    expect(strip().split('\n').filter(Boolean)).toHaveLength(1);
+    expect(strip()).toContain(`1/2 ● ${alsoMine.id} · ${model}`);
+    expect(strip()).not.toContain(mine.id);
     expect(strip()).not.toContain(theirs.id);
 
     // Each worker belongs to its owner's session and runs on the session's
@@ -108,19 +119,27 @@ test('the worker strip follows only the displayed session’s workers', async ()
     await flush();
     expect(workers.map(run => run.status)).toEqual(['working', 'working', 'working']);
 
-    // Stopping one leaves its line on the strip, saying how it ended, until
-    // the user clears it.
+    // Stopping one is the freshest change there is, so its line leads the
+    // strip, saying how it ended.
     await first.cancelWorker(mine.id);
     await flush();
     expect(mine.status).toBe('cancelled');
     expect(strip()).toContain(`${mine.id} · ${model}`);
     expect(strip()).toContain('cancelled');
-    // Its report reaches the owner all the same, as a message from the run.
-    expect(output).toContain(`${mine.id} · worker`);
-    first.dismissWorker(mine.id);
+    // Its report reaches the owner all the same, but the chat never shows it
+    // as a message: the user reads it under the SpawnAgent row instead.
+    expect(output).not.toContain(`${mine.id} · worker`);
+    expect(output).not.toContain('Task: Work');
+    // A second on, the line is gone and the strip belongs to the run still
+    // working. The record stays: `/agents` lists it until it is dismissed.
+    await new Promise(resolve => setTimeout(resolve, 1_200));
     await flush();
     expect(strip()).not.toContain(mine.id);
     expect(strip()).toContain(alsoMine.id);
+    expect(first.getWorkers().map(run => run.id)).toEqual([mine.id, alsoMine.id]);
+    first.dismissWorker(mine.id);
+    await flush();
+    expect(first.getWorkers().find(run => run.id === mine.id)?.dismissed).toBe(true);
 
     app.rerender(pane(second));
     await flush();
@@ -139,13 +158,18 @@ test('the worker strip follows only the displayed session’s workers', async ()
     const call: ToolCallBlock = {
       type: 'tool_call', id: mine.callId!, kind: 'other', title: 'sirus - SpawnAgent',
       status: 'completed', locations: [], content: [],
+      // What the session puts on the call when the run it started ends.
+      output: workerReport(mine),
     };
     const toolRow = (session: Session) => stripAnsi(renderToString(
       <ChatMessage message={{ seq: 0, role: 'assistant', content: [call] }} sessionId={session.getId()} />,
       { columns: 140 },
     ));
     expect(toolRow(first)).toContain(`${mine.id} · cancelled`);
-    expect(toolRow(second)).not.toContain('cancelled');
+    expect(toolRow(second)).not.toContain(`${mine.id} · cancelled`);
+    // The report is under the row, without the user having to open it.
+    expect(toolRow(first)).toContain(`Subagent ${mine.id} cancelled`);
+    expect(toolRow(first)).toContain('Task: Work');
 
     release();
     await Promise.all(workers.map(subagentDone));

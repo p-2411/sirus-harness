@@ -96,13 +96,16 @@ tasks: nothing waits on one. When a worker ends, `workerFinished` queues its rep
 compaction or directory restore. `deliverReports` gives it to the agent that spawned it as a
 message from the run, which starts that agent's turn the way a peer's message does, one turn
 per owner however many of its workers ended; `sendNextQueuedPrompt` sends the reports before
-it drains what the user queued. The snapshot carries a `WorkerRecord` per run, so a run still
-working when Sirus quits comes back `interrupted`, a record with no agent behind it, and
-`appendRestoredReports` reads its report into the owner's record at the start of the next
-prompt rather than starting a turn on launch. Nothing restarts on its own. `getWorkers`,
-`cancelWorker`, `messageWorker` and `dismissWorker` are what `/agents` and the worker strip
-call; `dispose` is asynchronous for the workers' sake, since each one must be stopped and
-waited for before its worktree can be removed.
+it drains what the user queued. That entry is `hidden`: the runtimes read it in the record,
+the chat shows no message for it, and the same text is set as the `output` of the SpawnAgent
+call the run came from (`toolCallOf`), which is where the user reads it. The snapshot
+carries a `WorkerRecord` per run, so a run still working when Sirus quits comes back
+`interrupted`, a record with no agent behind it, and `appendRestoredReports` reads its
+report into the owner's record at the start of the next prompt rather than starting a turn
+on launch. Nothing restarts on its own. `getWorkers`, `cancelWorker`, `messageWorker` and
+`dismissWorker` are what `/agents` and the worker strip call; `dispose` is asynchronous for
+the workers' sake, since each one must be stopped and waited for before its worktree can be
+removed.
 
 Compaction belongs to the runtime. Each one folds its own conversation when its window
 fills and reports it; `Session.compact` asks the default participant's runtime to do it now
@@ -261,9 +264,14 @@ message is the one thing a menu cannot supply, so its entry carries `input`, whi
 input bar over to its entry prompt and sends what the user types as the command's last
 argument. The worker strip above the status row (`frontend/chat/WorkerStrip.tsx`) reads the
 run index directly rather than waiting for the session to hand it an array, since runs are
-mutated in place, and it shares its ordering and its clock with the `/agents` menu. In the
-history, `ChatMessage.tsx` lets the SpawnAgent row follow the run it started and heads a
-report with the run's id, since its author is no name on the roster.
+mutated in place. It is one line: the run with the freshest `updatedAt` of those working or
+finished within the last second, with a counter for the rest. `↓` from the input bar hands
+it the keyboard against a list frozen as focus arrives, so nothing moves under the user, and
+`enter` sends `/agents <id>` down the path typing it takes; the ordering is the strip's own,
+while `/agents` keeps listing every run nobody has dismissed. In the history, `ChatMessage.tsx`
+lets the SpawnAgent row follow the run it started, keeps it out of the `Ran N commands`
+groups, and shows the report the session set as the call's output, open already once the run
+has ended.
 
 ## Verification
 

@@ -250,6 +250,35 @@ describe('chat message', () => {
     ]);
   });
 
+  test('keeps every SpawnAgent row out of the group around it', () => {
+    // A turn that delegates twice leaves two rows, each following its own run
+    // and carrying its report, rather than one "Ran N commands" summary with
+    // the reports folded away inside it.
+    const spawn = (id: string, worker: string) => toolCall({
+      id,
+      kind: 'other',
+      title: 'sirus - SpawnAgent',
+      output: `Subagent ${worker} done after 45s.`,
+    });
+    const content: MessageBlock[] = [
+      calls[0],
+      calls[1],
+      spawn('call-spawn-one', 'sub-1234'),
+      spawn('call-spawn-two', 'sub-5678'),
+    ];
+
+    expect(messageSegments(content).map(segment => segment.type))
+      .toEqual(['tool_run', 'tool_call', 'tool_call']);
+
+    const output = stripAnsi(renderToString(
+      <ChatMessage message={{ seq: 0, role: 'assistant', content }} sessionId="session" />,
+      { columns: 140 },
+    ));
+    expect(output).toContain('Ran 2 commands');
+    expect(output).toContain('Subagent sub-1234 done after 45s.');
+    expect(output).toContain('Subagent sub-5678 done after 45s.');
+  });
+
   test('summarizes completed and running tool groups while collapsed', () => {
     const completed = stripAnsi(renderToString(
       <ToolRunGroup calls={calls} />,
@@ -324,6 +353,26 @@ describe('what an expanded row reveals', () => {
       { sign: ' ', text: 'url: https://example.com' },
       { sign: ' ', text: 'timeout: 30' },
     ]);
+  });
+
+  test('reads a worker report off the SpawnAgent call, not its content', () => {
+    // The content of that call is the handle the vendor was given back; the
+    // report the session set as its output is what the user came to read.
+    expect(callDetail(toolCall({
+      id: 'call-5',
+      kind: 'other',
+      title: 'sirus - SpawnAgent',
+      content: [{ type: 'text', text: '{"id":"sub-1234","status":"working"}' }],
+      output: 'Subagent sub-1234 done after 45s.',
+    }))).toEqual([{ sign: ' ', text: 'Subagent sub-1234 done after 45s.' }]);
+    // Every other call still leads with what it produced.
+    expect(callDetail(toolCall({
+      id: 'call-6',
+      kind: 'execute',
+      title: 'bun test',
+      content: [{ type: 'text', text: '12 pass' }],
+      output: 'raw output',
+    }))).toEqual([{ sign: ' ', text: '12 pass' }]);
   });
 
   test('cuts a long preview and says how much is left', () => {
@@ -483,17 +532,44 @@ describe('the SpawnAgent row', () => {
 });
 
 describe('a worker report', () => {
-  const report = (participant: string) => stripAnsi(renderToString(
-    <ChatMessage message={{
-      seq: 0, role: 'assistant', participant,
-      content: [{ type: 'text', text: 'Done; the branch is ready.' }],
-    }} />,
-    { columns: 120 },
+  const report = ['Subagent sub-1234 done after 45s on claude-sonnet-5 (medium).', 'Task: Rewrite the loader'];
+  const reported = (output: string) => toolCall({
+    id: 'reported-call',
+    title: 'sirus - SpawnAgent',
+    content: [{ type: 'text', text: '{"id":"sub-1234","status":"working"}' }],
+    output,
+  });
+  const row = (call: ToolCallBlock) => stripAnsi(renderToString(
+    <ChatMessage message={{ seq: 0, role: 'assistant', content: [call] }} sessionId="session" />,
+    { columns: 140 },
   ));
 
-  test('says who wrote it without borrowing a participant name', () => {
-    expect(report('sub-1234')).toContain('sub-1234 · worker');
-    expect(report('sub-1234')).toContain('Done; the branch is ready.');
-    expect(report('reviewer')).not.toContain('worker');
+  test('shows under the row of the call that started the worker, not as a message', () => {
+    const run = workerRun({ id: 'sub-1234', callId: 'reported-call', status: 'done' });
+    registerSubagent(run);
+    try {
+      const output = row(reported(report.join('\n')));
+      // Open without asking: the run has ended and this is what was waited for.
+      for (const line of report) expect(output).toContain(line);
+      expect(output).not.toContain('"status":"working"');
+      // Its author is a run id, never a name on the roster, so no message of
+      // the worker's own is written anywhere in the history.
+      expect(output).not.toContain('sub-1234 · worker');
+    } finally {
+      unregisterSubagent(run.id);
+    }
+  });
+
+  test('is cut the way any other output is, saying how much is left', () => {
+    const run = workerRun({ id: 'sub-1234', callId: 'reported-call', status: 'done' });
+    registerSubagent(run);
+    try {
+      const output = row(reported(Array.from({ length: 11 }, (_, index) => `line ${index}`).join('\n')));
+      expect(output).toContain('line 7');
+      expect(output).not.toContain('line 8');
+      expect(output).toContain('3 more lines');
+    } finally {
+      unregisterSubagent(run.id);
+    }
   });
 });

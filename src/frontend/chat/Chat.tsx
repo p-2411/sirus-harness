@@ -191,7 +191,10 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     () => currSession.getVersion(),
   );
   useSyncExternalStore(subscribeSubagents, getSubagentsVersion);
-  const messages = currSession.getMessages();
+  // A hidden entry belongs to the runtimes alone: a worker's report is in its
+  // owner's record, but the user reads it under the SpawnAgent row that
+  // started the worker, not as a message of its own.
+  const messages = currSession.getMessages().filter(message => !message.hidden);
   const participants = currSession.getParticipants();
   const participantColors = participantColorMap(participants);
 
@@ -247,6 +250,8 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     replaceAttachments(attachmentsRef.current.filter(item => item.path !== image.path));
   };
   const [commandStartedAt, setCommandStartedAt] = useState<number | null>(null);
+  // Whether the worker strip under the input has the keyboard right now.
+  const workerFocus = useRef(false);
   const queued = currSession.getQueuedMessageCount();
   const history = promptHistory(messages);
   // A tool call of this session (or of a subagent it spawned) waiting on the
@@ -306,6 +311,9 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
 
   useInput((input, key) => {
     if (key.escape) {
+      // Escape with the worker strip focused only hands the keyboard back to
+      // the draft; the input bar does that itself.
+      if (workerFocus.current) return;
       setInputMode({ type: 'text' });
       setFeedback(null);
       // The turn only: the session's workers keep going in the background and
@@ -588,6 +596,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         permissionMode={currSession.getPermissionMode()}
         modeNotice={currSession.getModeNotice()}
         onCyclePermissionMode={cyclePermissionMode}
+        onWorkerFocusChange={focused => { workerFocus.current = focused; }}
         attachments={attachments}
         onPasteImage={pasteImage}
         onRemoveAttachment={removeAttachment}

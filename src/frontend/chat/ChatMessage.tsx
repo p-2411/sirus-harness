@@ -116,8 +116,26 @@ export function editPreview(call: ToolCallBlock): DiffLine[] {
 	]);
 }
 
-// What the call produced: its text content, or failing that a string output.
+// A SpawnAgent call is a Sirus tool the vendor reports as kind `other` under
+// its own title. Its row is the worker's anchor in the history: it follows
+// the run it started rather than the call, and carries the run's report once
+// there is one.
+function isSpawnAgent(call: ToolCallBlock): boolean {
+	return call.kind === 'other' && /\bSpawnAgent\b/.test(call.title);
+}
+
+// The report the session put on the call when the worker it started ended.
+// The call's own content is the handle the vendor was given back, which is
+// not what the user came to read.
+function spawnReport(call: ToolCallBlock): string {
+	return isSpawnAgent(call) && typeof call.output === 'string' ? call.output.trim() : '';
+}
+
+// What the call produced: the worker's report on a SpawnAgent row, otherwise
+// its text content, or failing that a string output.
 export function outputPreview(call: ToolCallBlock): DiffLine[] {
+	const report = spawnReport(call);
+	if (report) return diffLines(' ', report);
 	const text = call.content
 		.flatMap(block => block.type === 'text' ? [block.text] : [])
 		.join('\n');
@@ -151,18 +169,26 @@ interface ToolRun {
 
 export type MessageSegment = MessageBlock | ToolRun;
 
+// A call that is part of a run of ordinary tool calls, which a group folds
+// away behind "Ran N commands". A SpawnAgent call is not: its row is a
+// worker's anchor, showing the run's status and carrying its report, so it
+// keeps a row of its own however many calls sit beside it.
+function groupable(block: MessageBlock): block is ToolCallBlock {
+	return block.type === 'tool_call' && !isSpawnAgent(block);
+}
+
 /** Collapse only adjacent tool calls, and only two or more of them. */
 export function messageSegments(content: readonly MessageBlock[]): MessageSegment[] {
 	const segments: MessageSegment[] = [];
 	for (let index = 0; index < content.length;) {
 		const block = content[index];
-		if (block.type !== 'tool_call') {
+		if (!groupable(block)) {
 			segments.push(block);
 			index++;
 			continue;
 		}
 		const calls: ToolCallBlock[] = [];
-		while (index < content.length && content[index].type === 'tool_call') {
+		while (index < content.length && groupable(content[index])) {
 			calls.push(content[index] as ToolCallBlock);
 			index++;
 		}
@@ -176,16 +202,10 @@ function finished(call: ToolCallBlock): boolean {
 	return call.status === 'completed' || call.status === 'failed';
 }
 
-// A SpawnAgent call is a Sirus tool the vendor reports as kind `other` under
-// its own title. Its row is the worker's anchor in the history: it follows
-// the run rather than the call — amber while the worker works, green once it
-// is done, red if it failed, muted when it was stopped or the process it
+// The dot on that row is the run's: amber while the worker works, green once
+// it is done, red if it failed, muted when it was stopped or the process it
 // lived in ended. A run from an earlier process left no record, so its dot
 // stays neutral.
-function isSpawnAgent(call: ToolCallBlock): boolean {
-	return call.kind === 'other' && /\bSpawnAgent\b/.test(call.title);
-}
-
 type SubagentIndicator = SubagentStatus | 'unknown';
 
 const subagentColors: Record<SubagentIndicator, string> = {
@@ -277,14 +297,19 @@ function DiffPreview({ lines }: { lines: readonly DiffLine[] }) {
 }
 
 // One call, collapsed to its summary line until clicked; expanded, it also
-// shows what the call carried.
+// shows what the call carried. A worker's report is the exception: it is what
+// the user has been waiting for, so the SpawnAgent row opens itself once the
+// run has ended, and a click still closes it.
 function ToolCallEntry({ call, indent, sessionId }: {
 	sessionId?: string;
 	call: ToolCallBlock;
 	indent?: string;
 }) {
-	const [expanded, setExpanded] = useState(false);
-	const toggle = useCallback(() => setExpanded(current => !current), []);
+	const { status } = useSubagentRun(call, sessionId);
+	const showsReport = spawnReport(call) !== '' && status !== 'working';
+	const [expansionOverride, setExpansionOverride] = useState<boolean | null>(null);
+	const expanded = expansionOverride ?? showsReport;
+	const toggle = useCallback(() => setExpansionOverride(!expanded), [expanded]);
 	const ref = useRef<DOMElement>(null);
 	const hovered = useClickable(ref, toggle);
 	const detail = expanded ? callDetail(call) : [];
@@ -400,16 +425,6 @@ function CompactionRule({ block, participantColors }: {
 	);
 }
 
-// A worker reports back as an assistant entry it wrote itself, addressed to
-// the participant that spawned it. Its author is a run id, never a name on
-// the roster, so the header says what it is instead of borrowing a
-// participant's colour.
-const WORKER_PARTICIPANT = /^sub-[0-9a-f]+$/i;
-
-export function isWorkerParticipant(name: string): boolean {
-	return WORKER_PARTICIPANT.test(name);
-}
-
 // An attached image: the terminal cannot show it, so its row says what it is.
 export function ImageLine({ image }: { image: ImageBlock }) {
 	return <Text color={theme.textMuted}>▣ {describeImage(image)}</Text>;
@@ -428,7 +443,6 @@ export function ChatMessage({
 }) {
 	const isUser = message.role === "user";
 	const participantName = message.participant ?? 'sirus';
-	const isWorker = !isUser && isWorkerParticipant(participantName);
 	return (
 		// no bars, no boxes — bold speaker label, body aligned flush beneath,
 		// whitespace doing the separating
@@ -441,13 +455,11 @@ export function ChatMessage({
 		>
 			<Text>
 				<Text
-					color={isUser ? theme.highlight
-						: isWorker ? theme.textMuted : participantColor(participantName, participantColors)}
+					color={isUser ? theme.highlight : participantColor(participantName, participantColors)}
 					bold
 				>
 					{isUser ? "you" : participantName}
 				</Text>
-				{isWorker && <Text color={theme.textMuted}> · worker</Text>}
 				{!isUser && model && <Text color={theme.textSubtle} dimColor> {model}</Text>}
 			</Text>
 			{messageSegments(message.content).map((block, index) => {

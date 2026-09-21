@@ -7,7 +7,7 @@ import { useFileSuggestions } from './FileMenu';
 import { DraftText, TrailingImages } from './DraftText';
 import { InputFeedback, QueuedRow } from './InputRows';
 import { SubagentStatusRow, type StatusRowProps } from './StatusRow';
-import { WorkerStrip } from './WorkerStrip';
+import { stripWorkers, WorkerStrip, type WorkerSelection } from './WorkerStrip';
 import { PromptBar, type PromptMode } from './PromptBar';
 import { applyInputEdit, normalizeNewlines, onFirstLine, onLastLine, type InputEdit, type InputState } from './editor';
 import { composeContent, removedPlaceholders, useDraftImages } from './draft';
@@ -42,6 +42,9 @@ interface InputBarProps {
   modeNotice?: string | null;
   // shift+tab in text mode
   onCyclePermissionMode?: () => void;
+  // Told when the worker strip takes the keyboard and when it gives it back,
+  // so the chat's own Escape leaves a focused strip alone.
+  onWorkerFocusChange?: (focused: boolean) => void;
   // images waiting to go with the next message, oldest first
   attachments?: readonly ImageBlock[];
   // ctrl+v in text mode
@@ -82,6 +85,7 @@ export function InputBar({
   permissionMode,
   modeNotice,
   onCyclePermissionMode,
+  onWorkerFocusChange,
   attachments = NO_ATTACHMENTS,
   onPasteImage,
   onRemoveAttachment,
@@ -206,6 +210,33 @@ export function InputBar({
     setEditor({ text: history[index], cursor: history[index].length });
   };
 
+  // ── The worker strip ───────────────────────────────────────────────────
+  // ↓ from the last line of the draft, where nothing else wants it, puts the
+  // keyboard on the strip. The list is frozen as focus arrives, so the runs
+  // cannot reorder or leave under the user while they walk it; ↑ past the
+  // first line, escape, or simply typing gives the draft the keyboard back.
+  const [workerSelection, setWorkerSelection] = useState<WorkerSelection | null>(null);
+  useEffect(() => {
+    if (mode.type !== 'text') setWorkerSelection(null);
+  }, [mode]);
+  useEffect(() => {
+    onWorkerFocusChange?.(workerSelection !== null);
+  }, [workerSelection !== null]);
+  const focusWorkers = (): boolean => {
+    const runs = stripWorkers(workers);
+    if (runs.length === 0) return false;
+    setWorkerSelection({ runs, index: 0 });
+    return true;
+  };
+  const moveWorkerSelection = (delta: -1 | 1): void => {
+    setWorkerSelection(current => {
+      if (!current) return null;
+      const index = current.index + delta;
+      if (index < 0) return null;
+      return index < current.runs.length ? { ...current, index } : current;
+    });
+  };
+
   const edit = (change: InputEdit) => {
     setRecall(null);
     const next = applyInputEdit(editor, change);
@@ -244,6 +275,31 @@ export function InputBar({
     // Most terminals (macOS included) send DEL for the backspace key, which
     // Ink reports as key.delete rather than key.backspace.
     const isBackspace = key.backspace || key.delete;
+
+    // While the strip has the keyboard it answers first, and keys it has no
+    // use for do nothing. Enter opens the run's actions the way typing
+    // `/agents <id>` would; a printable character returns to the draft and
+    // lands in it, so a user who came here by accident simply carries on.
+    if (workerSelection) {
+      if (key.upArrow || key.downArrow) {
+        moveWorkerSelection(key.upArrow ? -1 : 1);
+        return;
+      }
+      if (key.return) {
+        const run = workerSelection.runs[workerSelection.index];
+        setWorkerSelection(null);
+        if (run) send(`/agents ${run.id}`);
+        return;
+      }
+      if (key.escape) {
+        setWorkerSelection(null);
+        return;
+      }
+      if (!enteredInput || isBackspace || key.ctrl || key.meta || key.tab
+        || key.leftArrow || key.rightArrow
+        || key.pageUp || key.pageDown || key.home || key.end) return;
+      setWorkerSelection(null);
+    }
 
     if (key.escape) {
       setMenusDismissed(true);
@@ -303,6 +359,9 @@ export function InputBar({
         }
         return;
       }
+      // ↓ with no earlier prompt to walk forward to would do nothing; the
+      // strip takes it instead.
+      if (key.downArrow && !recall && focusWorkers()) return;
       if (key.upArrow) recallPrevious();
       else recallNext();
       return;
@@ -447,7 +506,7 @@ export function InputBar({
           </Box>
         </Box>
       </Box>
-      <WorkerStrip workers={workers} />
+      <WorkerStrip workers={workers} selection={workerSelection} />
       <SubagentStatusRow {...status} />
     </>
   );
