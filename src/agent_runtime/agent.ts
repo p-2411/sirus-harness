@@ -6,20 +6,22 @@ import { providerFor } from './providers';
 import { DEFAULT_MODEL, VENDOR_INFO, vendorOf, type Vendor } from './providers/catalog';
 import { sourceEnvironment } from './providers/profiles';
 import { maskApiKey, type Source } from './providers/sources';
+import { routeWorker, vendorAllowance, workerCandidates } from './router';
 import {
   createRuntime,
   MODE_KINDS,
   runtimeGeneration,
+  trackRuntime,
   type ModeKind,
   type Runtime,
   type RuntimeOptions,
   type RuntimeUpdate,
 } from './runtime/runtime';
 import { Transcript, transcriptText } from './session/transcript';
-import type { SubagentRun, SubagentSpawnOptions } from './tools/subagents';
+import { notifySubagents, type SubagentRun } from './tools/subagents';
 import { describeSubagents } from './tools/subagents/report';
-import { cancelSubagent, checkSubagent, startSubagent } from './tools/subagents/run';
-import type { SubagentHost } from './tools/types';
+import { cancelSubagent, checkSubagent, messageSubagent, startSubagent } from './tools/subagents/run';
+import type { SubagentHandle, SubagentHost, WorkerContext } from './tools/types';
 import {
   DEFAULT_THINKING_LEVEL,
   type ImageBlock,
@@ -50,11 +52,16 @@ export interface RuntimeHost {
   mcpServer(agent: SessionAgent): Promise<RuntimeOptions['mcpServer']>;
   permissionMode(): PermissionMode;
   requestPermission(agent: SessionAgent, request: RequestPermissionRequest, signal: AbortSignal): Promise<RequestPermissionResponse>;
-  // The model a subagent spawned here runs on; null means the owner's own.
+  // The model a subagent spawned here runs on; null means Jev picks one.
   subagentModel(): string | null;
-  // The host a worker of this session runs under: the same directory and
-  // mode, the subagent contract, and permission requests attributed to it.
-  forWorker(id: string): RuntimeHost;
+  // The host a worker of this session runs under: its own worktree, the
+  // session's mode, the subagent contract, and permission requests
+  // attributed to it.
+  forWorker(id: string, directory: string): RuntimeHost;
+  // A worker of this session reached a terminal status. Its report goes to
+  // the transcript of the agent that spawned it and starts that agent's
+  // turn, the way a message from another participant does.
+  workerFinished(run: SubagentRun): void;
 }
 
 export interface AgentOptions extends Participant {
@@ -209,6 +216,46 @@ export class SessionAgent {
       this.turn = null;
       this.record = null;
       this.entry = null;
+    }
+  }
+
+  // Sends text into the turn this agent's runtime is running now. Rejects
+  // when no turn is running or the vendor cannot take it.
+  async steer(text: string): Promise<void> {
+    if (!this.runtime || !this.turn) throw new Error(`@${this.name} is not running a turn`);
+    await this.runtime.steer(text);
+  }
+
+  // Starts this agent's first runtime as a fork of another's live one: the
+  // same adapter process and the conversation it holds, in this agent's
+  // directory, on its model, with its own tools and callbacks. False when
+  // there is nothing to fork or the vendor refused, and the caller then lets
+  // the ordinary credential loop start a fresh runtime. A lost fork (the
+  // owner's runtime was disposed) is rebuilt fresh from this agent's own
+  // record, like any other lost runtime.
+  async forkFrom(owner: SessionAgent): Promise<boolean> {
+    const source = owner.runtime;
+    if (!source || this.runtime) return false;
+    try {
+      const forked = await source.fork({
+        directory: this.host.directory,
+        model: this.model,
+        thinkingLevel: this.thinkingLevel,
+        systemPrompt: this.host.systemPrompt(this),
+        permissionMode: this.host.permissionMode(),
+        mcpServer: await this.host.mcpServer(this),
+        onPermission: (request, promptSignal) => this.host.requestPermission(this, request, promptSignal),
+        onUpdate: update => this.record?.(update),
+      });
+      this.runtime = trackRuntime(forked);
+      this.generation = runtimeGeneration();
+      // The fork runs on the credential the owner's process was started on,
+      // so the next turn does not mistake it for a runtime on another one.
+      this.source = owner.source;
+      this.context = forked.context;
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -371,36 +418,53 @@ export class SessionAgent {
       : `${PERMISSION_MODE_NAMES[requested]} is unavailable on ${this.model}; the agent is on ${mode?.name ?? settled.modeId}`;
   }
 
-  // Subagents this agent has spawned. It can only see and steer its own.
-  spawnSubagent(prompt: string, options: SubagentSpawnOptions): SubagentRun {
-    const run = startSubagent(this, prompt, this.host.subagentModel() ?? this.model, options);
+  // Workers this agent has spawned. It can only see and steer its own.
+  // Spawning returns once the worker is on its way: it runs in the
+  // background and reports back when it ends.
+  async spawnSubagent(prompt: string, context: WorkerContext, callId?: string): Promise<SubagentRun> {
+    const run = await startSubagent(this, prompt, {
+      ...await this.workerModel(prompt),
+      context,
+      ...(callId ? { callId } : {}),
+    });
     this.subagents.set(run.id, run);
+    notifySubagents();
     return run;
+  }
+
+  // The model and thinking level a worker of this agent runs on: the
+  // session's fixed subagent model with this agent's level, or Jev's pick
+  // for the task. Jev is advisory — no key, no answer, an unsure answer or
+  // an error all leave the worker on this agent's own model and level.
+  private async workerModel(prompt: string): Promise<{ model: string; thinkingLevel: ThinkingLevel }> {
+    const own = { model: this.model, thinkingLevel: this.thinkingLevel };
+    const fixed = this.host.subagentModel();
+    if (fixed) return { model: fixed, thinkingLevel: this.thinkingLevel };
+    try {
+      const pick = await routeWorker(
+        { task: prompt, directory: this.directory },
+        workerCandidates(),
+        vendorAllowance(),
+        { fallbackLevel: this.thinkingLevel },
+      );
+      return pick ?? own;
+    } catch {
+      return own;
+    }
+  }
+
+  // A run this agent owned in an earlier process, restored from the session
+  // file as a record and nothing more.
+  adoptSubagent(run: SubagentRun): void {
+    this.subagents.set(run.id, run);
   }
 
   listSubagents(): SubagentRun[] {
     return [...this.subagents.values()];
   }
 
-  checkSubagent(id: string, wait: boolean, signal?: AbortSignal): Promise<Record<string, unknown>> {
-    return checkSubagent(this.requireSubagent(id), wait, signal);
-  }
-
-  cancelSubagent(id: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
-    return cancelSubagent(this.requireSubagent(id), signal);
-  }
-
   describeSubagents(): Record<string, unknown>[] {
     return describeSubagents(this.listSubagents());
-  }
-
-  // Stops every working subagent of this agent. Returns how many were stopped.
-  cancelSubagents(): number {
-    let cancelled = 0;
-    for (const run of this.subagents.values()) {
-      if (run.status === 'working' && run.worker.cancel()) cancelled++;
-    }
-    return cancelled;
   }
 
   // The tool call the vendor reported for the SpawnAgent it is running now:
@@ -420,25 +484,42 @@ export class SessionAgent {
 
   // The agent's own delegation, as the narrow port the agent tools speak to
   // over the MCP server. A worker outlives the tool call that started it:
-  // the call's signal ends with its request, and stopping a worker is the
-  // session's cancel or CancelAgent.
+  // the call's signal ends with its request, and stopping a worker is
+  // CancelAgent, the /agents panel, or deleting the session.
   subagentHost(): SubagentHost {
     return {
-      spawn: (prompt, call) => this.spawnSubagent(prompt, { callId: this.openSpawnCallId() ?? call.callId }),
-      check: (id, wait, signal) => this.checkSubagent(id, wait, signal),
-      cancel: (id, signal) => this.cancelSubagent(id, signal),
+      spawn: async (prompt, context, call): Promise<SubagentHandle> => {
+        const run = await this.spawnSubagent(prompt, context, this.openSpawnCallId() ?? call.callId);
+        return {
+          id: run.id,
+          model: run.model,
+          thinkingLevel: run.thinkingLevel,
+          status: run.status,
+          branch: run.branch,
+          context: run.context,
+        };
+      },
+      check: id => checkSubagent(this.requireSubagent(id)),
+      cancel: (id, signal) => cancelSubagent(this.requireSubagent(id), signal),
+      message: (id, text) => messageSubagent(this.requireSubagent(id), text),
       list: () => this.describeSubagents(),
     };
   }
 
-  // The agent that does one subagent's work: its own runtime and record
-  // under this agent's session, and the subagent contract.
-  createSubagent(id: string, model: string): SessionAgent {
+  // A worker of this agent ended: the session delivers its report here.
+  workerFinished(run: SubagentRun): void {
+    this.host.workerFinished(run);
+  }
+
+  // The agent that does one worker's work: its own runtime and record under
+  // this agent's session, in its own directory, with the subagent contract.
+  createSubagent(id: string, model: string, thinkingLevel: ThinkingLevel, directory: string): SessionAgent {
     return new SessionAgent({
       name: 'sirus',
       model,
+      thinkingLevel,
       runtimeId: `${this.runtimeId}/subagents/${id}`,
-      host: this.host.forWorker(id),
+      host: this.host.forWorker(id, directory),
       subagentId: id,
     });
   }

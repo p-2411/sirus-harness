@@ -5,8 +5,8 @@ import stripAnsi from 'strip-ansi';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { Session } from '../../src/agent_runtime/session';
-import { findSubagentByCall, listAllSubagents, type SubagentRun } from '../../src/agent_runtime/tools/subagents';
-import { checkSubagent } from '../../src/agent_runtime/tools/subagents/run';
+import { findSubagent, findSubagentByCall, type SubagentRun } from '../../src/agent_runtime/tools/subagents';
+import { subagentDone } from '../../src/agent_runtime/tools/subagents/run';
 import { sirusMcpServerEntry, stopSirusMcpServer } from '../../src/agent_runtime/tools/server';
 import Chat from '../../src/frontend/chat/Chat';
 import { ChatMessage } from '../../src/frontend/chat/ChatMessage';
@@ -29,16 +29,19 @@ async function spawnWorker(session: Session): Promise<SubagentRun> {
     requestInit: { headers: Object.fromEntries(entry.headers.map(header => [header.name, header.value])) },
   }));
   try {
-    const result = await client.callTool({ name: 'SpawnAgent', arguments: { prompt: 'Work' } });
+    const result = await client.callTool({
+      name: 'SpawnAgent',
+      arguments: { prompt: 'Work', context: 'fresh' },
+    });
     const [block] = result.content as { text: string }[];
     const { id } = JSON.parse(block.text) as { id: string };
-    return listAllSubagents().find(run => run.id === id)!;
+    return findSubagent(id)!;
   } finally {
     await client.close();
   }
 }
 
-test('the input status follows only the displayed session’s workers, including detached workers', async () => {
+test('the worker strip follows only the displayed session’s workers', async () => {
   const model = 'test-session-status-workers';
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
@@ -69,71 +72,94 @@ test('the input status follows only the displayed session’s workers, including
     await new Promise<void>(resolve => setImmediate(resolve));
     await app.waitUntilRenderFlush();
   };
+  // The strip is what sits between the input box and the status row, told
+  // apart from a worker's report in the history above it.
+  const strip = () => {
+    const lines = output.replace(/\n+$/, '').split('\n');
+    const box = lines.map(line => line.includes('╰')).lastIndexOf(true);
+    return lines.slice(box + 1, -1).join('\n');
+  };
   try {
     await flush();
-    expect(output).not.toContain('active subagent');
+    expect(output).not.toContain('sub-');
     workers.push(await spawnWorker(first));
     workers.push(await spawnWorker(second));
     workers.push(await spawnWorker(first));
+    const [mine, theirs, alsoMine] = workers;
     await flush();
     expect(first.getStatus()).toBe('idle');
-    expect(first.getActiveSubagentCount()).toBe(2);
-    expect(second.getActiveSubagentCount()).toBe(1);
-    expect(empty.getActiveSubagentCount()).toBe(0);
-    expect(output).toContain('2 active subagents');
-    expect(output).not.toContain('3 active subagents');
+    expect(first.getWorkers().map(run => run.id)).toEqual([mine.id, alsoMine.id]);
+    expect(second.getWorkers().map(run => run.id)).toEqual([theirs.id]);
+    expect(empty.getWorkers()).toEqual([]);
+    // One line per worker, saying which run it is and what it runs on.
+    expect(strip()).toContain(`${mine.id} · ${model}`);
+    expect(strip()).toContain(`${alsoMine.id} · ${model}`);
+    expect(strip()).not.toContain(theirs.id);
 
     // Each worker belongs to its owner's session and runs on the session's
     // subagent model, which while unset is the spawner's own.
-    const [worker] = workers;
-    expect(worker.sessionId).toBe(first.getId());
-    expect(worker.model).toBe(model);
-    expect(findSubagentByCall(worker.callId!, first.getId())).toBe(worker);
-    expect(findSubagentByCall(worker.callId!, second.getId())).toBeUndefined();
+    expect(mine.sessionId).toBe(first.getId());
+    expect(mine.model).toBe(model);
+    expect(findSubagentByCall(mine.callId!, first.getId())).toBe(mine);
+    expect(findSubagentByCall(mine.callId!, second.getId())).toBeUndefined();
+
+    // Escape is the turn's cancel and nothing more: the workers carry on.
+    stdin.write('\x1b');
+    await flush();
+    expect(workers.map(run => run.status)).toEqual(['working', 'working', 'working']);
+
+    // Stopping one leaves its line on the strip, saying how it ended, until
+    // the user clears it.
+    await first.cancelWorker(mine.id);
+    await flush();
+    expect(mine.status).toBe('cancelled');
+    expect(strip()).toContain(`${mine.id} · ${model}`);
+    expect(strip()).toContain('cancelled');
+    // Its report reaches the owner all the same, as a message from the run.
+    expect(output).toContain(`${mine.id} · worker`);
+    first.dismissWorker(mine.id);
+    await flush();
+    expect(strip()).not.toContain(mine.id);
+    expect(strip()).toContain(alsoMine.id);
 
     app.rerender(pane(second));
     await flush();
-    expect(output).toContain('1 active subagent');
-    expect(output).not.toContain('2 active subagents');
+    expect(strip()).toContain(`${theirs.id} · ${model}`);
+    expect(strip()).not.toContain(alsoMine.id);
+    // The strip stays up while the bar is busy asking something else.
     stdin.write('/login');
     await flush();
     stdin.write('\r');
     await flush();
     expect(output).toContain('ChatGPT');
-    expect(output).toContain('1 active subagent');
-
-    first.cancel();
-    await Promise.all(workers.filter(run => run.sessionId === first.getId())
-      .map(run => checkSubagent(run, true)));
-    await flush();
-    expect(first.getActiveSubagentCount()).toBe(0);
-    expect(output).toContain('1 active subagent');
+    expect(strip()).toContain(theirs.id);
 
     // The same call id in two sessions decorates only the row of the session
     // whose run it is.
     const call: ToolCallBlock = {
-      type: 'tool_call', id: worker.callId!, kind: 'other', title: 'sirus - SpawnAgent',
+      type: 'tool_call', id: mine.callId!, kind: 'other', title: 'sirus - SpawnAgent',
       status: 'completed', locations: [], content: [],
     };
     const toolRow = (session: Session) => stripAnsi(renderToString(
       <ChatMessage message={{ seq: 0, role: 'assistant', content: [call] }} sessionId={session.getId()} />,
       { columns: 140 },
     ));
-    expect(toolRow(first)).toContain('cancelled');
+    expect(toolRow(first)).toContain(`${mine.id} · cancelled`);
     expect(toolRow(second)).not.toContain('cancelled');
 
     release();
-    await Promise.all(workers.map(run => checkSubagent(run, true)));
+    await Promise.all(workers.map(subagentDone));
     await flush();
-    expect(output).not.toContain('active subagent');
+    expect(strip()).toContain(`${theirs.id} · ${model}`);
+    expect(strip()).toContain('done');
     app.rerender(pane(empty));
     await flush();
-    expect(output).not.toContain('active subagent');
+    expect(output).not.toContain('sub-');
   } finally {
     release();
     first.cancel();
     second.cancel();
-    await Promise.all(workers.map(run => checkSubagent(run, true)));
+    await Promise.all(workers.map(subagentDone));
     app.unmount();
     await app.waitUntilExit();
     app.cleanup();

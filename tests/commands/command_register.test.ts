@@ -9,19 +9,22 @@ import {
   matchCommands,
   parseCommandLine,
   type CommandMenuItem,
+  type CommandSession,
 } from '../../src/commands/registry';
 import { loginMenuItems } from '../../src/commands/authentication/behavior';
 import { Session } from '../../src/agent_runtime/session';
 import { providerFor } from '../../src/agent_runtime/providers';
 import { resolveModelReference } from '../../src/commands/agents/behavior';
+import type { SubagentRun } from '../../src/agent_runtime/tools/subagents';
 import type { Feedback } from '../../src/commands/feedback';
-import { loadSirusModelPreference, saveSirusModelPreference } from '../../src/persistence';
+import { loadJevApiKey, loadSirusModelPreference, saveSirusModelPreference } from '../../src/persistence';
+import { shouldRequestJevKey } from '../../src/agent_runtime/router';
 import { bindScriptedRuntime, textTurn, unbindRuntime } from '../support/runtime';
 
 function runCommand(
   command: string,
   args: string[],
-  session: Session = new Session(),
+  session: CommandSession = new Session(),
 ) {
   return executeCommand(command, args, {
     session,
@@ -513,5 +516,225 @@ describe('subagent model command', () => {
     expect(session.getSubagentModel()).toBeNull();
     expect(() => runCommand('model', ['subagent', 'nope'], session)).toThrow(/unknown model/i);
     expect(() => runCommand('model', ['subagent', 'haiku', 'extra'], session)).toThrow('Usage: /model subagent');
+  });
+});
+
+describe('/agents', () => {
+  // A worker record with only the fields each case is about spelled out, and
+  // a conversation the panel can render.
+  function worker(run: Partial<SubagentRun> & { id: string }): SubagentRun {
+    return {
+      callId: null, sessionId: 'session', owner: 'sirus', worker: null,
+      model: 'gpt-5.6-terra', thinkingLevel: 'high', context: 'fresh',
+      prompt: 'Rewrite the loader', directory: '/project', branch: null,
+      status: 'working', startedAt: Date.now() - 130_000, finishedAt: null,
+      transcript: [], content: [], finalMessage: null, changes: [],
+      error: null, reported: false, dismissed: false,
+      ...run,
+    };
+  }
+
+  // The session as `/agents` sees it, recording what it was asked to do.
+  function workerSession(workers: readonly SubagentRun[]) {
+    const asked: string[] = [];
+    const session = {
+      getWorkers: () => [...workers],
+      cancelWorker: async (id: string) => { asked.push(`cancel ${id}`); },
+      messageWorker: async (id: string, text: string) => { asked.push(`message ${id}: ${text}`); },
+      dismissWorker: (id: string) => { asked.push(`dismiss ${id}`); },
+    } as unknown as CommandSession;
+    return { session, asked };
+  }
+
+  function items(args: readonly string[], session: CommandSession): CommandMenuItem[] {
+    return commandMenu('agents', args, session)?.filter(
+      (entry): entry is CommandMenuItem => entry.type === 'item',
+    ) ?? [];
+  }
+
+  test('lists the session workers, running ones first', () => {
+    const { session } = workerSession([
+      worker({ id: 'sub-done', status: 'done', startedAt: 0, finishedAt: 45_000 }),
+      worker({ id: 'sub-gone', status: 'done', dismissed: true }),
+      worker({ id: 'sub-live' }),
+    ]);
+    expect(items([], session).map(item => item.label)).toEqual([
+      'sub-live · gpt-5.6-terra · working 2m10s',
+      'sub-done · gpt-5.6-terra · done 45s',
+    ]);
+    expect(items([], session).map(item => item.description)).toEqual([
+      'Rewrite the loader', 'Rewrite the loader',
+    ]);
+    expect(items([], session).map(item => item.command)).toEqual(['/agents sub-live', '/agents sub-done']);
+    // Run rather than opened as a menu, it says the same as one panel of text.
+    expect((runCommand('agents', [], session) as Feedback).text)
+      .toContain('sub-live · gpt-5.6-terra · working 2m10s · Rewrite the loader');
+  });
+
+  test('says so plainly when the session has no workers', () => {
+    const { session } = workerSession([]);
+    expect(commandMenu('agents', [], session)).toBeNull();
+    expect(runCommand('agents', [], session)).toEqual({ kind: 'info', text: 'No workers in this session.' });
+  });
+
+  test('offers only what can be done to that worker', () => {
+    const { session } = workerSession([
+      worker({ id: 'sub-live' }),
+      worker({ id: 'sub-done', status: 'done' }),
+    ]);
+    expect(items(['sub-live'], session).map(item => item.command))
+      .toEqual(['/agents show sub-live', '/agents message sub-live', '/agents cancel sub-live']);
+    expect(items(['sub-done'], session).map(item => item.command))
+      .toEqual(['/agents show sub-done', '/agents dismiss sub-done']);
+    // The message action asks for the text in the input bar, in the open.
+    const message = items(['sub-live'], session).find(item => item.key === 'message')!;
+    expect(message.input?.prompt).toMatch(/sub-live/);
+    expect(message.secret).toBeUndefined();
+    // An action already chosen runs instead of opening another menu.
+    expect(commandMenu('agents', ['show', 'sub-live'], session)).toBeNull();
+    expect(() => commandMenu('agents', ['sub-nope'], session)).toThrow(/no worker "sub-nope"/i);
+  });
+
+  test('shows a worker record and the conversation it has had', () => {
+    const { session } = workerSession([worker({
+      id: 'sub-live', branch: 'sirus/sub-live',
+      transcript: [
+        { seq: 0, role: 'user', content: [{ type: 'text', text: 'Rewrite the loader' }] },
+        {
+          seq: 1, role: 'assistant', participant: 'sub-live', content: [
+            { type: 'tool_call', id: 'one', kind: 'edit', title: 'src/loader.ts', status: 'completed', locations: [], content: [] },
+            { type: 'text', text: 'Halfway there.' },
+          ],
+        },
+      ],
+    })]);
+    const result = runCommand('agents', ['show', 'sub-live'], session) as Feedback;
+    expect(result).toMatchObject({ kind: 'info', panel: true, showIcon: false });
+    expect(result.text).toContain('sub-live · working · 2m10s');
+    expect(result.text).toContain('task: Rewrite the loader');
+    expect(result.text).toContain('model: gpt-5.6-terra · high');
+    expect(result.text).toContain('branch: sirus/sub-live');
+    expect(result.text).toContain('› sub-live');
+    expect(result.text).toContain('✓ edit src/loader.ts');
+    expect(result.text).toContain('Halfway there.');
+  });
+
+  test('says where a worker without a branch is working', () => {
+    const { session } = workerSession([worker({ id: 'sub-live' })]);
+    expect((runCommand('agents', ['show', 'sub-live'], session) as Feedback).text)
+      .toContain('branch: none · works in /project');
+  });
+
+  test('steers a working worker with the text the input bar collected', async () => {
+    const { session, asked } = workerSession([worker({ id: 'sub-live' })]);
+    const item = items(['sub-live'], session).find(entry => entry.input)!;
+    const { name, args } = parseCommandLine(item.command);
+    expect(name).toBe('agents');
+    expect(args).toEqual(['message', 'sub-live']);
+    expect(await runCommand(name, [...args, 'also check the tests'], session))
+      .toEqual({ kind: 'success', text: 'Sent to sub-live.' });
+    expect(asked).toEqual(['message sub-live: also check the tests']);
+    expect(() => runCommand('agents', ['message', 'sub-live'], session))
+      .toThrow('Usage: /agents message sub-live <message>');
+  });
+
+  test('refuses to steer a worker that has stopped', () => {
+    const { session, asked } = workerSession([worker({ id: 'sub-done', status: 'failed' })]);
+    expect(() => runCommand('agents', ['message', 'sub-done', 'carry on'], session))
+      .toThrow('sub-done is failed; only a working worker can be messaged.');
+    expect(asked).toEqual([]);
+  });
+
+  test('cancels a working worker and leaves a finished one alone', async () => {
+    const { session, asked } = workerSession([
+      worker({ id: 'sub-live' }),
+      worker({ id: 'sub-done', status: 'done' }),
+    ]);
+    expect(await runCommand('agents', ['cancel', 'sub-live'], session))
+      .toEqual({ kind: 'success', text: 'Cancelled sub-live.' });
+    expect(runCommand('agents', ['cancel', 'sub-done'], session))
+      .toEqual({ kind: 'info', text: 'sub-done is already done.' });
+    expect(asked).toEqual(['cancel sub-live']);
+  });
+
+  test('clears a finished worker from the strip, never a working one', () => {
+    const { session, asked } = workerSession([
+      worker({ id: 'sub-live' }),
+      worker({ id: 'sub-done', status: 'cancelled' }),
+    ]);
+    expect(runCommand('agents', ['dismiss', 'sub-done'], session))
+      .toEqual({ kind: 'success', text: 'Dismissed sub-done.' });
+    expect(() => runCommand('agents', ['dismiss', 'sub-nope'], session)).toThrow(/no worker/i);
+    expect(() => runCommand('agents', ['dismiss', 'sub-live'], session))
+      .toThrow('sub-live is still working. Cancel it first, or leave it to finish.');
+    expect(asked).toEqual(['dismiss sub-done']);
+  });
+
+  test('is offered in the command menu and in /help', () => {
+    expect(matchCommands('/ag').map(command => command.name)).toEqual(['agents']);
+    expect(matchCommands('/agents')[0].args).toBe('[show|message|cancel|dismiss] [id]');
+    expect((runCommand('help', []) as Feedback).text)
+      .toContain('/agents [show|message|cancel|dismiss] [id]');
+  });
+});
+
+describe('jev command', () => {
+  let directory: string;
+  let previousDirectory: string | undefined;
+  let previousKey: string | undefined;
+
+  beforeEach(() => {
+    directory = mkdtempSync(join(tmpdir(), 'sirus-jev-'));
+    previousDirectory = process.env.SIRUS_DATA_DIR;
+    previousKey = process.env.JEV_API;
+    process.env.SIRUS_DATA_DIR = directory;
+    delete process.env.JEV_API;
+  });
+
+  afterEach(() => {
+    if (previousDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
+    else process.env.SIRUS_DATA_DIR = previousDirectory;
+    if (previousKey === undefined) delete process.env.JEV_API;
+    else process.env.JEV_API = previousKey;
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  test('sets, shows and removes the key, settling the one-time request', () => {
+    expect(shouldRequestJevKey()).toBe(true);
+    expect(runCommand('jev', [])).toEqual({ kind: 'info', text: expect.stringMatching(/Jev is off/) });
+    const menu = commandMenu('jev', [], new Session())!;
+    expect(menu[0]).toMatchObject({ type: 'heading', label: expect.stringMatching(/Jev is off/) });
+    expect(menu.filter(item => item.type === 'item').map(item => item.command)).toEqual(['/jev key']);
+    expect(menu.find(item => item.type === 'item' && item.secret)).toMatchObject({ secret: { prompt: 'TypeSafe AI API key' } });
+
+    expect(runCommand('jev', ['key', 'ts-live-key-abcdef'])).toEqual({
+      kind: 'success',
+      text: expect.stringMatching(/Saved TypeSafe AI key .*cdef/),
+    });
+    expect(loadJevApiKey()).toBe('ts-live-key-abcdef');
+    expect(shouldRequestJevKey()).toBe(false);
+    expect(runCommand('jev', [])).toEqual({ kind: 'info', text: expect.stringMatching(/Jev is on, with the key/) });
+    expect(commandMenu('jev', [], new Session())!.filter(item => item.type === 'item').map(item => item.command))
+      .toEqual(['/jev key', '/jev off']);
+
+    expect(runCommand('jev', ['off'])).toEqual({ kind: 'success', text: expect.stringMatching(/Jev is off/) });
+    expect(loadJevApiKey()).toBeNull();
+    // Declined or removed, the request is not repeated on the next launch.
+    expect(shouldRequestJevKey()).toBe(false);
+    expect(() => runCommand('jev', ['nonsense'])).toThrow('Usage: /jev [key <key>|off]');
+  });
+
+  test('a key in the environment wins and cannot be removed here', () => {
+    process.env.JEV_API = 'ts-env-key-123456';
+    expect(shouldRequestJevKey()).toBe(false);
+    expect(runCommand('jev', [])).toEqual({ kind: 'info', text: expect.stringMatching(/JEV_API in the environment/) });
+    expect(commandMenu('jev', [], new Session())!.filter(item => item.type === 'item').map(item => item.command))
+      .toEqual(['/jev key']);
+    expect(() => runCommand('jev', ['off'])).toThrow(/environment/);
+  });
+
+  test('help lists /jev', () => {
+    const result = runCommand('help', []) as Feedback;
+    expect(result.text).toContain('/jev');
   });
 });

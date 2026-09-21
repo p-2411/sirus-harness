@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync
 import os from 'os';
 import path from 'path';
 import { Session } from '../../src/agent_runtime/session';
+import type { WorkerRecord } from '../../src/agent_runtime/tools/subagents';
 import {
   loadApiKeys,
   loadSessionSnapshots,
@@ -16,6 +17,10 @@ import {
   saveSubscriptionPreferences,
   loadNotificationPreference,
   saveNotificationPreference,
+  loadJevApiKey,
+  loadJevKeyRequested,
+  saveJevApiKey,
+  saveJevKeyRequested,
 } from '../../src/persistence';
 
 let directory: string;
@@ -97,6 +102,71 @@ describe('session persistence', () => {
     expect(restoredSessions[0].getThinkingLevel('reviewer')).toBe('xhigh');
     expect(restoredSessions[0].getInputContent()).toBe('Unfinished first message');
     expect(restoredSessions[1].getInputContent()).toBe('  Unfinished second message\nwith whitespace  ');
+  });
+
+  test('round-trips the session’s workers, transcripts included', async () => {
+    const worker: WorkerRecord = {
+      id: 'sub-1a2b3c4d',
+      callId: 'call-spawn',
+      owner: 'sirus',
+      model: 'claude-sonnet-5',
+      thinkingLevel: 'low',
+      context: 'owner',
+      prompt: 'Rewrite the parser',
+      directory: path.join(directory, 'worktrees', 'worker-session', 'sub-1a2b3c4d'),
+      branch: 'sirus/sub-1a2b3c4d',
+      status: 'done',
+      startedAt: 1_000,
+      finishedAt: 2_000,
+      transcript: [
+        { seq: 0, role: 'user', content: [{ type: 'text', text: 'Rewrite the parser' }] },
+        { seq: 1, role: 'assistant', participant: 'sub-1a2b3c4d', model: 'claude-sonnet-5', content: [
+          { type: 'tool_call', id: 'edit-1', title: 'parser.ts', kind: 'edit', status: 'completed', locations: [{ path: 'parser.ts' }], content: [] },
+          { type: 'text', text: 'Rewritten.' },
+        ] },
+      ],
+      finalMessage: 'Rewritten.',
+      changes: ['Edited parser.ts'],
+      error: null,
+      reported: true,
+      dismissed: false,
+    };
+    const session = new Session({
+      id: 'worker-session',
+      name: 'With workers',
+      directory,
+      model: 'gpt-5.6-luna',
+      messages: [{ role: 'user', to: ['sirus'], content: [{ type: 'text', text: 'Delegate it' }] }],
+      workers: [worker],
+    });
+    expect(session.toSnapshot().workers).toEqual([worker]);
+    expect(saveSessionSnapshots([session.toSnapshot()], session.getId(), directory)).toBe(true);
+    await session.dispose();
+
+    const [stored] = loadSessionSnapshots(directory).snapshots;
+    expect(stored.workers).toEqual([worker]);
+    const reopened = Session.fromSnapshot(stored);
+    try {
+      const [run] = reopened.getWorkers();
+      expect(run).toMatchObject({ id: worker.id, sessionId: 'worker-session', worker: null, branch: worker.branch });
+      // The response is the assistant entry's blocks, not a second copy.
+      expect(run.content).toBe(run.transcript[1].content);
+    } finally {
+      await reopened.dispose();
+    }
+  });
+
+  test('a session file written before workers existed loads without them', () => {
+    const session = new Session({
+      id: 'no-workers',
+      name: 'No workers',
+      directory,
+      model: 'gpt-5.6-luna',
+      messages: [{ role: 'user', to: ['sirus'], content: [{ type: 'text', text: 'Nothing delegated' }] }],
+    });
+    expect(session.toSnapshot().workers).toBeUndefined();
+    expect(saveSessionSnapshots([session.toSnapshot()], session.getId(), directory)).toBe(true);
+    expect(loadSessionSnapshots(directory).snapshots[0].workers).toBeUndefined();
   });
 
   test('restores older participant snapshots with an empty draft', () => {
@@ -272,6 +342,22 @@ describe('subscription preference persistence', () => {
     expect(loadSubscriptionPreferences(directory)).toEqual({ claude: true, gpt: false });
     expect(loadSirusModelPreference(directory)).toBe('gpt-5.6-sol');
     expect(loadNotificationPreference(directory)).toBe('off');
+  });
+
+  test('keeps the Jev key and the one-time request beside the other settings', () => {
+    expect(loadJevApiKey(directory)).toBeNull();
+    expect(loadJevKeyRequested(directory)).toBe(false);
+    expect(saveJevKeyRequested(directory)).toBe(true);
+    expect(loadJevKeyRequested(directory)).toBe(true);
+    expect(loadJevApiKey(directory)).toBeNull();
+    expect(saveJevApiKey('ts-live-key-1234', directory)).toBe(true);
+    saveNotificationPreference('always', directory);
+    expect(loadJevApiKey(directory)).toBe('ts-live-key-1234');
+    expect(loadJevKeyRequested(directory)).toBe(true);
+    expect(saveJevApiKey(null, directory)).toBe(true);
+    expect(loadJevApiKey(directory)).toBeNull();
+    expect(loadJevKeyRequested(directory)).toBe(true);
+    expect(loadNotificationPreference(directory)).toBe('always');
   });
 
   test('defaults to API keys and restores enabled providers', () => {

@@ -76,6 +76,18 @@ export interface PromptResult {
   stopReason: StopReason;
 }
 
+// What a forked runtime takes from the caller rather than inheriting from
+// the runtime it was forked from: it runs somewhere else, for someone else,
+// with its own callbacks and its own Sirus tool entry, which both adapters
+// do honour. The conversation so far is inherited, and so, in practice, is
+// the system prompt: Codex's is the process's instructions file, and Claude
+// ignores the one a fork is opened with and keeps what the forked transcript
+// was written under. `systemPrompt` is still what a fork would be given, so
+// it is sent; a worker that needs its own instructions today has to carry
+// them in its first prompt.
+export type ForkOptions = Pick<RuntimeOptions,
+  'directory' | 'model' | 'thinkingLevel' | 'systemPrompt' | 'permissionMode' | 'mcpServer' | 'onPermission' | 'onUpdate'>;
+
 export interface Runtime {
   readonly vendor: Vendor;
   readonly model: string;
@@ -95,7 +107,24 @@ export interface Runtime {
   // apply, in which case the caller rebuilds the runtime.
   setModel(model: string): Promise<boolean>;
   setThinkingLevel(level: ThinkingLevel): Promise<void>;
-  // Ends the process. Idempotent.
+  // `session/fork`: a second session on the same adapter process that
+  // starts from this one's conversation so far, prompted separately from
+  // then on. Works while this runtime is mid-prompt. Rejects when the vendor
+  // cannot fork, in which case the caller starts a fresh runtime instead.
+  // The fork shares this runtime's process: disposing this runtime loses
+  // the fork too, and its next prompt rejects like any lost runtime's.
+  // What comes back is untracked, so whoever keeps it passes it through
+  // `trackRuntime` the way `createRuntime` does for a runtime it started.
+  fork(options: ForkOptions): Promise<Runtime>;
+  // `_session/steering`: injects text into the prompt in flight, which the
+  // vendor folds into the running turn. Rejects when this runtime is running
+  // no prompt, when the vendor cannot steer, and when it takes the text some
+  // other way than into the running turn; the caller then reports that
+  // instead. Resolving means the text reached the turn, not that the turn
+  // acted on it.
+  steer(text: string): Promise<void>;
+  // Ends the process, or for a fork just its session, leaving the process up
+  // for the runtime it was forked from. Idempotent.
   dispose(): void;
 }
 

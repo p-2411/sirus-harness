@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import type { ImageBlock, Message, MessageBlock, ToolCallBlock } from '../../agent_runtime/types';
+import { saveJevKeyRequested } from '../../persistence';
 import { isAutoSendable, Session } from '../../agent_runtime/session';
 import { attachClipboardImage, describeImage, removeStoredImage } from '../../images';
 import { Box, Text, measureElement, renderToString, useApp, useBoxMetrics, useInput, useStdout, type DOMElement } from 'ink';
@@ -174,10 +175,14 @@ function CommandFeedbackPanel({ feedback, participantColors, sidebarWidth }: {
   );
 }
 
-export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEBAR_WIDTH }: {
+export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEBAR_WIDTH, askJevKey, onJevKeyAsked }: {
   currSession: Session;
   sidebarWidth?: number;
   onStartSession?: (session: Session) => void;
+  // The one-time request for a TypeSafe AI key: the app decides it is due,
+  // this bar asks, and the answer (a key or a skip) settles it for good.
+  askJevKey?: boolean;
+  onJevKeyAsked?: () => void;
 }) {
   // Subscribe to the session: any mutation (append, setModel) bumps its
   // version and re-renders, so model and messages are read fresh below.
@@ -303,7 +308,9 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     if (key.escape) {
       setInputMode({ type: 'text' });
       setFeedback(null);
-      // queued messages stay: the next one goes out once the turn has stopped
+      // The turn only: the session's workers keep going in the background and
+      // are stopped from /agents. Queued messages stay, and the next one goes
+      // out once the turn has stopped.
       currSession.cancel();
       commandAbort.current?.abort(new TurnCancelledError());
       return;
@@ -327,21 +334,24 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   });
 
   // A command with choices (like /login) turns the input bar into a
-  // picker; the chosen item runs as if the user had typed it. A secret is
-  // handed over as one final argument, so a key containing a space survives
-  // and is never echoed into the input.
+  // picker; the chosen item runs as if the user had typed it. An item that
+  // still needs a value asks for it in the bar and hands it over as one final
+  // argument, so a key or a message containing spaces survives whole and a
+  // secret is never echoed into the input.
   const openMenu = (items: readonly CommandMenuEntry[]) => {
     const close = () => setInputMode({ type: 'text' });
     const choose = (item: CommandMenuItem) => {
-      if (!item.secret) {
+      const asked = item.secret ?? item.input;
+      if (!asked) {
         close();
         send(item.command);
         return;
       }
       const { name, args } = parseCommandLine(item.command);
       setInputMode({
-        type: 'secret',
-        prompt: item.secret.prompt,
+        type: 'entry',
+        prompt: asked.prompt,
+        masked: item.secret !== undefined,
         onSubmit: value => {
           close();
           runCommand(name, [...args, value]);
@@ -453,6 +463,28 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     }
   }
 
+  // The first launch without a Jev key asks for one here, once. Escape
+  // declines: Jev stays off and /jev can add a key later.
+  useEffect(() => {
+    if (!askJevKey) return;
+    onJevKeyAsked?.();
+    const close = () => setInputMode({ type: 'text' });
+    setInputMode({
+      type: 'entry',
+      prompt: 'TypeSafe AI API key, so Jev can pick models per task (esc to skip)',
+      masked: true,
+      onSubmit: value => {
+        close();
+        runCommand('jev', ['key', value]);
+      },
+      onCancel: () => {
+        close();
+        saveJevKeyRequested();
+        setFeedback({ kind: 'info', text: 'Jev is off: models stay on their defaults. /jev adds a key later.' });
+      },
+    });
+  }, [askJevKey]);
+
   // Queued messages live on the session so they survive switching away and
   // back. Send one at a time as soon as that session is free again.
   useEffect(() => {
@@ -550,7 +582,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         disabled={isLoading}
         feedback={panelFeedback ? null : feedback}
         participants={participants}
-        activeSubagents={currSession.getActiveSubagentCount()}
+        workers={currSession.getWorkers()}
         directory={currSession.getDirectory()}
         mode={effectiveInputMode}
         permissionMode={currSession.getPermissionMode()}

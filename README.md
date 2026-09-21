@@ -20,7 +20,7 @@ Run `sirus` on its own to open the current directory. The npm package includes t
 Inside Sirus:
 
 1. Type `/login` and choose Claude or ChatGPT, then sign in with an existing subscription or enter an API key through the masked input. Repeat `/login` to connect more accounts—as many as you want.
-2. Type `/model` and select a model from the provider you connected.
+2. Optionally type `/model` and pick a model. Left alone, a new session asks Jev, TypeSafe AI's routing model, which of your connected vendors' latest models fits the task in your first prompt; see "A model picked for the task" below.
 3. Give Sirus a task:
 
 ```text
@@ -71,13 +71,25 @@ Then address that participant by name:
 
 Each participant keeps its own conversation. It reads the prompts you address to it, and whatever another participant says in a message that mentions it, attributed to the sender. A prompt that mentions nobody goes to `@sirus`. Set a participant's model with `/model @reviewer <model>` and reasoning depth with `/thinking @reviewer high`. Use `/model` to see the model names supported by your installation.
 
+### A model picked for the task
+
+With a TypeSafe AI key, a new session does not start on a fixed model. Sirus asks for the key once, on the first launch without one; `/jev` shows whether Jev is on and sets or removes the key later, and a `JEV_API` variable in the environment is used as it is. Without a key nothing is routed and every model stays on its default. With one, a new session does not start on a fixed model. Its first prompt goes to Jev, a fast decision model from TypeSafe AI, which chooses between the latest model of each vendor you have connected and that still has allowance: today `claude-fable-5-1` and `gpt-6-astra`. Jev sees the prompt, the names of files it mentions and the project's name, and the profile Sirus's catalog keeps of each model: what it is good at, its published benchmark results, what people report from using it, and what it costs, alongside how much of that vendor's allowance is left. The pick shows in the model label under the input, like any model.
+
+Jev also picks for subagents, unless `/model subagent` has pinned one. Each spawn asks it for the model and the reasoning depth that fit that task, choosing among every model the catalog offers for delegated work rather than only the latest ones, so routine work goes somewhere cheap and quick and the hard cases somewhere capable.
+
+Your own choice comes first: `/model <model>` before the first prompt pins the session to it and Jev is not asked. Anything short of a confident pick keeps the model in hand: no key, no answer in time, an error, or an answer Jev is unsure of leaves a new session on the saved `/model` default or `gpt-5.6-luna` as before, and a subagent on its owner's model and depth. With one usable vendor there is nothing to choose and the session takes that vendor's latest model. A vendor whose subscription allowance the sidebar shows at 0% is left out of the choice.
+
 ### Delegate work, follow the results
 
-For work that can be split into independent tasks, Sirus can spawn autonomous subagents and collect their findings. Each receives a focused assignment and returns a final report with a summary of its changes. You can follow their activity in the interface while the parent agent coordinates the work.
+For work that can be split into independent tasks, Sirus can spawn subagents that work in the background. Each receives a focused assignment, and the agent that spawned it carries on at once. When a subagent ends, its report arrives in the conversation as a message from the subagent, saying what it did, what it changed, and where its work is, and that report starts its owner's next turn. If the session is busy the report waits for the turn to finish, and goes ahead of whatever you queued behind it.
 
-Named participants are collaborators you can address and follow in the chat; subagents receive only their delegated task and report back to the agent that spawned them. Subagents work in the same project directory, so assignments should avoid overlapping edits.
+In a Git project each subagent works in a Git worktree of its own, on a branch named after the run and cut from your project's HEAD, so its edits meet neither yours nor another subagent's. Uncommitted changes and ignored files are not carried over. The report names the branch, and merging or inspecting it is yours or the spawning agent's to do. Worktrees live in Sirus's data directory and go when the session is deleted; the branches stay. In a project that is not a Git repository, subagents work in the project directory itself, so assignments should avoid overlapping edits.
 
-A subagent runs on the model of the participant that spawned it. Use `/model subagent <model>` to put every subagent in the session on one model, `/model subagent` to see which, and `/model subagent default` to go back to the spawning participant's own.
+Named participants are collaborators you can address and follow in the chat; subagents receive only their delegated task and report back to the agent that spawned them, though an agent can also start one from its own conversation so far when the task depends on what you have already established. While a subagent runs, its owner can ask it for its status, send it further instructions, or stop it. `Esc` cancels the session's turn and leaves the subagents working.
+
+You can follow them yourself. The strip above the status row gives each one a line: its id, its model, how long it has been running, its latest tool call, and its branch. Finished lines stay, dimmed, until you clear them. `/agents` lists the session's subagents and offers to show one's record, send it a message, cancel it, or dismiss its line. Runs are saved with the session: one still working when you quit comes back marked interrupted, with its record, and its report reaches its owner on your next prompt. Nothing restarts on its own.
+
+A subagent runs on the model and reasoning depth Jev picks for its task. Use `/model subagent <model>` to put every subagent in the session on one model instead, `/model subagent` to see which, and `/model subagent default` to hand the choice back.
 
 ### Explore with an undo button
 
@@ -90,6 +102,8 @@ Sirus captures a checkpoint before each turn. Use `/undo` for the last turn or `
 This restores the files while keeping the conversation, letting you discuss what happened and try another approach. Checkpoints live in a separate Git repository in Sirus's local data directory, leaving your project's Git history and staging area untouched.
 
 File restoration covers the checkpointed directory, including your own edits since the snapshot. It respects Git's tracked and ignored file rules; it does not undo external effects such as deployments or database changes.
+
+Restoring the chat waits for the session's subagents to finish, since it rebuilds the conversations they belong to. Restoring files waits only for a subagent working in the project directory itself; one in its own worktree is out of the way.
 
 ### Memory that survives a new chat
 
@@ -117,7 +131,7 @@ Attach an image with `Ctrl+V` or `/image /path/to/screenshot.png` to work from a
 
 ### Repository instructions
 
-Put project guidance in `SIRUS.md` or `AGENTS.md` in the session's working directory. Sirus automatically includes it for session participants, but not spawned subagents. Subagents receive project guidance only through their parent's task instructions. If both exist, `SIRUS.md` **replaces** `AGENTS.md`; they are not merged, even when `SIRUS.md` is empty or unreadable.
+Put project guidance in `SIRUS.md` or `AGENTS.md` in the session's working directory. Sirus automatically includes it for session participants, but not spawned subagents. Subagents receive project guidance only through their parent's task instructions, except when one is started from its owner's conversation: the vendor keeps the instructions that conversation was written under, so that subagent inherits them. If both exist, `SIRUS.md` **replaces** `AGENTS.md`; they are not merged, even when `SIRUS.md` is empty or unreadable.
 
 Guidance is read when a participant's runtime starts and stays fixed for as long as that runtime lives, so edits take effect the next time it is built, such as after `/clear`, a chat rewind, or `/memory on` or `off`. Only regular files are read, up to 32 KiB; symbolic links are rejected, including dangling links. Truncation and read errors are reported in the model's prompt. Repository guidance is subordinate to Sirus's operating contract and your request, cannot grant tool permissions, and is never included in Sirus's own internal prompts, such as the one that names a session.
 
@@ -157,6 +171,8 @@ Use `/usage` to see reported subscription allowance and how full each participan
 | `Esc` | Close a menu or cancel the current session's turn. |
 | `/rename <name>` | Give the current session a useful name. |
 | `/thinking` | Show or change reasoning depth. |
+| `/agents` | Watch, message, cancel, or clear the session's subagents. |
+| `/jev` | Set or remove the TypeSafe AI key Jev picks models with. |
 | `/undo` / `/rewind` | Choose what to restore from a checkpoint. |
 | `/notify` | Configure desktop notifications. |
 | `/update` | Install the latest release. |

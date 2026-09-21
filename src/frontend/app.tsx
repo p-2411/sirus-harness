@@ -13,6 +13,7 @@ import { useTextSelection } from "./interaction/useTextSelection";
 import { useTerminalFocus } from "./interaction/useTerminalFocus";
 import { useNotifications } from "./useNotifications";
 import { isKnownModel } from '../agent_runtime/providers/catalog';
+import { shouldRequestJevKey } from '../agent_runtime/router';
 import { checkSirusUpdate } from '../updater';
 
 export function nextSessionName(sessions: readonly Session[]): string {
@@ -41,7 +42,9 @@ function createDraft(
   preference: string | null = loadSirusModelPreference(),
 ): Session {
   const model = preference && isKnownModel(preference) ? preference : DEFAULT_MODEL;
-  return new Session({ name: nextSessionName(sessions), directory, model, autoNamePending: true });
+  // The draft starts on the fallback; its first prompt asks Jev for better,
+  // unless the user picks a model first.
+  return new Session({ name: nextSessionName(sessions), directory, model, autoNamePending: true, routePending: true });
 }
 
 export function startSession(
@@ -74,6 +77,9 @@ export default function App({ launchDirectory = process.cwd() }: { launchDirecto
   const [terminalHeight, setTerminalHeight] = useState(() => stdout.rows ?? 24);
   const [updateAvailable, setUpdateAvailable] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  // Asked once per install: on the first launch without a Jev key, and never
+  // again once the user has pasted one or declined.
+  const [jevKeyPending, setJevKeyPending] = useState(() => shouldRequestJevKey());
   const sidebarWidth = sidebarCollapsed ? COLLAPSED_SIDEBAR_WIDTH : SIDEBAR_WIDTH;
   // tracked so width-only resizes also re-render (the header rule spans the width)
   const [terminalWidth, setTerminalWidth] = useState(() => stdout.columns ?? 80);
@@ -192,6 +198,8 @@ export default function App({ launchDirectory = process.cwd() }: { launchDirecto
         currSession={activeSession}
         sidebarWidth={sidebarWidth}
         onStartSession={selectedSession === null ? activateSession : undefined}
+        askJevKey={jevKeyPending}
+        onJevKeyAsked={() => setJevKeyPending(false)}
       />
     </Box>
 	);

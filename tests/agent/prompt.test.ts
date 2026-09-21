@@ -3,7 +3,7 @@ import { spawnSync } from 'child_process';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { getSystemPrompt, systemPrompt, systemPromptFor } from '../../src/agent_runtime/prompt';
+import { FORKED_WORKER_HANDOVER, getSystemPrompt, systemPrompt, systemPromptFor } from '../../src/agent_runtime/prompt';
 import { saveMemoryAccessPreference } from '../../src/persistence';
 
 describe('repository instructions', () => {
@@ -192,6 +192,40 @@ describe('system prompt', () => {
     expect(getSystemPrompt('/projects/owned-session')).not.toContain(`Working directory: ${JSON.stringify(process.cwd())}`);
   });
 
+  test('tells the owner a subagent is a background task that reports back on its own', () => {
+    const owner = getSystemPrompt('/projects/delegation', 'sirus');
+    expect(owner).toContain('as soon as the subagent is on its way');
+    expect(owner).toContain('reaches you as a message from @<id> and starts your next turn');
+    expect(owner).toContain('branch sirus/<id> in its own worktree');
+    expect(owner).toContain('Merge it yourself');
+    expect(owner).toContain('MessageAgent with an id and a message');
+    expect(owner).toContain('context "owner"');
+    // Nothing tells it to wait, poll or read a stream file any more.
+    expect(owner).not.toContain('streamFile');
+    expect(owner).not.toContain('wait true');
+  });
+
+  test('tells the worker it may be steered and that its changes land on a branch', () => {
+    const worker = getSystemPrompt('/projects/delegation', 'sirus', true);
+    expect(worker).toContain('may send further instructions while you work');
+    expect(worker).toContain('worktree of the project on a branch of your own');
+    expect(worker).toContain('final message addressed to the agent that spawned you');
+  });
+
+  test('the forked handover says the same thing, since a fork keeps the owner’s system prompt', () => {
+    expect(FORKED_WORKER_HANDOVER).toStartWith('You are now a Sirus subagent, forked from the conversation above');
+    for (const obligation of [
+      'never ask one',
+      'may send further instructions while you work',
+      'cannot spawn or contact other agents',
+      'worktree of the project on a branch of your own',
+      'final message addressed to the agent that spawned you',
+    ]) {
+      expect(FORKED_WORKER_HANDOVER).toContain(obligation);
+      expect(getSystemPrompt('/projects/delegation', 'sirus', true)).toContain(obligation);
+    }
+  });
+
   test('gives named participants their own identity in the shared session', () => {
     const prompt = getSystemPrompt('/projects/owned-session', 'reviewer');
     expect(prompt).toContain('You are @reviewer');
@@ -203,7 +237,7 @@ describe('system prompt', () => {
   });
 
   test('describes the vendor tools generically and names only the Sirus tools', () => {
-    for (const tool of ['SpawnAgent', 'CheckAgent', 'CancelAgent', 'ListAgents']) {
+    for (const tool of ['SpawnAgent', 'CheckAgent', 'MessageAgent', 'CancelAgent', 'ListAgents']) {
       expect(systemPrompt).toContain(tool);
     }
     for (const retiredTool of ['ReadFile', 'WriteFile', 'EditFile', 'RunShell', 'SearchFiles', 'FetchURL', 'TodoWrite', 'apply_patch']) {

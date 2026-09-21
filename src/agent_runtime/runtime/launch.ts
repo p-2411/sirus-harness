@@ -5,12 +5,26 @@ import path from 'path';
 import type { McpServer } from '@agentclientprotocol/sdk';
 import { dataDirectory } from '../../dataDirectory';
 import type { PermissionMode } from '../permissions/policy';
-import type { Vendor } from '../providers/catalog';
+import { VENDOR_INFO, type Vendor } from '../providers/catalog';
 import type { RuntimeOptions } from './runtime';
 
 // A vendor is a launch spec: the adapter to run, the environment its process
 // gets, and what its `session/new` carries. Everything the runtime does after
 // the launch is the same for every vendor.
+
+// Who a session on this process is opened for: the runtime's own participant
+// when it is the root, the worker's when it is a fork.
+export interface SessionSpec {
+  systemPrompt: string;
+  mcpServer: RuntimeOptions['mcpServer'];
+}
+
+// What that session's `session/new`, `session/fork` or `session/resume`
+// carries beyond the directory.
+export interface SessionParams {
+  meta?: Record<string, unknown>;
+  mcpServers: McpServer[];
+}
 
 export interface Launch {
   command: string;
@@ -19,9 +33,23 @@ export interface Launch {
   // The mode the session starts in. A bare runtime answers one question and
   // starts read-only whatever the session's mode is.
   mode: PermissionMode;
-  // The vendor's `session/new` extras, when it takes any there.
-  meta?: Record<string, unknown>;
-  mcpServers: McpServer[];
+  // Every session opened on this process goes through here — the first one
+  // and every fork — so the vendor's extras are written once and each
+  // session carries the participant it was opened for. Claude takes a system
+  // prompt here and Codex does not, its instructions file being the whole
+  // process's; on a fork only the MCP entry actually lands, since Claude
+  // keeps the prompt the forked transcript was written under.
+  session(spec: SessionSpec): SessionParams;
+  // claude-agent-acp's `session/fork` only writes the forked transcript: it
+  // looks the session being forked up under the directory the call names, so
+  // that must be the parent's, and the fork is not a session in the adapter
+  // until a `session/resume` opens it in the worker's directory. codex-acp
+  // creates the forked session outright, in the directory the call names, and
+  // answers with it already live.
+  forkNeedsResume: boolean;
+  // An `authenticate` to send after `initialize`, when the credential in the
+  // environment is one the harness must be logged in with rather than read.
+  authenticate?: { methodId: string };
   // Removes what the launch wrote to disk. Idempotent.
   cleanup(): void;
 }
@@ -36,8 +64,8 @@ function adapterScript(packageName: string): string {
   return path.join(path.dirname(manifestPath), Object.values(manifest.bin)[0]!);
 }
 
-function mcpServersFor(options: RuntimeOptions): McpServer[] {
-  return options.mcpServer ? [{ type: 'http', ...options.mcpServer }] : [];
+function mcpServersFor(spec: SessionSpec): McpServer[] {
+  return spec.mcpServer ? [{ type: 'http', ...spec.mcpServer }] : [];
 }
 
 // Claude Code's built-in tools this session may run. Task, Agent,
@@ -53,18 +81,21 @@ function claudeLaunch(options: RuntimeOptions, mode: PermissionMode): Launch {
     // credential and CLAUDE_CONFIG_DIR reach Claude Code as they are.
     env: { ...options.env },
     mode,
-    meta: {
-      // A string replaces the Claude Code preset, as Sirus's prompt always has.
-      systemPrompt: options.systemPrompt,
-      claudeCode: {
-        options: {
-          tools: options.bare ? [] : CLAUDE_TOOLS,
-          // Keeps CLAUDE.md and the user's settings files out of the session.
-          settingSources: [],
+    session: spec => ({
+      meta: {
+        // A string replaces the Claude Code preset, as Sirus's prompt always has.
+        systemPrompt: spec.systemPrompt,
+        claudeCode: {
+          options: {
+            tools: options.bare ? [] : CLAUDE_TOOLS,
+            // Keeps CLAUDE.md and the user's settings files out of the session.
+            settingSources: [],
+          },
         },
       },
-    },
-    mcpServers: mcpServersFor(options),
+      mcpServers: mcpServersFor(spec),
+    }),
+    forkNeedsResume: true,
     cleanup() {},
   };
 }
@@ -126,7 +157,14 @@ function codexLaunch(options: RuntimeOptions, mode: PermissionMode): Launch {
       ...(codex ? { CODEX_PATH: codex } : {}),
     },
     mode,
-    mcpServers: mcpServersFor(options),
+    // The instructions file is the whole process's, so a forked session
+    // inherits the owner's system prompt and takes only its own MCP entry.
+    session: spec => ({ mcpServers: mcpServersFor(spec) }),
+    forkNeedsResume: false,
+    // An API key in the environment is an API-key source (a subscription's
+    // environment scrubs it). Codex only honours a key it was logged in
+    // with, in the home the source's environment points it at.
+    ...(options.env[VENDOR_INFO.gpt.credentialEnv] ? { authenticate: { methodId: 'api-key' } } : {}),
     cleanup() {
       rmSync(directory, { recursive: true, force: true });
     },

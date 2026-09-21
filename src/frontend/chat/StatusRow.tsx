@@ -11,7 +11,6 @@ export interface StatusRowProps {
   model?: string;
   thinkingLevel?: string;
   contextUsage?: ContextUsage | null;
-  activeSubagents?: number;
 }
 
 // The context gauge: how much of the model's window the last response used.
@@ -29,8 +28,8 @@ function ContextGauge({ usage }: { usage: ContextUsage }) {
 }
 
 // The line under the input box: the session's permission mode, qualified when
-// the vendor could not honour it, then how many spawned subagents are still
-// at work; the context gauge and the session's model stay on the far right.
+// the vendor could not honour it; the context gauge and the session's model
+// stay on the far right. The workers have their own strip above this row.
 // It keeps its height when there is nothing to say so the layout stays put.
 export function SubagentStatusRow({
   permissionMode,
@@ -38,7 +37,6 @@ export function SubagentStatusRow({
   model,
   thinkingLevel,
   contextUsage,
-  activeSubagents: active = 0,
 }: StatusRowProps) {
   return (
     <Box paddingX={3} height={1} flexShrink={0} justifyContent="space-between">
@@ -49,9 +47,6 @@ export function SubagentStatusRow({
             {modeNotice && <Text color={theme.textSubtle} dimColor> · {modeNotice}</Text>}
             <Text color={theme.textSubtle}> · shift+tab</Text>
           </Text>
-        )}
-        {active > 0 && (
-          <Text color={theme.textMuted}>{permissionMode ? ' · ' : ''}{active} active subagent{active === 1 ? '' : 's'}</Text>
         )}
       </Box>
       <Box>

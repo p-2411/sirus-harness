@@ -148,9 +148,14 @@ function serverFor(binding: ToolSessionBinding, requester: string): Server {
     tools: visibleTools(toolRegistry, audience, binding.memoryEnabled).map(tool => ({
       name: tool.name,
       description: tool.description,
-      // The argument schemas are JSON Schema as written; every argument is
-      // declared required, as every provider declared them before.
-      inputSchema: { type: 'object', properties: tool.args, required: Object.keys(tool.args) },
+      // The argument schemas are JSON Schema as written. An argument is
+      // required unless it declares a default, which is the one way a tool
+      // says the caller may leave it out.
+      inputSchema: {
+        type: 'object',
+        properties: tool.args,
+        required: Object.keys(tool.args).filter(name => tool.args[name].default === undefined),
+      },
     })),
   }));
   mcp.setRequestHandler(CallToolRequestSchema, async ({ params }, extra) => {

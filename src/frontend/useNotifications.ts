@@ -67,32 +67,42 @@ export function subscribeApprovalNotifications(getSessions: () => readonly Sessi
   });
 }
 
-// Watches every session, the approval queue, and the subagent runs, and
-// raises a desktop notification when something finishes or needs the user.
-// Whether a notification actually shows is the notification module's call.
+// A worker finishes in the background, so nothing on screen is waiting for
+// it: say so, and where its report landed. Runs that are already over when
+// the subscription starts — the interrupted records a restart brings back —
+// are recorded as seen, so reopening the app never announces last session's
+// work. A worker the user cancelled needs no announcement either.
+export function subscribeWorkerNotifications(
+  getSessions: () => readonly Session[],
+  send = notify,
+): () => void {
+  const statuses = new Map<string, SubagentStatus>();
+  for (const run of listAllSubagents()) statuses.set(run.id, run.status);
+  return subscribeSubagents(() => {
+    for (const run of listAllSubagents()) {
+      const previous = statuses.get(run.id);
+      statuses.set(run.id, run.status);
+      if (previous !== 'working' || run.status === 'working' || run.status === 'cancelled') continue;
+      // While its owner is still working the owner's own finish will say so.
+      const session = getSessions().find(candidate => candidate.getId() === run.sessionId);
+      if (session?.getStatus() === 'working') continue;
+      const closing = firstLine(run.finalMessage ?? run.error ?? '');
+      send(
+        `Sirus · ${session?.getName() ?? 'worker'}`,
+        `Worker ${run.id} ${run.status}; its report went to @${run.owner}${closing ? `: ${closing}` : '.'}`,
+      );
+    }
+  });
+}
+
+// Watches every session, the approval queue, and the workers, and raises a
+// desktop notification when something finishes or needs the user. Whether a
+// notification actually shows is the notification module's call.
 export function useNotifications(sessions: readonly Session[]) {
   const latestSessions = useRef(sessions);
   latestSessions.current = sessions;
 
   useEffect(() => subscribeSessionNotifications(sessions), [sessions]);
   useEffect(() => subscribeApprovalNotifications(() => latestSessions.current), []);
-
-  useEffect(() => {
-    const statuses = new Map<string, SubagentStatus>();
-    for (const run of listAllSubagents()) statuses.set(run.id, run.status);
-    return subscribeSubagents(() => {
-      for (const run of listAllSubagents()) {
-        const previous = statuses.get(run.id);
-        statuses.set(run.id, run.status);
-        if (previous !== 'working' || run.status === 'working' || run.status === 'cancelled') continue;
-        // While its owner is still working the owner's own finish will say so.
-        const session = latestSessions.current.find(candidate => candidate.getId() === run.sessionId);
-        if (session?.getStatus() === 'working') continue;
-        notify(
-          `Sirus · ${session?.getName() ?? 'subagent'}`,
-          `Subagent ${run.id} ${run.status}: ${firstLine(run.finalMessage ?? run.error ?? '')}`,
-        );
-      }
-    });
-  }, []);
+  useEffect(() => subscribeWorkerNotifications(() => latestSessions.current), []);
 }

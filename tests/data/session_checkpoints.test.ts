@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { execFileSync } from 'child_process';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { Session, type Draft } from '../../src/agent_runtime/session';
 import type { RuntimeOptions } from '../../src/agent_runtime/runtime/runtime';
-import type { SubagentRun } from '../../src/agent_runtime/tools/subagents';
-import { checkSubagent } from '../../src/agent_runtime/tools/subagents/run';
+import { subagentDone } from '../../src/agent_runtime/tools/subagents/run';
 import { enableCheckpoints } from '../../src/checkpoints';
 import { TurnCancelledError } from '../../src/abort';
 import { bindScriptedRuntime, unbindRuntime, type ScriptedBinding } from '../support/runtime';
@@ -17,6 +17,18 @@ let project: string;
 let session: Session;
 const prompt: Draft = { role: 'user', content: [{ type: 'text', text: 'Change the file' }] };
 const isWorker = (options: RuntimeOptions) => options.systemPrompt.includes('You are a Sirus subagent');
+
+const git = (directory: string, args: readonly string[]) =>
+  execFileSync('git', ['-C', directory, ...args], { encoding: 'utf8' });
+
+// A worker that ends wakes its owner, and nobody awaits that turn.
+async function until(condition: () => boolean, what: string): Promise<void> {
+  for (let attempt = 0; attempt < 400; attempt++) {
+    if (condition()) return;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  throw new Error(`Timed out waiting for ${what}`);
+}
 
 beforeEach(() => {
   root = mkdtempSync(path.join(os.tmpdir(), 'sirus-session-checkpoints-'));
@@ -230,7 +242,7 @@ describe('session checkpoint integration', () => {
   });
 
   test.each(['same session', 'another session'])(
-    'blocks file rewind while a detached worker from %s is still running', async ownerScope => {
+    'blocks file rewind while an in-place worker from %s is still running', async ownerScope => {
       writeResponse();
       await session.sendMessage(prompt);
       const [checkpoint] = session.getCheckpoints();
@@ -238,16 +250,22 @@ describe('session checkpoint integration', () => {
         ? session : new Session({ id: 'detached-other', name: 'Other session', directory: project, model });
       let release!: () => void;
       const gate = new Promise<void>(resolve => { release = resolve; });
-      let worker!: SubagentRun;
+      let spawned = false;
       bindScriptedRuntime(model, async (_input, emit, options) => {
         if (isWorker(options)) await gate;
-        else worker = owner.subagentHostFor('sirus')!.spawn('Keep working', { callId: 'spawn' }) as SubagentRun;
+        else if (!spawned) {
+          spawned = true;
+          await owner.subagentHostFor('sirus')!.spawn('Keep working', 'fresh', { callId: 'spawn' });
+        }
         emit({ type: 'text', text: 'Done' });
       });
+      const [worker] = await (async () => { await owner.sendMessage(prompt); return owner.getWorkers(); })();
       try {
-        await owner.sendMessage(prompt);
         expect(owner.getStatus()).toBe('idle');
         expect(worker.status).toBe('working');
+        // A project that is not a git repository has no worktree to give it,
+        // so it works in the directory everything else is working in.
+        expect(worker.branch).toBeNull();
         expect(worker.directory).toBe(project);
         await expect(session.rewind(checkpoint.id, { files: true, chat: false }))
           .rejects.toThrow('Subagents are working in this directory');
@@ -259,7 +277,8 @@ describe('session checkpoint integration', () => {
         expect(worker.status).toBe('working');
       } finally {
         release();
-        if (worker) await checkSubagent(worker, true);
+        await subagentDone(worker);
+        await until(() => owner.getStatus() !== 'working', 'the report turn to finish');
       }
       await session.rewind(checkpoint.id, { files: true, chat: true });
       expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('user draft');
@@ -267,7 +286,7 @@ describe('session checkpoint integration', () => {
     },
   );
 
-  test('allows rewind while another session has a detached worker in a different directory', async () => {
+  test('allows rewind while another session has a worker in a different directory', async () => {
     writeResponse();
     await session.sendMessage(prompt);
     const [checkpoint] = session.getCheckpoints();
@@ -276,14 +295,18 @@ describe('session checkpoint integration', () => {
     const other = new Session({ id: 'detached-unrelated', name: 'Other project', directory: otherProject, model });
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
-    let worker!: SubagentRun;
+    let spawned = false;
     bindScriptedRuntime(model, async (_input, emit, options) => {
       if (isWorker(options)) await gate;
-      else worker = other.subagentHostFor('sirus')!.spawn('Keep working', { callId: 'spawn' }) as SubagentRun;
+      else if (!spawned) {
+        spawned = true;
+        await other.subagentHostFor('sirus')!.spawn('Keep working', 'fresh', { callId: 'spawn' });
+      }
       emit({ type: 'text', text: 'Done' });
     });
     try {
       await other.sendMessage(prompt);
+      const [worker] = other.getWorkers();
       expect(other.getStatus()).toBe('idle');
       await session.rewind(checkpoint.id, { files: true, chat: true });
       expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('user draft');
@@ -291,7 +314,63 @@ describe('session checkpoint integration', () => {
       expect(worker.status).toBe('working');
     } finally {
       release();
-      if (worker) await checkSubagent(worker, true);
+      await other.dispose();
     }
+  });
+
+  test('a worker in a git project gets its own worktree, which goes when the session does', async () => {
+    const repository = path.join(root, 'repository');
+    mkdirSync(repository);
+    git(repository, ['init', '--quiet', '-b', 'main']);
+    git(repository, ['config', 'user.email', 'worker@example.com']);
+    git(repository, ['config', 'user.name', 'Worker Test']);
+    writeFileSync(path.join(repository, 'file.txt'), 'committed');
+    git(repository, ['add', 'file.txt']);
+    git(repository, ['commit', '--quiet', '-m', 'first']);
+
+    const owner = new Session({ id: 'worktree-session', name: 'Worktree', directory: repository, model });
+    owner.setPermissionMode('bypass');
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let spawned = false;
+    bindScriptedRuntime(model, async (_input, emit, options) => {
+      if (isWorker(options)) {
+        await gate;
+        return;
+      }
+      if (!spawned) {
+        spawned = true;
+        await owner.subagentHostFor('sirus')!.spawn('Work on your own branch', 'fresh', { callId: 'spawn' });
+      }
+      writeFileSync(path.join(options.directory, 'file.txt'), 'agent edit');
+      emit({ type: 'text', text: 'Done' });
+    });
+    let worktree = '';
+    let branch = '';
+    try {
+      await owner.sendMessage(prompt);
+      const [worker] = owner.getWorkers();
+      worktree = worker.directory;
+      branch = worker.branch!;
+      expect(branch).toBe(`sirus/${worker.id}`);
+      expect(worktree).toBe(path.join(root, 'state', 'worktrees', 'worktree-session', worker.id));
+      expect(readFileSync(path.join(worktree, 'file.txt'), 'utf8')).toBe('committed');
+      expect(git(repository, ['branch', '--list', branch])).toContain(branch);
+
+      // Its work is not in the project, so nothing it does blocks a rewind
+      // of the files there.
+      const [checkpoint] = owner.getCheckpoints();
+      expect(readFileSync(path.join(repository, 'file.txt'), 'utf8')).toBe('agent edit');
+      await owner.rewind(checkpoint.id, { files: true, chat: false });
+      expect(readFileSync(path.join(repository, 'file.txt'), 'utf8')).toBe('committed');
+      expect(worker.status).toBe('working');
+    } finally {
+      release();
+      await owner.dispose();
+    }
+    // The worktree goes with the session; the branch is left to be merged.
+    expect(existsSync(worktree)).toBe(false);
+    expect(git(repository, ['branch', '--list', branch])).toContain(branch);
+    expect(git(repository, ['worktree', 'list'])).not.toContain(worktree);
   });
 });

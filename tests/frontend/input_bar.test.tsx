@@ -5,8 +5,9 @@ import { useState, useSyncExternalStore } from 'react';
 import stripAnsi from 'strip-ansi';
 import { InputBar } from '../../src/frontend/chat/InputBar';
 import { ApprovalPrompt, approvalChoices } from '../../src/frontend/chat/ApprovalPrompt';
-import { InputFeedback, QueuedRow, SecretInput } from '../../src/frontend/chat/InputRows';
+import { EntryInput, InputFeedback, QueuedRow } from '../../src/frontend/chat/InputRows';
 import { SubagentStatusRow } from '../../src/frontend/chat/StatusRow';
+import { WorkerStrip } from '../../src/frontend/chat/WorkerStrip';
 import {
   applyInputEdit,
   normalizeNewlines,
@@ -21,6 +22,7 @@ import { Session } from '../../src/agent_runtime/session';
 import Sidebar from '../../src/frontend/Sidebar';
 import type { ApprovalRequest } from '../../src/agent_runtime/permissions/approvals';
 import type { PermissionOption } from '@agentclientprotocol/sdk';
+import type { SubagentRun } from '../../src/agent_runtime/tools/subagents';
 import type { ToolCallBlock } from '../../src/agent_runtime/types';
 
 describe('session input drafts', () => {
@@ -374,14 +376,80 @@ describe('select menu', () => {
   });
 });
 
-describe('secret input', () => {
+describe('entry input', () => {
   test('shows the prompt and one dot per character, never the value', () => {
     const output = stripAnsi(renderToString(
-      <SecretInput prompt="Paste your Anthropic API key" value="sk-ant-1234" />,
+      <EntryInput prompt="Paste your Anthropic API key" value="sk-ant-1234" masked />,
       { columns: 80 },
     ));
     expect(output).toContain('Paste your Anthropic API key');
     expect(output).toContain('•'.repeat('sk-ant-1234'.length));
     expect(output).not.toContain('sk-ant');
+  });
+
+  test('shows an ordinary value as it is typed', () => {
+    const output = stripAnsi(renderToString(
+      <EntryInput prompt="Message for sub-1234" value="check the tests too" masked={false} />,
+      { columns: 80 },
+    ));
+    expect(output).toContain('Message for sub-1234: check the tests too');
+    expect(output).not.toContain('•');
+  });
+});
+
+// A worker record as the strip reads it: everything the session would carry,
+// so each case writes only the fields it is about.
+function worker(run: Partial<SubagentRun> & { id: string }): SubagentRun {
+  return {
+    callId: null, sessionId: 'session', owner: 'sirus', worker: null,
+    model: 'claude-sonnet-5', thinkingLevel: 'medium', context: 'fresh',
+    prompt: 'Work', directory: '/project', branch: null, status: 'working',
+    startedAt: Date.now(), finishedAt: null, transcript: [], content: [],
+    finalMessage: null, changes: [], error: null, reported: false, dismissed: false,
+    ...run,
+  };
+}
+
+describe('worker strip', () => {
+  test('lists the running workers first and what each is doing', () => {
+    const output = stripAnsi(renderToString(
+      <WorkerStrip workers={[
+        worker({
+          id: 'sub-done', status: 'done', model: 'claude-sonnet-5',
+          startedAt: 1_000, finishedAt: 136_000, branch: 'sirus/sub-done',
+        }),
+        worker({
+          id: 'sub-live', model: 'gpt-5.6-terra', thinkingLevel: 'high',
+          startedAt: Date.now() - 45_000, branch: 'sirus/sub-live',
+          content: [
+            { type: 'tool_call', id: 'one', kind: 'read', title: 'notes.md', status: 'completed', locations: [], content: [] },
+            { type: 'tool_call', id: 'two', kind: 'execute', title: 'bun test', status: 'pending', locations: [], content: [] },
+          ],
+        }),
+      ]} />,
+      { columns: 120 },
+    ));
+    const lines = output.split('\n').filter(Boolean);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain('sub-live · gpt-5.6-terra high · 45s · Run bun test · sirus/sub-live');
+    // A finished worker keeps its line, showing how it ended and how long it took.
+    expect(lines[1]).toContain('sub-done · claude-sonnet-5 medium · 2m15s · done · sirus/sub-done');
+  });
+
+  test('takes no vertical space without workers to show', () => {
+    expect(renderToString(<WorkerStrip workers={[]} />, { columns: 120 })).toBe('');
+    expect(renderToString(
+      <WorkerStrip workers={[worker({ id: 'sub-gone', status: 'done', dismissed: true })]} />,
+      { columns: 120 },
+    )).toBe('');
+  });
+
+  test('says a worker is starting until its first tool call', () => {
+    const output = stripAnsi(renderToString(
+      <WorkerStrip workers={[worker({ id: 'sub-new', startedAt: Date.now() })]} />,
+      { columns: 120 },
+    ));
+    expect(output).toContain('sub-new · claude-sonnet-5 medium · 0s · starting');
+    expect(output).not.toContain('·  · ');
   });
 });
