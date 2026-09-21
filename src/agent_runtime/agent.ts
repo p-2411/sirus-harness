@@ -120,6 +120,10 @@ export class SessionAgent {
   private record: ((update: RuntimeUpdate) => void) | null = null;
   private entry: Message | null = null;
   private readonly subagents = new Map<string, SubagentRun>();
+  // MCP does not carry the vendor's tool-call id. Claiming an open row before
+  // async worker setup prevents two parallel SpawnAgent requests from seeing
+  // and choosing the same row.
+  private readonly claimedSpawnCallIds = new Set<string>();
 
   constructor(options: AgentOptions) {
     this.name = options.name;
@@ -422,14 +426,18 @@ export class SessionAgent {
   // Spawning returns once the worker is on its way: it runs in the
   // background and reports back when it ends.
   async spawnSubagent(prompt: string, context: WorkerContext, callId?: string): Promise<SubagentRun> {
-    const run = await startSubagent(this, prompt, {
-      ...await this.workerModel(prompt),
-      context,
-      ...(callId ? { callId } : {}),
-    });
-    this.subagents.set(run.id, run);
-    notifySubagents();
-    return run;
+    try {
+      const run = await startSubagent(this, prompt, {
+        ...await this.workerModel(prompt),
+        context,
+        ...(callId ? { callId } : {}),
+      });
+      this.subagents.set(run.id, run);
+      notifySubagents();
+      return run;
+    } finally {
+      if (callId) this.claimedSpawnCallIds.delete(callId);
+    }
   }
 
   // The model and thinking level a worker of this agent runs on: the
@@ -471,17 +479,22 @@ export class SessionAgent {
     return describeSubagents(this.listSubagents());
   }
 
-  // The tool call the vendor reported for the SpawnAgent it is running now:
-  // the newest one still open and not yet tied to a run. The MCP request
-  // carries no vendor call id, and the chat decorates the row by it.
+  // The oldest open SpawnAgent row not yet claimed by a worker. Parallel MCP
+  // requests arrive in the same order as the vendor's rows; claiming before
+  // the first await keeps each request on its own row. The MCP request carries
+  // no vendor call id, and the chat decorates the row by it.
   private openSpawnCallId(): string | undefined {
     const taken = new Set([...this.subagents.values()].map(run => run.callId));
+    for (const callId of this.claimedSpawnCallIds) taken.add(callId);
     const blocks = this.entry?.content ?? [];
-    for (let index = blocks.length - 1; index >= 0; index--) {
+    for (let index = 0; index < blocks.length; index++) {
       const block = blocks[index];
       if (block.type !== 'tool_call' || taken.has(block.id)) continue;
       if (block.status === 'completed' || block.status === 'failed') continue;
-      if (/SpawnAgent/.test(block.title)) return block.id;
+      if (/(?:^|[^A-Za-z0-9])SpawnAgent\s*$/.test(block.title)) {
+        this.claimedSpawnCallIds.add(block.id);
+        return block.id;
+      }
     }
     return undefined;
   }
@@ -493,7 +506,8 @@ export class SessionAgent {
   subagentHost(): SubagentHost {
     return {
       spawn: async (prompt, context, call): Promise<SubagentHandle> => {
-        const run = await this.spawnSubagent(prompt, context, this.openSpawnCallId() ?? call.callId);
+        const callId = this.openSpawnCallId();
+        const run = await this.spawnSubagent(prompt, context, callId ?? call.callId);
         return {
           id: run.id,
           model: run.model,

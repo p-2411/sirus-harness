@@ -279,6 +279,20 @@ describe('chat message', () => {
     expect(output).toContain('Subagent sub-5678 done after 45s.');
   });
 
+  test('recognizes the namespaced MCP SpawnAgent title', () => {
+    const spawn = toolCall({
+      id: 'mcp-spawn-call',
+      kind: 'other',
+      title: 'mcp__sirus__SpawnAgent',
+      content: [{ type: 'text', text: '{"id":"sub-1234"}' }],
+      output: 'Subagent sub-1234 done.',
+    });
+
+    expect(messageSegments([calls[0], spawn, calls[1]]).map(segment => segment.type))
+      .toEqual(['tool_call', 'tool_call', 'tool_call']);
+    expect(callDetail(spawn)).toEqual([{ sign: ' ', text: 'Subagent sub-1234 done.' }]);
+  });
+
   test('summarizes completed and running tool groups while collapsed', () => {
     const completed = stripAnsi(renderToString(
       <ToolRunGroup calls={calls} />,

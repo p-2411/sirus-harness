@@ -121,7 +121,7 @@ export function editPreview(call: ToolCallBlock): DiffLine[] {
 // the run it started rather than the call, and carries the run's report once
 // there is one.
 function isSpawnAgent(call: ToolCallBlock): boolean {
-	return call.kind === 'other' && /\bSpawnAgent\b/.test(call.title);
+	return call.kind === 'other' && /(?:^|[^A-Za-z0-9])SpawnAgent\s*$/.test(call.title);
 }
 
 // The report the session put on the call when the worker it started ended.

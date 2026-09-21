@@ -560,6 +560,50 @@ describe('Session model', () => {
     }
   });
 
+  test('keeps parallel workers on distinct SpawnAgent rows', async () => {
+    let releaseWorkers!: () => void;
+    const workersGate = new Promise<void>(resolve => { releaseWorkers = resolve; });
+    let session!: Session;
+    let spawned = false;
+    bindScriptedRuntime(testModel, async (_input, emit, options) => {
+      if (isWorker(options)) {
+        await workersGate;
+        return;
+      }
+      if (!spawned) {
+        spawned = true;
+        const calls = [
+          { id: 'spawn-one', title: 'mcp__sirus__SpawnAgent' },
+          { id: 'spawn-two', title: 'mcp__sirus__SpawnAgent' },
+        ] as const;
+        for (const call of calls) {
+          emit({ type: 'tool_call', call: {
+            type: 'tool_call', ...call, kind: 'other', status: 'in_progress', locations: [], content: [],
+          } });
+        }
+        const host = session.subagentHostFor('sirus')!;
+        await Promise.all([
+          host.spawn('First task', 'fresh', { callId: 'mcp-one' }),
+          host.spawn('Second task', 'fresh', { callId: 'mcp-two' }),
+        ]);
+        for (const call of calls) {
+          emit({ type: 'tool_call', call: {
+            type: 'tool_call', ...call, kind: 'other', status: 'completed', locations: [], content: [],
+          } });
+        }
+      }
+      emit({ type: 'text', text: 'Noted' });
+    });
+    session = new Session({ id: 'parallel-worker-rows', name: 'Parallel rows', model: testModel });
+    try {
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Delegate both' }] });
+      expect(session.getWorkers().map(run => run.callId)).toEqual(['spawn-one', 'spawn-two']);
+    } finally {
+      releaseWorkers();
+      await session.dispose();
+    }
+  });
+
   test('a report waits behind a busy turn and goes out before the user’s queued prompts', async () => {
     const prompts: string[] = [];
     let releaseOwner!: () => void;
