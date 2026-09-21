@@ -99,6 +99,10 @@ export interface Message {
   // Captured on assistant entries so the UI can show the model that produced
   // a historical message even if that participant changes models later.
   model?: string;
+  // Kept out of the chat. The runtimes still read it in the record; the user
+  // sees its content somewhere else. A worker's report is shown under the
+  // SpawnAgent call that started the worker, not as a message of its own.
+  hidden?: true;
 }
 
 // The reasoning depth a user picks per agent. Runtimes translate the shared

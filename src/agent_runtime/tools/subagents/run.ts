@@ -9,6 +9,7 @@ import type { WorkerContext } from '../types';
 import {
   notifySubagentProgress,
   notifySubagents,
+  touchSubagent,
   registerSubagent,
   type SubagentRun,
 } from './index';
@@ -89,6 +90,7 @@ export async function startSubagent(
     status: 'working',
     startedAt: Date.now(),
     finishedAt: null,
+    updatedAt: Date.now(),
     transcript: worker.transcript.entries() as Message[],
     content: entry.content,
     finalMessage: null,
@@ -140,7 +142,7 @@ export async function messageSubagent(run: SubagentRun, text: string): Promise<R
     role: 'user',
     content: [{ type: 'text', text }],
   });
-  notifySubagents();
+  touchSubagent(run);
   return { id: run.id, status: run.status, delivered: text };
 }
 
@@ -158,7 +160,10 @@ async function execute(run: SubagentRun, owner: SessionAgent, turn: WorkerTurn):
     await worker.respond({ text: turn.text }, {
       entry: turn.entry,
       carried: [turn.task],
-      onUpdate: () => notifySubagentProgress(),
+      onUpdate: () => {
+        run.updatedAt = Date.now();
+        notifySubagentProgress();
+      },
     });
     run.finalMessage = finalMessageOf(turn.entry.content);
     run.status = 'done';
@@ -171,7 +176,7 @@ async function execute(run: SubagentRun, owner: SessionAgent, turn: WorkerTurn):
     run.changes = summarizeChanges(turn.entry.content, run.directory);
     run.finishedAt = Date.now();
     worker.resetRuntime();
-    notifySubagents();
+    touchSubagent(run);
     owner.workerFinished(run);
   }
 }

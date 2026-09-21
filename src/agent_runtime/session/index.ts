@@ -20,7 +20,7 @@ import { INTERRUPTED_REASON, workerReport } from '../tools/subagents/report';
 import { cancelSubagent, messageSubagent } from '../tools/subagents/run';
 import { removeWorktree } from '../tools/subagents/worktree';
 import type { SubagentHost } from '../tools/types';
-import { textOf, type Message, type ThinkingLevel } from '../types';
+import { textOf, type Message, type ThinkingLevel, type ToolCallBlock } from '../types';
 import type { ContextUsage } from '../usage';
 import { parseFileMentions, resolveFileMentions } from '../../fileMentions';
 import { isAbortError } from '../../abort';
@@ -511,18 +511,34 @@ export class Session {
   }
 
   // The report itself: a message from the worker, addressed to its owner and
-  // attributed to the run, so the chat shows who spoke and the owner's next
-  // runtime reads it in the record like any other participant's message.
+  // attributed to the run, so the owner's runtime reads it in the record
+  // like any other participant's message. The chat does not show it as one:
+  // the same text goes onto the SpawnAgent call that started the worker, as
+  // that call's output, which is where the user reads it.
   private reportEntry(run: SubagentRun, owner: SessionAgent): Message {
     run.reported = true;
+    const report = workerReport(run);
+    const call = run.callId ? this.toolCallOf(owner, run.callId) : null;
+    if (call) call.output = report;
     notifySubagents();
     return this.timeline.add({
       role: 'assistant',
       participant: run.id,
       model: run.model,
-      content: [{ type: 'text', text: workerReport(run) }],
+      content: [{ type: 'text', text: report }],
       to: [owner.name],
+      hidden: true,
     }, [owner.transcript], false);
+  }
+
+  // The tool call block an agent's record holds under this id, if it does.
+  private toolCallOf(agent: SessionAgent, callId: string): ToolCallBlock | null {
+    for (const entry of agent.transcript.entries()) {
+      for (const block of entry.content) {
+        if (block.type === 'tool_call' && block.id === callId) return block;
+      }
+    }
+    return null;
   }
 
   // A run restored from the session file never received its report: nothing

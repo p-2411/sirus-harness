@@ -527,7 +527,7 @@ describe('/agents', () => {
       callId: null, sessionId: 'session', owner: 'sirus', worker: null,
       model: 'gpt-5.6-terra', thinkingLevel: 'high', context: 'fresh',
       prompt: 'Rewrite the loader', directory: '/project', branch: null,
-      status: 'working', startedAt: Date.now() - 130_000, finishedAt: null,
+      status: 'working', startedAt: Date.now() - 130_000, finishedAt: null, updatedAt: Date.now(),
       transcript: [], content: [], finalMessage: null, changes: [],
       error: null, reported: false, dismissed: false,
       ...run,

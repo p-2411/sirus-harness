@@ -520,7 +520,12 @@ describe('Session model', () => {
       prompts.push(input.text);
       if (!spawned) {
         spawned = true;
+        // The vendor reports the SpawnAgent call as a block of the owner's
+        // entry; the run is tied to it, and the report lands on it.
+        const call = { type: 'tool_call' as const, id: 'spawn', title: 'sirus - SpawnAgent', kind: 'other' as const, locations: [], content: [] };
+        emit({ type: 'tool_call', call: { ...call, status: 'in_progress' } });
         await session.subagentHostFor('sirus')!.spawn('Rewrite the parser', 'fresh', { callId: 'spawn' });
+        emit({ type: 'tool_call', call: { ...call, status: 'completed' } });
       }
       emit({ type: 'text', text: 'Noted' });
     });
@@ -542,8 +547,12 @@ describe('Session model', () => {
       expect(prompts[1]).toContain('I rewrote the parser.');
 
       const report = session.getMessages().find(entry => entry.participant === worker.id);
-      expect(report).toMatchObject({ role: 'assistant', participant: worker.id, model: testModel, to: ['sirus'] });
+      expect(report).toMatchObject({ role: 'assistant', participant: worker.id, model: testModel, to: ['sirus'], hidden: true });
       expect(textOf(report!)).toContain('Final message:');
+      // The user reads the report under the call that started the worker.
+      const call = session.getMessages().flatMap(entry => entry.content)
+        .find(block => block.type === 'tool_call' && block.id === worker.callId);
+      expect(call).toMatchObject({ type: 'tool_call', output: textOf(report!) });
       expect(session.getMessages().at(-1)).toMatchObject({ role: 'assistant', participant: 'sirus' });
     } finally {
       release();
@@ -699,6 +708,7 @@ describe('Session model', () => {
       // of the prompt, rather than a turn of its own.
       expect(report).toBeGreaterThan(-1);
       expect(report).toBeLessThan(question);
+      expect(entries[report].hidden).toBe(true);
       expect(prompts).toHaveLength(2);
       expect(prompts[1]).toContain('Sirus quit while it was working');
       expect(prompts[1]).toContain('What happened?');

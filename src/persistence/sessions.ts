@@ -95,6 +95,7 @@ const messageSchema = z.object({
   participant: z.string().min(1).optional(),
   to: z.array(z.string().min(1)).optional(),
   model: z.string().min(1).optional(),
+  hidden: z.literal(true).optional(),
   // A compaction summary written by Sirus itself, before the runtimes
   // compacted their own conversations. It becomes a boundary with the
   // summary text; the token figures it carried are gone with the gauge.
@@ -126,6 +127,8 @@ const workerSchema = z.object({
   status: z.enum(['working', 'done', 'failed', 'cancelled', 'interrupted']),
   startedAt: z.number(),
   finishedAt: z.number().nullable(),
+  // Absent in files written before the strip ordered runs by freshness.
+  updatedAt: z.number().optional(),
   transcript: z.array(messageSchema),
   finalMessage: z.string().nullable(),
   changes: z.array(z.string()),
@@ -253,6 +256,7 @@ function toMessage(stored: StoredMessage, index: number, defaultParticipant: str
     ...(role === 'assistant' ? { participant: stored.participant ?? defaultParticipant } : {}),
     ...(stored.to ? { to: stored.to } : {}),
     ...(stored.model ? { model: stored.model } : {}),
+    ...(stored.hidden ? { hidden: true as const } : {}),
   };
 }
 
@@ -262,6 +266,7 @@ function toMessage(stored: StoredMessage, index: number, defaultParticipant: str
 function toWorkerRecord(stored: z.infer<typeof workerSchema>): WorkerRecord {
   return {
     ...stored,
+    updatedAt: stored.updatedAt ?? stored.finishedAt ?? stored.startedAt,
     transcript: stored.transcript.map((message, index) => toMessage(message, index, stored.id)),
   };
 }

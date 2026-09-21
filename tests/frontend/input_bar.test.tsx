@@ -404,7 +404,7 @@ function worker(run: Partial<SubagentRun> & { id: string }): SubagentRun {
     callId: null, sessionId: 'session', owner: 'sirus', worker: null,
     model: 'claude-sonnet-5', thinkingLevel: 'medium', context: 'fresh',
     prompt: 'Work', directory: '/project', branch: null, status: 'working',
-    startedAt: Date.now(), finishedAt: null, transcript: [], content: [],
+    startedAt: Date.now(), finishedAt: null, updatedAt: Date.now(), transcript: [], content: [],
     finalMessage: null, changes: [], error: null, reported: false, dismissed: false,
     ...run,
   };

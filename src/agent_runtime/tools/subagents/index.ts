@@ -40,6 +40,9 @@ export interface WorkerRecord {
   status: SubagentStatus;
   startedAt: number;
   finishedAt: number | null;
+  // When the run last changed: something streamed in, a message was sent to
+  // it, or its status moved. The worker strip shows the freshest run first.
+  updatedAt: number;
   // The worker's own record: the task, the steering messages sent to it,
   // and the one assistant entry its turn fills in. Live while it works.
   transcript: Message[];
@@ -75,6 +78,12 @@ export function notifySubagents(): void {
   }
   version++;
   for (const listener of listeners) listener();
+}
+
+// A change to one run: stamps it and tells the listeners at once.
+export function touchSubagent(run: SubagentRun): void {
+  run.updatedAt = Date.now();
+  notifySubagents();
 }
 
 // A working run publishes every chunk its vendor streams, and the worker
@@ -158,6 +167,7 @@ export function workerRecord(run: SubagentRun): WorkerRecord {
     status: run.status,
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,
+    updatedAt: run.updatedAt,
     transcript: [...run.transcript],
     finalMessage: run.finalMessage,
     changes: [...run.changes],

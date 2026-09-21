@@ -118,6 +118,7 @@ describe('session persistence', () => {
       status: 'done',
       startedAt: 1_000,
       finishedAt: 2_000,
+      updatedAt: 2_000,
       transcript: [
         { seq: 0, role: 'user', content: [{ type: 'text', text: 'Rewrite the parser' }] },
         { seq: 1, role: 'assistant', participant: 'sub-1a2b3c4d', model: 'claude-sonnet-5', content: [
