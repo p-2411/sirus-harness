@@ -571,6 +571,9 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
     canFork = initialized.agentCapabilities?.sessionCapabilities?.fork != null;
     const meta = initialized._meta as { steering?: { supported?: boolean } } | null | undefined;
     canSteer = meta?.steering?.supported === true;
+    if (launch.authenticate) {
+      await connection.agent.request(methods.agent.authenticate, { methodId: launch.authenticate.methodId });
+    }
 
     const params = launch.session({ systemPrompt: options.systemPrompt, mcpServer: options.mcpServer });
     const session = await connection.agent.request(methods.agent.session.new, {

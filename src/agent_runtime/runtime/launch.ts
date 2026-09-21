@@ -5,7 +5,7 @@ import path from 'path';
 import type { McpServer } from '@agentclientprotocol/sdk';
 import { dataDirectory } from '../../dataDirectory';
 import type { PermissionMode } from '../permissions/policy';
-import type { Vendor } from '../providers/catalog';
+import { VENDOR_INFO, type Vendor } from '../providers/catalog';
 import type { RuntimeOptions } from './runtime';
 
 // A vendor is a launch spec: the adapter to run, the environment its process
@@ -47,6 +47,9 @@ export interface Launch {
   // creates the forked session outright, in the directory the call names, and
   // answers with it already live.
   forkNeedsResume: boolean;
+  // An `authenticate` to send after `initialize`, when the credential in the
+  // environment is one the harness must be logged in with rather than read.
+  authenticate?: { methodId: string };
   // Removes what the launch wrote to disk. Idempotent.
   cleanup(): void;
 }
@@ -158,6 +161,10 @@ function codexLaunch(options: RuntimeOptions, mode: PermissionMode): Launch {
     // inherits the owner's system prompt and takes only its own MCP entry.
     session: spec => ({ mcpServers: mcpServersFor(spec) }),
     forkNeedsResume: false,
+    // An API key in the environment is an API-key source (a subscription's
+    // environment scrubs it). Codex only honours a key it was logged in
+    // with, in the home the source's environment points it at.
+    ...(options.env[VENDOR_INFO.gpt.credentialEnv] ? { authenticate: { methodId: 'api-key' } } : {}),
     cleanup() {
       rmSync(directory, { recursive: true, force: true });
     },

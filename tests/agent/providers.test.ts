@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'fs';
+import { existsSync, mkdtempSync, rmSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { providerFor, servableModelIds, servesModel } from '../../src/agent_runtime/providers';
@@ -181,6 +181,15 @@ describe('credential environments', () => {
     expect(env.CLAUDE_CONFIG_DIR).toBeUndefined();
     expect(sourceEnvironment('gpt', { id: 'k', kind: 'api', key: 'sk-proj-run-5678' }).OPENAI_API_KEY)
       .toBe('sk-proj-run-5678');
+  });
+
+  test('a Codex API key gets a home of its own, so the login never touches the user\'s', () => {
+    const first = sourceEnvironment('gpt', { id: 'k', kind: 'api', key: 'sk-proj-run-5678' });
+    expect(first.CODEX_HOME).toStartWith(path.join(directory, 'api', 'gpt') + path.sep);
+    expect(existsSync(first.CODEX_HOME!)).toBe(true);
+    expect(sourceEnvironment('gpt', { id: 'k', kind: 'api', key: 'sk-proj-run-5678' }).CODEX_HOME).toBe(first.CODEX_HOME);
+    expect(sourceEnvironment('gpt', { id: 'j', kind: 'api', key: 'sk-proj-other-0001' }).CODEX_HOME).not.toBe(first.CODEX_HOME);
+    expect(first.CODEX_HOME).not.toContain('sk-proj');
   });
 
   test('a subscription points the process at its own profile and inherits no key', () => {

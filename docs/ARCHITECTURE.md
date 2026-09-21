@@ -165,7 +165,9 @@ Reduced to credentials: nothing here knows a wire protocol or runs a turn.
 - `profiles.ts`: a credential as the environment an agent process gets.
   `sourceEnvironment` is the whole of it: an API key under the name the vendor's harness
   reads, or a subscription pointed at its own profile directory, with the vendor's other
-  credentials scrubbed either way.
+  credentials scrubbed either way. Codex ignores a key in the environment while a ChatGPT
+  login sits in its home, so a Codex API key also gets a home of its own under `api/`, and
+  the launch logs the adapter in there with the key.
 - `provider.ts`: one vendor composed from the above, plus which credential each runtime is
   on, which is the row the sidebar shows.
 - `index.ts`: the registry. `providerFor`, `allProviders`, `servesModel`,

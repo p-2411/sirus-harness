@@ -58,6 +58,11 @@ export interface VendorInfo {
   scrubEnv: readonly string[];
   // The variable that points a subscription child at an isolated profile.
   profileDirEnv: string;
+  // Whether the harness has to be logged in with an API key rather than
+  // reading it from the environment. Codex ignores `OPENAI_API_KEY` while a
+  // ChatGPT login sits in its home, so an API-key source gets a home of its
+  // own and the adapter logs it in there; Claude Code reads the key as it is.
+  apiKeyLogin: boolean;
   // The allowance window the sidebar shows for this vendor.
   limitPeriod: '5-hour' | '7-day';
 }
@@ -79,6 +84,7 @@ const VENDOR_TABLE = {
       'CLAUDE_CODE_USE_FOUNDRY',
     ],
     profileDirEnv: 'CLAUDE_CONFIG_DIR',
+    apiKeyLogin: false,
     limitPeriod: '5-hour',
   },
   gpt: {
@@ -90,6 +96,7 @@ const VENDOR_TABLE = {
     credentialEnv: 'OPENAI_API_KEY',
     scrubEnv: ['OPENAI_API_KEY', 'CODEX_API_KEY'],
     profileDirEnv: 'CODEX_HOME',
+    apiKeyLogin: true,
     limitPeriod: '7-day',
   },
 } as const;
