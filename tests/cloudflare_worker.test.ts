@@ -1,10 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 import worker from '../cloudflare/src/index';
 
+// The shape the worker's `D1Statement` expects, plus what the tests read
+// back: the SQL and the values bound to it.
 interface Statement {
   sql: string;
   values: unknown[];
   bind: (...values: unknown[]) => Statement;
+  first: <T = Record<string, unknown>>() => Promise<T | null>;
   run: () => Promise<unknown>;
 }
 
@@ -20,8 +23,8 @@ function fakeDatabase(stats = { day: 1, week: 2, month: 3 }) {
           statement.values = values;
           return statement;
         },
-        async first() {
-          return stats;
+        async first<T>() {
+          return stats as unknown as T;
         },
         async run() {},
       };
