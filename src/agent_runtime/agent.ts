@@ -440,6 +440,10 @@ export class SessionAgent {
     const own = { model: this.model, thinkingLevel: this.thinkingLevel };
     const fixed = this.host.subagentModel();
     if (fixed) return { model: fixed, thinkingLevel: this.thinkingLevel };
+    // A model the catalog does not know is a scripted runtime bound by the
+    // test suite: there is nothing to route between, and a pick would move
+    // the worker onto a real vendor with whatever key the machine holds.
+    if (!vendorOf(this.model)) return own;
     try {
       const pick = await routeWorker(
         { task: prompt, directory: this.directory },

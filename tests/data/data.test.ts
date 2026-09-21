@@ -714,7 +714,15 @@ describe('Session model', () => {
     const started: { model: string; thinkingLevel: string }[] = [];
     let session!: Session;
     let spawns = 0;
-    bindScriptedRuntime(testModel, async (_input, emit, options) => {
+    // Jev is asked only for an owner on a catalog model, so the owner runs a
+    // scripted runtime bound under a real id, with a key of its own in a data
+    // directory of its own so the vendor has a credential to start it on.
+    const ownerModel = 'gpt-5.6-luna';
+    const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-worker-routing-'));
+    const previous = { SIRUS_DATA_DIR: process.env.SIRUS_DATA_DIR, OPENAI_SECRET: process.env.OPENAI_SECRET };
+    process.env.SIRUS_DATA_DIR = directory;
+    process.env.OPENAI_SECRET = 'sk-test-worker-routing';
+    bindScriptedRuntime(ownerModel, async (_input, emit, options) => {
       if (isWorker(options)) {
         started.push({ model: options.model, thinkingLevel: options.thinkingLevel });
         await gate;
@@ -733,7 +741,7 @@ describe('Session model', () => {
     const route = spyOn(router, 'routeWorker')
       .mockResolvedValueOnce({ model: secondTestModel, thinkingLevel: 'low' })
       .mockRejectedValueOnce(new Error('Jev is unreachable'));
-    session = new Session({ id: 'worker-routing', name: 'Routing', model: testModel });
+    session = new Session({ id: 'worker-routing', name: 'Routing', model: ownerModel });
     session.setThinkingLevel('xhigh');
     try {
       await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Delegate it' }] });
@@ -744,12 +752,44 @@ describe('Session model', () => {
       expect(route.mock.calls[0][3]).toMatchObject({ fallbackLevel: 'xhigh' });
       expect(first).toMatchObject({ model: secondTestModel, thinkingLevel: 'low' });
       // A throw is not an answer: the worker stays on its owner's model.
-      expect(second).toMatchObject({ model: testModel, thinkingLevel: 'xhigh' });
+      expect(second).toMatchObject({ model: ownerModel, thinkingLevel: 'xhigh' });
       await until(() => started.length === 2, 'both workers to start');
       expect(started).toEqual([
         { model: secondTestModel, thinkingLevel: 'low' },
-        { model: testModel, thinkingLevel: 'xhigh' },
+        { model: ownerModel, thinkingLevel: 'xhigh' },
       ]);
+    } finally {
+      release();
+      route.mockRestore();
+      await session.dispose();
+      unbindRuntime(ownerModel);
+      for (const [name, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('a worker of an owner outside the catalog never asks Jev', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let session!: Session;
+    let spawned = false;
+    bindScriptedRuntime(testModel, async (_input, emit, options) => {
+      if (isWorker(options)) { await gate; return; }
+      if (!spawned) {
+        spawned = true;
+        await session.subagentHostFor('sirus')!.spawn('Background task', 'fresh', { callId: 'spawn' });
+      }
+      emit({ type: 'text', text: 'Noted' });
+    });
+    const route = spyOn(router, 'routeWorker').mockResolvedValue({ model: 'gpt-5.6-terra', thinkingLevel: 'low' });
+    session = new Session({ id: 'worker-unrouted', name: 'Unrouted', model: testModel });
+    try {
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Delegate it' }] });
+      expect(route).not.toHaveBeenCalled();
+      expect(session.getWorkers()[0]).toMatchObject({ model: testModel, status: 'working' });
     } finally {
       release();
       route.mockRestore();
