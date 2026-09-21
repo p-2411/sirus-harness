@@ -1,7 +1,3 @@
-interface D1Result<T = Record<string, unknown>> {
-  results: T[];
-}
-
 interface D1Statement {
   bind(...values: unknown[]): D1Statement;
   first<T = Record<string, unknown>>(): Promise<T | null>;
@@ -10,7 +6,6 @@ interface D1Statement {
 
 interface D1Database {
   prepare(query: string): D1Statement;
-  batch(statements: D1Statement[]): Promise<D1Result[]>;
 }
 
 interface Env {

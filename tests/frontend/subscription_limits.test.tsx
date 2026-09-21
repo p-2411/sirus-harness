@@ -19,7 +19,7 @@ test('renders compact subscription percentages, including zero and unavailable',
   expect(text).toBe('codex: 0%\nclaude: unavailable');
 });
 
-test('shows only the active subscription and follows fallback, removal and API selection', async () => {
+test('shows the active subscription and follows fallback, removal and API selection', async () => {
   const previous = process.env.SIRUS_DATA_DIR;
   const directory = mkdtempSync(path.join(tmpdir(), 'sirus-sidebar-limits-'));
   process.env.SIRUS_DATA_DIR = directory;
@@ -93,7 +93,7 @@ test('shows only the active subscription and follows fallback, removal and API s
     expect(output).not.toContain('codex 2');
     current.sources.addApiKey('sidebar-test-key');
     await flush();
-    expect(output).not.toContain('codex:');
+    expect(output).toContain('codex: 10%');
     expect(output).toContain('claude: 80%');
     reader.mockResolvedValue({ windows: [], unavailable: 'could not read limits' });
     providerFor('claude').sources.promote('claude-one');

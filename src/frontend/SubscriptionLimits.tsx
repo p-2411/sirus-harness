@@ -22,8 +22,14 @@ export function SubscriptionLimitRows({ rows }: { rows: readonly SubscriptionLim
 
 function activeSubscriptions() {
   return VENDORS.flatMap(vendor => {
-    const source = providerFor(vendor).activeSource();
-    if (source?.kind !== 'subscription') return [];
+    const provider = providerFor(vendor);
+    const active = provider.activeSource();
+    // Usage belongs to the signed-in subscription, even when the runtime has
+    // temporarily fallen back to an API key for this vendor.
+    const source = active?.kind === 'subscription'
+      ? active
+      : provider.sources.list().find(item => item.kind === 'subscription');
+    if (!source || source.kind !== 'subscription') return [];
     return [{
       vendor, source,
       id: `${vendor}:${source.id}`,
