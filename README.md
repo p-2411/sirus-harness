@@ -175,6 +175,18 @@ Sessions, settings, checkpoints, and memories are stored on your machine. Model 
 
 Set `SIRUS_DATA_DIR` to use another location. API keys entered through Sirus are saved in local settings with restricted file permissions. For environment-based API setup, Sirus reads `ANTHROPIC_API` for Anthropic and `OPENAI_SECRET` for OpenAI.
 
+### Optional installation statistics
+
+The repository includes a privacy-conscious Cloudflare Worker/D1 implementation in [`cloudflare/`](cloudflare/) and a dependency-free GitHub Pages dashboard in [`stats-dashboard/`](stats-dashboard/). Released builds use the deployed Worker by default. Set `SIRUS_HEARTBEAT_URL` to override it, or set it to an empty value to disable heartbeats:
+
+```sh
+export SIRUS_HEARTBEAT_URL=https://your-worker.your-subdomain.workers.dev/heartbeat
+# Disable the optional heartbeat:
+export SIRUS_HEARTBEAT_URL=
+```
+
+Sirus then creates a random per-installation ID in its local data directory and sends at most one heartbeat every 24 hours. The payload contains only that ID and the Sirus version. The Worker HMAC-hashes the ID before storage, derives timestamps from its server clock, and retains records for 35 days. Network failures never block startup. Counts are estimates because the public endpoint can be submitted by arbitrary clients.
+
 On macOS, if memory reports that it cannot load `sqlite-vec`, install SQLite with `brew install sqlite`, or set `SIRUS_SQLITE_LIBRARY` to your SQLite dynamic library path.
 
 ## Install & run

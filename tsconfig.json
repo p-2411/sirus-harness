@@ -3,6 +3,7 @@
   "include": [
     "src/**/*.ts",
     "src/**/*.tsx",
+    "cloudflare/**/*.ts",
     "tests/**/*.ts",
     "tests/**/*.tsx"
   ]

@@ -6,6 +6,10 @@ import { disposeAllRuntimes } from "../agent_runtime/runtime/runtime";
 import { stopSirusMcpServer } from "../agent_runtime/tools/server";
 import { closeAllMemoryStores } from "../memory/store";
 import { enableCheckpoints } from "../checkpoints";
+import { sendHeartbeat } from "../telemetry";
+
+// Heartbeats are opt-in through SIRUS_HEARTBEAT_URL and never block startup.
+void sendHeartbeat().catch(() => undefined);
 
 // Frame capture must see Ink's writes, so it wraps stdout before anything else.
 installFrameCapture();

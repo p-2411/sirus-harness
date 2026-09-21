@@ -11,4 +11,6 @@ debug.log
 *.sqlite
 .env
 .env.*
+cloudflare/.wrangler/
+cloudflare/.dev.vars
 marketing/private/
