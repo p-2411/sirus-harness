@@ -36,6 +36,8 @@ export type WorkerContext = 'fresh' | 'owner';
 // be tied back to it. A worker outlives the call: nothing here stops it.
 export interface SubagentSpawnCall {
   callId: string;
+  // The vendor's id for the call, when the vendor sent one.
+  vendorCallId?: string;
 }
 
 // The narrow port the agent tools speak to. The session hands the MCP server
@@ -62,6 +64,9 @@ export interface ToolContext {
   signal?: AbortSignal;
   // An id for this call, for effects that outlive it.
   callId: string;
+  // The id the vendor gave this call, which is its row in the chat, when the
+  // vendor sent one with the request.
+  vendorCallId?: string;
   subagents?: SubagentHost;
 }
 

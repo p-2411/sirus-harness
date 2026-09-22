@@ -42,7 +42,7 @@ export const agentTools: Tool[] = [
       const handle = await host(ctx, 'SpawnAgent').spawn(
         requiredString(args, 'prompt', 'SpawnAgent'),
         workerContext(args),
-        { callId: ctx.callId },
+        { callId: ctx.callId, ...(ctx.vendorCallId ? { vendorCallId: ctx.vendorCallId } : {}) },
       );
       return {
         ...handle,

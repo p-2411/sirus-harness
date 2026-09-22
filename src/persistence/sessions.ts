@@ -2,6 +2,7 @@ import path from 'path';
 import { z } from 'zod';
 import { dataDirectory } from '../dataDirectory';
 import {
+  failOpenToolCalls,
   IMAGE_MEDIA_TYPES,
   THINKING_LEVELS,
   TOOL_CALL_STATUSES,
@@ -239,6 +240,9 @@ function toBlocks(content: readonly StoredBlock[]): MessageBlock[] {
     }
     blocks.push(block as MessageBlock);
   }
+  // Nothing is running after a restart: a call saved mid-turn ended with the
+  // process that ran it.
+  failOpenToolCalls(blocks);
   return blocks;
 }
 

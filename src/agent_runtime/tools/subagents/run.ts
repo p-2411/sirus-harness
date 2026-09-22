@@ -33,6 +33,13 @@ export interface SubagentSpawnOptions {
   callId?: string;
 }
 
+// Nobody watches a worker, so one whose runtime has said nothing for this
+// long is taken as hung and stopped. Both vendors cut off a single command
+// well before it, and time spent waiting on the user's approval is not
+// counted.
+const WORKER_IDLE_MS = 15 * 60_000;
+const IDLE_CHECK_MS = 30_000;
+
 // What each run is still doing, so cancelling one can wait for it to wind
 // down. A finished run's entry resolves at once.
 const completions = new Map<string, Promise<void>>();
@@ -156,6 +163,11 @@ interface WorkerTurn {
 
 async function execute(run: SubagentRun, owner: SessionAgent, turn: WorkerTurn): Promise<void> {
   const worker = run.worker!;
+  const watchdog = setInterval(() => {
+    if (worker.quietFor < WORKER_IDLE_MS) return;
+    worker.cancel(new TurnCancelledError(`no activity for ${WORKER_IDLE_MS / 60_000} minutes`));
+  }, IDLE_CHECK_MS);
+  watchdog.unref?.();
   try {
     await worker.respond({ text: turn.text }, {
       entry: turn.entry,
@@ -171,6 +183,7 @@ async function execute(run: SubagentRun, owner: SessionAgent, turn: WorkerTurn):
     run.error = error instanceof Error ? error.message : String(error);
     run.status = isAbortError(error) ? 'cancelled' : 'failed';
   } finally {
+    clearInterval(watchdog);
     // Whatever happened, the changes made so far are what the owner must know
     // about, and the owner is told: finishing a worker wakes it.
     run.changes = summarizeChanges(turn.entry.content, run.directory);

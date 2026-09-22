@@ -8,5 +8,5 @@
 [X] active subagent should be per session.
 
 [] skills
-[] heartbeat mechanism
-[] when turn was cancelled, all tools should fial. "running commands" should also stop
+[X] heartbeat mechanism
+[X] when turn was cancelled, all tools should fial. "running commands" should also stop

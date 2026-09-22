@@ -134,6 +134,10 @@ function tokenMatches(expected: string, given: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+// Claude Code names the tool call behind an MCP request in its `_meta`, under
+// the id its ACP adapter gives the call's row. Codex sends no such id.
+const CLAUDE_TOOL_USE_ID = 'claudecode/toolUseId';
+
 const MEMORY_DISABLED = 'Memory access is disabled. Use /memory on to enable it.';
 
 function serverFor(binding: ToolSessionBinding, requester: string): Server {
@@ -170,9 +174,11 @@ function serverFor(binding: ToolSessionBinding, requester: string): Server {
       return failure(`Unknown tool: ${params.name}`);
     }
     try {
+      const vendorCallId = params._meta?.[CLAUDE_TOOL_USE_ID];
       const result = await tool.run(params.arguments ?? {}, {
         directory: binding.directory,
         callId: randomUUID(),
+        ...(typeof vendorCallId === 'string' && vendorCallId ? { vendorCallId } : {}),
         signal: extra.signal,
         ...(subagents ? { subagents } : {}),
       });

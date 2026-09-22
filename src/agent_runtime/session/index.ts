@@ -737,6 +737,13 @@ export class Session {
     return this.timeline.lastActivity;
   }
 
+  // How long every participant still answering has gone without a word from
+  // its runtime; zero when any of them is producing or waiting on the user.
+  getTurnQuietFor(): number {
+    const busy = this.roster.all().filter(agent => agent.busy);
+    return busy.length > 0 ? Math.min(...busy.map(agent => agent.quietFor)) : 0;
+  }
+
   getConversationStartedAt(): number {
     return this.timeline.conversationStartedAt;
   }

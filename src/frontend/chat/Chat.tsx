@@ -96,13 +96,19 @@ export function formatElapsed(ms: number): string {
   return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }
 
+// A turn whose runtime has said nothing for this long says so, since a
+// vendor that has stalled looks the same as one that is thinking.
+const QUIET_NOTICE_MS = 60_000;
+
 // The line at the foot of the history while a turn runs: what the agents are
 // doing, or that they are waiting on the user, and for how long.
-function TurnStatus({ messages, awaitingApproval, compacting, startedAt }: {
+function TurnStatus({ messages, awaitingApproval, compacting, startedAt, quietFor }: {
   messages: readonly Message[];
   awaitingApproval: boolean;
   compacting: boolean;
   startedAt: number;
+  // Read on every tick: how long the runtimes have been silent.
+  quietFor: () => number;
 }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -112,11 +118,15 @@ function TurnStatus({ messages, awaitingApproval, compacting, startedAt }: {
   const phase = awaitingApproval ? 'waiting for your approval'
     : compacting ? 'compacting context'
       : turnPhase(messages);
+  const quiet = awaitingApproval || compacting ? 0 : quietFor();
   return (
     <Box paddingX={3} marginBottom={1}>
       <Spinner />
       <Text color={awaitingApproval ? theme.pending : theme.textSubtle}>  {phase}</Text>
       <Text color={theme.textSubtle} dimColor> · {formatElapsed(now - startedAt)}</Text>
+      {quiet >= QUIET_NOTICE_MS && (
+        <Text color={theme.pending}> · no output for {formatElapsed(quiet)} · esc to cancel</Text>
+      )}
     </Box>
   );
 }
@@ -539,6 +549,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
           awaitingApproval={approvals.length > 0}
           compacting={currSession.isCompacting()}
           startedAt={currSession.getActiveTurnStartedAt() ?? commandStartedAt ?? Date.now()}
+          quietFor={() => currSession.getTurnQuietFor()}
         />
       )}
     </>

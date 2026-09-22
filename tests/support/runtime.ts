@@ -64,6 +64,7 @@ function scriptedRuntime(model: string, options: RuntimeOptions, binding: Script
     modes: [],
     context: null,
     disposed: false,
+    get lost() { return runtime.disposed; },
     prompts: [],
     permissionMode: options.permissionMode,
     thinkingLevel: options.thinkingLevel,

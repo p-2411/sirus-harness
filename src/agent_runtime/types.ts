@@ -81,6 +81,18 @@ export interface ToolCallBlock {
 
 export type MessageBlock = TextBlock | ImageBlock | ThoughtBlock | CompactionBlock | ToolCallBlock;
 
+// Marks every tool call still pending or running as failed, for a turn that
+// will report nothing more about them. True if any was.
+export function failOpenToolCalls(content: MessageBlock[]): boolean {
+  let changed = false;
+  for (const [index, block] of content.entries()) {
+    if (block.type !== 'tool_call' || block.status === 'completed' || block.status === 'failed') continue;
+    content[index] = { ...block, status: 'failed' };
+    changed = true;
+  }
+  return changed;
+}
+
 // One entry of a participant's transcript. The same object sits in every
 // transcript it was delivered to, so the session's timeline is the union of
 // the transcripts ordered by seq.

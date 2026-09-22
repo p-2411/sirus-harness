@@ -24,6 +24,7 @@ import { cancelSubagent, checkSubagent, messageSubagent, startSubagent } from '.
 import type { SubagentHandle, SubagentHost, WorkerContext } from './tools/types';
 import {
   DEFAULT_THINKING_LEVEL,
+  failOpenToolCalls,
   type ImageBlock,
   type Message,
   type ThinkingLevel,
@@ -114,15 +115,19 @@ export class SessionAgent {
   // The credential the runtime is on; a source that worked stays first.
   private source: Source | null = null;
   private turn: AbortController | null = null;
+  // When the runtime last reported anything, and how many of its permission
+  // requests are waiting on the user: the turn is quiet, not stuck, while
+  // one is.
+  private heardAt = 0;
+  private asking = 0;
   // Where the runtime's updates go: the recorder of the turn in flight, and
   // the entry it fills. The runtime outlives turns, so it is handed one
   // stable callback and this is what that callback reads.
   private record: ((update: RuntimeUpdate) => void) | null = null;
   private entry: Message | null = null;
   private readonly subagents = new Map<string, SubagentRun>();
-  // MCP does not carry the vendor's tool-call id. Claiming an open row before
-  // async worker setup prevents two parallel SpawnAgent requests from seeing
-  // and choosing the same row.
+  // Rows claimed by a SpawnAgent request whose worker is still being set up,
+  // so two parallel requests never choose the same row.
   private readonly claimedSpawnCallIds = new Set<string>();
 
   constructor(options: AgentOptions) {
@@ -163,6 +168,14 @@ export class SessionAgent {
     return this.turn !== null;
   }
 
+  // How long the turn in flight has gone without a word from its runtime:
+  // no text, no tool call update, nothing. Zero when no turn is running or
+  // the turn is waiting on the user's approval.
+  get quietFor(): number {
+    if (!this.turn || this.asking > 0) return 0;
+    return Date.now() - this.heardAt;
+  }
+
   toParticipant(): Participant {
     return {
       name: this.name,
@@ -183,9 +196,11 @@ export class SessionAgent {
     if (outer?.aborted) follow();
     else outer?.addEventListener('abort', follow, { once: true });
     this.turn = controller;
+    this.heardAt = Date.now();
     const { signal } = controller;
     this.entry = options.entry;
     this.record = this.recorder(options.entry, options.onUpdate);
+    let answered = false;
     try {
       throwIfAborted(signal);
       const failures: string[] = [];
@@ -197,6 +212,7 @@ export class SessionAgent {
           const prompt = fresh ? this.seeded(text, options.carried ?? []) : text;
           await runtime.prompt({ text: prompt, images: input.images ?? [] }, signal);
           this.source = source;
+          answered = true;
           return;
         } catch (error) {
           throwIfAborted(signal);
@@ -217,6 +233,10 @@ export class SessionAgent {
       throw new Error(`All ${VENDOR_INFO[vendor].displayName} sources failed (${failures.length}): ${failures.join('; ')}`);
     } finally {
       outer?.removeEventListener('abort', follow);
+      // A turn that was cancelled or failed reports nothing more: updates
+      // arriving after this are dropped, so a call it left open would read
+      // as running for good.
+      if (!answered && failOpenToolCalls(options.entry.content)) options.onUpdate?.();
       this.turn = null;
       this.record = null;
       this.entry = null;
@@ -248,8 +268,8 @@ export class SessionAgent {
         systemPrompt: this.host.systemPrompt(this),
         permissionMode: this.host.permissionMode(),
         mcpServer: await this.host.mcpServer(this),
-        onPermission: (request, promptSignal) => this.host.requestPermission(this, request, promptSignal),
-        onUpdate: update => this.record?.(update),
+        onPermission: (request, promptSignal) => this.askPermission(request, promptSignal),
+        onUpdate: update => this.hear(update),
       });
       this.runtime = trackRuntime(forked);
       this.generation = runtimeGeneration();
@@ -333,7 +353,10 @@ export class SessionAgent {
     signal: AbortSignal,
   ): Promise<{ runtime: Runtime; fresh: boolean }> {
     const stale = this.runtime !== null
-      && (this.generation !== runtimeGeneration() || this.source?.id !== source?.id || this.runtime.model !== this.model);
+      && (this.runtime.lost
+        || this.generation !== runtimeGeneration()
+        || this.source?.id !== source?.id
+        || this.runtime.model !== this.model);
     if (stale) this.resetRuntime();
     if (this.runtime) return { runtime: this.runtime, fresh: false };
     const env = source && vendorOf(this.model) ? sourceEnvironment(this.vendor, source) : { ...process.env };
@@ -347,8 +370,8 @@ export class SessionAgent {
       env,
       mcpServer: await this.host.mcpServer(this),
       permissionMode: this.host.permissionMode(),
-      onPermission: (request, promptSignal) => this.host.requestPermission(this, request, promptSignal),
-      onUpdate: update => this.record?.(update),
+      onPermission: (request, promptSignal) => this.askPermission(request, promptSignal),
+      onUpdate: update => this.hear(update),
     });
     if (signal.aborted) {
       runtime.dispose();
@@ -360,6 +383,21 @@ export class SessionAgent {
     this.context = runtime.context;
     if (source) this.provider?.markActive(this.runtimeId, source);
     return { runtime, fresh: true };
+  }
+
+  private hear(update: RuntimeUpdate): void {
+    this.heardAt = Date.now();
+    this.record?.(update);
+  }
+
+  private async askPermission(request: RequestPermissionRequest, signal: AbortSignal): Promise<RequestPermissionResponse> {
+    this.asking++;
+    try {
+      return await this.host.requestPermission(this, request, signal);
+    } finally {
+      this.asking--;
+      this.heardAt = Date.now();
+    }
   }
 
   // A new runtime's first prompt carries the record it has never seen, the
@@ -479,10 +517,19 @@ export class SessionAgent {
     return describeSubagents(this.listSubagents());
   }
 
-  // The oldest open SpawnAgent row not yet claimed by a worker. Parallel MCP
-  // requests arrive in the same order as the vendor's rows; claiming before
-  // the first await keeps each request on its own row. The MCP request carries
-  // no vendor call id, and the chat decorates the row by it.
+  // The SpawnAgent row a request belongs to, which the chat decorates with
+  // the run. Claude names it in the request. Codex does not, so its request
+  // takes the oldest open SpawnAgent row not yet claimed, on the grounds that
+  // parallel requests arrive in the order of their rows; claiming before the
+  // first await keeps each request on its own row.
+  private spawnCallId(vendorCallId: string | undefined): string | undefined {
+    if (vendorCallId) {
+      this.claimedSpawnCallIds.add(vendorCallId);
+      return vendorCallId;
+    }
+    return this.openSpawnCallId();
+  }
+
   private openSpawnCallId(): string | undefined {
     const taken = new Set([...this.subagents.values()].map(run => run.callId));
     for (const callId of this.claimedSpawnCallIds) taken.add(callId);
@@ -506,7 +553,7 @@ export class SessionAgent {
   subagentHost(): SubagentHost {
     return {
       spawn: async (prompt, context, call): Promise<SubagentHandle> => {
-        const callId = this.openSpawnCallId();
+        const callId = this.spawnCallId(call.vendorCallId);
         const run = await this.spawnSubagent(prompt, context, callId ?? call.callId);
         return {
           id: run.id,

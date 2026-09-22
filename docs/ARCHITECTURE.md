@@ -152,7 +152,16 @@ with the owner's record as text when there is nothing to fork or the vendor refu
 
 Runtimes stay warm between turns. One is rebuilt when a credential fails, a model change
 cannot be applied to the live session, the system prompt changes under it
-(`invalidateAllRuntimes`), or the record it mirrors is rewound or cleared.
+(`invalidateAllRuntimes`), the record it mirrors is rewound or cleared, or it is `lost`: its
+process ended between turns, or a cancelled prompt went unanswered for 30 seconds and the
+session was marked stuck. A turn that is cancelled or fails marks the tool calls it left
+open as failed, since nothing more will be heard of them, and a snapshot restores an open
+call the same way.
+
+A participant keeps the time its runtime last reported anything (`quietFor`), not counting
+time spent waiting on the user's approval. After a minute of silence the turn status line
+says so. A worker, which nobody is watching, is stopped after 15 minutes of it, and its
+report says why.
 
 ## Providers
 

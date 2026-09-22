@@ -48,6 +48,9 @@ import {
 
 const STDERR_TAIL_LINES = 20;
 const KILL_GRACE_MS = 2_000;
+// How long a cancelled prompt may go unanswered before its session is taken
+// as stuck. The adapter normally answers within a second or two.
+const CANCEL_GRACE_MS = 30_000;
 
 // Sirus advertises compaction and nothing else: no fs, terminal, elicitation,
 // plan or subagents, so the agents run their tools on disk themselves and
@@ -158,6 +161,10 @@ interface SessionState {
   // Set when this session alone is gone: a fork that was disposed. The root
   // never sets it, because disposing the root ends the process instead.
   closed: boolean;
+  // Set when a cancelled prompt went unanswered past its grace: the adapter
+  // is holding a turn nobody can end, so the session takes no more prompts
+  // and its owner rebuilds it.
+  stuck: boolean;
 }
 
 export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime> {
@@ -216,6 +223,7 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
       turn: null,
       inFlight: Promise.resolve(),
       closed: false,
+      stuck: false,
     };
     sessions.set(id, state);
     return state;
@@ -227,6 +235,7 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
   function live(state: SessionState): void {
     if (dead) throw dead;
     if (state.closed) throw new Error(`${options.vendor} runtime was disposed`);
+    if (state.stuck) throw new Error(`${options.vendor} runtime did not answer a cancel`);
   }
 
   function compaction(state: SessionState, id: string, status: CompactionStatus): RuntimeUpdate | null {
@@ -374,15 +383,29 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
     throwIfAborted(signal);
     const current = { signal, error: null as Error | null };
     state.turn = current;
+    let answered = false;
+    let giveUp: () => void = () => undefined;
+    const unanswered = new Promise<void>(resolve => { giveUp = resolve; });
     const cancel = () => {
       void connection.agent.notify(methods.agent.session.cancel, { sessionId: state.id }).catch(() => undefined);
+      // The next prompt waits for this one's answer; one that never comes
+      // must not hold it for good.
+      const timer = setTimeout(() => {
+        if (answered) return;
+        state.stuck = true;
+        giveUp();
+      }, CANCEL_GRACE_MS);
+      timer.unref?.();
     };
     signal.addEventListener('abort', cancel, { once: true });
     const request = connection.agent.request(methods.agent.session.prompt, {
       sessionId: state.id,
       prompt: promptBlocks(input),
     });
-    state.inFlight = request.catch(() => undefined);
+    state.inFlight = Promise.race([
+      request.then(() => undefined, () => undefined).finally(() => { answered = true; }),
+      unanswered,
+    ]);
     try {
       const response = await abortable(request, signal);
       if (response.stopReason === 'cancelled' && signal.aborted) throw abortReason(signal);
@@ -549,6 +572,7 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
       get model() { return state.model; },
       get modes() { return state.modes; },
       get context() { return state.context; },
+      get lost() { return dead !== null || state.closed || state.stuck; },
       prompt: (input, signal) => prompt(state, input, signal),
       setPermissionMode: mode => setPermissionMode(state, mode),
       setModel: next => setModel(state, next),

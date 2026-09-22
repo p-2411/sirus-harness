@@ -95,6 +95,9 @@ export interface Runtime {
   readonly modes: readonly SessionMode[];
   // The latest usage update, or null before the first.
   readonly context: ContextUsage | null;
+  // True once this runtime can take no more prompts: its process ended, it
+  // was disposed, or it never answered a cancel. Its owner rebuilds it.
+  readonly lost: boolean;
   // Runs one turn: `session/prompt`, resolved when the vendor ends it. Aborting
   // the signal sends `session/cancel` and rejects with the abort reason. Any
   // other rejection means the runtime is lost and must be rebuilt.
