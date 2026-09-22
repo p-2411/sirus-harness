@@ -7,6 +7,7 @@ import { dataDirectory } from '../../dataDirectory';
 import type { PermissionMode } from '../permissions/policy';
 import { VENDOR_INFO, type Vendor } from '../providers/catalog';
 import type { RuntimeOptions } from './runtime';
+import { claudeSkillPlugins, linkCodexSkills } from './skills';
 
 // A vendor is a launch spec: the adapter to run, the environment its process
 // gets, and what its `session/new` carries. Everything the runtime does after
@@ -15,6 +16,8 @@ import type { RuntimeOptions } from './runtime';
 // Who a session on this process is opened for: the runtime's own participant
 // when it is the root, the worker's when it is a fork.
 export interface SessionSpec {
+  // Where the session runs: the participant's directory, or the worker's.
+  directory: string;
   systemPrompt: string;
   mcpServer: RuntimeOptions['mcpServer'];
 }
@@ -70,10 +73,14 @@ function mcpServersFor(spec: SessionSpec): McpServer[] {
 
 // Claude Code's built-in tools this session may run. Task, Agent,
 // AskUserQuestion, TodoWrite, NotebookEdit and ExitPlanMode stay off so native
-// subagents stay off and nothing arrives that Sirus cannot render.
-const CLAUDE_TOOLS = ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep', 'WebFetch', 'WebSearch'];
+// subagents stay off and nothing arrives that Sirus cannot render. Skill is
+// what lists and loads skills (see `./skills`).
+const CLAUDE_TOOLS = ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Skill'];
 
 function claudeLaunch(options: RuntimeOptions, mode: PermissionMode): Launch {
+  // Where the skill plugins are written, made with the first session that
+  // needs one and removed with the process.
+  const directory = path.join(dataDirectory(), 'runtimes', crypto.randomUUID());
   return {
     command: process.execPath,
     args: [adapterScript('@agentclientprotocol/claude-agent-acp')],
@@ -90,13 +97,21 @@ function claudeLaunch(options: RuntimeOptions, mode: PermissionMode): Launch {
             tools: options.bare ? [] : CLAUDE_TOOLS,
             // Keeps CLAUDE.md and the user's settings files out of the session.
             settingSources: [],
+            ...(options.bare ? {} : {
+              plugins: claudeSkillPlugins(directory, spec.directory)
+                .map(plugin => ({ type: 'local', path: plugin, skipMcpDiscovery: true })),
+              // Claude Code's bundled skills lean on tools Sirus leaves off.
+              settings: { disableBundledSkills: true },
+            }),
           },
         },
       },
       mcpServers: mcpServersFor(spec),
     }),
     forkNeedsResume: true,
-    cleanup() {},
+    cleanup() {
+      rmSync(directory, { recursive: true, force: true });
+    },
   };
 }
 
@@ -145,6 +160,7 @@ function codexLaunch(options: RuntimeOptions, mode: PermissionMode): Launch {
   const instructions = path.join(directory, 'instructions.md');
   writeFileSync(instructions, options.systemPrompt, { mode: 0o600 });
   const codex = codexBinaryPath();
+  linkCodexSkills(options.env[VENDOR_INFO.gpt.profileDirEnv]);
   return {
     command: process.execPath,
     args: [adapterScript('@agentclientprotocol/codex-acp')],

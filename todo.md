@@ -7,6 +7,6 @@
 [X] esc should only cancel current session
 [X] active subagent should be per session.
 
-[] skills
+[X] skills
 [X] heartbeat mechanism
 [X] when turn was cancelled, all tools should fial. "running commands" should also stop

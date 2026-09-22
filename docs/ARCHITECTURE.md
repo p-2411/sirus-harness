@@ -142,6 +142,16 @@ it was forked from, so the worker's own contract arrives in its first prompt ins
 (`FORKED_WORKER_HANDOVER` in `prompt.ts`). Adding a vendor is a launch spec and a catalog
 row.
 
+Skills are the vendors' own, and `runtime/skills.ts` only makes sure each one can see the
+user's and the project's. Claude has `Skill` on its allowlist, but its empty
+`settingSources` also keep its skill folders out, so each session is handed two local
+plugins, `user` and `project`, written under the launch's folder: symlinks to the skills in
+`.claude/skills` and `.agents/skills` in the user's home and in the session's directory up
+to the git root. `SessionSpec.directory` is there so a forked worker gets the project plugin
+of its own worktree. Claude Code's bundled skills are switched off. Codex finds `.agents` and
+`.codex` skills on its own; when a credential points `CODEX_HOME` at a profile, the user's
+`~/.codex/skills` are linked into it one by one.
+
 Delegation is the participant's own: `spawnSubagent` settles the worker's model and thinking
 level (the session's fixed subagent model, else the router's answer for that task), has
 `worktree.ts` cut it a checkout, and returns as soon as the run is under way.

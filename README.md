@@ -137,6 +137,18 @@ Guidance is read when a participant's runtime starts and stays fixed for as long
 
 Automatic discovery is limited to the session directory. Ancestor/git-root lookup, nested rules, `CLAUDE.md`, and global instruction files are not loaded automatically; agents can still inspect relevant files using tools.
 
+### Skills
+
+Each agent uses its own vendor's skills: Claude through Claude Code's Skill tool, GPT through Codex's skill list. A skill is a folder holding a `SKILL.md`, and the agent loads it when the task fits or when you name it.
+
+| Put a skill in… | Claude sees it | GPT sees it |
+| --- | --- | --- |
+| `.agents/skills/` in the project, or `~/.agents/skills/` | yes | yes |
+| `.claude/skills/` in the project, or `~/.claude/skills/` | yes | no |
+| `.codex/skills/` in the project, or `~/.codex/skills/` | no | yes |
+
+Project folders are read from the session's directory up to the Git root. Claude lists your skills as `user:<name>` and the project's as `project:<name>`; Claude Code's bundled skills are left out, since they rely on tools Sirus does not give it. Codex keeps its built-in skills. Claude reads its skills when its runtime starts, so a skill you add reaches a Claude participant after `/clear`, a chat rewind, or the next time Sirus opens. Codex rereads the project's folders and `~/.agents/skills` on every prompt.
+
 ### Choose how much approval you want
 
 The mode applies to the session's participants and subagents. It is the vendor's own mode: Sirus asks each runtime to switch, and the agent decides what to ask about.

@@ -526,6 +526,7 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
     live(parent);
     if (!canFork) throw new Error(`The ${options.vendor} adapter cannot fork a session`);
     const params: SessionParams = launch.session({
+      directory: forked.directory,
       systemPrompt: forked.systemPrompt,
       mcpServer: forked.mcpServer,
     });
@@ -599,7 +600,11 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
       await connection.agent.request(methods.agent.authenticate, { methodId: launch.authenticate.methodId });
     }
 
-    const params = launch.session({ systemPrompt: options.systemPrompt, mcpServer: options.mcpServer });
+    const params = launch.session({
+      directory: options.directory,
+      systemPrompt: options.systemPrompt,
+      mcpServer: options.mcpServer,
+    });
     const session = await connection.agent.request(methods.agent.session.new, {
       cwd: options.directory,
       mcpServers: params.mcpServers,
