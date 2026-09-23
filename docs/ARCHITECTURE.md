@@ -144,11 +144,16 @@ row.
 
 Skills are the vendors' own, and `runtime/skills.ts` only makes sure each one can see the
 user's and the project's. Claude has `Skill` on its allowlist, but its empty
-`settingSources` also keep its skill folders out, so each session is handed two local
-plugins, `user` and `project`, written under the launch's folder: symlinks to the skills in
-`.claude/skills` and `.agents/skills` in the user's home and in the session's directory up
-to the git root. `SessionSpec.directory` is there so a forked worker gets the project plugin
-of its own worktree. Claude Code's bundled skills are switched off. Codex finds `.agents` and
+`settingSources` also keep its skill folders and enabled plugins out, so each session is
+handed them through the SDK's `plugins` option (`claudeSkillOptions`). Two local plugins,
+`user` and `project`, are written under the launch's folder: symlinks to the skills in
+`.claude/skills` and `.agents/skills` and the commands in `.claude/commands`, in the user's
+home and in the session's directory up to the git root. The plugins the user installed and
+enabled in Claude Code (`plugins/installed_plugins.json` and `enabledPlugins` in the user's,
+the project's and the local settings) go in by path, whole: skills, commands, MCP servers and
+hooks. `SessionSpec.directory` is there so a forked worker gets the project plugin of its own
+worktree. The bundled skills that need tools Sirus leaves off, or act on Claude Code's own
+settings, are switched off by name through `settings.skillOverrides`. Codex finds `.agents` and
 `.codex` skills on its own; when a credential points `CODEX_HOME` at a profile, the user's
 `~/.codex/skills` are linked into it one by one.
 

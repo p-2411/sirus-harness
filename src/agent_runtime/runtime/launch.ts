@@ -7,7 +7,7 @@ import { dataDirectory } from '../../dataDirectory';
 import type { PermissionMode } from '../permissions/policy';
 import { VENDOR_INFO, type Vendor } from '../providers/catalog';
 import type { RuntimeOptions } from './runtime';
-import { claudeSkillPlugins, linkCodexSkills } from './skills';
+import { claudeSkillOptions, linkCodexSkills } from './skills';
 
 // A vendor is a launch spec: the adapter to run, the environment its process
 // gets, and what its `session/new` carries. Everything the runtime does after
@@ -97,12 +97,9 @@ function claudeLaunch(options: RuntimeOptions, mode: PermissionMode): Launch {
             tools: options.bare ? [] : CLAUDE_TOOLS,
             // Keeps CLAUDE.md and the user's settings files out of the session.
             settingSources: [],
-            ...(options.bare ? {} : {
-              plugins: claudeSkillPlugins(directory, spec.directory)
-                .map(plugin => ({ type: 'local', path: plugin, skipMcpDiscovery: true })),
-              // Claude Code's bundled skills lean on tools Sirus leaves off.
-              settings: { disableBundledSkills: true },
-            }),
+            // The user's and the project's skills and commands, the plugins
+            // enabled in Claude Code, and which bundled skills stay off.
+            ...(options.bare ? {} : claudeSkillOptions(directory, spec.directory)),
           },
         },
       },

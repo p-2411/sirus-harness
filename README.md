@@ -149,7 +149,11 @@ Type `/` to find a skill: the menu lists `@sirus`'s skills after Sirus's own com
 | `.claude/skills/` in the project, or `~/.claude/skills/` | yes | no |
 | `.codex/skills/` in the project, or `~/.codex/skills/` | no | yes |
 
-Project folders are read from the session's directory up to the Git root. Claude lists your skills as `user:<name>` and the project's as `project:<name>`; Claude Code's bundled skills are left out, since they rely on tools Sirus does not give it. Codex keeps its built-in skills. Claude reads its skills when its runtime starts, so a skill you add reaches a Claude participant after `/clear`, a chat rewind, or the next time Sirus opens. Codex rereads the project's folders and `~/.agents/skills` on every prompt.
+Project folders are read from the session's directory up to the Git root. Claude also takes your commands in `~/.claude/commands/` and the project's `.claude/commands/`, and lists your skills and commands as `user:<name>` and the project's as `project:<name>`.
+
+Claude also loads the plugins you installed and enabled in Claude Code, as Claude Code does: their skills and commands (in the menu as `/<plugin>:<name>`), their MCP servers, and their hooks. A plugin's hooks run in every Claude session Sirus starts, and each participant, subagent, and rebuilt runtime is a session of its own, so a session-start hook runs for each. Plugin agents need Claude Code's own Agent tool, which Sirus replaces with its subagents, so they go unused.
+
+Claude Code's bundled skills are on, except those that cannot work here: `batch`, `code-review`, `loop`, `deep-research`, `workflow-authoring`, and `design-sync` need tools Sirus does not give Claude, and `update-config`, `fewer-permission-prompts`, and `debug` act on Claude Code's own settings and logs, which Sirus does not use. Codex keeps its built-in skills. Claude reads its skills when its runtime starts, so a skill you add reaches a Claude participant after `/clear`, a chat rewind, or the next time Sirus opens. Codex rereads the project's folders and `~/.agents/skills` on every prompt.
 
 ### Choose how much approval you want
 
