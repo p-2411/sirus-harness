@@ -1,4 +1,6 @@
 import type {
+  CreateElicitationRequest,
+  CreateElicitationResponse,
   RequestPermissionRequest,
   RequestPermissionResponse,
   SessionMode,
@@ -52,6 +54,10 @@ export interface RuntimeOptions {
   // Whatever the vendor escalates arrives here. A cancelled prompt must
   // answer `{ outcome: 'cancelled' }`; the signal is the prompt's.
   onPermission: (request: RequestPermissionRequest, signal: AbortSignal) => Promise<RequestPermissionResponse>;
+  // A question the agent puts to the user, as a form: Claude's
+  // AskUserQuestion, Codex's request_user_input, an MCP server's form. A
+  // runtime without it declines them. The signal is the prompt's.
+  onElicitation?: (request: CreateElicitationRequest, signal: AbortSignal) => Promise<CreateElicitationResponse>;
   // Every `session/update` the runtime received, already reduced.
   onUpdate: (update: RuntimeUpdate) => void;
 }
@@ -89,7 +95,8 @@ export interface PromptResult {
 // it is sent; a worker that needs its own instructions today has to carry
 // them in its first prompt.
 export type ForkOptions = Pick<RuntimeOptions,
-  'directory' | 'model' | 'thinkingLevel' | 'systemPrompt' | 'permissionMode' | 'mcpServer' | 'onPermission' | 'onUpdate'>;
+  'directory' | 'model' | 'thinkingLevel' | 'systemPrompt' | 'permissionMode' | 'mcpServer' | 'onPermission'
+  | 'onElicitation' | 'onUpdate'>;
 
 export interface Runtime {
   readonly vendor: Vendor;

@@ -2,12 +2,14 @@ import { useEffect, useRef } from 'react';
 import type { Session, SessionStatus } from '../agent_runtime/session';
 import { textOf } from '../agent_runtime/types';
 import { describeRequester, pendingApprovals, subscribePermissions } from '../agent_runtime/permissions/approvals';
+import { pendingQuestions, subscribeQuestions } from '../agent_runtime/permissions/questions';
 import {
   listAllSubagents,
   subscribeSubagents,
   type SubagentStatus,
 } from '../agent_runtime/tools/subagents';
 import { sentenceCase } from './chat/ApprovalPrompt';
+import { questionText } from './chat/QuestionCard';
 import { toolLine } from './chat/ChatMessage';
 import { notify } from './terminal/notifications';
 
@@ -69,6 +71,23 @@ export function subscribeApprovalNotifications(getSessions: () => readonly Sessi
   });
 }
 
+// A question waits on the user like an approval does.
+export function subscribeQuestionNotifications(getSessions: () => readonly Session[], send = notify): () => void {
+  let seen = new Set(pendingQuestions().map(request => request.id));
+  return subscribeQuestions(() => {
+    const current = pendingQuestions();
+    for (const request of current) {
+      if (seen.has(request.id)) continue;
+      const session = getSessions().find(candidate => candidate.getId() === request.sessionId);
+      send(
+        `Sirus · ${session?.getName() ?? 'question'}`,
+        `${describeRequester(request.requester)} asks: ${firstLine(questionText(request, request.fields[0]).question)}`,
+      );
+    }
+    seen = new Set(current.map(request => request.id));
+  });
+}
+
 // A worker finishes in the background, so nothing on screen is waiting for
 // it: say so, and where its report landed. Runs that are already over when
 // the subscription starts — the interrupted records a restart brings back —
@@ -97,7 +116,7 @@ export function subscribeWorkerNotifications(
   });
 }
 
-// Watches every session, the approval queue, and the workers, and raises a
+// Watches every session, the approval and question queues, and the workers, and raises a
 // desktop notification when something finishes or needs the user. Whether a
 // notification actually shows is the notification module's call.
 export function useNotifications(sessions: readonly Session[]) {
@@ -106,5 +125,6 @@ export function useNotifications(sessions: readonly Session[]) {
 
   useEffect(() => subscribeSessionNotifications(sessions), [sessions]);
   useEffect(() => subscribeApprovalNotifications(() => latestSessions.current), []);
+  useEffect(() => subscribeQuestionNotifications(() => latestSessions.current), []);
   useEffect(() => subscribeWorkerNotifications(() => latestSessions.current), []);
 }

@@ -169,6 +169,10 @@ Use `/permissions` to choose a mode, or `Shift+Tab` to cycle through them. At a 
 
 Two things differ by vendor. In `ask` and `auto`, Codex runs edits and commands inside the working directory in a sandbox that can write there and reach no network, so those run without asking and only what leaves the sandbox reaches you. Claude's `auto` mode depends on the model: where the model does not support it the session falls back to asking, and the status row says so. These are tool approval controls, not an operating-system sandbox.
 
+### Questions from the agent
+
+When an agent needs a decision from you, it can ask instead of guessing: Claude through Claude Code's AskUserQuestion, GPT through Codex's question tool, and MCP servers through the forms they raise. The question takes the input bar's place as a card, one question at a time: pick with `↑`/`↓` and `Enter` (or a number key), toggle a multiple choice with `Space`, choose `Other…` to type your own answer, and `←` to go back. `Esc` cancels the turn, as it does for an approval. Subagents cannot ask; nobody is watching them.
+
 ### Your subscriptions, as many as you want—or an API key
 
 Put your existing Claude and ChatGPT subscriptions to work in Sirus. Connect as many subscription accounts as you want, use an Anthropic or OpenAI API key, or mix subscriptions and keys. Add each account through `/login`; Sirus keeps them available together.

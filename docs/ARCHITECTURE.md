@@ -41,7 +41,7 @@ One user prompt, in the order a reader opens the files:
 5. `agent_runtime/runtime/runtime.ts`: `createRuntime` starts the vendor's adapter, or the
    scripted runtime the test suite bound to that model id.
 6. `agent_runtime/runtime/acp.ts`: the ACP client. Spawn, `initialize` advertising
-   compaction and nothing else, `session/new`, `session/set_mode`, one `session/prompt` per
+   compaction and form elicitation and nothing else, `session/new`, `session/set_mode`, one `session/prompt` per
    turn, `session/cancel` to stop one, `session/fork` for a worker that starts from its
    owner's conversation, and `_session/steering` to put text into a prompt in flight. One
    process can hold several sessions, so every update is routed by the session id it names.
@@ -57,7 +57,8 @@ One user prompt, in the order a reader opens the files:
    delegation runs in `tools/subagents/`.
 9. `agent_runtime/permissions/approvals.ts`: whatever the vendor escalates arrives as
    `session/request_permission`, is queued here, and `Chat.tsx` renders it and answers with
-   one of the options the vendor offered.
+   one of the options the vendor offered. A question the agent asks arrives as
+   `elicitation/create` and is queued in `permissions/questions.ts` the same way.
 
 ## Session
 
@@ -273,6 +274,16 @@ escalated: the prompt renders from the ACP tool call and nothing else, and the a
 of the vendor's own options, so "allow for this session" is the vendor's allow-always and
 Sirus keeps no allowance of its own. There is no `permissions/index.ts`: every import names
 the file that defines the symbol.
+
+Questions are the vendors' too: Claude's AskUserQuestion (on the allowlist) and Codex's
+request_user_input (on in every mode through `default_mode_request_user_input`), and any
+form an MCP server raises through either. Both adapters send them as ACP form elicitations,
+which Sirus advertises; codex-acp still sends tool approvals as permission requests.
+`questions.ts` reads the form into fields, folding each question's free-text field (marked
+in its `_meta` by either adapter) into it as "Other", queues it per session behind the
+approvals, and answers with the form's content. A subagent's question is declined at once.
+`frontend/chat/QuestionCard.tsx` asks it one field at a time in the same `FramedCard` the
+approval prompt uses; time spent waiting on either is not silence to the watchdog.
 
 ## Persistence
 

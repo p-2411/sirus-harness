@@ -71,11 +71,12 @@ function mcpServersFor(spec: SessionSpec): McpServer[] {
   return spec.mcpServer ? [{ type: 'http', ...spec.mcpServer }] : [];
 }
 
-// Claude Code's built-in tools this session may run. Task, Agent,
-// AskUserQuestion, TodoWrite, NotebookEdit and ExitPlanMode stay off so native
-// subagents stay off and nothing arrives that Sirus cannot render. Skill is
-// what lists and loads skills (see `./skills`).
-const CLAUDE_TOOLS = ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Skill'];
+// Claude Code's built-in tools this session may run. Task, Agent, TodoWrite,
+// NotebookEdit and ExitPlanMode stay off so native subagents stay off and
+// nothing arrives that Sirus cannot render. Skill is what lists and loads
+// skills (see `./skills`); AskUserQuestion reaches the user as a form
+// (see `permissions/questions.ts`).
+const CLAUDE_TOOLS = ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Skill', 'AskUserQuestion'];
 
 function claudeLaunch(options: RuntimeOptions, mode: PermissionMode): Launch {
   // Where the skill plugins are written, made with the first session that
@@ -163,7 +164,13 @@ function codexLaunch(options: RuntimeOptions, mode: PermissionMode): Launch {
     args: [adapterScript('@agentclientprotocol/codex-acp')],
     env: {
       ...options.env,
-      CODEX_CONFIG: JSON.stringify({ model_instructions_file: instructions, project_doc_max_bytes: 0 }),
+      // request_user_input is Codex's AskUserQuestion; Codex offers it only in
+      // plan mode unless this feature is on.
+      CODEX_CONFIG: JSON.stringify({
+        model_instructions_file: instructions,
+        project_doc_max_bytes: 0,
+        features: { default_mode_request_user_input: true },
+      }),
       INITIAL_AGENT_MODE: CODEX_MODES[mode],
       // A login page must never open from under the TUI.
       NO_BROWSER: '1',

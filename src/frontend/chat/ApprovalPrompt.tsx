@@ -4,6 +4,7 @@ import { theme } from '../styles/theme';
 import type { ToolCallBlock } from '../../agent_runtime/types';
 import { describeRequester, type ApprovalDecision, type ApprovalRequest } from '../../agent_runtime/permissions/approvals';
 import { editPreview, toolLine, type DiffLine } from './ChatMessage';
+import { FramedCard } from './FramedCard';
 
 interface ApprovalChoice {
   kind: PermissionOptionKind;
@@ -61,34 +62,45 @@ function detailColor(line: string): string {
   return theme.textMuted;
 }
 
-// A pending permission prompt: who is asking, what for, and the choices.
+// A pending permission prompt as a framed card: who is asking and what for
+// in its top edge, what the call would do, and the choices with their keys.
 export function ApprovalPrompt({ request, waiting, selected }: {
   request: ApprovalRequest;
   waiting: number;
   selected: number;
 }) {
   const choices = approvalChoices(request);
-  const column = Math.max(...choices.map(choice => choice.label.length)) + 2;
+  const detail = approvalDetail(request.toolCall);
   return (
-    <Box flexDirection="column" paddingX={2} marginX={1} flexShrink={0} position="static">
-      <Text wrap="truncate-end">
-        <Text color={theme.pending}>⚠ </Text>
-        <Text color={theme.accent} bold>{describeRequester(request.requester)}</Text>
-        <Text color={theme.text}> wants to </Text>
-        <Text color={theme.highlight} bold>{sentenceCase(toolLine(request.toolCall))}</Text>
-        {waiting > 0 && <Text color={theme.textSubtle}> · {waiting} more waiting</Text>}
-      </Text>
-      {approvalDetail(request.toolCall).map((line, index) => (
-        <Text key={index} color={detailColor(line)} wrap="truncate-end">  {line}</Text>
-      ))}
-      <Box height={1} />
-      {choices.map((choice, index) => (
-        <Box key={choice.kind}>
-          <Text color={index === selected ? theme.accent : theme.textSubtle}>{index === selected ? '› ' : '  '}</Text>
-          <Text color={index === selected ? theme.accent : theme.text}>{choice.label.padEnd(column)}</Text>
-          <Text color={theme.textSubtle}>{choice.key}</Text>
+    <FramedCard
+      tone={theme.pending}
+      title={[
+        { text: '⚠ ', color: theme.pending },
+        { text: describeRequester(request.requester), color: theme.accent, bold: true },
+        { text: ' wants to ' },
+        { text: sentenceCase(toolLine(request.toolCall)), color: theme.highlight, bold: true },
+      ]}
+      {...(waiting > 0 ? { right: `${waiting} more` } : {})}
+      footer="↑↓ move · enter select · esc cancels the turn"
+    >
+      {detail.length > 0 && (
+        <Box flexDirection="column" marginBottom={1}>
+          {detail.map((line, index) => (
+            <Text key={index} color={detailColor(line)} wrap="truncate-end">  {line}</Text>
+          ))}
         </Box>
-      ))}
-    </Box>
+      )}
+      {choices.map((choice, index) => {
+        const active = index === selected;
+        return (
+          <Box key={choice.kind} justifyContent="space-between">
+            <Text color={active ? theme.accent : theme.text} wrap="truncate-end">
+              {active ? '› ' : '  '}{choice.label}
+            </Text>
+            <Text color={active ? theme.accent : theme.textSubtle}>{choice.key}</Text>
+          </Box>
+        );
+      })}
+    </FramedCard>
   );
 }

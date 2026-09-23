@@ -7,6 +7,7 @@ import { Box, Text, useInput, usePaste } from 'ink';
 import { theme } from '../styles/theme';
 import { moveSelection, SelectMenu } from './SelectMenu';
 import { ApprovalPrompt, approvalChoices } from './ApprovalPrompt';
+import { QuestionCard } from './QuestionCard';
 import { EntryInput, InputFeedback, QueuedRow } from './InputRows';
 import { SubagentStatusRow, type StatusRowProps } from './StatusRow';
 import { WorkerStrip } from './WorkerStrip';
@@ -16,6 +17,7 @@ import type { ParticipantColors } from '../MentionText';
 import type { Feedback } from '../../commands/feedback';
 import type { CommandMenuEntry, CommandMenuItem } from '../../commands/registry';
 import type { ApprovalDecision, ApprovalRequest } from '../../agent_runtime/permissions/approvals';
+import type { QuestionAnswer, QuestionRequest } from '../../agent_runtime/permissions/questions';
 import type { SubagentRun } from '../../agent_runtime/tools/subagents';
 
 export type PromptMode =
@@ -25,6 +27,13 @@ export type PromptMode =
     // further prompts queued behind this one for the same session
     waiting: number;
     onDecide: (decision: ApprovalDecision) => void;
+  }
+  | {
+    type: 'question';
+    request: QuestionRequest;
+    // further questions queued behind this one for the same session
+    waiting: number;
+    onAnswer: (answer: QuestionAnswer) => void;
   }
   | {
     type: 'menu';
@@ -65,6 +74,8 @@ export function PromptBar({ mode, feedback, participantColors, queuedMessages, w
     if (isMouseInput(enteredInput) || isFocusInput(enteredInput)) return;
     // Session switching belongs to the sidebar in every input mode.
     if (key.meta && (key.upArrow || key.downArrow)) return;
+    // The question card takes its own keys.
+    if (mode.type === 'question') return;
 
     if (mode.type === 'approval') {
       // escape is the turn's cancel, handled by the chat; it withdraws the prompt
@@ -102,12 +113,24 @@ export function PromptBar({ mode, feedback, participantColors, queuedMessages, w
     }
   });
 
+  // A permission or question card stands where the input box stands.
+  if (mode.type === 'approval' || mode.type === 'question') {
+    return (
+      <>
+        <InputFeedback feedback={feedback} participantColors={participantColors} />
+        <QueuedRow messages={queuedMessages} participantColors={participantColors} />
+        {mode.type === 'approval'
+          ? <ApprovalPrompt request={mode.request} waiting={mode.waiting} selected={selected} />
+          : <QuestionCard key={mode.request.id} request={mode.request} waiting={mode.waiting} onAnswer={mode.onAnswer} />}
+        <WorkerStrip workers={workers} />
+        <SubagentStatusRow {...status} />
+      </>
+    );
+  }
+
   return (
     <>
       {mode.type === 'menu' && <SelectMenu items={mode.items} selected={selected} />}
-      {mode.type === 'approval' && (
-        <ApprovalPrompt request={mode.request} waiting={mode.waiting} selected={selected} />
-      )}
       <InputFeedback feedback={feedback} participantColors={participantColors} />
       <QueuedRow messages={queuedMessages} participantColors={participantColors} />
       <Box
@@ -124,13 +147,10 @@ export function PromptBar({ mode, feedback, participantColors, queuedMessages, w
             : (
               <Box>
                 <Text color={theme.accentSoft}>›{' '}</Text>
-                <Text color={theme.textSubtle}>
-                  ↑↓ choose · enter to select
-                  {mode.type === 'approval' && ` · ${approvalChoices(mode.request).map(choice => choice.key).join(' / ')}`}
-                </Text>
+                <Text color={theme.textSubtle}>↑↓ choose · enter to select</Text>
               </Box>
             )}
-          <Text color={theme.textSubtle}>{mode.type === 'approval' ? 'esc cancels the turn' : 'esc cancels'}</Text>
+          <Text color={theme.textSubtle}>esc cancels</Text>
         </Box>
       </Box>
       <WorkerStrip workers={workers} />

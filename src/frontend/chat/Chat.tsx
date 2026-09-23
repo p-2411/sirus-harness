@@ -30,6 +30,12 @@ import {
   resolveApproval,
   subscribePermissions,
 } from '../../agent_runtime/permissions/approvals';
+import {
+  getQuestionsVersion,
+  pendingQuestions,
+  resolveQuestion,
+  subscribeQuestions,
+} from '../../agent_runtime/permissions/questions';
 import { nextPermissionMode } from '../../agent_runtime/permissions/policy';
 import { getSubagentsVersion, subscribeSubagents } from '../../agent_runtime/tools/subagents';
 
@@ -103,9 +109,10 @@ const QUIET_NOTICE_MS = 60_000;
 
 // The line at the foot of the history while a turn runs: what the agents are
 // doing, or that they are waiting on the user, and for how long.
-function TurnStatus({ messages, awaitingApproval, compacting, startedAt, quietFor }: {
+function TurnStatus({ messages, awaitingApproval, awaitingAnswer, compacting, startedAt, quietFor }: {
   messages: readonly Message[];
   awaitingApproval: boolean;
+  awaitingAnswer: boolean;
   compacting: boolean;
   startedAt: number;
   // Read on every tick: how long the runtimes have been silent.
@@ -116,14 +123,16 @@ function TurnStatus({ messages, awaitingApproval, compacting, startedAt, quietFo
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
+  const waitingOnUser = awaitingApproval || awaitingAnswer;
   const phase = awaitingApproval ? 'waiting for your approval'
+    : awaitingAnswer ? 'waiting for your answer'
     : compacting ? 'compacting context'
       : turnPhase(messages);
-  const quiet = awaitingApproval || compacting ? 0 : quietFor();
+  const quiet = waitingOnUser || compacting ? 0 : quietFor();
   return (
     <Box paddingX={3} marginBottom={1}>
       <Spinner />
-      <Text color={awaitingApproval ? theme.pending : theme.textSubtle}>  {phase}</Text>
+      <Text color={waitingOnUser ? theme.pending : theme.textSubtle}>  {phase}</Text>
       <Text color={theme.textSubtle} dimColor> · {formatElapsed(now - startedAt)}</Text>
       {quiet >= QUIET_NOTICE_MS && (
         <Text color={theme.pending}> · no output for {formatElapsed(quiet)} · esc to cancel</Text>
@@ -268,15 +277,26 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   // A tool call of this session (or of a subagent it spawned) waiting on the
   // user takes over the input bar until it is answered or the turn is cancelled.
   useSyncExternalStore(subscribePermissions, getPermissionsVersion);
+  // A question an agent asks waits behind the approvals.
+  useSyncExternalStore(subscribeQuestions, getQuestionsVersion);
   const approvals = pendingApprovals(currSession.getId());
-  const effectiveInputMode: InputMode = approvals.length > 0 && inputMode.type === 'text'
-    ? {
-      type: 'approval',
-      request: approvals[0],
-      waiting: approvals.length - 1,
-      onDecide: decision => { resolveApproval(approvals[0].id, decision); },
-    }
-    : inputMode;
+  const questions = pendingQuestions(currSession.getId());
+  const effectiveInputMode: InputMode = inputMode.type !== 'text' ? inputMode
+    : approvals.length > 0
+      ? {
+        type: 'approval',
+        request: approvals[0],
+        waiting: approvals.length - 1 + questions.length,
+        onDecide: decision => { resolveApproval(approvals[0].id, decision); },
+      }
+      : questions.length > 0
+        ? {
+          type: 'question',
+          request: questions[0],
+          waiting: questions.length - 1,
+          onAnswer: answer => { resolveQuestion(questions[0].id, answer); },
+        }
+        : inputMode;
   // shift+tab is /permissions <next mode>, sent down the same path as typing it
   const cyclePermissionMode = () => {
     send(`/permissions ${nextPermissionMode(currSession.getPermissionMode())}`);
@@ -550,6 +570,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         <TurnStatus
           messages={messages}
           awaitingApproval={approvals.length > 0}
+          awaitingAnswer={questions.length > 0}
           compacting={currSession.isCompacting()}
           startedAt={currSession.getActiveTurnStartedAt() ?? commandStartedAt ?? Date.now()}
           quietFor={() => currSession.getTurnQuietFor()}

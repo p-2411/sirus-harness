@@ -289,7 +289,8 @@ describe('approval prompt', () => {
       content: [{ type: 'diff', path: 'src/app.ts', oldText: 'old', newText: 'new' }],
     }), 1);
 
-    expect(output).toContain('@sirus wants to edit src/app.ts · 1 more waiting');
+    expect(output).toContain('@sirus wants to edit src/app.ts');
+    expect(output).toMatch(/1 more ─╮/);
     expect(output).toContain('src/app.ts');
     expect(output).toContain('- old');
     expect(output).toContain('+ new');

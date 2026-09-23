@@ -1,4 +1,9 @@
-import type { RequestPermissionRequest, RequestPermissionResponse } from '@agentclientprotocol/sdk';
+import type {
+  CreateElicitationRequest,
+  CreateElicitationResponse,
+  RequestPermissionRequest,
+  RequestPermissionResponse,
+} from '@agentclientprotocol/sdk';
 import { abortReason, isAbortError, throwIfAborted, TurnCancelledError } from '../abort';
 import type { Requester } from './permissions/approvals';
 import { PERMISSION_MODE_NAMES, type PermissionMode } from './permissions/policy';
@@ -53,6 +58,7 @@ export interface RuntimeHost {
   mcpServer(agent: SessionAgent): Promise<RuntimeOptions['mcpServer']>;
   permissionMode(): PermissionMode;
   requestPermission(agent: SessionAgent, request: RequestPermissionRequest, signal: AbortSignal): Promise<RequestPermissionResponse>;
+  requestAnswers(agent: SessionAgent, request: CreateElicitationRequest, signal: AbortSignal): Promise<CreateElicitationResponse>;
   // The model a subagent spawned here runs on; null means Jev picks one.
   subagentModel(): string | null;
   // The host a worker of this session runs under: its own worktree, the
@@ -115,9 +121,9 @@ export class SessionAgent {
   // The credential the runtime is on; a source that worked stays first.
   private source: Source | null = null;
   private turn: AbortController | null = null;
-  // When the runtime last reported anything, and how many of its permission
-  // requests are waiting on the user: the turn is quiet, not stuck, while
-  // one is.
+  // When the runtime last reported anything, and how many of its approvals
+  // and questions are waiting on the user: the turn is quiet, not stuck,
+  // while one is.
   private heardAt = 0;
   private asking = 0;
   // Where the runtime's updates go: the recorder of the turn in flight, and
@@ -269,6 +275,7 @@ export class SessionAgent {
         permissionMode: this.host.permissionMode(),
         mcpServer: await this.host.mcpServer(this),
         onPermission: (request, promptSignal) => this.askPermission(request, promptSignal),
+        onElicitation: (request, promptSignal) => this.askUser(request, promptSignal),
         onUpdate: update => this.hear(update),
       });
       this.runtime = trackRuntime(forked);
@@ -371,6 +378,7 @@ export class SessionAgent {
       mcpServer: await this.host.mcpServer(this),
       permissionMode: this.host.permissionMode(),
       onPermission: (request, promptSignal) => this.askPermission(request, promptSignal),
+      onElicitation: (request, promptSignal) => this.askUser(request, promptSignal),
       onUpdate: update => this.hear(update),
     });
     if (signal.aborted) {
@@ -390,10 +398,19 @@ export class SessionAgent {
     this.record?.(update);
   }
 
-  private async askPermission(request: RequestPermissionRequest, signal: AbortSignal): Promise<RequestPermissionResponse> {
+  private askPermission(request: RequestPermissionRequest, signal: AbortSignal): Promise<RequestPermissionResponse> {
+    return this.waitOnUser(() => this.host.requestPermission(this, request, signal));
+  }
+
+  private askUser(request: CreateElicitationRequest, signal: AbortSignal): Promise<CreateElicitationResponse> {
+    return this.waitOnUser(() => this.host.requestAnswers(this, request, signal));
+  }
+
+  // Time the turn spends waiting on the user is not silence.
+  private async waitOnUser<T>(ask: () => Promise<T>): Promise<T> {
     this.asking++;
     try {
-      return await this.host.requestPermission(this, request, signal);
+      return await ask();
     } finally {
       this.asking--;
       this.heardAt = Date.now();

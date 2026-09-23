@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import { SessionAgent, type RuntimeHost } from '../agent';
 import { isMemoryAccessEnabled } from '../memory-access';
 import { requestPermission } from '../permissions/approvals';
+import { requestAnswers } from '../permissions/questions';
 import { DEFAULT_PERMISSION_MODE, type PermissionMode } from '../permissions/policy';
 import { getSystemPrompt, systemPromptFor } from '../prompt';
 import { jevApiKey, routeSessionModel, routingCandidates } from '../router';
@@ -278,6 +279,8 @@ export class Session {
       permissionMode: () => this.permissionMode,
       requestPermission: (agent, request, signal) =>
         requestPermission({ sessionId: this.id, requester: agent.requester }, request, signal),
+      requestAnswers: (agent, request, signal) =>
+        requestAnswers({ sessionId: this.id, requester: agent.requester }, request, signal),
       subagentModel: () => this.subagentModel,
       forWorker: (id, directory) => ({
         ...host,

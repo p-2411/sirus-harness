@@ -7,6 +7,8 @@ import {
   RequestError,
   type ClientCapabilities,
   type ContentBlock,
+  type CreateElicitationRequest,
+  type CreateElicitationResponse,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
   type SessionConfigOption,
@@ -52,10 +54,15 @@ const KILL_GRACE_MS = 2_000;
 // as stuck. The adapter normally answers within a second or two.
 const CANCEL_GRACE_MS = 30_000;
 
-// Sirus advertises compaction and nothing else: no fs, terminal, elicitation,
-// plan or subagents, so the agents run their tools on disk themselves and
-// nothing pulls execution back into this process.
-const CLIENT_CAPABILITIES: ClientCapabilities = { session: { compaction: {} } };
+// Sirus advertises compaction and form elicitation and nothing else: no fs,
+// terminal, plan or subagents, so the agents run their tools on disk
+// themselves and nothing pulls execution back into this process. Forms are
+// how both adapters put a question to the user; codex-acp still sends its
+// tool approvals as permission requests either way.
+const CLIENT_CAPABILITIES: ClientCapabilities = { session: { compaction: {} }, elicitation: { form: {} } };
+
+const DECLINED: CreateElicitationResponse = { action: 'decline' };
+const CANCELLED_ELICITATION: CreateElicitationResponse = { action: 'cancel' };
 
 // The answer to a permission request that outlives its turn.
 const CANCELLED: RequestPermissionResponse = { outcome: { outcome: 'cancelled' } };
@@ -125,7 +132,7 @@ function refusedValue(error: unknown, id: string): boolean {
 
 // Where a session sends what it produces. The root's are the runtime's own;
 // a fork's belong to the worker it was taken for.
-type SessionHooks = Pick<RuntimeOptions, 'onPermission' | 'onUpdate'>;
+type SessionHooks = Pick<RuntimeOptions, 'onPermission' | 'onElicitation' | 'onUpdate'>;
 
 // Everything one session owns: what its reducer has folded so far, the turn
 // it is running, and who to hand the result to. Sessions on one process share
@@ -326,10 +333,27 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
     }
   }
 
+  // A question outside a turn, or one tied to no session (asked while the
+  // adapter is still starting up), has nobody to answer it.
+  async function elicitation(request: CreateElicitationRequest): Promise<CreateElicitationResponse> {
+    const sessionId = 'sessionId' in request && typeof request.sessionId === 'string' ? request.sessionId : null;
+    const state = sessionId ? sessions.get(sessionId) : undefined;
+    const signal = state?.turn?.signal;
+    if (!state || !signal || signal.aborted) return CANCELLED_ELICITATION;
+    if (!state.hooks.onElicitation) return DECLINED;
+    try {
+      return await state.hooks.onElicitation(request, signal);
+    } catch (error) {
+      if (signal.aborted) return CANCELLED_ELICITATION;
+      throw error;
+    }
+  }
+
   // The casts bridge node's web-stream types and the runtime's globals, which
   // name the same objects.
   const connection = client({ name: 'sirus' })
     .onRequest(methods.client.session.requestPermission, ({ params }) => permission(params))
+    .onRequest(methods.client.elicitation.create, ({ params }) => elicitation(params))
     .onNotification(methods.client.session.update, ({ params }) => { receive(params.sessionId, params.update); })
     .connect(ndJsonStream(
       Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
