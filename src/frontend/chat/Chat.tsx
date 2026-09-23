@@ -13,6 +13,7 @@ import { InputFeedback } from './InputRows';
 import {
   commandMenu,
   executeCommand,
+  isSkillCommand,
   parseCommandLine,
   type CommandMenuEntry,
   type CommandMenuItem,
@@ -442,7 +443,9 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   // A command leaves any attachments waiting for the next real message.
   // Commands are exactly what the background queue leaves for a mounted Chat.
   const send = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[]) => {
-    if (!isAutoSendable(text)) {
+    // A `/name` for one of the agent's skills is a prompt: the agent's own
+    // harness runs the skill.
+    if (!isAutoSendable(text) && !isSkillCommand(text, currSession.getSkills())) {
       const { name, args } = parseCommandLine(text);
       runCommand(name, args);
     } else {
@@ -618,6 +621,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         onQueue={text => currSession.queueMessage(text)}
         onUpdateQueued={(id, text) => currSession.updateQueuedMessage(id, text)}
         contextUsage={currSession.getContextUsage()}
+        skills={() => currSession.getSkills()}
       />
     </Box>
   );

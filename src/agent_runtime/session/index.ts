@@ -6,7 +6,8 @@ import { DEFAULT_PERMISSION_MODE, type PermissionMode } from '../permissions/pol
 import { getSystemPrompt, systemPromptFor } from '../prompt';
 import { jevApiKey, routeSessionModel, routingCandidates } from '../router';
 import { servableModelIds, servesModel } from '../providers';
-import { DEFAULT_MODEL } from '../providers/catalog';
+import { DEFAULT_MODEL, vendorOf } from '../providers/catalog';
+import { skillCommands, type SkillCommand } from '../runtime/skills';
 import { registerToolSession, sirusMcpServerEntry, unregisterToolSession } from '../tools/server';
 import {
   notifySubagents,
@@ -789,6 +790,14 @@ export class Session {
 
   getDirectory(): string {
     return this.directory;
+  }
+
+  // The skills the user can call by name: those of the participant a prompt
+  // with no mention goes to, since that is who `/name` reaches.
+  getSkills(): SkillCommand[] {
+    const agent = this.roster.default;
+    const vendor = vendorOf(agent.model);
+    return vendor ? skillCommands(vendor, agent.directory) : [];
   }
 
   getParticipants(): Participant[] {

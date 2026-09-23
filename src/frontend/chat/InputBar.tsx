@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { Box, Text, useInput, usePaste } from 'ink';
 import { theme } from '../styles/theme';
 import { CommandMenu, useCommandMenu } from './CommandMenu';
+import { isSkillCommand } from '../../commands/registry';
 import { MentionMenu, useMentionMenu } from './MentionMenu';
 import { useFileSuggestions } from './FileMenu';
 import { DraftText, TrailingImages } from './DraftText';
@@ -21,6 +22,7 @@ import type { ImageBlock, MessageBlock } from '../../agent_runtime/types';
 import type { SubagentRun } from '../../agent_runtime/tools/subagents';
 import type { ContextUsage } from '../../agent_runtime/usage';
 import type { PermissionMode } from '../../agent_runtime/permissions/policy';
+import type { SkillCommand } from '../../agent_runtime/runtime/skills';
 
 // What the input bar is collecting: a message, or one of the prompts that
 // take the bar over for a moment.
@@ -64,6 +66,8 @@ interface InputBarProps {
   // Edits a waiting message in place; empty text removes it.
   onUpdateQueued?: (id: string, text: string) => void;
   contextUsage?: ContextUsage | null;
+  // The skills `/name` reaches, read while a slash command is being typed.
+  skills?: () => readonly SkillCommand[];
 }
 
 const TEXT_MODE: InputMode = { type: 'text' };
@@ -71,6 +75,7 @@ const NO_WORKERS: readonly SubagentRun[] = [];
 const NO_ATTACHMENTS: readonly ImageBlock[] = [];
 const NO_HISTORY: readonly string[] = [];
 const NO_QUEUE: readonly QueuedMessage[] = [];
+const NO_SKILLS: readonly SkillCommand[] = [];
 
 export function InputBar({
   send,
@@ -96,6 +101,7 @@ export function InputBar({
   onQueue,
   onUpdateQueued,
   contextUsage,
+  skills,
 }: InputBarProps) {
   const participantColors = participantColorMap(participants);
   const status: StatusRowProps = { permissionMode, modeNotice, model, thinkingLevel, contextUsage };
@@ -171,14 +177,18 @@ export function InputBar({
   useEffect(() => {
     setMenusDismissed(false);
   }, [input]);
-  const commands = useCommandMenu(input, mode.type === 'text' && !selectedQueued && !menusDismissed);
+  const skillList = input.startsWith('/') ? skills?.() ?? NO_SKILLS : NO_SKILLS;
+  const commands = useCommandMenu(input, mode.type === 'text' && !selectedQueued && !menusDismissed, skillList);
+  // A Sirus command takes no @mentions; a skill's arguments are a prompt and
+  // do, once its name is complete.
+  const commandText = input.startsWith('/') && !(input.includes(' ') && isSkillCommand(input, skillList));
   const fileSuggestions = useFileSuggestions(
-    mode.type === 'text' && !menusDismissed && !input.startsWith('/') ? directory : undefined,
+    mode.type === 'text' && !menusDismissed && !commandText ? directory : undefined,
     input,
     editor.cursor,
   );
   const mentionActive = mode.type === 'text' && !menusDismissed
-    && !input.startsWith('/') && fileSuggestions.mention !== null;
+    && !commandText && fileSuggestions.mention !== null;
   const mentions = useMentionMenu({
     active: mentionActive,
     input,
@@ -325,6 +335,13 @@ export function InputBar({
         return;
       }
     }
+    // tab completes the highlighted command, so its arguments can follow
+    if (key.tab && !key.shift && commands.matches.length > 0) {
+      const completed = `/${commands.matches[commands.selected].name} `;
+      setRecall(null);
+      setEditor({ text: completed, cursor: completed.length });
+      return;
+    }
     // ctrl+v (not cmd+v, which the terminal keeps for text) attaches the
     // clipboard image
     if (key.ctrl && enteredInput === 'v') {
@@ -452,6 +469,7 @@ export function InputBar({
         input={input}
         selected={commands.selected}
         offset={commands.offset}
+        skills={skillList}
       />}
       {mentionActive && <MentionMenu
         items={mentions.items}

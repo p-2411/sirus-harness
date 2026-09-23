@@ -152,6 +152,17 @@ of its own worktree. Claude Code's bundled skills are switched off. Codex finds 
 `.codex` skills on its own; when a credential points `CODEX_HOME` at a profile, the user's
 `~/.codex/skills` are linked into it one by one.
 
+The user calls a skill as `/name`. `skillCommands` lists the default participant's skills
+from the same folders, named the way each vendor names them (the frontmatter `name`), and
+the `/` menu shows them after Sirus's commands; `isSkillCommand` is what makes `Chat.send`
+send such a line as a prompt instead of running it. `TurnRunner` rewrites the user's
+`/name` into the addressed participant's vendor form (`skillPrompt`): `/user:name` or
+`/project:name`, which Claude Code reads as a slash command, or `$name`, which Codex
+resolves as a skill mention. Claude reads a slash command only from the prompt's last text
+block, so a cold runtime seeded with its record gets that record as a block of its own
+ahead of the command (`PromptInput.context`), and every prompt sends its images before its
+text.
+
 Delegation is the participant's own: `spawnSubagent` settles the worker's model and thinking
 level (the session's fixed subagent model, else the router's answer for that task), has
 `worktree.ts` cut it a checkout, and returns as soon as the run is under way.

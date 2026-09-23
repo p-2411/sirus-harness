@@ -209,8 +209,8 @@ export class SessionAgent {
         throwIfAborted(signal);
         try {
           const { runtime, fresh } = await this.ensureRuntime(source, signal);
-          const prompt = fresh ? this.seeded(text, options.carried ?? []) : text;
-          await runtime.prompt({ text: prompt, images: input.images ?? [] }, signal);
+          const prompt = fresh ? this.seeded(text, options.carried ?? []) : { text };
+          await runtime.prompt({ ...prompt, images: input.images ?? [] }, signal);
           this.source = source;
           answered = true;
           return;
@@ -401,12 +401,15 @@ export class SessionAgent {
   }
 
   // A new runtime's first prompt carries the record it has never seen, the
-  // way the vendor's own conversation would have held it.
-  private seeded(text: string, carried: readonly Message[]): string {
+  // way the vendor's own conversation would have held it. A slash command
+  // must stay the prompt's own text for the vendor to read it as one, so the
+  // record goes ahead of it as context instead.
+  private seeded(text: string, carried: readonly Message[]): { text: string; context?: string } {
     const earlier = this.transcript.entries().filter(entry => !carried.includes(entry));
     const history = transcriptText(earlier);
-    if (!history) return text;
-    return ['Earlier conversation, for context:', history, '', text].join('\n');
+    if (!history) return { text };
+    const seed = ['Earlier conversation, for context:', history].join('\n');
+    return text.startsWith('/') ? { text, context: seed } : { text: [seed, '', text].join('\n') };
   }
 
   // Everything the runtime reports lands in the entry: text and thoughts as

@@ -141,6 +141,8 @@ Automatic discovery is limited to the session directory. Ancestor/git-root looku
 
 Each agent uses its own vendor's skills: Claude through Claude Code's Skill tool, GPT through Codex's skill list. A skill is a folder holding a `SKILL.md`, and the agent loads it when the task fits or when you name it.
 
+Type `/` to find a skill: the menu lists `@sirus`'s skills after Sirus's own commands, with what each takes and where it comes from. `Tab` completes the name so you can add arguments, including `@file` mentions, and `Enter` sends it. Sirus hands it to the agent in its vendor's own form, `/project:deploy prod` for Claude or `$deploy prod` for Codex, so the skill runs as it would in Claude Code or Codex. A skill marked `user-invocable: false` stays out of the menu, and a Sirus command of the same name takes precedence.
+
 | Put a skill in… | Claude sees it | GPT sees it |
 | --- | --- | --- |
 | `.agents/skills/` in the project, or `~/.agents/skills/` | yes | yes |
@@ -179,6 +181,7 @@ Use `/usage` to see reported subscription allowance and how full each participan
 | `Option+↑` / `Option+↓` | Switch sessions. |
 | `Ctrl+K` | Collapse or expand the sidebar. |
 | `Enter` | Send a message, or queue it while agents are busy. |
+| `Tab` | Complete the highlighted `/` command or skill. |
 | `Shift+Enter` or `\` then `Enter` | Insert a new line. |
 | `Esc` | Close a menu or cancel the current session's turn. |
 | `/rename <name>` | Give the current session a useful name. |

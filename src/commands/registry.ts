@@ -12,6 +12,7 @@ import { updateCommandSpec, versionCommandSpec } from './update/commands';
 import { rewindCommandSpec, undoCommandSpec } from './checkpoints/commands';
 import { imageCommandSpec } from './images/commands';
 import { notifyCommandSpec } from './notifications/commands';
+import type { SkillCommand } from '../agent_runtime/runtime/skills';
 import type {
   CommandCapabilities,
   CommandContext,
@@ -64,13 +65,44 @@ export function parseCommandLine(text: string): { name: string; args: string[] }
   return { name: words[0].slice(1), args: words.slice(1).filter(Boolean) };
 }
 
+// One line of the `/` menu: a Sirus command, or a skill of the participant
+// the prompt goes to.
+export interface CommandMatch {
+  name: string;
+  args?: string;
+  description: string;
+}
+
+// The skills `/name` reaches. A Sirus command of the same name wins, as a
+// vendor's own commands win over its skills.
+export function invocableSkills(skills: readonly SkillCommand[]): SkillCommand[] {
+  return skills.filter(skill => !commandRegistry.some(spec => spec.name === skill.name));
+}
+
+// Text that calls one of those skills: sent to the agent as a prompt rather
+// than run here.
+export function isSkillCommand(text: string, skills: readonly SkillCommand[]): boolean {
+  const name = /^\/(\S+)/.exec(text)?.[1];
+  return name !== undefined && invocableSkills(skills).some(skill => skill.name === name);
+}
+
 // Prefix matches while a command name is being typed ('/' alone matches
 // everything); none once args have begun or the text isn't a command at all.
-export function matchCommands(input: string): CommandSpec[] {
+// Sirus's commands come first, then the skills.
+export function matchCommands(input: string, skills: readonly SkillCommand[] = []): CommandMatch[] {
   if (!input.startsWith('/')) return [];
   const typed = input.slice(1);
   if (typed.includes(' ')) return [];
-  return commandRegistry.filter(spec => spec.name.startsWith(typed));
+  return [
+    ...commandRegistry.filter(spec => spec.name.startsWith(typed)),
+    ...invocableSkills(skills)
+      .filter(skill => skill.name.startsWith(typed))
+      .map(skill => ({
+        name: skill.name,
+        ...(skill.argumentHint ? { args: skill.argumentHint } : {}),
+        description: [skill.description, `(${skill.scope} skill)`].filter(Boolean).join(' '),
+      })),
+  ];
 }
 
 export function commandMenu(

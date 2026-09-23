@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
 import { matchCommands } from '../../commands/registry';
+import type { SkillCommand } from '../../agent_runtime/runtime/skills';
 import { theme } from '../styles/theme';
 
 export const COMMAND_MENU_VISIBLE_ITEMS = 6;
@@ -33,9 +34,9 @@ export function moveCommandMenuSelection(
 // The commands `/…` currently matches, and where the menu sits in them. The
 // selection belongs to the input that produced it: typing anything moves it
 // back to the first match.
-export function useCommandMenu(input: string, active: boolean) {
+export function useCommandMenu(input: string, active: boolean, skills: readonly SkillCommand[] = []) {
   const [navigation, setNavigation] = useState({ input: '', selected: 0, offset: 0 });
-  const matches = active ? matchCommands(input) : [];
+  const matches = active ? matchCommands(input, skills) : [];
   const current = navigation.input === input ? navigation : { input, selected: 0, offset: 0 };
   useEffect(() => {
     setNavigation({ input, selected: 0, offset: 0 });
@@ -61,12 +62,14 @@ export function CommandMenu({
   input,
   selected = 0,
   offset = 0,
+  skills = [],
 }: {
   input: string;
   selected?: number;
   offset?: number;
+  skills?: readonly SkillCommand[];
 }) {
-  const matches = matchCommands(input);
+  const matches = matchCommands(input, skills);
   if (matches.length === 0) return null;
 
   const labels = matches.map(spec => `/${spec.name}${spec.args ? ` ${spec.args}` : ''}`);

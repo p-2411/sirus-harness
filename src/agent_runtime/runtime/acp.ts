@@ -369,10 +369,14 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
     void connection.agent.request(methods.agent.session.close, { sessionId: state.id }).catch(() => undefined);
   }
 
+  // The prompt's text goes last, after its context and images, the way
+  // Claude Code's own input is sent: its last text block is where it looks
+  // for a slash command, and what comes before rides along with it.
   function promptBlocks(input: PromptInput): ContentBlock[] {
     return [
-      { type: 'text', text: input.text },
+      ...(input.context ? [{ type: 'text' as const, text: input.context }] : []),
       ...input.images.map(image => ({ type: 'image' as const, data: imageData(image), mimeType: image.mediaType })),
+      { type: 'text', text: input.text },
     ];
   }
 

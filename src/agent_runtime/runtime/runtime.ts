@@ -70,6 +70,9 @@ export type RuntimeUpdate =
 export interface PromptInput {
   text: string;
   images: readonly ImageBlock[];
+  // Text that goes ahead of the prompt as a block of its own, so the prompt
+  // stays the last text block, where Claude Code reads a slash command.
+  context?: string;
 }
 
 export interface PromptResult {
