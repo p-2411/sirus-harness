@@ -1,9 +1,11 @@
 import { Session, type SessionStatus } from '../agent_runtime/session';
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { Box, Text, useInput, type DOMElement } from 'ink';
+import { Box, Text, measureElement, useBoxMetrics, useInput, type DOMElement } from 'ink';
 import { theme } from './styles/theme';
 import { useSelectionRegion } from './interaction/useTextSelection';
 import { useClickable } from './interaction/clickable';
+import { parseMouseWheel } from './interaction/mouse';
+import { rowToLine } from './terminal/screen';
 import SubscriptionLimits from './SubscriptionLimits';
 
 export const SIDEBAR_WIDTH = 26;
@@ -88,13 +90,14 @@ export function sessionStatusAppearance(status: SessionStatus, hasUnread: boolea
   return SESSION_STATUS_APPEARANCE[status === 'idle' && hasUnread ? 'unread' : status];
 }
 
-export function SessionItem({ session, isSelected, onSelect, onDelete, now = Date.now(), collapsed = false }: {
+export function SessionItem({ session, isSelected, onSelect, onDelete, now = Date.now(), collapsed = false, visible = true }: {
   session: Session;
   isSelected: boolean;
   onSelect: (session: Session) => void;
   onDelete: (session: Session) => void;
   now?: number;
   collapsed?: boolean;
+  visible?: boolean;
 }) {
   const ref = useRef<DOMElement>(null);
   const select = useCallback(() => onSelect(session), [onSelect, session]);
@@ -123,6 +126,9 @@ export function SessionItem({ session, isSelected, onSelect, onDelete, now = Dat
 
   const status = sessionStatusAppearance(session.getStatus(), hasUnread && !isSelected);
   const activity = formatRelativeTime(session.getLastActivity(), now);
+
+  // Keep unread state while offscreen, but remove the row's mouse target.
+  if (!visible) return null;
 
   return (
     <Box ref={ref} flexDirection="column" height={1} flexShrink={0}>
@@ -166,8 +172,42 @@ export default function SideBar({ sessions, currSession, selectSession, addSessi
   const versions = useCallback(() => sessions.map(session => session.getVersion()).join(','), [sessions]);
   useSyncExternalStore(subscribeAll, versions);
   const ordered = sessionsByRecency(sessions);
+  const listRef = useRef<DOMElement>(null);
+  const { height } = useBoxMetrics(listRef);
+  const visibleRows = Math.max(0, Math.floor(height));
+  const [scrollOffset, setScrollOffset] = useState(0);
+  const maxOffset = Math.max(0, ordered.length - visibleRows);
+  const offset = Math.min(scrollOffset, maxOffset);
+  const selectedId = currSession?.getId();
+  const selectedIndex = ordered.findIndex(session => session.getId() === selectedId);
+
+  // Follow selection and resizing, while letting the wheel browse freely.
+  useEffect(() => {
+    if (visibleRows === 0) return;
+    setScrollOffset(previous => {
+      const clamped = Math.min(previous, maxOffset);
+      if (selectedIndex < 0) return clamped;
+      if (selectedIndex < clamped) return selectedIndex;
+      if (selectedIndex >= clamped + visibleRows) return selectedIndex - visibleRows + 1;
+      return clamped;
+    });
+  }, [selectedId, selectedIndex, visibleRows, maxOffset]);
+
+  const thumbSize = Math.max(1, Math.floor(visibleRows * visibleRows / Math.max(1, ordered.length)));
+  const thumbTop = maxOffset > 0 ? Math.round(offset / maxOffset * (visibleRows - thumbSize)) : 0;
 
   useInput((input, key) => {
+    const wheel = parseMouseWheel(input);
+    if (wheel && listRef.current) {
+      const { x, y, width, height: listHeight } = measureElement(listRef.current);
+      const column = wheel.column - 1;
+      const line = rowToLine(wheel.row);
+      if (column >= x && column < x + width && line >= y && line < y + listHeight) {
+        setScrollOffset(previous => Math.max(0, Math.min(maxOffset,
+          Math.min(previous, maxOffset) + (wheel.direction === 'up' ? -3 : 3))));
+      }
+      return;
+    }
     if (key.ctrl && input === 'n') addSession();
     // Option+arrows switch sessions even while the input bar shows a picker.
     if (!key.meta || ordered.length === 0) return;
@@ -195,15 +235,16 @@ export default function SideBar({ sessions, currSession, selectSession, addSessi
       borderTop={false}
       borderBottom={false}
       borderLeft={false}
-      justifyContent="space-between"
     >
-      <Box flexDirection="column">
+      <Box flexDirection="column" flexShrink={0}>
         <Box height={1} flexShrink={0} flexDirection="column">
           {!collapsed && <SidebarHeader updateAvailable={updateAvailable} />}
         </Box>
         {!collapsed && <SubscriptionLimits />}
-        <Box flexDirection="column" marginTop={2}>
-          {ordered.map((session) => (
+      </Box>
+      <Box ref={listRef} flexGrow={1} minHeight={0} overflow="hidden" marginTop={2}>
+        <Box flexDirection="column" flexGrow={1} minWidth={0}>
+          {ordered.map((session, index) => (
             <SessionItem
               key={session.getId()}
               session={session}
@@ -212,9 +253,19 @@ export default function SideBar({ sessions, currSession, selectSession, addSessi
               onDelete={deleteSession}
               now={now}
               collapsed={collapsed}
+              visible={index >= offset && index < offset + visibleRows}
             />
           ))}
         </Box>
+        {!collapsed && maxOffset > 0 && visibleRows > 0 && (
+          <Box width={1} flexShrink={0} flexDirection="column">
+            {Array.from({ length: visibleRows }, (_, index) => (
+              <Text key={index} color={theme.textSubtle}>
+                {index >= thumbTop && index < thumbTop + thumbSize ? '┃' : '│'}
+              </Text>
+            ))}
+          </Box>
+        )}
       </Box>
       {!collapsed && <Box flexDirection="column" flexShrink={0}>
         <Box ref={newSessionRef} justifyContent="space-between">

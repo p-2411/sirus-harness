@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import { renderToString } from 'ink';
+import { Box, render as renderApp, renderToString } from 'ink';
+import { PassThrough } from 'node:stream';
 import stripAnsi from 'strip-ansi';
 import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
 import { Session } from '../../src/agent_runtime/session';
@@ -13,8 +14,146 @@ import {
 } from '../../src/frontend/Sidebar';
 import Sidebar from '../../src/frontend/Sidebar';
 import { theme } from '../../src/frontend/styles/theme';
+import { pressAt, releaseAt } from '../../src/frontend/interaction/clickable';
+import { lineToRow } from '../../src/frontend/terminal/screen';
 
 const noOp = () => {};
+
+function mountSidebar() {
+  let sessions = Array.from({ length: 30 }, (_, index) => new Session({
+    id: `scroll-${index}`, name: `Session ${String(index).padStart(2, '0')}`,
+    timing: { conversationStartedAt: 30 - index },
+  }));
+  const allSessions = sessions;
+  let selected = sessions[0]!;
+  let height = 14;
+  let collapsed = false;
+  let added = 0;
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {}, ref() {}, unref() {} });
+  const stdout = Object.assign(new PassThrough(), { columns: 40, rows: 30 });
+  let frame = '';
+  stdout.on('data', chunk => { if (chunk.toString().trim()) frame = stripAnsi(chunk.toString()); });
+  const view = () => <Box height={height} width={40}>
+    <Sidebar sessions={sessions} currSession={selected} selectSession={session => {
+      selected = session;
+      app.rerender(view());
+    }} addSession={() => { added++; }} deleteSession={noOp} collapsed={collapsed} />
+  </Box>;
+  const app = renderApp(view(), {
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    debug: true, patchConsole: false, exitOnCtrlC: false,
+  });
+  const flush = async () => {
+    await new Promise(resolve => setImmediate(resolve));
+    await app.waitUntilRenderFlush();
+  };
+  const type = async (input: string) => { stdin.write(input); await flush(); };
+  return {
+    flush, type,
+    frame: () => frame,
+    selected: () => selected,
+    added: () => added,
+    async wheel(direction: 'up' | 'down', column = 3, line = 4) {
+      await type(`\x1b[<${direction === 'up' ? 64 : 65};${column};${lineToRow(line)}M`);
+    },
+    async resize(next: number) { height = next; app.rerender(view()); await flush(); },
+    async collapse() { collapsed = true; app.rerender(view()); await flush(); },
+    async keepFirst(count: number) {
+      sessions = sessions.slice(0, count);
+      if (!sessions.includes(selected)) selected = sessions[0]!;
+      app.rerender(view());
+      await flush();
+    },
+    async close() {
+      app.unmount();
+      await app.waitUntilExit();
+      stdin.destroy();
+      stdout.destroy();
+      for (const session of allSessions) await session.dispose();
+    },
+  };
+}
+
+describe('sidebar scrolling', () => {
+  test('wheel scrolling reaches the last session, keeps controls fixed, and clicks the visible row', async () => {
+    const app = mountSidebar();
+    try {
+      await app.flush();
+      const initial = app.frame();
+      expect(initial).toContain('Session 00');
+      expect(initial).not.toContain('Session 29');
+      const footerLine = initial.split('\n').findIndex(line => line.includes('new session'));
+      await app.wheel('down', 30); // Over chat, not the sidebar.
+      await app.wheel('down', 3, 0); // Over the fixed header.
+      expect(app.frame()).toBe(initial);
+      for (let index = 0; index < 12; index++) await app.wheel('down');
+      expect(app.frame()).toContain('Session 29');
+      expect(app.frame()).not.toContain('Session 00');
+      expect(app.frame().split('\n')[footerLine]).toContain('new session');
+      expect(app.frame().split('\n')[0]).toContain('sirus');
+      expect(app.frame()).toContain('┃');
+      const bottom = app.frame();
+      await app.wheel('down');
+      expect(app.frame()).toBe(bottom);
+      const row = app.frame().split('\n').findIndex(line => line.includes('Session 29'));
+      expect(pressAt({ col: 3, line: row })).toBe(true);
+      expect(releaseAt({ col: 3, line: row })).toBe(true);
+      await app.flush();
+      expect(app.selected().getName()).toBe('Session 29');
+      // Hidden rows must not intercept the fixed footer's click.
+      pressAt({ col: 3, line: footerLine });
+      releaseAt({ col: 3, line: footerLine });
+      expect(app.added()).toBe(1);
+      for (let index = 0; index < 12; index++) await app.wheel('up');
+      expect(app.frame()).toContain('Session 00');
+      expect(app.frame()).not.toContain('Session 29');
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('keyboard switching follows selection through wraparound, resize, and list removal', async () => {
+    const app = mountSidebar();
+    try {
+      await app.flush();
+      await app.type('\x1b[1;3A');
+      expect(app.selected().getName()).toBe('Session 29');
+      expect(app.frame()).toContain('Session 29');
+      await app.resize(11);
+      expect(app.frame()).toContain('Session 29');
+      expect(app.frame()).toContain('new session');
+      await app.type('\x1b[1;3B');
+      expect(app.selected().getName()).toBe('Session 00');
+      expect(app.frame()).toContain('Session 00');
+      for (let index = 0; index < 12; index++) await app.type('\x1b[1;3B');
+      expect(app.frame()).toContain('Session 12');
+      await app.keepFirst(3);
+      expect(app.frame()).toContain('Session 00');
+      expect(app.frame()).toContain('Session 02');
+      expect(app.frame()).not.toContain('┃');
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('the collapsed sidebar can scroll and select sessions beyond the first page', async () => {
+    const app = mountSidebar();
+    try {
+      await app.flush();
+      await app.collapse();
+      for (let index = 0; index < 12; index++) await app.wheel('down', 2);
+      const rows = app.frame().split('\n').flatMap((line, index) => line.includes('○') ? [index] : []);
+      expect(rows.length).toBeGreaterThan(0);
+      pressAt({ col: 1, line: rows.at(-1)! });
+      releaseAt({ col: 1, line: rows.at(-1)! });
+      await app.flush();
+      expect(app.selected().getName()).toBe('Session 29');
+    } finally {
+      await app.close();
+    }
+  });
+});
 
 function render(session: Session): string {
   return stripAnsi(renderToString(
