@@ -2,66 +2,36 @@ import { execFile } from 'node:child_process';
 import { readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { FILE_PATH_CHARACTER } from './fileMentions';
+import { rootTextRanges } from './mentions';
 
 const runFile = promisify(execFile);
 const excludedDirectories = new Set(['.git', 'node_modules', 'dist', 'build', '.next', 'coverage']);
 const MAX_FILES = 20_000;
 
-export interface FileMention {
+// The file mention being typed at the cursor: where it starts and ends in
+// the input, and the path typed so far.
+export interface ActiveFileMention {
   start: number;
   end: number;
   query: string;
 }
 
-function protectedText(text: string): boolean {
-  let quote: string | null = null;
-  let code = 0;
-  let codeCharacter = '`';
-  for (let index = 0; index < text.length; index++) {
-    const character = text[index]!;
-    if (character === '\\') {
-      index++;
-      continue;
-    }
-    if (code) {
-      if (character !== codeCharacter) continue;
-      let length = 1;
-      while (text[index + length] === codeCharacter) length++;
-      if (length === code) code = 0;
-      index += length - 1;
-      continue;
-    }
-    if (quote) {
-      if (character === quote) quote = null;
-      continue;
-    }
-    if (character === '`') {
-      codeCharacter = '`';
-      code = 1;
-      while (text[index + code] === '`') code++;
-      index += code - 1;
-    } else if (character === '~' && text.slice(index, index + 3) === '~~~'
-      && /^ {0,3}$/.test(text.slice(text.lastIndexOf('\n', index - 1) + 1, index))) {
-      codeCharacter = '~';
-      code = 3;
-      while (text[index + code] === '~') code++;
-      index += code - 1;
-    } else if ('"“‘\''.includes(character)) {
-      if (character === "'" && /\w/.test(text[index - 1] ?? '') && /\w/.test(text[index + 1] ?? '')) continue;
-      quote = character === '“' ? '”' : character === '‘' ? '’' : character;
-    }
-  }
-  return quote !== null || code > 0;
-}
+// An @ at the start of the input or after whitespace or an opening bracket,
+// so an email address is no mention, then a quoted path still open or a
+// bare one, running to the cursor.
+const ACTIVE_MENTION = new RegExp(String.raw`(?:^|[\s([{])@(?:"([^"\n]*)|(${FILE_PATH_CHARACTER.source}*))$`);
 
 /** The unfinished file token being edited, without treating email addresses as mentions. */
-export function activeFileMention(input: string, cursor: number): FileMention | null {
+export function activeFileMention(input: string, cursor: number): ActiveFileMention | null {
   const position = Math.max(0, Math.min(input.length, cursor));
   const prefix = input.slice(0, position);
-  const match = /(?:^|[\s([{])@(?:"([^"\n]*)|([^\s@"'`<>]*))$/.exec(prefix);
+  const match = ACTIVE_MENTION.exec(prefix);
   if (!match) return null;
   const start = match.index + (match[0]!.startsWith('@') ? 0 : 1);
-  if (protectedText(input.slice(0, start))) return null;
+  // The message reads a file mention only in top-level prose, never in a
+  // quoted example, code or a list, so the menu offers files nowhere else.
+  if (!rootTextRanges(input).some(range => start >= range.start && start < range.end)) return null;
   const quoted = match[1] !== undefined;
   const query = match[1] ?? match[2] ?? '';
   let end = position;
@@ -69,7 +39,7 @@ export function activeFileMention(input: string, cursor: number): FileMention | 
     while (end < input.length && input[end] !== '"' && input[end] !== '\n') end++;
     if (input[end] === '"') end++;
   } else {
-    while (end < input.length && !/[\s@"'`<>]/.test(input[end]!)) end++;
+    while (end < input.length && FILE_PATH_CHARACTER.test(input[end]!)) end++;
   }
   return { start, end, query };
 }
