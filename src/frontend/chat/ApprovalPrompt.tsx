@@ -5,6 +5,7 @@ import type { ToolCallBlock } from '../../agent_runtime/types';
 import { describeRequester, type ApprovalDecision, type ApprovalRequest } from '../../agent_runtime/permissions/approvals';
 import { editPreview, toolLine, type DiffLine } from './ChatMessage';
 import { FramedCard } from './FramedCard';
+import { terminalText } from '../terminal/text';
 
 interface ApprovalChoice {
   kind: PermissionOptionKind;
@@ -42,17 +43,18 @@ const PLAN_LINES = 30;
 
 // What the user is approving, one item per line: where the call lands, then
 // the change it makes, the command it runs, the plan it would carry out, or
-// failing all of those its input.
+// failing all of those its input. Each is the vendor's text and is made safe
+// to print before a mark is put in front of it; the input's JSON already is.
 export function approvalDetail(call: ToolCallBlock): string[] {
-  const lines = call.locations.map(location => location.path);
+  const lines = call.locations.map(location => terminalText(location.path));
   const diff = editPreview(call);
   if (diff.length > 0) return [...lines, ...diff.map(markLine)];
   const input = call.input;
   const command = call.kind === 'execute' && input !== null && typeof input === 'object'
     && 'command' in input && typeof input.command === 'string' ? input.command : null;
-  if (command !== null) return [...lines, ...command.split('\n').map(line => `$ ${line}`)];
+  if (command !== null) return [...lines, ...terminalText(command).split('\n').map(line => `$ ${line}`)];
   const plan = call.kind === 'switch_mode' && input !== null && typeof input === 'object'
-    && 'plan' in input && typeof input.plan === 'string' ? input.plan.trim() : null;
+    && 'plan' in input && typeof input.plan === 'string' ? terminalText(input.plan).trim() : null;
   if (plan) {
     const planLines = plan.split('\n');
     return [...lines, ...planLines.slice(0, PLAN_LINES), ...(planLines.length > PLAN_LINES
@@ -65,7 +67,8 @@ export function approvalDetail(call: ToolCallBlock): string[] {
 }
 
 function markLine(line: DiffLine): string {
-  return line.sign === ' ' ? line.text : `${line.sign} ${line.text}`;
+  const text = terminalText(line.text);
+  return line.sign === ' ' ? text : `${line.sign} ${text}`;
 }
 
 // "wants to read src/app.ts": the line's verb loses its capital mid-sentence.
@@ -120,7 +123,7 @@ export function ApprovalPrompt({ request, waiting, selected }: {
         return (
           <Box key={index} justifyContent="space-between">
             <Text color={active ? theme.accent : theme.text} wrap="truncate-end">
-              {active ? '› ' : '  '}{choice.label}
+              {active ? '› ' : '  '}{terminalText(choice.label)}
             </Text>
             <Text color={active ? theme.accent : theme.textSubtle}>{choice.key}</Text>
           </Box>

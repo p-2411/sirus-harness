@@ -435,6 +435,39 @@ describe('thinking', () => {
   });
 });
 
+describe('text from outside Sirus', () => {
+  // What an agent or a tool can put in its text that the terminal would act
+  // on: a progress bar's carriage return, a bell, and a link that shows one
+  // address and opens another.
+  const hostile = 'fetch 50%\r100% done\x07 \x1b]8;;https://elsewhere.example\x1b\\docs.example.com\x1b]8;;\x1b\\';
+  const expectInert = (output: string) => {
+    expect(output).not.toMatch(/[\r\x07\x08]|\x1b\]/);
+    expect(stripAnsi(output)).toContain('100% done docs.example.com');
+    expect(stripAnsi(output)).not.toContain('50%');
+    expect(stripAnsi(output)).not.toContain('elsewhere.example');
+  };
+  const rendered = (content: MessageBlock[]) => renderToString(
+    <ChatMessage message={{ seq: 0, role: 'assistant', content }} sessionId="session" />,
+    { columns: 140 },
+  );
+
+  test('reaches the terminal as plain text in replies, thoughts, tool rows, plans and reports', () => {
+    expectInert(rendered([{ type: 'text', text: hostile }]));
+    expectInert(rendered([{ type: 'thought', text: hostile }]));
+    expectInert(rendered([toolCall({ id: 'hostile-title', kind: 'execute', title: hostile })]));
+    expectInert(rendered([toolCall({
+      id: 'sirus-plan-hostile', input: { entries: [{ content: hostile, status: 'pending' }] },
+    })]));
+    const run = workerRun({ id: 'sub-hostile', callId: 'hostile-report', status: 'done' });
+    registerSubagent(run);
+    try {
+      expectInert(rendered([toolCall({ id: 'hostile-report', title: 'sirus - SpawnAgent', output: hostile })]));
+    } finally {
+      unregisterSubagent(run.id);
+    }
+  });
+});
+
 describe('compaction rule', () => {
   const message = {
     seq: 7,

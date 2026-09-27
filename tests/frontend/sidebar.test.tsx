@@ -106,6 +106,17 @@ describe('sidebar session metadata', () => {
     expect(output).toContain('1m');
     expect(output.trim().split('\n')).toHaveLength(1);
   });
+
+  test('shows a session name an agent chose as plain text', () => {
+    const session = new Session({ id: 'named', timing: { updatedAt: 1_000 } });
+    session.setName('Fix\x07 the \x1b]8;;https://elsewhere.example\x1b\\loader\x1b]8;;\x1b\\');
+    const output = renderToString(
+      <SessionItem session={session} isSelected={false} onSelect={noOp} onDelete={noOp} now={61_000} />,
+      { columns: 40 },
+    );
+    expect(output).not.toMatch(/\x07|\x1b\]/);
+    expect(stripAnsi(output)).toContain('Fix the loader');
+  });
 });
 
 describe('sidebar session status', () => {

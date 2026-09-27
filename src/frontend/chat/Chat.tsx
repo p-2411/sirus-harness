@@ -5,6 +5,7 @@ import { isAutoSendable, Session } from '../../agent_runtime/session';
 import { attachClipboardImage, describeImage, removeStoredImage } from '../../images';
 import { Box, Text, measureElement, renderToString, useApp, useBoxMetrics, useInput, useStdout, type DOMElement } from 'ink';
 import { theme } from '../styles/theme';
+import { terminalText } from '../terminal/text';
 import { HORSE } from '../branding/horse';
 import { ChatMessage, toolLine } from './ChatMessage';
 import { Spinner } from './Spinner';
@@ -47,7 +48,7 @@ export function ChatHeader({ session }: { session: Session }) {
     <Box paddingX={3} justifyContent="space-between" flexShrink={0}>
       <Box flexShrink={1}>
         <Text wrap="truncate-middle">
-          <Text color={theme.textMuted}>{session.getName().toUpperCase()}</Text>
+          <Text color={theme.textMuted}>{terminalText(session.getName()).toUpperCase()}</Text>
           <Text color={theme.textSubtle} dimColor> {session.getDirectory()}</Text>
         </Text>
       </Box>

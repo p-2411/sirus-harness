@@ -9,13 +9,15 @@ import { theme } from '../styles/theme';
 import { FramedCard } from './FramedCard';
 import { isMouseInput } from '../interaction/mouse';
 import { isFocusInput } from '../terminal/window-focus';
+import { terminalText } from '../terminal/text';
 import { describeRequester } from '../../agent_runtime/permissions/approvals';
 import type { QuestionAnswer, QuestionField, QuestionOption, QuestionRequest } from '../../agent_runtime/permissions/questions';
 
 type Answers = Record<string, string | number | boolean | string[]>;
 
 // The rows a field offers: its options, Yes and No for a yes-or-no, and
-// "Other…" last when the agent takes an answer of the user's own.
+// "Other…" last when the agent takes an answer of the user's own. An
+// option's words are the agent's, so they are made safe to print here.
 interface Row {
   label: string;
   description?: string;
@@ -27,9 +29,9 @@ function rowsOf(field: QuestionField): Row[] {
   if (field.kind === 'boolean') return [{ label: 'Yes', value: true }, { label: 'No', value: false }];
   if (field.kind !== 'choice') return [];
   const rows: Row[] = field.options.map((option: QuestionOption) => ({
-    label: option.label,
+    label: terminalText(option.label),
     value: option.value,
-    ...(option.description ? { description: option.description } : {}),
+    ...(option.description ? { description: terminalText(option.description) } : {}),
   }));
   if (field.other) rows.push({ label: 'Other…', description: 'type your own answer', other: true });
   return rows;
@@ -204,7 +206,7 @@ export function QuestionCard({ request, waiting, onAnswer }: {
         { text: '? ', color: theme.accent },
         { text: describeRequester(request.requester), color: theme.accent, bold: true },
         { text: ' asks' },
-        ...(label ? [{ text: ` · ${label}`, color: theme.textMuted }] : []),
+        ...(label ? [{ text: ` · ${terminalText(label)}`, color: theme.textMuted }] : []),
       ]}
       {...(right ? { right } : {})}
       footer={footer}
@@ -212,9 +214,9 @@ export function QuestionCard({ request, waiting, onAnswer }: {
       <Box flexDirection="column" marginBottom={1} paddingLeft={2}>
         {/* A form of several fields says what it is for once, above each. */}
         {request.fields.length > 1 && request.message !== question && (
-          <Text color={theme.textMuted} wrap="wrap">{request.message}</Text>
+          <Text color={theme.textMuted} wrap="wrap">{terminalText(request.message)}</Text>
         )}
-        <Text color={theme.text} bold wrap="wrap">{question}</Text>
+        <Text color={theme.text} bold wrap="wrap">{terminalText(question)}</Text>
       </Box>
       {!typing && rows.map((row, rowIndex) => {
         const active = rowIndex === selected;

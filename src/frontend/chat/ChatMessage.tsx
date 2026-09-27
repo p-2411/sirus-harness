@@ -16,6 +16,7 @@ import { Box, Text, type DOMElement } from 'ink';
 import { theme } from '../styles/theme';
 import { Markdown } from '../markdown/Markdown';
 import { describeImage } from '../../images';
+import { terminalText } from '../terminal/text';
 import { participantColor, type ParticipantColors } from '../MentionText';
 import { useClickable } from '../interaction/clickable';
 import {
@@ -52,8 +53,9 @@ function toolVerb(kind: ToolKind): string {
 	return TOOL_VERBS[kind];
 }
 
+// A vendor's title or an agent's words, as one line the terminal only prints.
 function singleLine(text: string): string {
-	return text.replace(/\s+/g, ' ').trim();
+	return terminalText(text).replace(/\s+/g, ' ').trim();
 }
 
 // The whole line as one string, for the callers with no row to truncate it:
@@ -235,7 +237,7 @@ function PlanRow({ call }: { call: ToolCallBlock }) {
 						color={entry.status === 'in_progress' ? theme.text : theme.textMuted}
 						strikethrough={entry.status === 'completed'}
 					>
-						{entry.content}
+						{terminalText(entry.content)}
 					</Text>
 				</Box>
 			))}
@@ -334,7 +336,7 @@ function DiffPreview({ lines }: { lines: readonly DiffLine[] }) {
 		<Box flexDirection="column" marginLeft={4}>
 			{lines.map((line, index) => (
 				<Text key={index} color={detailColors[line.sign]} wrap="truncate-end">
-					{line.sign} {expandTabs(line.text)}
+					{line.sign} {expandTabs(terminalText(line.text))}
 				</Text>
 			))}
 		</Box>
@@ -442,7 +444,7 @@ function ThoughtRow({ text }: { text: string }) {
 			</Box>
 			{expanded && (
 				<Box marginLeft={4}>
-					<Text color={theme.textSubtle} dimColor wrap="wrap">{text.trim()}</Text>
+					<Text color={theme.textSubtle} dimColor wrap="wrap">{terminalText(text).trim()}</Text>
 				</Box>
 			)}
 		</Box>

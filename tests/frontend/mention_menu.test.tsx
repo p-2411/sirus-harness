@@ -76,6 +76,18 @@ describe('unified mention menu', () => {
     expect(output).not.toContain('@Reviewer');
   });
 
+  test('shows a file name as plain text, whatever characters it holds', () => {
+    // A name with spaces or brackets is quoted as JSON, which escapes it;
+    // one without is shown as it is on disk.
+    const items = mentionMenuItems('@', [], ['ring\x07me.ts']);
+    const output = renderToString(
+      <MentionMenu items={items} participants={[]} selected={0} offset={0} />,
+      { columns: 80 },
+    );
+    expect(output).not.toContain('\x07');
+    expect(stripAnsi(output)).toContain('@ringme.ts');
+  });
+
   test('retains the existing per-agent MentionText colors and hides raw errors', () => {
     const colors = participantColorMap(participants);
     const menu = MentionMenu({ items: mentionMenuItems('@Reviewer', participants, []), participants, selected: 0, offset: 0 });

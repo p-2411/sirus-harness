@@ -4,6 +4,7 @@ import { Box, Text, useInput, type DOMElement } from 'ink';
 import { theme } from './styles/theme';
 import { useSelectionRegion } from './interaction/useTextSelection';
 import { useClickable } from './interaction/clickable';
+import { terminalText } from './terminal/text';
 import SubscriptionLimits from './SubscriptionLimits';
 
 export const SIDEBAR_WIDTH = 26;
@@ -131,7 +132,7 @@ export function SessionItem({ session, isSelected, onSelect, onDelete, now = Dat
           <Box width={1} flexShrink={0}>
             <Text color={status.color}>{status.symbol}</Text>
           </Box>
-          {!collapsed && <Text color={hovered ? theme.highlight : isSelected ? theme.text : theme.textMuted} bold={isSelected} wrap="truncate-end"> {session.getName()}</Text>}
+          {!collapsed && <Text color={hovered ? theme.highlight : isSelected ? theme.text : theme.textMuted} bold={isSelected} wrap="truncate-end"> {terminalText(session.getName())}</Text>}
         </Box>
         {!collapsed && activity && (
           <Box marginLeft={1} flexShrink={0}>

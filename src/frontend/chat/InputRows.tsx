@@ -2,6 +2,7 @@
 // the messages waiting to go out, and the prompt for a value a command needs.
 import { Box, Text } from 'ink';
 import { theme } from '../styles/theme';
+import { terminalText } from '../terminal/text';
 import { MentionText, type ParticipantColors } from '../MentionText';
 import type { Feedback } from '../../commands/feedback';
 
@@ -24,7 +25,7 @@ export function InputFeedback({ feedback, participantColors }: {
     <Box paddingX={3} flexShrink={0}>
       {showIcon && <Text color={iconColor}>{FEEDBACK_ICONS[feedback.kind]}</Text>}
       <Text color={feedback.kind === 'error' ? theme.danger : theme.textMuted}>
-        {showIcon ? ' ' : ''}<MentionText colors={participantColors}>{feedback.text}</MentionText>
+        {showIcon ? ' ' : ''}<MentionText colors={participantColors}>{terminalText(feedback.text)}</MentionText>
       </Text>
     </Box>
   );

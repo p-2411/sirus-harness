@@ -27,6 +27,14 @@ describe('chat header', () => {
     expect(output.split('\n')[0]).toContain('PROJECT WORK');
   });
 
+  test('shows a session name an agent chose as plain text', () => {
+    const session = new Session({ id: 'session-id', directory: '/projects/sirus' });
+    session.setName('Fix\x07 the \x1b]8;;https://elsewhere.example\x1b\\loader\x1b]8;;\x1b\\');
+    const output = renderToString(<ChatHeader session={session} />, { columns: 100 });
+    expect(output).not.toMatch(/\x07|\x1b\]/);
+    expect(stripAnsi(output)).toContain('FIX THE LOADER /projects/sirus');
+  });
+
   test('lists participant names without their models', () => {
     const session = new Session();
     session.addParticipant('reviewer', 'claude-sonnet-5');

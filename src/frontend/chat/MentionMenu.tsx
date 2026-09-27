@@ -5,6 +5,7 @@ import type { Participant } from '../../agent_runtime/session';
 import { formatFileMention } from '../../fileMentions';
 import { MentionText, participantColorMap } from '../MentionText';
 import { theme } from '../styles/theme';
+import { terminalText } from '../terminal/text';
 import { participantMenuItems } from './ParticipantMenu';
 
 export const MENTION_MENU_VISIBLE_ITEMS = 4;
@@ -89,7 +90,9 @@ export function MentionMenu({ items, participants, selected, offset, loading = f
   error?: string | null;
 }) {
   const colors = participantColorMap(participants);
-  const labelWidth = Math.min(38, Math.max(0, ...items.map(item => stringWidth(item.label))) + 2);
+  // A file's name is whatever is on disk, so it is made safe to print.
+  const labels = items.map(item => terminalText(item.label));
+  const labelWidth = Math.min(38, Math.max(0, ...labels.map(label => stringWidth(label))) + 2);
   const descriptionWidth = Math.max(0, ...items.map(item => stringWidth(item.description)));
   const visible = items.slice(offset, offset + MENTION_MENU_VISIBLE_ITEMS);
   return (
@@ -103,7 +106,7 @@ export function MentionMenu({ items, participants, selected, offset, loading = f
             </Box>
             <Box width={labelWidth} flexShrink={1} minWidth={0} paddingRight={2}>
               <Text color={active ? theme.accent : theme.text} wrap="truncate-end">
-                <MentionText colors={colors}>{item.label}</MentionText>
+                <MentionText colors={colors}>{labels[offset + index]}</MentionText>
               </Text>
             </Box>
             <Box width={descriptionWidth} flexShrink={1} minWidth={0}>

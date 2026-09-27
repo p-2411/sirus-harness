@@ -5,6 +5,7 @@ import { useState, useSyncExternalStore } from 'react';
 import stripAnsi from 'strip-ansi';
 import { InputBar } from '../../src/frontend/chat/InputBar';
 import { ApprovalPrompt, approvalChoices } from '../../src/frontend/chat/ApprovalPrompt';
+import { QuestionCard } from '../../src/frontend/chat/QuestionCard';
 import { EntryInput, InputFeedback, QueuedRow } from '../../src/frontend/chat/InputRows';
 import { SubagentStatusRow } from '../../src/frontend/chat/StatusRow';
 import { WorkerStrip } from '../../src/frontend/chat/WorkerStrip';
@@ -188,6 +189,15 @@ describe('input feedback', () => {
   test('takes no vertical space when there is no feedback', () => {
     expect(render(null)).toBe('');
   });
+
+  test('shows a worker\'s transcript as plain text', () => {
+    const output = renderToString(
+      <InputFeedback feedback={{ kind: 'info', text: 'ran\x07 \x1b]8;;https://elsewhere.example\x1b\\the tests\x1b]8;;\x1b\\' }} />,
+      { columns: 80 },
+    );
+    expect(output).not.toMatch(/\x07|\x1b\]/);
+    expect(stripAnsi(output)).toContain('ran the tests');
+  });
 });
 
 describe('input status', () => {
@@ -370,6 +380,26 @@ describe('approval prompt', () => {
       .toEqual(['1:Yes, proceed', '2:No, continue without running it', '3:No, and tell Codex what to do differently']);
   });
 
+  test('shows what the vendor sent as plain text', () => {
+    const hostile = 'fetch 50%\r100% done\x07 \x1b]8;;https://elsewhere.example\x1b\\docs.example.com\x1b]8;;\x1b\\';
+    const output = renderToString(
+      <ApprovalPrompt
+        request={approval({
+          type: 'tool_call', id: 'call-hostile', kind: 'execute', title: hostile,
+          status: 'pending', locations: [{ path: hostile }], content: [], input: { command: hostile },
+        }, [{ optionId: 'allow', name: hostile, kind: 'allow_once' }])}
+        waiting={0}
+        selected={0}
+      />,
+      { columns: 140 },
+    );
+    expect(output).not.toMatch(/[\r\x07]|\x1b\]/);
+    const plain = stripAnsi(output);
+    expect(plain).toContain('$ 100% done docs.example.com');
+    expect(plain).not.toContain('50%');
+    expect(plain).not.toContain('elsewhere.example');
+  });
+
   test('cuts an unrecognised input down to a readable line', () => {
     const output = render(approval({
       type: 'tool_call',
@@ -385,6 +415,34 @@ describe('approval prompt', () => {
     expect(output).toContain('@sirus wants to tool sirus - SaveMemory');
     expect(output).toContain('…');
     expect(output).not.toContain('x'.repeat(300));
+  });
+});
+
+describe('question card', () => {
+  test('shows what the agent asked as plain text', () => {
+    const hostile = 'fetch 50%\r100% done\x07 \x1b]8;;https://elsewhere.example\x1b\\docs.example.com\x1b]8;;\x1b\\';
+    const output = renderToString(
+      <QuestionCard
+        request={{
+          id: 'question-hostile',
+          sessionId: 'session-1',
+          requester: { participant: 'sirus' },
+          message: hostile,
+          fields: [{
+            kind: 'choice', key: 'pick', title: hostile, description: hostile, multiple: false,
+            options: [{ label: hostile, value: 'a', description: hostile }],
+          }],
+        }}
+        waiting={0}
+        onAnswer={() => {}}
+      />,
+      { columns: 140 },
+    );
+    expect(output).not.toMatch(/[\r\x07]|\x1b\]/);
+    const plain = stripAnsi(output);
+    expect(plain).toContain('100% done docs.example.com');
+    expect(plain).not.toContain('50%');
+    expect(plain).not.toContain('elsewhere.example');
   });
 });
 
