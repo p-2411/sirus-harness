@@ -11,8 +11,10 @@ import type { LimitPeriod } from '../types';
 // offer" below), so a model Claude Code or Codex adds is there without a
 // change here. MODELS is what Sirus knows about a model beyond its name,
 // which is what Jev routes by. Profiling a model is one row in MODELS.
-// Adding a vendor is one row in VENDOR_TABLE plus a launch spec in
-// src/agent_runtime/runtime/launch.ts.
+// Adding a vendor starts with one row in VENDOR_TABLE; every per-vendor
+// table, switch and enum elsewhere, the launch spec in
+// src/agent_runtime/runtime/launch.ts among them, then fails to compile
+// until it covers the new vendor (docs/ARCHITECTURE.md lists them).
 
 // What Jev is told about a model when it routes. Four kinds of evidence, kept
 // apart because they answer different questions: what the model is for, what

@@ -13,9 +13,10 @@ import { parseThinkingLevel, type ThinkingLevel } from './types';
 // that can still run, answered in well under a second. Each candidate is
 // described by its catalog profile, what it is for, what it scored, what
 // users found and what it costs, with its vendor's remaining allowance added
-// live. Nothing here blocks a turn for long or fails it: no key, a slow
-// answer, an error or an unsure answer all leave the session on the model it
-// started with.
+// live. With a single candidate there is no choice to make and Jev is not
+// asked: that candidate is the pick, key or no key. Otherwise nothing here
+// blocks a turn for long or fails it: no key, a slow answer, an error or an
+// unsure answer all leave the session on the model it started with.
 
 // The key comes from the environment like the vendors' own can, or from
 // the settings when the user pasted one through /jev. The environment wins,

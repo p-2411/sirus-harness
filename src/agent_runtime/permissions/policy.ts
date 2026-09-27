@@ -3,7 +3,10 @@ import type { Requester } from './approvals';
 
 // Sirus's three modes are the vendor's. Setting one switches each participant's
 // session with `session/set_mode` to the vendor mode of the matching kind:
-//   ask    — standard: the vendor asks about every action that is not a read
+//   ask    — standard: Claude asks about every action that is not a read;
+//            Codex's standard mode (`read-only` in codex-acp) still writes
+//            and runs commands inside the working directory without asking,
+//            in its sandbox with no network, and asks about what leaves it
 //   auto   — auto_review: the vendor's own reviewer decides and escalates only
 //            what it judges unsafe
 //   bypass — full_access: nothing is asked
