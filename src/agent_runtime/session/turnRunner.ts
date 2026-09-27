@@ -2,7 +2,7 @@ import { isAbortError } from '../../abort';
 import type { SessionAgent, TurnInput } from '../agent';
 import { vendorOf } from '../providers/catalog';
 import { nativePrompt } from '../runtime/commands';
-import { textOf, type ImageBlock, type Message } from '../types';
+import { DEFAULT_PARTICIPANT, textOf, type ImageBlock, type Message } from '../types';
 import { keyOf, type ParticipantRoster } from './roster';
 import type { Timeline } from './timeline';
 
@@ -38,7 +38,7 @@ function promptFor(invocation: Invocation): TurnInput {
   }
   return {
     text: invocation.entries
-      .map(entry => `@${entry.participant ?? 'sirus'} wrote:\n${textOf(entry)}`)
+      .map(entry => `@${entry.participant ?? DEFAULT_PARTICIPANT} wrote:\n${textOf(entry)}`)
       .join('\n\n'),
   };
 }

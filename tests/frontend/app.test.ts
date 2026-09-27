@@ -11,8 +11,9 @@ import { join } from 'path';
 import { Session } from '../../src/agent_runtime/session';
 import App, { createWorkspace, nextSessionName, startSession } from '../../src/frontend/app';
 import { changeModel } from '../../src/commands/agents/behavior';
-import * as persistence from '../../src/persistence';
-import { loadSessionSnapshots, saveSessionSnapshots } from '../../src/persistence';
+import * as sessionFile from '../../src/persistence/sessions';
+import { loadSessionSnapshots, saveSessionSnapshots } from '../../src/persistence/sessions';
+import { saveJevKeyRequested } from '../../src/persistence/settings';
 
 describe('app workspace startup', () => {
   let settingsDirectory: string;
@@ -131,8 +132,8 @@ describe('app workspace startup', () => {
       updateAvailable: false, currentVersion: '1.0.0', latestVersion: '1.0.0',
     });
     // Typed keys go to the draft, not to the first launch's request for a Jev key.
-    persistence.saveJevKeyRequested();
-    const save = spyOn(persistence, 'saveSessionSnapshots');
+    saveJevKeyRequested();
+    const save = spyOn(sessionFile, 'saveSessionSnapshots');
     const stdin = Object.assign(new PassThrough(), {
       isTTY: true, setRawMode() {}, ref() {}, unref() {},
     });

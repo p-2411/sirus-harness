@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import { execFile } from 'child_process';
 import { existsSync, lstatSync, mkdirSync, unlinkSync, writeFileSync } from 'fs';
 import path from 'path';
+import { errorMessage } from './abort';
 import { dataDirectory } from './dataDirectory';
 
 // A checkpoint is the state of a session's directory just before a turn
@@ -61,13 +62,10 @@ export function checkpointRepository(directory: string): string {
   return path.join(dataDirectory(), 'checkpoints', key);
 }
 
-// Also used by the worker worktrees, which run git against the project for
-// the same reason: a Sirus process launched from a hook must not reuse the
-// paths it inherited.
-export function gitEnvironment(): NodeJS.ProcessEnv {
+// A Sirus process launched from a Git hook may inherit paths into the
+// project's index and object store. No git that Sirus runs may reuse them.
+function gitEnvironment(): NodeJS.ProcessEnv {
   const env = { ...process.env, GIT_OPTIONAL_LOCKS: '0' };
-  // A Sirus process launched from a Git hook may inherit paths into the
-  // project's index/object store. Neither Git invocation may reuse them.
   for (const key of [
     'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE',
     'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE',
@@ -145,11 +143,18 @@ async function ensureRepository(directory: string): Promise<void> {
   }
 }
 
-function sourceGit(directory: string, args: readonly string[]): Promise<string> {
+// Git run against the project's own repository rather than the shadow one:
+// here to list what a checkpoint captures, and by the worker worktrees to cut
+// and remove their checkouts.
+export function projectGit(
+  directory: string,
+  args: readonly string[],
+  timeoutMs: number = GIT_TIMEOUT_MS,
+): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile('git', ['-C', directory, ...args], {
       cwd: directory,
-      timeout: GIT_TIMEOUT_MS,
+      timeout: timeoutMs,
       maxBuffer: 64 * 1024 * 1024,
       env: gitEnvironment(),
     }, (error, stdout, stderr) => {
@@ -165,8 +170,8 @@ function sourceGit(directory: string, args: readonly string[]): Promise<string> 
 // directory uses the shadow repository's equivalent view.
 async function checkpointFiles(directory: string): Promise<string> {
   try {
-    await sourceGit(directory, ['rev-parse', '--is-inside-work-tree']);
-    return await sourceGit(directory, ['ls-files', '-co', '--exclude-standard', '-z', '--', '.']);
+    await projectGit(directory, ['rev-parse', '--is-inside-work-tree']);
+    return await projectGit(directory, ['ls-files', '-co', '--exclude-standard', '-z', '--', '.']);
   } catch {
     return git(directory, ['ls-files', '-co', '--exclude-standard', '-z', '--', '.']);
   }
@@ -237,7 +242,7 @@ export async function captureCheckpoint(
     failures.delete(key);
     return { id, createdAt: Date.now() };
   } catch (error) {
-    failures.set(key, error instanceof Error ? error.message : String(error));
+    failures.set(key, errorMessage(error));
     return null;
   }
 }

@@ -2,6 +2,7 @@ import { existsSync } from 'fs';
 import path from 'path';
 import { z } from 'zod';
 import { dataDirectory } from '../dataDirectory';
+import { PROFILE_NAME_PATTERN } from '../agent_runtime/types';
 import { readJson, setAside, writeJson } from './atomicJson';
 
 // One settings file for the whole app, read through on every access so a test
@@ -9,20 +10,25 @@ import { readJson, setAside, writeJson } from './atomicJson';
 
 const providerSourceSchema = z.discriminatedUnion('type', [
   z.object({ id: z.string().min(1), type: z.literal('api'), key: z.string().min(1) }),
-  z.object({ id: z.string().min(1), type: z.literal('subscription'), profile: z.string().regex(/^(default|[a-zA-Z0-9_-]+)$/), label: z.string().optional() }),
+  z.object({ id: z.string().min(1), type: z.literal('subscription'), profile: z.string().regex(PROFILE_NAME_PATTERN), label: z.string().optional() }),
 ]);
 export type StoredProviderSource = z.infer<typeof providerSourceSchema>;
 export type StoredProviderSources = Partial<Record<'claude' | 'gpt', StoredProviderSource[]>>;
 
-export type NotificationPreference = 'off' | 'background' | 'always';
+// When to send desktop notifications.
+export const NOTIFICATION_PREFERENCES = ['off', 'background', 'always'] as const;
 
+export type NotificationPreference = typeof NOTIFICATION_PREFERENCES[number];
+
+// The two settings that held a vendor's credentials before source lists
+// did: whether it was on a subscription, and the one API key pasted for it.
+// Nothing is added to them now. `providers/sources.ts` reads them to build a
+// vendor's first list, and deletes the key once that list is written.
 export interface SubscriptionPreferences {
   claude: boolean;
   gpt: boolean;
 }
 
-// API keys the user pasted into Sirus; absent providers fall back to the
-// environment. Stored beside the other settings, which are written 0600.
 export interface StoredApiKeys {
   claude?: string;
   gpt?: string;
@@ -52,7 +58,7 @@ const settingsFileSchema = z.object({
   // own model in its snapshot; changing this preference never overrides it.
   sirusModel: z.string().min(1).optional(),
   // When to send desktop notifications; absent means background only.
-  notifications: z.enum(['off', 'background', 'always']).optional(),
+  notifications: z.enum(NOTIFICATION_PREFERENCES).optional(),
   // The TypeSafe AI key Jev routes with, and whether Sirus has already asked
   // for one once; absent means neither.
   jev: z.object({
@@ -94,8 +100,9 @@ const DEFAULTS: SettingsShape = {
   jevKeyRequested: false,
 };
 
-// How one setting maps onto the file. Only `memoryEnabled` and the cleared
-// Sirus model are not a plain key of the same name.
+// How one setting maps onto the file. Most are a plain key of the same name;
+// `memoryEnabled` is `memory.enabled`, a cleared Sirus model is an absent
+// key, and the two Jev settings share the `jev` section.
 interface Codec<K extends keyof SettingsShape> {
   // The top-level key of the file the setting is stored under.
   section: SectionName;
@@ -242,4 +249,34 @@ export function openSettings(directory: string = dataDirectory()): Settings {
       return writeJson(settingsPath(directory), next);
     },
   };
+}
+
+// Saving a Jev key, or clearing one, also settles the one-time request for a
+// key: the user has been through this already.
+export function saveJevApiKey(key: string | null, directory?: string): boolean {
+  return openSettings(directory).set({ jevApiKey: key, jevKeyRequested: true });
+}
+
+// Named for the UI code that reads and writes them: the first launch's
+// request for a Jev key, notifications, and the model new sessions start on.
+// Each is `get` or `set` of one key and nothing more.
+
+export function saveJevKeyRequested(directory?: string): boolean {
+  return openSettings(directory).set({ jevKeyRequested: true });
+}
+
+export function loadNotificationPreference(directory?: string): NotificationPreference {
+  return openSettings(directory).get('notifications');
+}
+
+export function saveNotificationPreference(notifications: NotificationPreference, directory?: string): boolean {
+  return openSettings(directory).set({ notifications });
+}
+
+export function loadSirusModelPreference(directory?: string): string | null {
+  return openSettings(directory).get('sirusModel');
+}
+
+export function saveSirusModelPreference(model: string, directory?: string): boolean {
+  return openSettings(directory).set({ sirusModel: model });
 }

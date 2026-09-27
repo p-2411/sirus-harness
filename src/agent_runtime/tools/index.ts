@@ -1,4 +1,3 @@
-import { isMemoryAccessEnabled } from '../memory-access';
 import { agentTools } from './agents';
 import { memoryTools } from './memories';
 import type { Tool, ToolAudience } from './types';
@@ -10,8 +9,10 @@ import type { Tool, ToolAudience } from './types';
 // it is imported directly rather than re-exported here.
 
 // Every tool Sirus offers, in the order the runtimes are told about them.
-// Adding a tool is one entry in one family file; nothing else lists tool
-// names.
+// Adding a tool is one entry in one family file, and the system prompt's
+// list of tools follows. Renaming one is not: the prompt's instructions name
+// the tools they teach, and a vendor's call is recognised by the tool's name
+// in its title (the SpawnAgent row, a worker's memory changes).
 export const toolRegistry: Tool[] = [
   ...memoryTools,
   ...agentTools,
@@ -39,20 +40,3 @@ export function visibleTools(
 ): Tool[] {
   return tools.filter(tool => isVisible(tool, audience, memoryEnabled));
 }
-
-// The registry as one audience sees it: what a runtime is told about and
-// what the system prompt describes.
-export function availableTools(audience: ToolAudience = {}): Tool[] {
-  return visibleTools(toolRegistry, audience, isMemoryAccessEnabled);
-}
-
-export type {
-  SubagentHandle,
-  SubagentHost,
-  SubagentSpawnCall,
-  Tool,
-  ToolArgumentSchema,
-  ToolAudience,
-  ToolContext,
-  WorkerContext,
-} from './types';

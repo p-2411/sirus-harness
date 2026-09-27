@@ -32,8 +32,6 @@ export interface SubagentHandle {
   context: WorkerContext;
 }
 
-export type { WorkerContext };
-
 // The identity of the tool call that is spawning a subagent, so the run can
 // be tied back to it. A worker outlives the call: nothing here stops it.
 export interface SubagentSpawnCall {

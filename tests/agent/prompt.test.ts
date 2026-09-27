@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { FORKED_WORKER_HANDOVER, sirusPrompt } from '../../src/agent_runtime/prompt';
-import { saveMemoryAccessPreference } from '../../src/persistence';
+import { openSettings } from '../../src/persistence/settings';
 
 describe('system prompt', () => {
   test('adds only what the vendor cannot know to its own prompt', () => {
@@ -81,7 +81,7 @@ describe('system prompt', () => {
     const previousDirectory = process.env.SIRUS_DATA_DIR;
     process.env.SIRUS_DATA_DIR = directory;
     try {
-      expect(saveMemoryAccessPreference(true, directory)).toBe(true);
+      expect(openSettings(directory).set({ memoryEnabled: true })).toBe(true);
       const prompt = sirusPrompt();
       for (const tool of ['SaveMemory', 'GetMemory', 'SearchMemories', 'DeleteMemory']) {
         expect(prompt).toContain(tool);
@@ -107,7 +107,7 @@ describe('system prompt', () => {
     const previousDirectory = process.env.SIRUS_DATA_DIR;
     process.env.SIRUS_DATA_DIR = directory;
     try {
-      expect(saveMemoryAccessPreference(false, directory)).toBe(true);
+      expect(openSettings(directory).set({ memoryEnabled: false })).toBe(true);
       const prompt = sirusPrompt();
       expect(prompt.toLowerCase()).not.toContain('persistent memory');
       expect(prompt).not.toContain('SaveMemory');

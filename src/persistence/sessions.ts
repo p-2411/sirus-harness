@@ -1,8 +1,10 @@
 import { existsSync } from 'fs';
 import path from 'path';
 import { z } from 'zod';
+import { isCheckpointId } from '../checkpoints';
 import { dataDirectory } from '../dataDirectory';
 import {
+  DEFAULT_PARTICIPANT,
   failOpenToolCalls,
   IMAGE_MEDIA_TYPES,
   PERMISSION_MODES,
@@ -15,13 +17,13 @@ import {
   type MessageBlock,
   type ToolCallBlock,
 } from '../agent_runtime/types';
-import type { SessionSnapshot } from '../agent_runtime/session';
+import type { Session, SessionSnapshot } from '../agent_runtime/session';
 import type { WorkerRecord } from '../agent_runtime/tools/subagents';
 import { readJson, setAside, writeJson } from './atomicJson';
 
 // The session file: the whole conversation graph, validated on the way in and
 // normalised to one shape. Storage knows the snapshot record, never the
-// `Session` class — the type import above is erased at build time.
+// `Session` class — the type imports above are erased at build time.
 
 const textBlockSchema = z.object({
   type: z.literal('text'),
@@ -143,7 +145,7 @@ const workerSchema = z.object({
 });
 
 const checkpointSchema = z.object({
-  id: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i),
+  id: z.string().refine(isCheckpointId),
   // `messageIndex` is the name files carried before entries had seqs; the
   // two numbers meant the same thing then.
   seq: z.number().int().nonnegative().optional(),
@@ -198,11 +200,20 @@ const sessionFileSchema = z.object({
 type StoredSession = z.infer<typeof sessionSchema>;
 type StoredMessage = z.infer<typeof messageSchema>;
 
-// The name the single participant of a pre-multi-agent session has always had.
-const LEGACY_PARTICIPANT_NAME = 'sirus';
+// The name the single participant of a pre-multi-agent session has always
+// had: the default participant's.
+const LEGACY_PARTICIPANT_NAME = DEFAULT_PARTICIPANT;
 
 export interface PersistedSessionSnapshots {
   snapshots: SessionSnapshot[];
+  selectedSessionId: string | null;
+}
+
+// The same workspace once `app.tsx` has rebuilt each snapshot into a
+// `Session`. Type-only, like the import it rests on: storage never
+// constructs one.
+export interface PersistedSessions {
+  sessions: Session[];
   selectedSessionId: string | null;
 }
 

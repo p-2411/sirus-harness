@@ -1,4 +1,4 @@
-import { openSettings } from '../persistence';
+import { openSettings } from '../persistence/settings';
 
 export function isMemoryAccessEnabled(): boolean {
   return openSettings().get('memoryEnabled');

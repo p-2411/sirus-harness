@@ -2,17 +2,13 @@ import { useEffect, useMemo, useState } from "react";
 import { Box, useInput, useStdout } from "ink";
 import Chat from "./chat/Chat";
 import Sidebar, { COLLAPSED_SIDEBAR_WIDTH, SIDEBAR_WIDTH } from "./Sidebar";
-import { DEFAULT_MODEL, Session } from "../agent_runtime/session";
-import {
-  loadSessionSnapshots,
-  loadSirusModelPreference,
-  saveSessionSnapshots,
-  type PersistedSessions,
-} from "../persistence";
+import { Session } from "../agent_runtime/session";
+import { loadSessionSnapshots, saveSessionSnapshots, type PersistedSessions } from "../persistence/sessions";
+import { loadSirusModelPreference } from "../persistence/settings";
 import { useTextSelection } from "./interaction/useTextSelection";
 import { useTerminalFocus } from "./interaction/useTerminalFocus";
 import { useNotifications } from "./useNotifications";
-import { isKnownModel } from '../agent_runtime/providers/catalog';
+import { DEFAULT_MODEL, isKnownModel } from '../agent_runtime/providers/catalog';
 import { shouldRequestJevKey } from '../agent_runtime/router';
 import { checkSirusUpdate } from '../updater';
 

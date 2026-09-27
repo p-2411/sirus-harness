@@ -4,8 +4,9 @@ import os from 'os';
 import path from 'path';
 import { formatFileMention, MAX_MENTION_FILE_BYTES, parseFileMentions, resolveFileMentions } from '../src/fileMentions';
 import { rootTextRanges } from '../src/mentions';
-import { Session, type Draft } from '../src/agent_runtime/session';
-import { loadSessionSnapshots, saveSessionSnapshots } from '../src/persistence';
+import { Session } from '../src/agent_runtime/session';
+import type { Draft } from '../src/agent_runtime/session/timeline';
+import { loadSessionSnapshots, saveSessionSnapshots } from '../src/persistence/sessions';
 import { bindScriptedRuntime, textTurn, unbindRuntime } from './support/runtime';
 
 const model = 'test-file-mention-model';

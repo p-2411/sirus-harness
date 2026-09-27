@@ -1,5 +1,6 @@
 import { closeSync, constants, existsSync, fstatSync, openSync, readSync, realpathSync } from 'fs';
 import path from 'path';
+import { errorMessage } from './abort';
 import { rootTextRanges } from './mentions';
 import type { Message, TextBlock } from './agent_runtime/types';
 
@@ -13,17 +14,29 @@ export const MAX_MENTION_FILES = 10;
 export const MAX_MENTION_FILE_BYTES = 256 * 1024;
 export const MAX_MENTION_TOTAL_BYTES = 512 * 1024;
 
+// One character of a bare, unquoted file mention: anything but whitespace,
+// quotes and backticks, angle brackets, and the brackets and punctuation
+// prose puts around a path. A mention is read up to the first character
+// outside it, and the file menu's token ends at the same place.
+export const FILE_PATH_CHARACTER = /[^\s"'`<>()[\]{},;]/;
+
+const BARE_PATH = new RegExp(`^${FILE_PATH_CHARACTER.source}+$`);
+
 export function formatFileMention(filePath: string): string {
   const withoutPrefix = filePath.startsWith('./') ? filePath.slice(2) : filePath;
-  // Quote extensionless names so they remain unambiguous file references.
-  return path.basename(withoutPrefix).includes('.') && /^[^\s@"'`<>()[\]{},;]+$/.test(withoutPrefix)
+  // Quote extensionless names so they remain unambiguous file references, and
+  // a path with an @ in it, so no part of it reads as a participant's name.
+  return path.basename(withoutPrefix).includes('.') && !withoutPrefix.includes('@') && BARE_PATH.test(withoutPrefix)
     ? `@${withoutPrefix}`
     : `@${JSON.stringify(withoutPrefix)}`;
 }
 
 export function parseFileMentions(text: string, directory?: string): FileMention[] {
   const candidates: FileMention[] = [];
-  const pattern = /(?<![\w@\\])@(?:"(?:[^"\\\r\n]|\\[^\r\n])*"|[^\s"'`<>()[\]{},;]+)/g;
+  const pattern = new RegExp(
+    String.raw`(?<![\w@\\])@(?:"(?:[^"\\\r\n]|\\[^\r\n])*"|${FILE_PATH_CHARACTER.source}+)`,
+    'g',
+  );
   for (const match of text.matchAll(pattern)) {
     let filePath = match[0].slice(1);
     const quoted = filePath.startsWith('"');
@@ -97,7 +110,7 @@ export function resolveFileMentions<T extends Pick<Message, 'content'>>(message:
       const fence = '`'.repeat(longestBackticks + 1);
       attachments.push({ type: 'text', filePath, text: `\n\n${fence}\nFile: ${label}\n${file.text}\n${fence}` });
     } catch (error) {
-      throw new Error(`Could not attach ${formatFileMention(mention.path)}: ${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(`Could not attach ${formatFileMention(mention.path)}: ${errorMessage(error)}`);
     }
   }
   return { ...message, content: [...message.content, ...attachments] };

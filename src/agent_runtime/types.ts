@@ -83,11 +83,13 @@ export interface ToolCallBlock {
 
 export type MessageBlock = TextBlock | ImageBlock | ThoughtBlock | CompactionBlock | ToolCallBlock;
 
+export const PLAN_ENTRY_STATUSES = ['pending', 'in_progress', 'completed'] as const;
+
 // One step of an agent's plan: Claude's todo list and Codex's plan both
 // arrive as a list of these, the whole plan each time.
 export interface PlanEntry {
   content: string;
-  status: 'pending' | 'in_progress' | 'completed';
+  status: typeof PLAN_ENTRY_STATUSES[number];
 }
 
 // A plan is recorded as a call of its own, the way both vendors' terminals
@@ -121,7 +123,7 @@ export function planEntriesOf(call: ToolCallBlock): PlanEntry[] {
   if (!Array.isArray(input?.entries)) return [];
   return input.entries.filter((entry): entry is PlanEntry => typeof entry === 'object' && entry !== null
     && typeof (entry as PlanEntry).content === 'string'
-    && ['pending', 'in_progress', 'completed'].includes((entry as PlanEntry).status));
+    && PLAN_ENTRY_STATUSES.includes((entry as PlanEntry).status));
 }
 
 // Marks every tool call still pending or running as failed, for a turn that
@@ -182,10 +184,11 @@ export function parseThinkingLevel(value: unknown): ThinkingLevel | null {
     : null;
 }
 
-// The lists below belong to the permission policy and the subagents, which
-// export them as their own. They are declared here because the session file
-// validates against them and persistence imports nothing else of the runtime,
-// so a value added to one is a value the file can read back.
+// What follows is the permission policy's, the subagents' and the
+// subscriptions' vocabulary. It is declared, and imported from, here because
+// the files under persistence validate against it and persistence imports
+// nothing else of the runtime, so a value added to one is a value the file
+// can read back.
 
 // Sirus's three permission modes, in the order the mode switch cycles them;
 // `permissions/policy.ts` says what each one does.
@@ -205,6 +208,16 @@ export type WorkerContext = typeof WORKER_CONTEXTS[number];
 export const SUBAGENT_STATUSES = ['working', 'done', 'failed', 'cancelled', 'interrupted'] as const;
 
 export type SubagentStatus = typeof SUBAGENT_STATUSES[number];
+
+// The allowance windows a subscription's remaining share is read for: the
+// one the sidebar shows for each vendor, and what the limit cache keeps.
+export const LIMIT_PERIODS = ['5-hour', '7-day'] as const;
+
+export type LimitPeriod = typeof LIMIT_PERIODS[number];
+
+// What a subscription profile may be called. The name becomes a directory
+// under the data directory, so it holds nothing that could lead out of it.
+export const PROFILE_NAME_PATTERN = /^[a-zA-Z0-9_-]+$/;
 
 // The participant every session starts with, and the one a message that names
 // no participant belongs to.

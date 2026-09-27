@@ -1,10 +1,5 @@
-import {
-  PERMISSION_MODE_NAMES,
-  PERMISSION_MODES,
-  parsePermissionMode,
-  type PermissionMode,
-} from '../../agent_runtime/permissions/policy';
-import { DEFAULT_PARTICIPANT } from '../../agent_runtime/types';
+import { PERMISSION_MODE_NAMES, parsePermissionMode } from '../../agent_runtime/permissions/policy';
+import { DEFAULT_PARTICIPANT, PERMISSION_MODES, type PermissionMode } from '../../agent_runtime/types';
 import type { Feedback } from '../feedback';
 import type { CommandMenuItem, CommandSession, CommandSpec } from '../types';
 

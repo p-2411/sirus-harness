@@ -17,9 +17,9 @@ import { providerFor } from '../../src/agent_runtime/providers';
 import { resolveModelReference } from '../../src/commands/agents/behavior';
 import type { SubagentRun } from '../../src/agent_runtime/tools/subagents';
 import type { Feedback } from '../../src/commands/feedback';
-import { loadJevApiKey, loadSirusModelPreference, saveSirusModelPreference } from '../../src/persistence';
+import { loadSirusModelPreference, openSettings, saveSirusModelPreference } from '../../src/persistence/settings';
 import { shouldRequestJevKey } from '../../src/agent_runtime/router';
-import { bindScriptedRuntime, textTurn, unbindRuntime } from '../support/runtime';
+import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
 
 function runCommand(
   command: string,
@@ -762,14 +762,14 @@ describe('jev command', () => {
       kind: 'success',
       text: expect.stringMatching(/Saved TypeSafe AI key .*cdef/),
     });
-    expect(loadJevApiKey()).toBe('ts-live-key-abcdef');
+    expect(openSettings().get('jevApiKey')).toBe('ts-live-key-abcdef');
     expect(shouldRequestJevKey()).toBe(false);
     expect(runCommand('jev', [])).toEqual({ kind: 'info', text: expect.stringMatching(/Jev is on, with the key/) });
     expect(commandMenu('jev', [], new Session())!.filter(item => item.type === 'item').map(item => item.command))
       .toEqual(['/jev key', '/jev off']);
 
     expect(runCommand('jev', ['off'])).toEqual({ kind: 'success', text: expect.stringMatching(/Jev is off/) });
-    expect(loadJevApiKey()).toBeNull();
+    expect(openSettings().get('jevApiKey')).toBeNull();
     // Declined or removed, the request is not repeated on the next launch.
     expect(shouldRequestJevKey()).toBe(false);
     expect(() => runCommand('jev', ['nonsense'])).toThrow('Usage: /jev [key <key>|off]');

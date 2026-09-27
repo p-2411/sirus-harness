@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
-import { onProviderChange, providerFor } from '../agent_runtime/providers';
+import { providerFor } from '../agent_runtime/providers';
+import { onProviderChange } from '../agent_runtime/providers/sources';
 import { VENDOR_INFO, VENDORS } from '../agent_runtime/providers/catalog';
 import { cachedSubscriptionRemaining, formatRemaining, readSubscriptionUsage, remainingAllowance } from '../agent_runtime/providers/usage';
 import { theme } from './styles/theme';

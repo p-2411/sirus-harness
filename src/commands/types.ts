@@ -1,7 +1,8 @@
-import type { PermissionMode } from '../agent_runtime/permissions/policy';
-import type { Checkpoint, Participant, RewindOptions, RewindResult } from '../agent_runtime/session';
+import type { Participant } from '../agent_runtime/agent';
+import type { RewindOptions, RewindResult } from '../agent_runtime/session/checkpointLog';
+import type { Checkpoint } from '../checkpoints';
 import type { SubagentRun } from '../agent_runtime/tools/subagents';
-import type { ImageBlock, ThinkingLevel } from '../agent_runtime/types';
+import type { ImageBlock, PermissionMode, ThinkingLevel } from '../agent_runtime/types';
 import type { ContextUsage } from '../agent_runtime/usage';
 import type { Feedback } from './feedback';
 

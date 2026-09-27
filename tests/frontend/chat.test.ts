@@ -2,7 +2,7 @@ import { describe, expect, spyOn, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { loadJevApiKey } from '../../src/persistence';
+import { openSettings } from '../../src/persistence/settings';
 import { shouldRequestJevKey } from '../../src/agent_runtime/router';
 import { createElement } from 'react';
 import { Box, render } from 'ink';
@@ -212,7 +212,7 @@ test('the first launch without a Jev key asks for one once, and esc declines for
     await flush();
     expect(output).not.toContain('TypeSafe AI API key');
     expect(output).toContain('Jev is off');
-    expect(loadJevApiKey(directory)).toBeNull();
+    expect(openSettings(directory).get('jevApiKey')).toBeNull();
     expect(shouldRequestJevKey()).toBe(false);
 
     // Pasting a key through /jev later stores it without echoing it.
@@ -229,7 +229,7 @@ test('the first launch without a Jev key asks for one once, and esc declines for
     stdin.write('\r');
     await flush();
     expect(output).toContain('Saved TypeSafe AI key');
-    expect(loadJevApiKey(directory)).toBe('ts-live-key-abcdef');
+    expect(openSettings(directory).get('jevApiKey')).toBe('ts-live-key-abcdef');
   } finally {
     app.unmount();
     await app.waitUntilExit();

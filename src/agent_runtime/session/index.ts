@@ -1,15 +1,15 @@
 import crypto from 'crypto';
-import { SessionAgent, type RuntimeHost } from '../agent';
+import { SessionAgent, type Participant, type RuntimeHost } from '../agent';
 import { isMemoryAccessEnabled } from '../memory-access';
 import { requestPermission } from '../permissions/approvals';
 import { requestAnswers } from '../permissions/questions';
-import { DEFAULT_PERMISSION_MODE, type PermissionMode } from '../permissions/policy';
+import { DEFAULT_PERMISSION_MODE } from '../permissions/policy';
 import { sirusPrompt } from '../prompt';
 import { jevApiKey, routeSessionModel, routingCandidates } from '../router';
-import { servableModelIds, servesModel } from '../providers';
+import { requireKnownModel } from '../providers';
 import { DEFAULT_MODEL, vendorOf } from '../providers/catalog';
 import { nativeCommands, type NativeCommand } from '../runtime/commands';
-import { registerToolSession, sirusMcpServerEntry, unregisterToolSession } from '../tools/server';
+import { registerToolSession, sirusMcpServerEntry, unregisterToolSession, workerRequester } from '../tools/server';
 import {
   notifySubagents,
   registerSubagent,
@@ -22,38 +22,25 @@ import { INTERRUPTED_REASON, workerReport } from '../tools/subagents/report';
 import { cancelSubagent, messageSubagent } from '../tools/subagents/run';
 import { removeWorktree } from '../tools/subagents/worktree';
 import type { SubagentHost } from '../tools/types';
-import { textOf, type Message, type ThinkingLevel, type ToolCallBlock } from '../types';
+import {
+  DEFAULT_PARTICIPANT,
+  textOf,
+  type Message,
+  type PermissionMode,
+  type ThinkingLevel,
+  type ToolCallBlock,
+} from '../types';
 import type { ContextUsage } from '../usage';
 import { parseFileMentions, resolveFileMentions } from '../../fileMentions';
 import { isAbortError, throwIfAborted, TurnCancelledError } from '../../abort';
+import type { Checkpoint } from '../../checkpoints';
 import { ChangeFeed } from './changeFeed';
-import {
-  CheckpointLog,
-  defaultDirectoryActivity,
-  type Checkpoint,
-  type DirectoryActivity,
-  type RewindOptions,
-  type RewindResult,
-} from './checkpointLog';
-import { MessageQueue, isAutoSendable, type QueuedMessage } from './messageQueue';
+import { CheckpointLog, type RewindOptions, type RewindResult } from './checkpointLog';
+import { MessageQueue, type QueuedMessage } from './messageQueue';
 import { generateSessionName } from './naming';
-import { keyOf, NAME_PATTERN_SOURCE, ParticipantRoster, stripCreationModels, type Participant } from './roster';
+import { keyOf, ParticipantRoster, stripCreationModels } from './roster';
 import { Timeline, type Draft } from './timeline';
 import { TurnRunner } from './turnRunner';
-
-// The default model is a catalog fact, named here because that is where
-// callers have always found it.
-export { DEFAULT_MODEL, NAME_PATTERN_SOURCE, defaultDirectoryActivity, isAutoSendable };
-export { SESSION_NAME_LIMIT } from './naming';
-export type {
-  Checkpoint,
-  DirectoryActivity,
-  Draft,
-  Participant,
-  QueuedMessage,
-  RewindOptions,
-  RewindResult,
-};
 
 export type SessionStatus = 'idle' | 'working' | 'error';
 
@@ -61,7 +48,6 @@ export type SessionStatus = 'idle' | 'working' | 'error';
 // shapes, and the one function that fills in every default.
 
 const DEFAULT_SESSION_NAME = 'Session 1';
-const DEFAULT_PARTICIPANT_NAME = 'sirus';
 
 // The clocks a restored session brings with it. All absent for a new one.
 export interface SessionTiming {
@@ -83,7 +69,8 @@ export interface SessionOptions {
   messages?: readonly (Message | Draft)[];
   checkpoints?: readonly Checkpoint[];
   permissionMode?: PermissionMode;
-  // The model spawned subagents run on; null for the owner's own.
+  // The model spawned subagents run on; null lets Jev pick one per task,
+  // and without a key or an answer from Jev a worker runs on its owner's.
   subagentModel?: string | null;
   // Workers of this session as the snapshot kept them. One still working
   // when it was saved is restored as interrupted.
@@ -109,15 +96,17 @@ export interface SessionSnapshot {
   inputContent?: string;
   // How tool calls are approved in this session; absent in older snapshots.
   permissionMode?: PermissionMode;
-  // The model spawned subagents run on; absent for the owner's own.
+  // The model spawned subagents run on; absent when Jev picks, as for null
+  // in SessionOptions.
   subagentModel?: string;
   // Every worker the session's participants spawned, oldest first; absent
   // when none.
   workers?: WorkerRecord[];
   // Directory snapshots taken before turns, oldest first; absent when none.
   checkpoints?: Checkpoint[];
-  // When the history last changed; absent in older snapshots.
-  updatedAt?: number;
+  // When the history last changed. A file written before the field existed
+  // is read as epoch zero, older than anything since.
+  updatedAt: number;
   conversationStartedAt?: number;
   lastResponseFinishedAt?: number | null;
   // A newly-created session may still take its name from its first prompt.
@@ -153,7 +142,7 @@ function resolveSessionOptions(options: SessionOptions = {}): ResolvedSessionOpt
     name: options.name ?? DEFAULT_SESSION_NAME,
     directory: options.directory ?? process.cwd(),
     model: options.model ?? DEFAULT_MODEL,
-    defaultParticipant: options.defaultParticipant ?? DEFAULT_PARTICIPANT_NAME,
+    defaultParticipant: options.defaultParticipant ?? DEFAULT_PARTICIPANT,
     participants: options.participants ?? [],
     messages,
     checkpoints: options.checkpoints ?? [],
@@ -242,6 +231,7 @@ export class Session {
     this.turns = new TurnRunner({ timeline: this.timeline, roster: this.roster });
   }
 
+  // What the snapshot leaves out, resolveSessionOptions fills in.
   static fromSnapshot(snapshot: SessionSnapshot): Session {
     return new Session({
       id: snapshot.id,
@@ -251,14 +241,14 @@ export class Session {
       defaultParticipant: snapshot.defaultModel.name,
       participants: snapshot.participants,
       messages: snapshot.messages,
-      workers: snapshot.workers ?? [],
-      checkpoints: snapshot.checkpoints ?? [],
-      inputContent: snapshot.inputContent ?? '',
-      autoNamePending: snapshot.autoNamePending ?? false,
-      ...(snapshot.permissionMode ? { permissionMode: snapshot.permissionMode } : {}),
-      ...(snapshot.subagentModel ? { subagentModel: snapshot.subagentModel } : {}),
+      workers: snapshot.workers,
+      checkpoints: snapshot.checkpoints,
+      inputContent: snapshot.inputContent,
+      autoNamePending: snapshot.autoNamePending,
+      permissionMode: snapshot.permissionMode,
+      subagentModel: snapshot.subagentModel,
       timing: {
-        updatedAt: snapshot.updatedAt ?? 0,
+        updatedAt: snapshot.updatedAt,
         conversationStartedAt: snapshot.conversationStartedAt,
         lastResponseFinishedAt: snapshot.lastResponseFinishedAt,
       },
@@ -283,8 +273,8 @@ export class Session {
       forWorker: (id, directory) => ({
         ...host,
         directory,
-        systemPrompt: () => sirusPrompt('sirus', true),
-        mcpServer: () => this.mcpServerEntry(`subagent:${id}`),
+        systemPrompt: () => sirusPrompt(DEFAULT_PARTICIPANT, true),
+        mcpServer: () => this.mcpServerEntry(workerRequester(id)),
         forWorker: () => { throw new Error('A subagent cannot spawn a subagent'); },
       }),
       workerFinished: run => this.workerFinished(run),
@@ -476,11 +466,12 @@ export class Session {
   }
 
   // The Sirus MCP server entry a runtime of this session lists; the
-  // requester is a participant's name, or `subagent:<id>` for a worker. The
-  // session joins the tool server here, when a runtime first asks, rather
-  // than when it is made: a draft nobody sent to is dropped without being
-  // disposed, and the server's map would otherwise hold on to it. Joining
-  // again only replaces the binding, and a deleted session stays out.
+  // requester is a participant's name, or `workerRequester(id)` for a
+  // worker. The session joins the tool server here, when a runtime first
+  // asks, rather than when it is made: a draft nobody sent to is dropped
+  // without being disposed, and the server's map would otherwise hold on to
+  // it. Joining again only replaces the binding, and a deleted session stays
+  // out.
   mcpServerEntry(requester: string): ReturnType<typeof sirusMcpServerEntry> {
     if (!this.disposed) {
       registerToolSession(this.id, {
@@ -919,9 +910,7 @@ export class Session {
   }
 
   setSubagentModel(model: string | null): void {
-    if (model !== null && !servesModel(model)) {
-      throw new Error(`Unknown model "${model}". Try: ${servableModelIds().join(', ')}`);
-    }
+    if (model !== null) requireKnownModel(model);
     if (this.subagentModel === model) return;
     this.subagentModel = model;
     this.changes.notify();

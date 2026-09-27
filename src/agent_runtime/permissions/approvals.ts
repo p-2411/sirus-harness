@@ -5,7 +5,7 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
-import { toolCallBlockFrom } from '../runtime/runtime';
+import { PERMISSION_CANCELLED, toolCallBlockFrom } from '../runtime/runtime';
 import type { ToolCallBlock } from '../types';
 import type { PermissionContext } from './policy';
 
@@ -37,39 +37,81 @@ export interface ApprovalRequest {
   options: PermissionOption[];
 }
 
-interface PendingEntry {
-  request: ApprovalRequest;
-  settle: (decision: ApprovalDecision) => void;
+// Requests waiting on the user, in the order they arrived: this file's
+// approvals and the questions in `./questions`. The UI subscribes to each
+// queue once and reads it whole.
+export interface UserRequestQueue<Request extends { id: string; sessionId: string }, Answer> {
+  subscribe(listener: () => void): () => void;
+  // Monotonic counter for useSyncExternalStore; the queue is mutated in place.
+  version(): number;
+  pending(sessionId?: string): Request[];
+  // Answers the request with this id. False when it is no longer waiting.
+  resolve(id: string, answer: Answer): boolean;
+  // Queues the request and turns the user's answer into the vendor's reply.
+  // A cancelled turn withdraws it and replies `cancelled` instead of
+  // throwing: the vendor is waiting on a reply and the runtime has to send
+  // one.
+  ask<Reply>(request: Request, signal: AbortSignal | undefined, reply: (answer: Answer) => Reply, cancelled: Reply): Promise<Reply>;
 }
 
-const pending: PendingEntry[] = [];
-const listeners = new Set<() => void>();
-let version = 0;
-
-function notifyListeners(): void {
-  version++;
-  for (const listener of listeners) listener();
+export function userRequestQueue<Request extends { id: string; sessionId: string }, Answer>(): UserRequestQueue<Request, Answer> {
+  const waiting: { request: Request; settle: (answer: Answer) => void }[] = [];
+  const listeners = new Set<() => void>();
+  let version = 0;
+  const changed = () => {
+    version++;
+    for (const listener of listeners) listener();
+  };
+  const take = (found: (request: Request) => boolean) => {
+    const index = waiting.findIndex(entry => found(entry.request));
+    return index === -1 ? undefined : waiting.splice(index, 1)[0];
+  };
+  return {
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    version: () => version,
+    pending: sessionId => waiting
+      .map(entry => entry.request)
+      .filter(request => sessionId === undefined || request.sessionId === sessionId),
+    resolve(id, answer) {
+      const entry = take(request => request.id === id);
+      if (!entry) return false;
+      changed();
+      entry.settle(answer);
+      return true;
+    },
+    ask(request, signal, reply, cancelled) {
+      if (signal?.aborted) return Promise.resolve(cancelled);
+      return new Promise(resolve => {
+        const onAbort = () => {
+          take(waitingRequest => waitingRequest === request);
+          changed();
+          resolve(cancelled);
+        };
+        signal?.addEventListener('abort', onAbort, { once: true });
+        waiting.push({
+          request,
+          settle: answer => {
+            signal?.removeEventListener('abort', onAbort);
+            resolve(reply(answer));
+          },
+        });
+        changed();
+      });
+    },
+  };
 }
 
-export function subscribePermissions(listener: () => void): () => void {
-  listeners.add(listener);
-  return () => listeners.delete(listener);
-}
+const approvals = userRequestQueue<ApprovalRequest, ApprovalDecision>();
 
-// Monotonic counter for useSyncExternalStore; the queue is mutated in place.
-export function getPermissionsVersion(): number {
-  return version;
-}
-
-export function pendingApprovals(sessionId?: string): ApprovalRequest[] {
-  return pending
-    .map(entry => entry.request)
-    .filter(request => sessionId === undefined || request.sessionId === sessionId);
-}
+export const subscribePermissions = approvals.subscribe;
+export const getPermissionsVersion = approvals.version;
+export const pendingApprovals = approvals.pending;
 
 export function isAwaitingApproval(callId: string, sessionId?: string): boolean {
-  return pending.some(entry => entry.request.toolCall.id === callId
-    && (sessionId === undefined || entry.request.sessionId === sessionId));
+  return approvals.pending(sessionId).some(request => request.toolCall.id === callId);
 }
 
 // What the user decided per tool call, so the transcript can say "declined by
@@ -96,15 +138,12 @@ export function lastDecision(callId: string, sessionId: string): Outcome | undef
 }
 
 export function resolveApproval(id: string, decision: ApprovalDecision): boolean {
-  const index = pending.findIndex(entry => entry.request.id === id);
-  if (index === -1) return false;
-  const [entry] = pending.splice(index, 1);
-  const option = chosenOption(decision, entry.request.options);
+  const request = approvals.pending().find(candidate => candidate.id === id);
+  if (!request) return false;
+  const option = chosenOption(decision, request.options);
   const denied = option ? option.kind.startsWith('reject') : decision === 'deny';
-  rememberDecision(entry.request.sessionId, entry.request.toolCall.id, denied ? 'deny' : 'allow');
-  notifyListeners();
-  entry.settle(decision);
-  return true;
+  rememberDecision(request.sessionId, request.toolCall.id, denied ? 'deny' : 'allow');
+  return approvals.resolve(id, decision);
 }
 
 // The option kinds each kind of answer prefers, best first. Only the kinds
@@ -127,18 +166,13 @@ function chosenOption(decision: ApprovalDecision, options: readonly PermissionOp
   return decision === 'deny' ? undefined : options[0];
 }
 
-const CANCELLED: RequestPermissionResponse = { outcome: { outcome: 'cancelled' } };
-
 // Puts one vendor escalation in front of the user and answers it with the
-// option matching their choice. A cancelled turn withdraws its prompt and
-// answers `cancelled` instead of throwing: the vendor is waiting on a reply
-// and the runtime has to send one.
+// option matching their choice.
 export function requestPermission(
   context: PermissionContext,
   request: RequestPermissionRequest,
   signal?: AbortSignal,
 ): Promise<RequestPermissionResponse> {
-  if (signal?.aborted) return Promise.resolve(CANCELLED);
   const approval: ApprovalRequest = {
     id: crypto.randomUUID(),
     sessionId: context.sessionId,
@@ -146,24 +180,10 @@ export function requestPermission(
     toolCall: toolCallBlockFrom(request.toolCall),
     options: request.options,
   };
-  return new Promise<RequestPermissionResponse>(resolve => {
-    const onAbort = () => {
-      const index = pending.findIndex(entry => entry.request === approval);
-      if (index !== -1) pending.splice(index, 1);
-      notifyListeners();
-      resolve(CANCELLED);
-    };
-    signal?.addEventListener('abort', onAbort, { once: true });
-    pending.push({
-      request: approval,
-      settle: decision => {
-        signal?.removeEventListener('abort', onAbort);
-        const option = chosenOption(decision, approval.options);
-        // An empty option list, or a denial the vendor offered no way to
-        // reject, leaves nothing to select.
-        resolve(option ? { outcome: { outcome: 'selected', optionId: option.optionId } } : CANCELLED);
-      },
-    });
-    notifyListeners();
-  });
+  return approvals.ask(approval, signal, decision => {
+    const option = chosenOption(decision, approval.options);
+    // An empty option list, or a denial the vendor offered no way to
+    // reject, leaves nothing to select.
+    return option ? { outcome: { outcome: 'selected', optionId: option.optionId } } : PERMISSION_CANCELLED;
+  }, PERMISSION_CANCELLED);
 }

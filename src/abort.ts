@@ -14,6 +14,12 @@ export function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw abortReason(signal);
 }
 
+// What a caught value says, for a message: anything can be thrown, not only
+// an Error.
+export function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export function isAbortError(error: unknown): boolean {
   return error instanceof TurnCancelledError
     || (error instanceof Error && error.name === 'AbortError');

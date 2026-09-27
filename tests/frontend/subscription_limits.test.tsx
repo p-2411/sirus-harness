@@ -8,7 +8,7 @@ import path from 'path';
 import { providerFor } from '../../src/agent_runtime/providers';
 import * as usage from '../../src/agent_runtime/providers/usage';
 import SubscriptionLimits, { SubscriptionLimitRows } from '../../src/frontend/SubscriptionLimits';
-import { saveSubscriptionLimitCache } from '../../src/persistence';
+import { saveSubscriptionLimitCache } from '../../src/persistence/subscriptionLimits';
 import Sidebar from '../../src/frontend/Sidebar';
 
 test('renders compact subscription percentages, including zero and unavailable', () => {

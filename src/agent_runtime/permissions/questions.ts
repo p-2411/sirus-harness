@@ -1,7 +1,8 @@
 import crypto from 'crypto';
 import type { CreateElicitationRequest, CreateElicitationResponse } from '@agentclientprotocol/sdk';
+import { QUESTION_CANCELLED, QUESTION_DECLINED } from '../runtime/runtime';
 import type { PermissionContext } from './policy';
-import type { Requester } from './approvals';
+import { userRequestQueue, type Requester } from './approvals';
 
 // Questions an agent puts to the user: Claude's AskUserQuestion, Codex's
 // request_user_input, and forms an MCP server raises through either. Both
@@ -47,44 +48,12 @@ export type QuestionAnswer =
   | { action: 'accept'; content: Record<string, string | number | boolean | string[]> }
   | { action: 'decline' };
 
-interface PendingEntry {
-  request: QuestionRequest;
-  settle: (answer: QuestionAnswer) => void;
-}
+const questions = userRequestQueue<QuestionRequest, QuestionAnswer>();
 
-const pending: PendingEntry[] = [];
-const listeners = new Set<() => void>();
-let version = 0;
-
-function notifyListeners(): void {
-  version++;
-  for (const listener of listeners) listener();
-}
-
-export function subscribeQuestions(listener: () => void): () => void {
-  listeners.add(listener);
-  return () => listeners.delete(listener);
-}
-
-// Monotonic counter for useSyncExternalStore; the queue is mutated in place.
-export function getQuestionsVersion(): number {
-  return version;
-}
-
-export function pendingQuestions(sessionId?: string): QuestionRequest[] {
-  return pending
-    .map(entry => entry.request)
-    .filter(request => sessionId === undefined || request.sessionId === sessionId);
-}
-
-export function resolveQuestion(id: string, answer: QuestionAnswer): boolean {
-  const index = pending.findIndex(entry => entry.request.id === id);
-  if (index === -1) return false;
-  const [entry] = pending.splice(index, 1);
-  notifyListeners();
-  entry.settle(answer);
-  return true;
-}
+export const subscribeQuestions = questions.subscribe;
+export const getQuestionsVersion = questions.version;
+export const pendingQuestions = questions.pending;
+export const resolveQuestion = questions.resolve;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -172,9 +141,6 @@ export function questionFields(request: CreateElicitationRequest): QuestionField
   return fields.length > 0 ? fields : null;
 }
 
-const DECLINE: CreateElicitationResponse = { action: 'decline' };
-const CANCEL: CreateElicitationResponse = { action: 'cancel' };
-
 // Puts one question in front of the user and answers it with what they
 // gave. A subagent's is declined at once: nobody is watching it, and its
 // contract tells it so. A cancelled turn withdraws the card and cancels.
@@ -183,9 +149,9 @@ export function requestAnswers(
   request: CreateElicitationRequest,
   signal?: AbortSignal,
 ): Promise<CreateElicitationResponse> {
-  if (signal?.aborted) return Promise.resolve(CANCEL);
+  if (signal?.aborted) return Promise.resolve(QUESTION_CANCELLED);
   const fields = questionFields(request);
-  if (!fields || 'subagent' in context.requester) return Promise.resolve(DECLINE);
+  if (!fields || 'subagent' in context.requester) return Promise.resolve(QUESTION_DECLINED);
   const question: QuestionRequest = {
     id: crypto.randomUUID(),
     sessionId: context.sessionId,
@@ -193,21 +159,12 @@ export function requestAnswers(
     message: request.message,
     fields,
   };
-  return new Promise<CreateElicitationResponse>(resolve => {
-    const onAbort = () => {
-      const index = pending.findIndex(entry => entry.request === question);
-      if (index !== -1) pending.splice(index, 1);
-      notifyListeners();
-      resolve(CANCEL);
-    };
-    signal?.addEventListener('abort', onAbort, { once: true });
-    pending.push({
-      request: question,
-      settle: answer => {
-        signal?.removeEventListener('abort', onAbort);
-        resolve(answer.action === 'accept' ? { action: 'accept', content: answer.content } : DECLINE);
-      },
-    });
-    notifyListeners();
-  });
+  return questions.ask(
+    question,
+    signal,
+    (answer): CreateElicitationResponse => answer.action === 'accept'
+      ? { action: 'accept', content: answer.content }
+      : QUESTION_DECLINED,
+    QUESTION_CANCELLED,
+  );
 }

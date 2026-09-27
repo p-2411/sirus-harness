@@ -4,19 +4,20 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
-import { abortReason, isAbortError, throwIfAborted, TurnCancelledError } from '../abort';
+import { abortReason, errorMessage, isAbortError, throwIfAborted, TurnCancelledError } from '../abort';
 import type { Requester } from './permissions/approvals';
-import { PERMISSION_MODE_NAMES, type PermissionMode } from './permissions/policy';
+import { PERMISSION_MODE_NAMES } from './permissions/policy';
 import { providerFor } from './providers';
 import { DEFAULT_MODEL, rememberListedModels, VENDOR_INFO, vendorOf, type Vendor } from './providers/catalog';
 import { sourceEnvironment } from './providers/profiles';
-import { maskApiKey, type Source } from './providers/sources';
+import { maskApiKey, maskKeys, type Source } from './providers/sources';
 import { routeWorker, vendorAllowance, workerCandidates } from './router';
 import {
   createRuntime,
   MODE_KINDS,
   runtimeGeneration,
   trackRuntime,
+  type ForkOptions,
   type ModeKind,
   type Runtime,
   type RuntimeOptions,
@@ -27,16 +28,19 @@ import { Transcript, transcriptText } from './session/transcript';
 import { notifySubagents, type SubagentRun } from './tools/subagents';
 import { describeSubagents } from './tools/subagents/report';
 import { cancelSubagent, checkSubagent, messageSubagent, startSubagent } from './tools/subagents/run';
-import type { SubagentHandle, SubagentHost, WorkerContext } from './tools/types';
+import type { SubagentHandle, SubagentHost } from './tools/types';
 import {
+  DEFAULT_PARTICIPANT,
   DEFAULT_THINKING_LEVEL,
   failOpenToolCalls,
   isPlanCall,
   planCall,
   type ImageBlock,
   type Message,
+  type PermissionMode,
   type ThinkingLevel,
   type ToolCallBlock,
+  type WorkerContext,
 } from './types';
 import type { ContextUsage } from './usage';
 
@@ -62,7 +66,8 @@ export interface RuntimeHost {
   permissionMode(): PermissionMode;
   requestPermission(agent: SessionAgent, request: RequestPermissionRequest, signal: AbortSignal): Promise<RequestPermissionResponse>;
   requestAnswers(agent: SessionAgent, request: CreateElicitationRequest, signal: AbortSignal): Promise<CreateElicitationResponse>;
-  // The model a subagent spawned here runs on; null means Jev picks one.
+  // The model a subagent spawned here runs on; null lets Jev pick one, and
+  // without a key or an answer from Jev the worker runs on its owner's.
   subagentModel(): string | null;
   // The host a worker of this session runs under: its own worktree, the
   // session's mode, the subagent contract, and permission requests
@@ -241,7 +246,8 @@ export class SessionAgent {
           // A scripted runtime has no credentials to fall back to; its
           // failure is the turn's failure.
           if (!source) throw error;
-          failures.push(`${describeSource(source)}: ${maskSecrets(error, this.candidateSources())}`);
+          // A failure message must not carry a key it was handed.
+          failures.push(`${describeSource(source)}: ${maskKeys(errorMessage(error), this.candidateSources())}`);
           // The next attempt reads the record, partial response included.
           text = `${input.text}\n\nThe previous attempt was interrupted. Continue from the completed work above without repeating it.`;
         }
@@ -281,17 +287,7 @@ export class SessionAgent {
     const source = owner.runtime;
     if (!source || this.runtime) return false;
     try {
-      const forked = await source.fork({
-        directory: this.host.directory,
-        model: this.model,
-        thinkingLevel: this.thinkingLevel,
-        systemPrompt: this.host.systemPrompt(this),
-        permissionMode: this.host.permissionMode(),
-        mcpServer: await this.host.mcpServer(this),
-        onPermission: (request, promptSignal) => this.askPermission(request, promptSignal),
-        onElicitation: (request, promptSignal) => this.askUser(request, promptSignal),
-        onUpdate: update => this.hear(update),
-      });
+      const forked = await source.fork(await this.runtimeOptions());
       this.runtime = trackRuntime(forked);
       this.generation = runtimeGeneration();
       // The fork runs on the credential the owner's process was started on,
@@ -382,19 +378,7 @@ export class SessionAgent {
     if (this.runtime) return { runtime: this.runtime, fresh: false };
     const env = source && vendorOf(this.model) ? sourceEnvironment(this.vendor, source) : { ...process.env };
     const generation = runtimeGeneration();
-    const runtime = await createRuntime({
-      vendor: this.vendor,
-      model: this.model,
-      thinkingLevel: this.thinkingLevel,
-      directory: this.host.directory,
-      systemPrompt: this.host.systemPrompt(this),
-      env,
-      mcpServer: await this.host.mcpServer(this),
-      permissionMode: this.host.permissionMode(),
-      onPermission: (request, promptSignal) => this.askPermission(request, promptSignal),
-      onElicitation: (request, promptSignal) => this.askUser(request, promptSignal),
-      onUpdate: update => this.hear(update),
-    }, signal);
+    const runtime = await createRuntime({ ...await this.runtimeOptions(), vendor: this.vendor, env }, signal);
     if (signal.aborted) {
       runtime.dispose();
       throw abortReason(signal);
@@ -405,6 +389,23 @@ export class SessionAgent {
     this.context = runtime.context;
     if (source) this.provider?.markActive(this.runtimeId, source);
     return { runtime, fresh: true };
+  }
+
+  // What every runtime of this agent is opened with, started fresh or forked:
+  // where and on what it runs, the session's prompt, mode and tools, and the
+  // callbacks that bring what it reports and escalates back to this agent.
+  private async runtimeOptions(): Promise<ForkOptions> {
+    return {
+      directory: this.host.directory,
+      model: this.model,
+      thinkingLevel: this.thinkingLevel,
+      systemPrompt: this.host.systemPrompt(this),
+      permissionMode: this.host.permissionMode(),
+      mcpServer: await this.host.mcpServer(this),
+      onPermission: (request, promptSignal) => this.askPermission(request, promptSignal),
+      onElicitation: (request, promptSignal) => this.askUser(request, promptSignal),
+      onUpdate: update => this.hear(update),
+    };
   }
 
   private hear(update: RuntimeUpdate): void {
@@ -492,7 +493,6 @@ export class SessionAgent {
           break;
         }
         case 'compaction': {
-          if (update.status === 'in_progress') return;
           if (update.status !== 'completed') return;
           entry.content.push({ type: 'compaction', ...(update.summary ? { summary: update.summary } : {}) });
           break;
@@ -658,7 +658,7 @@ export class SessionAgent {
   // this agent's session, in its own directory, with the subagent contract.
   createSubagent(id: string, model: string, thinkingLevel: ThinkingLevel, directory: string): SessionAgent {
     return new SessionAgent({
-      name: 'sirus',
+      name: DEFAULT_PARTICIPANT,
       model,
       thinkingLevel,
       runtimeId: `${this.runtimeId}/subagents/${id}`,
@@ -680,12 +680,4 @@ export class SessionAgent {
 function describeSource(source: Source | null): string {
   if (!source) return 'process environment';
   return source.kind === 'api' ? `API ${maskApiKey(source.key)}` : `subscription ${source.label ?? source.id}`;
-}
-
-// A failure message must not carry a key it was handed.
-function maskSecrets(error: unknown, sources: readonly (Source | null)[]): string {
-  const detail = error instanceof Error ? error.message : String(error);
-  return sources.reduce((text, source) => source?.kind === 'api'
-    ? text.replaceAll(source.key, maskApiKey(source.key))
-    : text, detail);
 }

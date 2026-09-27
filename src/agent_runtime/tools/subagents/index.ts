@@ -13,8 +13,6 @@ import type { Message, MessageBlock, SubagentStatus, ThinkingLevel, WorkerContex
 // the chat, the notifications and the rewind interlock can see runs they do
 // not own.
 
-export type { SubagentStatus, WorkerContext };
-
 // What the session file keeps of a worker: enough to show its record, tell
 // where its branch is, and give its owner the report it never received.
 export interface WorkerRecord {
@@ -140,10 +138,6 @@ export function activeSubagentCount(directory?: string): number {
   return count;
 }
 
-export function allSubagents(): Iterable<SubagentRun> {
-  return runs.values();
-}
-
 // What the session file keeps of one run. The live parts stay behind: the
 // agent doing the work, the session it belongs to, and the content array,
 // which is the assistant entry of the transcript and would otherwise be
@@ -171,5 +165,3 @@ export function workerRecord(run: SubagentRun): WorkerRecord {
     dismissed: run.dismissed,
   };
 }
-
-export type { SubagentSpawnOptions } from './run';

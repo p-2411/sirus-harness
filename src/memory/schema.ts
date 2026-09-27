@@ -1,5 +1,5 @@
 import type { Database } from 'bun:sqlite';
-import type { MemoryLink } from './store';
+import type { MemoryLink, MemoryScope } from './store';
 
 // The shape of the memory tables, the v1 -> v3 migration, and the queries that
 // depend on the column layout. Everything here is schema-level: no embedding,
@@ -13,7 +13,7 @@ export interface SchemaEmbedder {
 export interface MemoryRow {
   id: number;
   scope_id: number;
-  scope: 'global' | 'project';
+  scope: MemoryScope;
   project_directory: string | null;
   name: string;
   content: string;
@@ -81,13 +81,7 @@ export function migrate(database: Database, embedder: SchemaEmbedder): { needsRe
   const storedModel = setting(database, 'embedding_model');
   const storedDimensions = setting(database, 'embedding_dimensions');
   if (storedModel === undefined && storedDimensions === undefined) {
-    const writeSettings = database.transaction(() => {
-      database.query('INSERT INTO memory_settings (key, value) VALUES (?, ?)')
-        .run('embedding_model', embedder.model);
-      database.query('INSERT INTO memory_settings (key, value) VALUES (?, ?)')
-        .run('embedding_dimensions', String(embedder.dimensions));
-    });
-    writeSettings();
+    database.transaction(() => writeEmbeddingSettings(database, embedder))();
   } else if (storedModel !== embedder.model || storedDimensions !== String(embedder.dimensions)) {
     needsReindex = true;
   }
@@ -109,6 +103,17 @@ export function createVectorTable(database: Database, dimensions: number): void 
       scope_id integer
     )
   `);
+}
+
+// Records the embedder the vectors were made with, so a later start can tell
+// whether they need making again.
+export function writeEmbeddingSettings(database: Database, embedder: SchemaEmbedder): void {
+  const write = database.query(`
+    INSERT INTO memory_settings (key, value) VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `);
+  write.run('embedding_model', embedder.model);
+  write.run('embedding_dimensions', String(embedder.dimensions));
 }
 
 export function globalScopeId(database: Database): number {

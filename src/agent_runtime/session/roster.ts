@@ -1,13 +1,10 @@
-import { servableModelIds, servesModel } from '../providers';
+import { requireKnownModel, servableModelIds, servesModel } from '../providers';
 import { SessionAgent, type Participant, type RuntimeHost } from '../agent';
-import type { PermissionMode } from '../permissions/policy';
-import { textOf, type Message, type ThinkingLevel } from '../types';
+import { textOf, type Message, type PermissionMode, type ThinkingLevel } from '../types';
 import { rootTextRanges, type RootTextRange } from '../../mentions';
 import type { SubagentRun } from '../tools/subagents';
 import type { ChangeFeed } from './changeFeed';
 import type { Transcript } from './transcript';
-
-export type { Participant };
 
 // A participant named in a user prompt. New participants carry the model
 // that introduces them and the span of prompt text that named it.
@@ -64,12 +61,6 @@ export function keyOf(name: string): string {
 // Callers name participants with or without the leading @.
 function bareName(name: string): string {
   return name.replace(/^@/, '');
-}
-
-function requireKnownModel(model: string): void {
-  if (!servesModel(model)) {
-    throw new Error(`Unknown model "${model}". Try: ${servableModelIds().join(', ')}`);
-  }
 }
 
 // A model following a newly introduced @name is host routing metadata, not

@@ -1,10 +1,7 @@
 import { randomUUID } from 'crypto';
-import {
-  clearSubscriptionLimitCache,
-  openSettings,
-  type StoredProviderSource,
-  type StoredProviderSources,
-} from '../../persistence';
+import { openSettings, type StoredProviderSource, type StoredProviderSources } from '../../persistence/settings';
+import { clearSubscriptionLimitCache } from '../../persistence/subscriptionLimits';
+import { PROFILE_NAME_PATTERN } from '../types';
 import type { VendorInfo } from './catalog';
 
 // The single source of truth for one vendor's credentials: an ordered list of
@@ -21,7 +18,8 @@ export interface SourceStore {
   addApiKey: (key: string) => ApiSource;
   addSubscription: (profile: string, label?: string) => SubscriptionSource;
   remove: (id: string) => boolean;
-  // Moves a source to the front: what /login and a pasted key do.
+  // Moves a listed source to the front. Adding one, as /login and a pasted
+  // key do, puts it there already.
   promote: (id: string) => void;
   // Fires after this vendor's list changes.
   onChange: (listener: () => void) => () => void;
@@ -47,12 +45,12 @@ export function maskKeys(text: string, sources: readonly (Source | null)[]): str
 // removed for any vendor, or a request settling on a different source.
 const listeners = new Set<() => void>();
 
-export function onProviderSourceChange(listener: () => void): () => void {
+export function onProviderChange(listener: () => void): () => void {
   listeners.add(listener);
   return () => { listeners.delete(listener); };
 }
 
-export function notifyProviderSourceChange(): void {
+export function notifyProviderChange(): void {
   for (const listener of listeners) listener();
 }
 
@@ -114,7 +112,7 @@ export function createSourceStore(vendor: VendorInfo): SourceStore {
     // Owners first: they drop their per-runtime bookkeeping before any
     // observer asks what the active source now is.
     for (const listener of own) listener();
-    notifyProviderSourceChange();
+    notifyProviderChange();
   };
 
   return {
@@ -133,7 +131,7 @@ export function createSourceStore(vendor: VendorInfo): SourceStore {
       return source;
     },
     addSubscription: (profile, label) => {
-      if (!/^[a-zA-Z0-9_-]+$/.test(profile)) throw new Error('Invalid subscription profile');
+      if (!PROFILE_NAME_PATTERN.test(profile)) throw new Error('Invalid subscription profile');
       const current = stored();
       const existing = current.find(source => source.kind === 'subscription' && source.profile === profile);
       const source: SubscriptionSource = {

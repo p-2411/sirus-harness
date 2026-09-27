@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import path from 'path';
 import { mkdirSync } from 'fs';
 import { dataDirectory } from '../../dataDirectory';
+import { PROFILE_NAME_PATTERN } from '../types';
 import { VENDOR_INFO, type Vendor } from './catalog';
 import type { Source } from './sources';
 
@@ -10,15 +11,11 @@ import type { Source } from './sources';
 // source names. A credential is nothing more than this environment.
 
 export function subscriptionEnvironment(vendor: Vendor, profile = 'default'): NodeJS.ProcessEnv {
-  const info = VENDOR_INFO[vendor];
-  const env = { ...process.env };
   // Subscription children must not silently select an inherited API credential.
-  for (const key of info.scrubEnv) delete env[key];
+  const env = scrubbedEnvironment(vendor);
   if (profile !== 'default') {
-    if (!/^[a-zA-Z0-9_-]+$/.test(profile)) throw new Error('Invalid subscription profile');
-    const directory = path.resolve(dataDirectory(), 'subscriptions', vendor, profile);
-    mkdirSync(directory, { recursive: true, mode: 0o700 });
-    env[info.profileDirEnv] = directory;
+    if (!PROFILE_NAME_PATTERN.test(profile)) throw new Error('Invalid subscription profile');
+    useProfileDirectory(env, vendor, 'subscriptions', profile);
   }
   return env;
 }
@@ -31,14 +28,25 @@ export function subscriptionEnvironment(vendor: Vendor, profile = 'default'): No
 export function sourceEnvironment(vendor: Vendor, source: Source): NodeJS.ProcessEnv {
   if (source.kind === 'subscription') return subscriptionEnvironment(vendor, source.profile);
   const info = VENDOR_INFO[vendor];
-  const env = { ...process.env };
-  for (const key of info.scrubEnv) delete env[key];
+  const env = scrubbedEnvironment(vendor);
   env[info.credentialEnv] = source.key;
   if (info.apiKeyLogin) {
     const fingerprint = crypto.createHash('sha256').update(source.key).digest('hex').slice(0, 16);
-    const directory = path.resolve(dataDirectory(), 'api', vendor, fingerprint);
-    mkdirSync(directory, { recursive: true, mode: 0o700 });
-    env[info.profileDirEnv] = directory;
+    useProfileDirectory(env, vendor, 'api', fingerprint);
   }
   return env;
+}
+
+function scrubbedEnvironment(vendor: Vendor): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const key of VENDOR_INFO[vendor].scrubEnv) delete env[key];
+  return env;
+}
+
+// Points the child at a profile directory of Sirus's own under the data
+// directory, private to the user, made on first use.
+function useProfileDirectory(env: NodeJS.ProcessEnv, vendor: Vendor, kind: 'subscriptions' | 'api', name: string): void {
+  const directory = path.resolve(dataDirectory(), kind, vendor, name);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  env[VENDOR_INFO[vendor].profileDirEnv] = directory;
 }

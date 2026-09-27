@@ -1,7 +1,7 @@
 import { dataDirectory } from '../../dataDirectory';
 import type { VendorInfo } from './catalog';
 import { login as runLogin, subscriptionDetail as readSubscriptionDetail, type Notify } from './login';
-import { createSourceStore, notifyProviderSourceChange, type Source, type SourceStore } from './sources';
+import { createSourceStore, notifyProviderChange, type Source, type SourceStore } from './sources';
 
 // One vendor: its credential list, and which credential each runtime is on.
 // Nothing here knows a wire protocol or a model name. The participant walks
@@ -57,12 +57,12 @@ export function createProvider(options: { vendor: VendorInfo }): Provider {
         || previous?.directory !== directory || previous.sourceId !== source.id;
       active.set(runtimeId, { directory, sourceId: source.id });
       lastRuntime = runtimeId;
-      if (changed) notifyProviderSourceChange();
+      if (changed) notifyProviderChange();
     },
     clearActive: runtimeId => {
       if (!active.delete(runtimeId)) return;
       if (lastRuntime === runtimeId) lastRuntime = null;
-      notifyProviderSourceChange();
+      notifyProviderChange();
     },
     login: (notify, signal) => runLogin(vendor.id, sources, notify, signal),
     subscriptionDetail: (profile, signal) => readSubscriptionDetail(vendor.id, profile, signal),

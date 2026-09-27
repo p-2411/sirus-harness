@@ -4,25 +4,16 @@ import os from 'os';
 import path from 'path';
 import { Session } from '../../src/agent_runtime/session';
 import type { WorkerRecord } from '../../src/agent_runtime/tools/subagents';
+import { loadSessionSnapshots, saveSessionSnapshots } from '../../src/persistence/sessions';
 import {
-  loadApiKeys,
-  loadSessionSnapshots,
-  loadMemoryAccessPreference,
-  loadSirusModelPreference,
-  loadSubscriptionPreferences,
-  saveApiKeys,
-  saveMemoryAccessPreference,
-  saveSirusModelPreference,
-  saveSessionSnapshots,
-  saveSubscriptionPreferences,
   loadNotificationPreference,
-  saveNotificationPreference,
-  loadJevApiKey,
-  loadJevKeyRequested,
+  loadSirusModelPreference,
   openSettings,
   saveJevApiKey,
   saveJevKeyRequested,
-} from '../../src/persistence';
+  saveNotificationPreference,
+  saveSirusModelPreference,
+} from '../../src/persistence/settings';
 
 let directory: string;
 
@@ -382,47 +373,47 @@ describe('subscription preference persistence', () => {
   test('notification preferences survive updates to the other settings', () => {
     expect(loadNotificationPreference(directory)).toBe('background');
     expect(saveNotificationPreference('always', directory)).toBe(true);
-    saveSubscriptionPreferences({ claude: true, gpt: false }, directory);
-    saveMemoryAccessPreference(false, directory);
-    saveApiKeys({ gpt: 'test-key' }, directory);
+    openSettings(directory).set({ subscriptions: { claude: true, gpt: false } });
+    openSettings(directory).set({ memoryEnabled: false });
+    openSettings(directory).set({ apiKeys: { gpt: 'test-key' } });
     saveSirusModelPreference('gpt-5.6-sol', directory);
     expect(loadNotificationPreference(directory)).toBe('always');
     expect(saveNotificationPreference('off', directory)).toBe(true);
-    expect(loadApiKeys(directory)).toEqual({ gpt: 'test-key' });
-    expect(loadMemoryAccessPreference(directory)).toBe(false);
-    expect(loadSubscriptionPreferences(directory)).toEqual({ claude: true, gpt: false });
+    expect(openSettings(directory).get('apiKeys')).toEqual({ gpt: 'test-key' });
+    expect(openSettings(directory).get('memoryEnabled')).toBe(false);
+    expect(openSettings(directory).get('subscriptions')).toEqual({ claude: true, gpt: false });
     expect(loadSirusModelPreference(directory)).toBe('gpt-5.6-sol');
     expect(loadNotificationPreference(directory)).toBe('off');
   });
 
   test('keeps the Jev key and the one-time request beside the other settings', () => {
-    expect(loadJevApiKey(directory)).toBeNull();
-    expect(loadJevKeyRequested(directory)).toBe(false);
+    expect(openSettings(directory).get('jevApiKey')).toBeNull();
+    expect(openSettings(directory).get('jevKeyRequested')).toBe(false);
     expect(saveJevKeyRequested(directory)).toBe(true);
-    expect(loadJevKeyRequested(directory)).toBe(true);
-    expect(loadJevApiKey(directory)).toBeNull();
+    expect(openSettings(directory).get('jevKeyRequested')).toBe(true);
+    expect(openSettings(directory).get('jevApiKey')).toBeNull();
     expect(saveJevApiKey('ts-live-key-1234', directory)).toBe(true);
     saveNotificationPreference('always', directory);
-    expect(loadJevApiKey(directory)).toBe('ts-live-key-1234');
-    expect(loadJevKeyRequested(directory)).toBe(true);
+    expect(openSettings(directory).get('jevApiKey')).toBe('ts-live-key-1234');
+    expect(openSettings(directory).get('jevKeyRequested')).toBe(true);
     expect(saveJevApiKey(null, directory)).toBe(true);
-    expect(loadJevApiKey(directory)).toBeNull();
-    expect(loadJevKeyRequested(directory)).toBe(true);
+    expect(openSettings(directory).get('jevApiKey')).toBeNull();
+    expect(openSettings(directory).get('jevKeyRequested')).toBe(true);
     expect(loadNotificationPreference(directory)).toBe('always');
   });
 
   test('defaults to API keys and restores enabled providers', () => {
-    expect(loadSubscriptionPreferences(directory)).toEqual({ claude: false, gpt: false });
-    expect(saveSubscriptionPreferences({ claude: true, gpt: false }, directory)).toBe(true);
-    expect(loadSubscriptionPreferences(directory)).toEqual({ claude: true, gpt: false });
+    expect(openSettings(directory).get('subscriptions')).toEqual({ claude: false, gpt: false });
+    expect(openSettings(directory).set({ subscriptions: { claude: true, gpt: false } })).toBe(true);
+    expect(openSettings(directory).get('subscriptions')).toEqual({ claude: true, gpt: false });
   });
 
   test('preserves memory access while saving subscription preferences', () => {
-    expect(saveMemoryAccessPreference(false, directory)).toBe(true);
-    expect(saveSubscriptionPreferences({ claude: true, gpt: false }, directory)).toBe(true);
+    expect(openSettings(directory).set({ memoryEnabled: false })).toBe(true);
+    expect(openSettings(directory).set({ subscriptions: { claude: true, gpt: false } })).toBe(true);
 
-    expect(loadMemoryAccessPreference(directory)).toBe(false);
-    expect(loadSubscriptionPreferences(directory)).toEqual({ claude: true, gpt: false });
+    expect(openSettings(directory).get('memoryEnabled')).toBe(false);
+    expect(openSettings(directory).get('subscriptions')).toEqual({ claude: true, gpt: false });
   });
 
   test('falls back safely when settings are invalid', () => {
@@ -430,7 +421,7 @@ describe('subscription preference persistence', () => {
       version: 1,
       subscriptions: { claude: 'yes', gpt: false },
     }));
-    expect(loadSubscriptionPreferences(directory)).toEqual({ claude: false, gpt: false });
+    expect(openSettings(directory).get('subscriptions')).toEqual({ claude: false, gpt: false });
   });
 
   test('a section this build cannot read falls back alone and survives saves to the others', () => {
@@ -446,11 +437,11 @@ describe('subscription preference persistence', () => {
       futureSetting: { kept: true },
     }));
     expect(loadNotificationPreference(directory)).toBe('background');
-    expect(loadApiKeys(directory)).toEqual({ gpt: 'sk-openai-test' });
-    expect(loadSubscriptionPreferences(directory)).toEqual({ claude: true, gpt: false });
+    expect(openSettings(directory).get('apiKeys')).toEqual({ gpt: 'sk-openai-test' });
+    expect(openSettings(directory).get('subscriptions')).toEqual({ claude: true, gpt: false });
     expect(openSettings(directory).get('providerSources')).toEqual(sources);
 
-    expect(saveMemoryAccessPreference(false, directory)).toBe(true);
+    expect(openSettings(directory).set({ memoryEnabled: false })).toBe(true);
     expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({
       version: 1,
       subscriptions: { claude: true, gpt: false },
@@ -465,7 +456,7 @@ describe('subscription preference persistence', () => {
     // Changing the setting itself replaces what this build could not read.
     expect(saveNotificationPreference('always', directory)).toBe(true);
     expect(loadNotificationPreference(directory)).toBe('always');
-    expect(loadApiKeys(directory)).toEqual({ gpt: 'sk-openai-test' });
+    expect(openSettings(directory).get('apiKeys')).toEqual({ gpt: 'sk-openai-test' });
   });
 
   test('sets a settings file it cannot read aside before writing over it', () => {
@@ -476,7 +467,7 @@ describe('subscription preference persistence', () => {
       rmSync(directory, { recursive: true, force: true });
       mkdirSync(directory);
       writeFileSync(path.join(directory, 'settings.json'), unreadable);
-      expect(loadApiKeys(directory)).toEqual({});
+      expect(openSettings(directory).get('apiKeys')).toEqual({});
 
       expect(saveNotificationPreference('always', directory)).toBe(true);
       expect(loadNotificationPreference(directory)).toBe('always');
@@ -489,12 +480,12 @@ describe('subscription preference persistence', () => {
 
 describe('memory access preference persistence', () => {
   test('defaults on and preserves subscriptions when toggled', () => {
-    expect(loadMemoryAccessPreference(directory)).toBe(true);
-    expect(saveSubscriptionPreferences({ claude: false, gpt: true }, directory)).toBe(true);
-    expect(saveMemoryAccessPreference(false, directory)).toBe(true);
+    expect(openSettings(directory).get('memoryEnabled')).toBe(true);
+    expect(openSettings(directory).set({ subscriptions: { claude: false, gpt: true } })).toBe(true);
+    expect(openSettings(directory).set({ memoryEnabled: false })).toBe(true);
 
-    expect(loadMemoryAccessPreference(directory)).toBe(false);
-    expect(loadSubscriptionPreferences(directory)).toEqual({ claude: false, gpt: true });
+    expect(openSettings(directory).get('memoryEnabled')).toBe(false);
+    expect(openSettings(directory).get('subscriptions')).toEqual({ claude: false, gpt: true });
   });
 });
 
@@ -502,8 +493,8 @@ describe('Sirus model preference persistence', () => {
   test('defaults unset and survives writes to other settings', () => {
     expect(loadSirusModelPreference(directory)).toBeNull();
     expect(saveSirusModelPreference('claude-sonnet-5', directory)).toBe(true);
-    expect(saveSubscriptionPreferences({ claude: true, gpt: false }, directory)).toBe(true);
-    expect(saveMemoryAccessPreference(false, directory)).toBe(true);
+    expect(openSettings(directory).set({ subscriptions: { claude: true, gpt: false } })).toBe(true);
+    expect(openSettings(directory).set({ memoryEnabled: false })).toBe(true);
 
     expect(loadSirusModelPreference(directory)).toBe('claude-sonnet-5');
   });
@@ -511,23 +502,23 @@ describe('Sirus model preference persistence', () => {
 
 describe('API key persistence', () => {
   test('defaults to no stored keys and restores saved ones', () => {
-    expect(loadApiKeys(directory)).toEqual({});
-    expect(saveApiKeys({ claude: 'sk-ant-test' }, directory)).toBe(true);
-    expect(loadApiKeys(directory)).toEqual({ claude: 'sk-ant-test' });
+    expect(openSettings(directory).get('apiKeys')).toEqual({});
+    expect(openSettings(directory).set({ apiKeys: { claude: 'sk-ant-test' } })).toBe(true);
+    expect(openSettings(directory).get('apiKeys')).toEqual({ claude: 'sk-ant-test' });
   });
 
   test('keeps stored keys and other settings across each other\'s saves', () => {
-    expect(saveApiKeys({ gpt: 'sk-openai-test' }, directory)).toBe(true);
-    expect(saveSubscriptionPreferences({ claude: true, gpt: false }, directory)).toBe(true);
-    expect(saveMemoryAccessPreference(false, directory)).toBe(true);
+    expect(openSettings(directory).set({ apiKeys: { gpt: 'sk-openai-test' } })).toBe(true);
+    expect(openSettings(directory).set({ subscriptions: { claude: true, gpt: false } })).toBe(true);
+    expect(openSettings(directory).set({ memoryEnabled: false })).toBe(true);
 
-    expect(loadApiKeys(directory)).toEqual({ gpt: 'sk-openai-test' });
-    expect(loadSubscriptionPreferences(directory)).toEqual({ claude: true, gpt: false });
-    expect(loadMemoryAccessPreference(directory)).toBe(false);
+    expect(openSettings(directory).get('apiKeys')).toEqual({ gpt: 'sk-openai-test' });
+    expect(openSettings(directory).get('subscriptions')).toEqual({ claude: true, gpt: false });
+    expect(openSettings(directory).get('memoryEnabled')).toBe(false);
   });
 
   test('writes the settings file readable only by the owner', () => {
-    expect(saveApiKeys({ claude: 'sk-ant-test' }, directory)).toBe(true);
+    expect(openSettings(directory).set({ apiKeys: { claude: 'sk-ant-test' } })).toBe(true);
     const mode = statSync(path.join(directory, 'settings.json')).mode & 0o777;
     expect(mode).toBe(0o600);
   });

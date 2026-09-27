@@ -1,11 +1,12 @@
-import { abortable, throwIfAborted } from '../../abort';
+import { abortable, errorMessage, throwIfAborted } from '../../abort';
 import { readClaudeSubscriptionUsage } from './anthropic/claude-account';
 import { readCodexRateLimits } from './openai/codex-account';
 import type { Vendor } from './catalog';
+import { LIMIT_PERIODS, type LimitPeriod } from '../types';
 import { providerFor } from './index';
 import { maskKeys } from './sources';
 import { dataDirectory } from '../../dataDirectory';
-import { loadSubscriptionLimitCache, saveSubscriptionLimitCache } from '../../persistence';
+import { loadSubscriptionLimitCache, saveSubscriptionLimitCache } from '../../persistence/subscriptionLimits';
 
 export interface SubscriptionWindow {
   label: string;
@@ -131,7 +132,7 @@ export async function readSubscriptionUsage(vendor: Vendor, signal?: AbortSignal
     const checkedAt = Date.now();
     const entries = loadSubscriptionLimitCache(directory);
     let updated = false;
-    for (const period of ['5-hour', '7-day'] as const) {
+    for (const period of LIMIT_PERIODS) {
       const remaining = remainingAllowance(usage, period);
       if (remaining === null) continue;
       const previous = entries.findIndex(entry => entry.vendor === vendor && entry.profile === profile && entry.period === period);
@@ -148,28 +149,32 @@ export async function readSubscriptionUsage(vendor: Vendor, signal?: AbortSignal
     // binary, a signed-out account, a harness that cannot read usage. The
     // reader's process inherits the key this vendor's source reads from the
     // environment, so that and any stored key are masked in it.
-    const reason = maskKeys(error instanceof Error ? error.message : String(error), providerFor(vendor).sources.list());
+    const reason = maskKeys(errorMessage(error), providerFor(vendor).sources.list());
     return { windows: [], unavailable: `could not read provider limits: ${reason}` };
   }
 }
 
 // Use the overall allowance, excluding additional model-specific buckets.
-function allowanceWindow(usage: SubscriptionUsage, period: '5-hour' | '7-day'): SubscriptionWindow | undefined {
+function allowanceWindow(usage: SubscriptionUsage, period: LimitPeriod): SubscriptionWindow | undefined {
   const windows = usage.overall ?? usage.windows;
   return windows.find(window => window.label === period)
     ?? windows.find(window => window.label.toLowerCase() === `codex · ${period}`);
 }
-export function remainingAllowance(usage: SubscriptionUsage, period: '5-hour' | '7-day'): number | null {
+export function remainingAllowance(usage: SubscriptionUsage, period: LimitPeriod): number | null {
   const window = allowanceWindow(usage, period);
   return window?.usedPercent == null ? null : Number(Math.max(0, Math.min(100, 100 - window.usedPercent)).toFixed(1));
 }
 
+// How long each window lasts, which is also the longest a cached reading of
+// it can still be true.
+const PERIOD_HOURS: Record<LimitPeriod, number> = { '5-hour': 5, '7-day': 7 * 24 };
+
 // Cached values are only a placeholder while fetching. Do not reuse an old
 // window after its reset, or indefinitely when the reset wasn't reported.
-export function cachedSubscriptionRemaining(vendor: Vendor, profile: string, period: '5-hour' | '7-day', now = Date.now()): number | undefined {
+export function cachedSubscriptionRemaining(vendor: Vendor, profile: string, period: LimitPeriod, now = Date.now()): number | undefined {
   const entry = loadSubscriptionLimitCache().find(entry => entry.vendor === vendor && entry.profile === profile && entry.period === period);
   if (!entry) return undefined;
-  const maxAge = (period === '5-hour' ? 5 : 7 * 24) * 3600_000;
+  const maxAge = PERIOD_HOURS[period] * 3600_000;
   if (now < entry.checkedAt || now - entry.checkedAt >= maxAge || (entry.resetsAt !== null && now >= entry.resetsAt)) return undefined;
   return entry.remaining;
 }

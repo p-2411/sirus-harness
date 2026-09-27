@@ -1,4 +1,6 @@
 import { isMemoryAccessEnabled } from './memory-access';
+import { agentTools } from './tools/agents';
+import { DEFAULT_PARTICIPANT } from './types';
 
 // What Sirus adds to the vendor's own system prompt. Claude Code and Codex
 // keep their prompts, their instruction files (CLAUDE.md, AGENTS.md), their
@@ -11,7 +13,7 @@ const sharedSessionContract = `# Sirus session
 Other agents may participate in the same session. You see only what was directed to you: the user's messages that address you, and the messages of other participants that mention you, attributed as "@name wrote:". Answer the message that invoked you, and do not impersonate another participant.
 
 ## Participants and mentions
-- A user message without participant mentions goes to the default agent, @sirus. A message addressing participants invokes those participants; several can run in parallel in the same directory.
+- A user message without participant mentions goes to the default agent, @${DEFAULT_PARTICIPANT}. A message addressing participants invokes those participants; several can run in parallel in the same directory.
 - You may mention an existing participant with @name to request their input, but you cannot create participants. Use names established in the conversation; ListAgents lists your spawned subagents, not the participant roster. Only the user can introduce a participant with @name <supported-model> <task>.
 - Other participants respond to your message only when you explicitly mention them with a routable @name. They do not automatically reply because you asked a question, finished a task, or were previously mentioned by them. Every routable mention of another existing participant delivers your whole message to them and schedules their turn, even if the text is only a thank-you or status update.
 - A participant you mention receives your whole message and nothing else of what you know. Put everything they need in it: what you found, what you want from them, and the files involved. To hand off, write a direct request in a top-level prose paragraph, for example: @reviewer Please inspect the changed files for regressions and report your findings. The host routes mentions after your response finishes, so end your turn to let the participant respond; do not claim to have their answer yet.
@@ -66,8 +68,8 @@ Persistent memory is enabled with two scopes. Global memories are shared across 
 
 function identity(participantName: string, subagent: boolean): string {
   if (subagent) return 'You are a Sirus subagent: another agent spawned you to complete one delegated task, inside Sirus, a terminal client that puts coding agents from several vendors into one session.';
-  const who = participantName === 'sirus'
-    ? 'the default participant, @sirus'
+  const who = participantName === DEFAULT_PARTICIPANT
+    ? `the default participant, @${DEFAULT_PARTICIPANT}`
     : `the participant @${participantName}`;
   return `You are running inside Sirus, a terminal client that puts coding agents from several vendors into one shared session, and in it you are ${who}. The user reads your replies in Sirus.`;
 }
@@ -75,13 +77,13 @@ function identity(participantName: string, subagent: boolean): string {
 // Sirus's tools reach every runtime through its MCP server; a worker gets
 // the memory tools and nothing that delegates.
 function toolsLine(subagent: boolean): string {
-  const tools = subagent ? 'the memory tools' : 'SpawnAgent, CheckAgent, MessageAgent, CancelAgent, ListAgents, and the memory tools';
+  const tools = subagent ? 'the memory tools' : `${agentTools.map(tool => tool.name).join(', ')}, and the memory tools`;
   return `Sirus's own tools reach you through the "sirus" tool server: ${tools}. Use them by name; the server prefix, if your harness shows one, is part of the name.`;
 }
 
 // The addendum a participant's runtime starts with, or a worker's that has a
 // runtime of its own.
-export function sirusPrompt(participantName: string = 'sirus', subagent: boolean = false): string {
+export function sirusPrompt(participantName: string = DEFAULT_PARTICIPANT, subagent: boolean = false): string {
   const sections = [
     identity(participantName, subagent),
     subagent ? subagentContract : sharedSessionContract,

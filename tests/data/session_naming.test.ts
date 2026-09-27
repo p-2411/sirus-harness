@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { Session, type Draft } from '../../src/agent_runtime/session';
+import { Session } from '../../src/agent_runtime/session';
+import type { Draft } from '../../src/agent_runtime/session/timeline';
 import * as naming from '../../src/agent_runtime/session/naming';
 import { bindScriptedRuntime, textTurn, unbindRuntime } from '../support/runtime';
 

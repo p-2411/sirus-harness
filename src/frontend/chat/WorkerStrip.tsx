@@ -12,7 +12,7 @@ import {
   subscribeSubagents,
   type SubagentRun,
 } from '../../agent_runtime/tools/subagents';
-import type { ToolCallBlock } from '../../agent_runtime/types';
+import type { SubagentStatus, ToolCallBlock } from '../../agent_runtime/types';
 
 // Room for a tool title on a strip line before it is cut.
 const TOOL_TITLE_LENGTH = 32;

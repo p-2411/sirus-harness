@@ -8,6 +8,7 @@ import {
 	type Message,
 	type MessageBlock,
 	type PlanEntry,
+	type SubagentStatus,
 	type ThoughtBlock,
 	type ToolCallBlock,
 	type ToolCallDiff,
@@ -26,7 +27,6 @@ import {
 	getSubagentsVersion,
 	subscribeSubagents,
 	type SubagentRun,
-	type SubagentStatus,
 } from '../../agent_runtime/tools/subagents';
 import {
 	getPermissionsVersion,

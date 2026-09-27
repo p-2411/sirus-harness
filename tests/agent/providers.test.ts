@@ -23,7 +23,7 @@ import {
   type RoutingCandidate,
   type RoutingClient,
 } from '../../src/agent_runtime/router';
-import { loadSubscriptionLimitCache, saveSubscriptionLimitCache } from '../../src/persistence';
+import { loadSubscriptionLimitCache, saveSubscriptionLimitCache } from '../../src/persistence/subscriptionLimits';
 import { bindScriptedRuntime, textTurn, unbindRuntime } from '../support/runtime';
 
 test('maps a model id to its vendor', () => {

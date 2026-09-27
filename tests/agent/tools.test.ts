@@ -22,19 +22,21 @@ class TestEmbeddingProvider implements EmbeddingProvider {
 const embeddings = await import('../../src/memory/embeddings');
 mock.module('../../src/memory/embeddings', () => ({ ...embeddings, LocalEmbeddingProvider: TestEmbeddingProvider }));
 
-const { availableTools, toolRegistry } = await import('../../src/agent_runtime/tools');
+const { toolRegistry, visibleTools } = await import('../../src/agent_runtime/tools');
+const { isMemoryAccessEnabled } = await import('../../src/agent_runtime/memory-access');
 const {
   registerToolSession,
   sirusMcpServerEntry,
   stopSirusMcpServer,
   unregisterToolSession,
+  workerRequester,
 } = await import('../../src/agent_runtime/tools/server');
 const { closeAllMemoryStores } = await import('../../src/memory/store');
-const { saveMemoryAccessPreference } = await import('../../src/persistence');
+const { openSettings } = await import('../../src/persistence/settings');
 
-type SubagentHost = import('../../src/agent_runtime/tools').SubagentHost;
-type SubagentSpawnCall = import('../../src/agent_runtime/tools').SubagentSpawnCall;
-type WorkerContext = import('../../src/agent_runtime/tools').WorkerContext;
+type SubagentHost = import('../../src/agent_runtime/tools/types').SubagentHost;
+type SubagentSpawnCall = import('../../src/agent_runtime/tools/types').SubagentSpawnCall;
+type WorkerContext = import('../../src/agent_runtime/types').WorkerContext;
 
 const MEMORY_TOOLS = ['SaveMemory', 'GetMemory', 'SearchMemories', 'DeleteMemory'];
 const AGENT_TOOLS = ['SpawnAgent', 'CheckAgent', 'MessageAgent', 'CancelAgent', 'ListAgents'];
@@ -176,10 +178,11 @@ describe('tool registry', () => {
   });
 
   test('a subagent audience sees no agent tools and disabled memory hides the memory tools', () => {
+    const availableTools = (audience = {}) => visibleTools(toolRegistry, audience, isMemoryAccessEnabled);
     expect(availableTools().map(tool => tool.name)).toEqual([...MEMORY_TOOLS, ...AGENT_TOOLS]);
     expect(availableTools({ subagent: true }).map(tool => tool.name)).toEqual(MEMORY_TOOLS);
 
-    expect(saveMemoryAccessPreference(false)).toBe(true);
+    expect(openSettings().set({ memoryEnabled: false })).toBe(true);
     expect(availableTools().map(tool => tool.name)).toEqual(AGENT_TOOLS);
     expect(availableTools({ subagent: true })).toEqual([]);
   });
@@ -188,7 +191,7 @@ describe('tool registry', () => {
 describe('Sirus MCP server', () => {
   test('lists every tool to a participant and only the memory tools to a worker', async () => {
     const participant = await connect('sirus');
-    const worker = await connect('subagent:run-1');
+    const worker = await connect(workerRequester('run-1'));
     try {
       expect(await toolNames(participant)).toEqual([...MEMORY_TOOLS, ...AGENT_TOOLS]);
       expect(await toolNames(worker)).toEqual(MEMORY_TOOLS);
@@ -305,7 +308,7 @@ describe('Sirus MCP server', () => {
   });
 
   test('a worker is refused SpawnAgent by name and a participant without a host by the tool', async () => {
-    const worker = await connect('subagent:run-1');
+    const worker = await connect(workerRequester('run-1'));
     const reviewer = await connect('reviewer');
     try {
       const refused = await call(worker, 'SpawnAgent', { prompt: 'Do the work' });

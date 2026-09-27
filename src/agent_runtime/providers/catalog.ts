@@ -1,11 +1,10 @@
-import path from 'path';
-import { dataDirectory } from '../../dataDirectory';
-import { readJson, writeJson } from '../../persistence/atomicJson';
+import { cachedJsonFile } from '../../persistence/atomicJson';
+import type { LimitPeriod } from '../types';
 
 // Every fact about the models and vendors Sirus can talk to. This module
-// imports nothing from the rest of the app but where its one file lives: it
-// is the leaf that the launch specs, the credential store, the login flows
-// and the UI all read from.
+// imports nothing from the rest of the app but where its one file lives and
+// the allowance windows' names: it is the leaf that the launch specs, the
+// credential store, the login flows and the UI all read from.
 //
 // Which models there are is the vendors' to say: each runtime reports the
 // models its harness offers, and `/model` lists those (see "What the vendors
@@ -73,7 +72,7 @@ export interface VendorInfo {
   // own and the adapter logs it in there; Claude Code reads the key as it is.
   apiKeyLogin: boolean;
   // The allowance window the sidebar shows for this vendor.
-  limitPeriod: '5-hour' | '7-day';
+  limitPeriod: LimitPeriod;
 }
 
 const VENDOR_TABLE = {
@@ -324,12 +323,7 @@ export interface ListedModel {
 
 const LISTED_FILE_VERSION = 1;
 
-// Read once per data directory, which the test suite moves between files.
-let listed: { file: string; byVendor: Partial<Record<Vendor, ListedModel[]>> } | null = null;
-
-function listedFile(): string {
-  return path.join(dataDirectory(), 'listed-models.json');
-}
+type ListedByVendor = Partial<Record<Vendor, ListedModel[]>>;
 
 function isListedModel(value: unknown): value is ListedModel {
   if (typeof value !== 'object' || value === null) return false;
@@ -337,19 +331,24 @@ function isListedModel(value: unknown): value is ListedModel {
   return typeof model.id === 'string' && model.id.length > 0 && typeof model.description === 'string';
 }
 
-function listedModels(): Partial<Record<Vendor, ListedModel[]>> {
-  const file = listedFile();
-  if (listed?.file === file) return listed.byVendor;
-  const read = readJson(file) as { version?: unknown; vendors?: Record<string, unknown> } | null;
-  const byVendor: Partial<Record<Vendor, ListedModel[]>> = {};
-  if (read?.version === LISTED_FILE_VERSION && read.vendors) {
-    for (const vendor of VENDORS) {
-      const models = read.vendors[vendor];
-      if (Array.isArray(models)) byVendor[vendor] = models.filter(isListedModel);
+const listedFile = cachedJsonFile<ListedByVendor>(
+  'listed-models.json',
+  stored => {
+    const read = stored as { version?: unknown; vendors?: Record<string, unknown> } | null;
+    const byVendor: ListedByVendor = {};
+    if (read?.version === LISTED_FILE_VERSION && read.vendors) {
+      for (const vendor of VENDORS) {
+        const models = read.vendors[vendor];
+        if (Array.isArray(models)) byVendor[vendor] = models.filter(isListedModel);
+      }
     }
-  }
-  listed = { file, byVendor };
-  return byVendor;
+    return byVendor;
+  },
+  byVendor => ({ version: LISTED_FILE_VERSION, vendors: byVendor }),
+);
+
+function listedModels(): ListedByVendor {
+  return listedFile.read();
 }
 
 function listedVendorOf(id: string): Vendor | undefined {
@@ -371,7 +370,5 @@ export function listedDescription(id: string): string | undefined {
 export function rememberListedModels(vendor: Vendor, models: readonly ListedModel[]): void {
   const current = listedModels();
   if (JSON.stringify(current[vendor] ?? []) === JSON.stringify(models)) return;
-  const byVendor = { ...current, [vendor]: [...models] };
-  listed = { file: listedFile(), byVendor };
-  writeJson(listed.file, { version: LISTED_FILE_VERSION, vendors: byVendor });
+  listedFile.write({ ...current, [vendor]: [...models] });
 }
