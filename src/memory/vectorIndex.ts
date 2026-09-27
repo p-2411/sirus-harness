@@ -1,5 +1,5 @@
 import type { Database } from 'bun:sqlite';
-import { MEMORY_COLUMNS, createVectorTable, type MemoryRow, type SchemaEmbedder } from './schema';
+import { MEMORY_COLUMNS, createVectorTable, writeEmbeddingSettings, type MemoryRow, type SchemaEmbedder } from './schema';
 
 // The sqlite-vec index over memory embeddings: nearest-neighbour lookup, the
 // per-row writes the store performs inside its own transactions, and the lazy
@@ -81,14 +81,7 @@ export class VectorIndex {
     const rebuild = this.database.transaction(() => {
       this.database.exec('DROP TABLE IF EXISTS memory_vectors');
       createVectorTable(this.database, this.embedder.dimensions);
-      this.database.query(`
-        INSERT INTO memory_settings (key, value) VALUES (?, ?)
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value
-      `).run('embedding_model', this.embedder.model);
-      this.database.query(`
-        INSERT INTO memory_settings (key, value) VALUES (?, ?)
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value
-      `).run('embedding_dimensions', String(this.embedder.dimensions));
+      writeEmbeddingSettings(this.database, this.embedder);
       this.database.query('UPDATE memories SET embedding_model = ?').run(this.embedder.model);
       const insertVector = this.database.query(
         'INSERT INTO memory_vectors(rowid, embedding, scope_id) VALUES (?, ?, ?)',
