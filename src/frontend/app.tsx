@@ -63,6 +63,11 @@ export function startSession(
   };
 }
 
+// A streaming session notifies up to twenty times a second, and a save writes
+// every session whole and synchronously on the thread that reads input, so
+// changes are gathered into one save at most this long after the first.
+const PERSIST_DELAY_MS = 500;
+
 export default function App({ launchDirectory = process.cwd() }: { launchDirectory?: string }) {
   const [workspace, setWorkspace] = useState(() => {
     const saved = loadSessionSnapshots(undefined, launchDirectory);
@@ -135,17 +140,31 @@ export default function App({ launchDirectory = process.cwd() }: { launchDirecto
       persistableSessions.filter(session => !session.isEmpty()).map(session => session.toSnapshot()),
       selectedSession?.getId() ?? null,
     );
-    const unsubscribe = persistableSessions.map(session => session.subscribe(persist));
+    let pending: ReturnType<typeof setTimeout> | null = null;
+    const persistSoon = () => {
+      if (pending) return;
+      pending = setTimeout(() => {
+        pending = null;
+        persist();
+      }, PERSIST_DELAY_MS);
+      pending.unref?.();
+    };
     // Session messages are mutated with the latest streamed snapshot before
-    // throttled UI notifications. A synchronous exit save captures that final
-    // in-memory snapshot when the app is quit mid-response.
-    const persistOnExit = () => { persist(); };
-    process.on('exit', persistOnExit);
+    // throttled UI notifications. A synchronous save on exit, or when this
+    // effect is replaced, captures that final in-memory snapshot, with
+    // whatever was still waiting on the timer.
+    const persistNow = () => {
+      if (pending) clearTimeout(pending);
+      pending = null;
+      persist();
+    };
+    const unsubscribe = persistableSessions.map(session => session.subscribe(persistSoon));
+    process.on('exit', persistNow);
     persist();
     return () => {
       for (const stop of unsubscribe) stop();
-      process.off('exit', persistOnExit);
-      persist();
+      process.off('exit', persistNow);
+      persistNow();
     };
   }, [sessions, selectedSession, draftSession]);
 
