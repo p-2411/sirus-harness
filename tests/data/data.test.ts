@@ -2,6 +2,7 @@ import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'fs';
 import os from 'os';
 import path from 'path';
+import * as checkpoints from '../../src/checkpoints';
 import * as naming from '../../src/agent_runtime/session/naming';
 import * as router from '../../src/agent_runtime/router';
 import type { RuntimeOptions } from '../../src/agent_runtime/runtime/runtime';
@@ -973,6 +974,68 @@ describe('Session model', () => {
     ]);
     expect(session.cancel()).toBe(false);
     release();
+  });
+
+  test('Esc while Jev picks the model stops the turn before any runtime starts', async () => {
+    const binding = bindScriptedRuntime(testModel, textTurn('Done'));
+    let answer!: (pick: router.RoutingPick | null) => void;
+    const route = spyOn(router, 'routeSessionModel').mockImplementation(() => new Promise(resolve => { answer = resolve; }));
+    try {
+      const draft = new Session({ id: 'cancel-while-routing', name: 'Routing', model: testModel, routePending: true });
+      const turn = draft.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Go' }] });
+      // Nobody is answering yet, but the turn is under way and is stopped.
+      expect(draft.cancel()).toBe(true);
+      expect(route.mock.calls[0]?.[2]?.signal?.aborted).toBe(true);
+      answer(null);
+      await expect(turn).rejects.toMatchObject({ name: 'AbortError' });
+      expect(binding.starts).toHaveLength(0);
+      expect(draft.wasLastTurnCancelled()).toBe(true);
+      expect(draft.getStatus()).toBe('idle');
+      expect(draft.cancel()).toBe(false);
+    } finally {
+      route.mockRestore();
+    }
+  });
+
+  test('Esc while a report turn takes its checkpoint stops it before the owner is prompted', async () => {
+    const prompts: string[] = [];
+    let releaseWorker!: () => void;
+    const workerGate = new Promise<void>(resolve => { releaseWorker = resolve; });
+    let session!: Session;
+    let spawned = false;
+    bindScriptedRuntime(testModel, async (input, emit, options) => {
+      if (isWorker(options)) {
+        await workerGate;
+        return;
+      }
+      prompts.push(input.text);
+      if (!spawned) {
+        spawned = true;
+        await session.subagentHostFor('sirus')!.spawn('Background task', 'fresh', { callId: 'spawn' });
+      }
+      emit({ type: 'text', text: 'Noted' });
+    });
+    session = new Session({ id: 'cancel-report-capture', name: 'Report capture', model: testModel });
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Delegate it' }] });
+    const [worker] = session.getWorkers();
+    let releaseCapture!: () => void;
+    const capture = spyOn(checkpoints, 'captureCheckpoint')
+      .mockImplementation(() => new Promise(resolve => { releaseCapture = () => resolve(null); }));
+    try {
+      releaseWorker();
+      await until(() => worker.reported && capture.mock.calls.length === 1, 'the report turn to take its checkpoint');
+      expect(session.getStatus()).toBe('working');
+      expect(session.cancel()).toBe(true);
+      releaseCapture();
+      await until(() => session.getStatus() === 'idle', 'the report turn to end');
+      expect(prompts).toEqual(['Delegate it']);
+      expect(session.wasLastTurnCancelled()).toBe(true);
+    } finally {
+      releaseWorker();
+      releaseCapture?.();
+      capture.mockRestore();
+      await session.dispose();
+    }
   });
 
   test('creates a named participant from a mention and targets it thereafter', async () => {

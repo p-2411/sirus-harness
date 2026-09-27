@@ -25,7 +25,7 @@ import type { SubagentHost } from '../tools/types';
 import { textOf, type Message, type ThinkingLevel, type ToolCallBlock } from '../types';
 import type { ContextUsage } from '../usage';
 import { parseFileMentions, resolveFileMentions } from '../../fileMentions';
-import { isAbortError } from '../../abort';
+import { isAbortError, throwIfAborted, TurnCancelledError } from '../../abort';
 import { ChangeFeed } from './changeFeed';
 import {
   CheckpointLog,
@@ -203,6 +203,9 @@ export class Session {
   private readonly pendingReports: SubagentRun[] = [];
 
   private activeSends = 0;
+  // What Esc aborts: the turn under way, from the moment it was accepted.
+  // Null while no turn of the session is running.
+  private turnAbort: AbortController | null = null;
   private status: SessionStatus = 'idle';
   private turnFailed = false;
   private lastTurnCancelled = false;
@@ -363,14 +366,7 @@ export class Session {
     }
     if (this.compacting) throw new Error('Wait for the context compaction to finish before sending a message.');
 
-    if (this.activeSends === 0) {
-      this.turnFailed = false;
-      this.lastTurnCancelled = false;
-      this.activeTurnStartedAt = Date.now();
-    }
-    this.activeSends++;
-    this.checkpoints.beginTurn();
-    this.setStatus('working');
+    const signal = this.beginTurn();
     let accepted = false;
     try {
       const messageText = textOf(message);
@@ -409,30 +405,65 @@ export class Session {
       // acceptance straight after the call.
       if (this.routePending) {
         this.routePending = false;
-        const pick = await routeSessionModel({ prompt: ownWords, directory: this.directory }, routingCandidates());
+        const pick = await routeSessionModel({ prompt: ownWords, directory: this.directory }, routingCandidates(), { signal });
         if (pick && pick.model !== this.roster.default.model) this.roster.changeModel(this.roster.default.name, pick.model);
       }
       if (firstPrompt && this.autoNamePending) this.startNaming(ownWords);
+      throwIfAborted(signal);
       // The runtimes run their tools themselves and cannot wait on a barrier,
       // so the pre-turn snapshot is taken before any of them is prompted.
       await this.checkpoints.capture(entry.seq, messageText || '[image]');
-      await this.turns.run(targets.map(participant => ({ participant, entries: [entry] })));
+      throwIfAborted(signal);
+      await this.turns.run(targets.map(participant => ({ participant, entries: [entry] })), signal);
       return this.timeline.entries();
     } catch (error) {
-      if (isAbortError(error)) this.lastTurnCancelled = true;
-      else this.turnFailed = true;
+      this.recordTurnError(error);
       throw error;
     } finally {
-      // Measure the reply gap from the end of model work, not streamed chunks.
-      if (accepted) this.timeline.markResponseFinished();
-      this.activeSends--;
-      this.checkpoints.endTurn();
-      if (this.activeSends === 0) this.activeTurnStartedAt = null;
-      this.setStatus(this.activeSends > 0
-        ? 'working'
-        : this.turnFailed ? 'error' : 'idle');
-      this.sendNextQueuedPrompt();
+      this.endTurn(accepted);
     }
+  }
+
+  // A turn of the session starts: a prompt or a report was accepted. The
+  // first one from idle clears the last turn's outcome and opens the
+  // controller Esc aborts. Jev's pick and the checkpoint come before any
+  // participant is answering, so the turn checks the signal after each of
+  // them rather than running in full after the user stopped it.
+  private beginTurn(): AbortSignal {
+    if (!this.turnAbort) {
+      this.turnFailed = false;
+      this.lastTurnCancelled = false;
+      this.activeTurnStartedAt = Date.now();
+      this.turnAbort = new AbortController();
+    }
+    this.activeSends++;
+    this.checkpoints.beginTurn();
+    this.setStatus('working');
+    return this.turnAbort.signal;
+  }
+
+  // A cancelled turn was the user's doing and the notifications keep quiet
+  // about it; any other error shows in the status.
+  private recordTurnError(error: unknown): void {
+    if (isAbortError(error)) this.lastTurnCancelled = true;
+    else this.turnFailed = true;
+  }
+
+  // A turn ended, however it went, and whatever waits behind it goes next.
+  // A prompt refused before it was accepted had no response to time: the
+  // reply gap is measured from the end of model work, not streamed chunks.
+  private endTurn(responded: boolean): void {
+    if (responded) this.timeline.markResponseFinished();
+    this.activeSends--;
+    this.checkpoints.endTurn();
+    if (this.activeSends === 0) {
+      this.activeTurnStartedAt = null;
+      this.turnAbort = null;
+    }
+    this.setStatus(this.activeSends > 0
+      ? 'working'
+      : this.turnFailed ? 'error' : 'idle');
+    this.sendNextQueuedPrompt();
   }
 
   getActiveSubagentCount(): number {
@@ -472,30 +503,16 @@ export class Session {
     const pending = this.pendingReports.splice(0);
     const invocations = this.reportInvocations(pending);
     if (invocations.length === 0) return;
-    if (this.activeSends === 0) {
-      this.turnFailed = false;
-      this.lastTurnCancelled = false;
-      this.activeTurnStartedAt = Date.now();
-    }
-    this.activeSends++;
-    this.checkpoints.beginTurn();
-    this.setStatus('working');
+    const signal = this.beginTurn();
     try {
       const [first] = invocations[0].entries;
       await this.checkpoints.capture(first.seq, `Report from ${pending.map(run => `@${run.id}`).join(', ')}`);
-      await this.turns.run(invocations);
+      throwIfAborted(signal);
+      await this.turns.run(invocations, signal);
     } catch (error) {
-      if (isAbortError(error)) this.lastTurnCancelled = true;
-      else this.turnFailed = true;
+      this.recordTurnError(error);
     } finally {
-      this.timeline.markResponseFinished();
-      this.activeSends--;
-      this.checkpoints.endTurn();
-      if (this.activeSends === 0) this.activeTurnStartedAt = null;
-      this.setStatus(this.activeSends > 0
-        ? 'working'
-        : this.turnFailed ? 'error' : 'idle');
-      this.sendNextQueuedPrompt();
+      this.endTurn(true);
     }
   }
 
@@ -554,10 +571,16 @@ export class Session {
     }
   }
 
-  // Stops this session's turns. Workers are background tasks and keep
-  // working: `cancelWorker`, CancelAgent and `dispose` stop those.
+  // Stops this session's turn, whether its participants are answering or it
+  // is still waiting on Jev or the checkpoint. Workers are background tasks
+  // and keep working: `cancelWorker`, CancelAgent and `dispose` stop those.
+  // True if there was a turn to stop.
   cancel(): boolean {
-    return this.roster.cancel();
+    const answering = this.roster.cancel();
+    const turn = this.turnAbort;
+    if (!turn || turn.signal.aborted) return answering;
+    turn.abort(new TurnCancelledError());
+    return true;
   }
 
   // Asks the default participant's runtime to fold its own conversation now:
