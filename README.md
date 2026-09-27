@@ -20,7 +20,7 @@ Run `sirus` on its own to open the current directory. The npm package includes t
 Inside Sirus:
 
 1. Type `/login` and choose Claude or ChatGPT, then sign in with an existing subscription or enter an API key through the masked input. Repeat `/login` to connect more accounts—as many as you want.
-2. Optionally type `/model` and pick a model. Left alone, a new session asks Jev, TypeSafe AI's routing model, which of your connected vendors' latest models fits the task in your first prompt; see "A model picked for the task" below.
+2. Optionally type `/model` and pick a model. Left alone, and with a TypeSafe AI key, a new session asks Jev, TypeSafe AI's routing model, which of your connected vendors' latest models fits the task in your first prompt; see "A model picked for the task" below.
 3. Give Sirus a task:
 
 ```text
@@ -73,23 +73,23 @@ Each participant keeps its own conversation. It reads the prompts you address to
 
 ### A model picked for the task
 
-With a TypeSafe AI key, a new session does not start on a fixed model. Sirus asks for the key once, on the first launch without one; `/jev` shows whether Jev is on and sets or removes the key later, and a `JEV_API` variable in the environment is used as it is. Without a key nothing is routed and every model stays on its default. With one, a new session does not start on a fixed model. Its first prompt goes to Jev, a fast decision model from TypeSafe AI, which chooses between the latest model of each vendor you have connected and that still has allowance: today `claude-fable-5-1` and `gpt-6-astra`. Jev sees the prompt, the names of files it mentions and the project's name, and the profile Sirus's catalog keeps of each model: what it is good at, its published benchmark results, what people report from using it, and what it costs, alongside how much of that vendor's allowance is left. Until the pick lands the model label under the input stays empty; it shows the pick like any model, or your own choice as soon as you make one.
+Jev needs a TypeSafe AI key. Sirus asks for one once, on the first launch without one; `/jev` shows whether Jev is on and sets or removes the key later, and a `JEV_API` variable in the environment is used as it is. With a key, a new session does not start on a fixed model. Its first prompt goes to Jev, a fast decision model from TypeSafe AI, which chooses between the latest model of each vendor you have connected and that still has allowance: today `claude-fable-5-1` and `gpt-6-astra`. Jev sees the prompt, the names of files it mentions and the project's name, and the profile Sirus's catalog keeps of each model: what it is good at, its published benchmark results, what people report from using it, and what it costs, alongside how much of that vendor's allowance is left. Until the pick lands the model label under the input stays empty; it shows the pick like any model, or your own choice as soon as you make one.
 
 Jev also picks for subagents, unless `/model subagent` has pinned one. Each spawn asks it for the model and the reasoning depth that fit that task, choosing among every model the catalog offers for delegated work rather than only the latest ones, so routine work goes somewhere cheap and quick and the hard cases somewhere capable.
 
-Your own choice comes first: `/model <model>` before the first prompt pins the session to it and Jev is not asked. Anything short of a confident pick keeps the model in hand: no key, no answer in time, an error, or an answer Jev is unsure of leaves a new session on the saved `/model` default or `gpt-5.6-luna` as before, and a subagent on its owner's model and depth. With one usable vendor there is nothing to choose and the session takes that vendor's latest model. A vendor whose subscription allowance the sidebar shows at 0% is left out of the choice.
+Your own choice comes first: `/model <model>` before the first prompt pins the session to it and Jev is not asked. With one usable vendor there is nothing to choose: the session takes that vendor's latest model, with or without a key. Otherwise anything short of a confident pick keeps the model in hand: no key, no answer in time, an error, or an answer Jev is unsure of leaves a new session on the saved `/model` default or `gpt-5.6-luna` as before, and a subagent on its owner's model and depth. A vendor whose subscription allowance the sidebar shows at 0% is left out of the choice.
 
 ### Delegate work, follow the results
 
 For work that can be split into independent tasks, Sirus can spawn subagents that work in the background. Each receives a focused assignment, and the agent that spawned it carries on at once. When a subagent ends, its report appears under the SpawnAgent row that started it, saying what it did, what it changed, and where its work is; the row opens itself so you do not have to go looking. The agent that spawned it is told the same thing, and that report starts its next turn. If the session is busy the report waits for the turn to finish, and goes ahead of whatever you queued behind it.
 
-In a Git project each subagent works in a Git worktree of its own, on a branch named after the run and cut from your project's HEAD, so its edits meet neither yours nor another subagent's. Uncommitted changes and ignored files are not carried over. The report names the branch, and merging or inspecting it is yours or the spawning agent's to do. Worktrees live in Sirus's data directory and go when the session is deleted; the branches stay. In a project that is not a Git repository, subagents work in the project directory itself, so assignments should avoid overlapping edits.
+In a Git project each subagent works in a Git worktree of its own, on a branch named after the run and cut from your project's HEAD, so its edits meet neither yours nor another subagent's. Uncommitted changes and ignored files are not carried over. The report names the branch, and merging or inspecting it is yours or the spawning agent's to do. The worktree stays in Sirus's data directory after the subagent ends, and the branch stays in your repository. If Git cannot create the worktree, the subagent is not started. In a project that is not a Git repository, or one with no commit yet, subagents work in the project directory itself, so assignments should avoid overlapping edits.
 
 Named participants are collaborators you can address and follow in the chat; subagents receive only their delegated task and report back to the agent that spawned them, though an agent can also start one from its own conversation so far when the task depends on what you have already established. While a subagent runs, its owner can ask it for its status, send it further instructions, or stop it. `Esc` cancels the session's turn and leaves the subagents working. A subagent whose agent has reported nothing for 15 minutes, not counting time spent waiting on your approval, is taken as hung and stopped, and its report says so.
 
 You can follow them yourself. The strip above the status row shows one line, for the subagent that changed last: its id, its model, how long it has been running, its latest tool call, and its branch, with a counter such as `1/3` when others are behind it. Press `↓` from the input bar to step onto the strip; the order is fixed as you arrive, `↑`/`↓` walk it, `enter` opens that subagent's actions, and `↑` past the first line or `Esc` hands the keyboard back to your draft. A subagent that ends keeps its line for a second, dimmed, saying how it ended, and is then off the strip. `/agents` lists the session's subagents and offers to show one's record, send it a message, cancel it, or dismiss its line. Runs are saved with the session: one still working when you quit comes back marked interrupted, with its record, and its report reaches its owner on your next prompt. Nothing restarts on its own.
 
-A subagent runs on the model and reasoning depth Jev picks for its task. Use `/model subagent <model>` to put every subagent in the session on one model instead, `/model subagent` to see which, and `/model subagent default` to hand the choice back.
+With a TypeSafe AI key, a subagent runs on the model and reasoning depth Jev picks for its task; without one, it runs on its owner's model and depth. Use `/model subagent <model>` to put every subagent in the session on one model instead, at its owner's depth, `/model subagent` to see which, and `/model subagent default` to hand the choice back.
 
 ### Explore with an undo button
 
@@ -103,7 +103,7 @@ This restores the files while keeping the conversation, letting you discuss what
 
 File restoration covers the checkpointed directory, including your own edits since the snapshot. It respects Git's tracked and ignored file rules; it does not undo external effects such as deployments or database changes.
 
-Restoring the chat waits for the session's subagents to finish, since it rebuilds the conversations they belong to. Restoring files waits only for a subagent working in the project directory itself; one in its own worktree is out of the way.
+Restoring the chat is refused while any of the session's subagents is still starting or working, since it rebuilds the conversations they belong to; `/clear` is refused the same way. Restoring files is refused only while a subagent is working in the project directory itself, or another session is busy there; a subagent in its own worktree is out of the way. Wait for the subagents to end, or cancel them with `/agents`, then try again.
 
 ### Memory that survives a new chat
 
@@ -121,53 +121,49 @@ Use `/compact` to ask for it now. There is nothing to turn on or off: compaction
 
 Create sessions, name them, and switch between them from the sidebar. Each session retains its working directory, conversation, participants, model choices, and permission mode. Existing sessions keep their model settings when you change models elsewhere.
 
-Send a follow-up while an agent is busy to queue it. Session history is saved automatically, including partial responses when you quit. Reopen Sirus to return to your conversations, and enable desktop notifications with `/notify background` to hear when attention is needed while you're away from the terminal.
+Send a follow-up while an agent is busy to queue it. Session history is saved automatically, including partial responses when you quit. Reopen Sirus to return to your conversations. Desktop notifications tell you when attention is needed while the terminal is not focused; that is the default, and `/notify always` or `/notify off` changes it.
 
 ### Put the right context in the prompt
 
-Type `@` to find agents and files in one menu. The menu opens at the bottom, with the closest matches nearest the input. Agent names and the new-name option sit below file results; use ↑/↓ and Tab or Enter to select either. File search also accepts relative paths such as `@../proj/file.tsx`. Sirus includes the selected text files in your message, making it easy to point at the code you want to discuss.
+Type `@` to find agents and files in one menu. The menu opens at the bottom, with the closest matches nearest the input. Agent names and the new-name option sit below file results; use ↑/↓ and Tab or Enter to select either. File search also accepts relative paths such as `@../proj/file.tsx`. Sirus includes the selected text files in your message, making it easy to point at the code you want to discuss: up to 10 files, 256 KiB each and 512 KiB together.
+
+A mention counts, and the menu opens, only in ordinary prose, not in a list item, heading, block quote, table, code or quoted text. A path ends at the first whitespace, quote, backtick, or any of `< > ( ) [ ] { } , ;`; the menu writes a path that needs it in double quotes, such as `@"my notes.txt"`.
 
 Attach an image with `Ctrl+V` or `/image /path/to/screenshot.png` to work from a screenshot, mockup, or visual bug report. Clipboard and notification support depend on your operating system and terminal.
 
 ### Repository instructions
 
-Put project guidance in `SIRUS.md` or `AGENTS.md` in the session's working directory. Sirus automatically includes it for session participants, but not spawned subagents. Subagents receive project guidance only through their parent's task instructions, except when one is started from its owner's conversation: the vendor keeps the instructions that conversation was written under, so that subagent inherits them. If both exist, `SIRUS.md` **replaces** `AGENTS.md`; they are not merged, even when `SIRUS.md` is empty or unreadable.
+Each agent loads its own vendor's instruction files, as it would in Claude Code or Codex: Claude its `CLAUDE.md` files, GPT its `AGENTS.md` files. Sirus does not read them or add them to the prompt itself.
 
-Guidance is read when a participant's runtime starts and stays fixed for as long as that runtime lives, so edits take effect the next time it is built, such as after `/clear`, a chat rewind, or `/memory on` or `off`. Only regular files are read, up to 32 KiB; symbolic links are rejected, including dangling links. Truncation and read errors are reported in the model's prompt. Repository guidance is subordinate to Sirus's operating contract and your request, cannot grant tool permissions, and is never included in Sirus's own internal prompts, such as the one that names a session.
+It adds one note for Claude. When a project keeps its instructions only in `AGENTS.md`, with an `AGENTS.md` in the session's directory or a parent up to the Git root and no `CLAUDE.md`, `.claude/CLAUDE.md` or `CLAUDE.local.md` in any of them, Sirus tells Claude where those files are and to follow them as it would `CLAUDE.md`, so Claude and GPT in one session work from the same instructions. Subagents on Claude get the note too. A subagent in a worktree sees the project's instruction files as they are committed at your HEAD, since uncommitted changes are not carried over.
 
-Automatic discovery is limited to the session directory. Ancestor/git-root lookup, nested rules, `CLAUDE.md`, and global instruction files are not loaded automatically; agents can still inspect relevant files using tools.
+The runtime Sirus uses to name a session reads no project instructions.
 
 ### Skills
 
-Each agent uses its own vendor's skills: Claude through Claude Code's Skill tool, GPT through Codex's skill list. A skill is a folder holding a `SKILL.md`, and the agent loads it when the task fits or when you name it.
+Each agent uses its own vendor's skills and slash commands, found where Claude Code or Codex would find them: Claude its skills, commands and enabled plugins, GPT its Codex skills and built-in commands. Sirus keeps no skill folders of its own.
 
-Type `/` to find a skill: the menu lists `@sirus`'s skills after Sirus's own commands, with what each takes and where it comes from. `Tab` completes the name so you can add arguments, including `@file` mentions, and `Enter` sends it. Sirus hands it to the agent in its vendor's own form, `/project:deploy prod` for Claude or `$deploy prod` for Codex, so the skill runs as it would in Claude Code or Codex. A skill marked `user-invocable: false` stays out of the menu, and a Sirus command of the same name takes precedence.
+Type `/` to find one: after Sirus's own commands, the menu lists what `@sirus`'s runtime reports it offers, with what each takes. The list is the one last reported for that vendor in the session's directory, kept on disk, so once a runtime has run there the menu has it before the first prompt; a skill you add appears once the runtime reports its list again. `Tab` completes the name so you can add arguments, including `@file` mentions, and `Enter` sends it. Sirus hands it to the agent as the vendor's own terminal would, `/deploy prod` for Claude or `$deploy prod` for a Codex skill, so it runs as it would in Claude Code or Codex. A Sirus command of the same name takes precedence, and a few of the vendors' commands stay out of the menu: `/effort`, which would change the reasoning depth behind `/thinking`'s back, and Claude's internal session commands.
 
-| Put a skill in… | Claude sees it | GPT sees it |
-| --- | --- | --- |
-| `.agents/skills/` in the project, or `~/.agents/skills/` | yes | yes |
-| `.claude/skills/` in the project, or `~/.claude/skills/` | yes | no |
-| `.codex/skills/` in the project, or `~/.codex/skills/` | no | yes |
+Codex on an OpenAI key, or on any ChatGPT account after the first you signed in with, runs in a profile of its own under Sirus's data directory. Sirus links the skills in your `~/.codex/skills` (or `$CODEX_HOME/skills`) into that profile, so Codex finds them there too.
 
-Project folders are read from the session's directory up to the Git root. Claude also takes your commands in `~/.claude/commands/` and the project's `.claude/commands/`, and lists your skills and commands as `user:<name>` and the project's as `project:<name>`.
+Claude loads your settings, plugins and hooks as Claude Code does. Each participant, subagent and rebuilt runtime is a Claude session of its own, so a session-start hook runs for each. Plugin agents need Claude Code's own Agent tool, which Sirus switches off in favour of its subagents, so they go unused.
 
-Claude also loads the plugins you installed and enabled in Claude Code, as Claude Code does: their skills and commands (in the menu as `/<plugin>:<name>`), their MCP servers, and their hooks. A plugin's hooks run in every Claude session Sirus starts, and each participant, subagent, and rebuilt runtime is a session of its own, so a session-start hook runs for each. Plugin agents need Claude Code's own Agent tool, which Sirus replaces with its subagents, so they go unused.
-
-Claude Code's bundled skills are on, except those that cannot work here: `batch`, `code-review`, `loop`, `deep-research`, `workflow-authoring`, and `design-sync` need tools Sirus does not give Claude, and `update-config`, `fewer-permission-prompts`, and `debug` act on Claude Code's own settings and logs, which Sirus does not use. Codex keeps its built-in skills. Claude reads its skills when its runtime starts, so a skill you add reaches a Claude participant after `/clear`, a chat rewind, or the next time Sirus opens. Codex rereads the project's folders and `~/.agents/skills` on every prompt.
+Claude Code's bundled skills are on, except `batch`, `code-review`, `loop`, `deep-research` and `workflow-authoring`, which are built on tools Sirus switches off: Claude Code's own agents, workflows and remote triggers, since delegation here goes through Sirus's subagents, and its scheduling and monitoring tools, which start turns Sirus never asked for. Codex keeps its built-in skills, with its own subagents switched off.
 
 ### Choose how much approval you want
 
-The mode applies to the session's participants and subagents. It is the vendor's own mode: Sirus asks each runtime to switch, and the agent decides what to ask about.
+The mode applies to the session's participants and its subagents, including those already running. It is the vendor's own mode: Sirus asks each runtime to switch, and the agent decides what to ask about.
 
-| Mode | Behavior |
+| Mode | Behaviour |
 | --- | --- |
 | `auto` (the default) | The agent's own reviewer decides, and asks only about what it judges unsafe. |
-| `ask` | The agent asks before every action that is not a read. |
+| `ask` | The agent asks before every action that is not a read, except what Codex runs in its sandbox (below). |
 | `bypass` | Nothing is asked. |
 
-Use `/permissions` to choose a mode, or `Shift+Tab` to cycle through them. At a prompt, allow once, allow for this session, deny, or deny for this session.
+Use `/permissions` to choose a mode, or `Shift+Tab` to cycle through them. At a prompt, choose one of the options the agent offers, in its own words, such as allowing once, allowing without asking again, or denying.
 
-Two things differ by vendor. In `ask` and `auto`, Codex runs edits and commands inside the working directory in a sandbox that can write there and reach no network, so those run without asking and only what leaves the sandbox reaches you. Claude's `auto` mode depends on the model: where the model does not support it the session falls back to asking, and the status row says so. These are tool approval controls, not an operating-system sandbox.
+Two things differ by vendor. In `ask` and `auto`, Codex runs edits and commands inside the working directory in a sandbox that can write there and reach no network, so those run without asking and only what leaves the sandbox reaches you. Claude's `auto` mode depends on the model: where the model does not support it the session falls back to asking, and the status row says so. Codex's sandbox aside, these are tool approval controls, not an operating-system sandbox.
 
 ### Questions from the agent
 
@@ -198,7 +194,7 @@ Use `/usage` to see reported subscription allowance and how full each participan
 | `/jev` | Set or remove the TypeSafe AI key Jev picks models with. |
 | `/undo` / `/rewind` | Choose what to restore from a checkpoint. |
 | `/notify` | Configure desktop notifications. |
-| `/update` | Install the latest release. |
+| `/update` | Install the latest release with `npm install --global`. |
 | `/help` | Show all commands and shortcuts. |
 | `/exit` | Quit Sirus. |
 
@@ -216,7 +212,7 @@ Set `SIRUS_DATA_DIR` to use another location. API keys entered through Sirus are
 
 ### Optional installation statistics
 
-The repository includes a privacy-conscious Cloudflare Worker/D1 implementation in [`cloudflare/`](cloudflare/) and a dependency-free GitHub Pages dashboard in [`stats-dashboard/`](stats-dashboard/). Released builds use the deployed Worker by default. Set `SIRUS_HEARTBEAT_URL` to override it, or set it to an empty value to disable heartbeats:
+The repository includes a privacy-conscious Cloudflare Worker/D1 implementation in [`cloudflare/`](cloudflare/) and a dependency-free GitHub Pages dashboard in [`stats-dashboard/`](stats-dashboard/). Every build, released or run from source, sends its heartbeat to the deployed Worker by default. Set `SIRUS_HEARTBEAT_URL` to send it elsewhere, or set it to an empty value to disable heartbeats; a URL that is not HTTPS, other than plain HTTP to localhost, disables them too:
 
 ```sh
 export SIRUS_HEARTBEAT_URL=https://your-worker.your-subdomain.workers.dev/heartbeat
@@ -224,7 +220,7 @@ export SIRUS_HEARTBEAT_URL=https://your-worker.your-subdomain.workers.dev/heartb
 export SIRUS_HEARTBEAT_URL=
 ```
 
-Sirus then creates a random per-installation ID in its local data directory and sends at most one heartbeat every 24 hours. The payload contains only that ID and the Sirus version. The Worker HMAC-hashes the ID before storage, derives timestamps from its server clock, and retains records for 35 days. Network failures never block startup. Counts are estimates because the public endpoint can be submitted by arbitrary clients.
+When heartbeats are on, Sirus creates a random per-installation ID in its local data directory and sends at most one heartbeat every 24 hours, when it starts. The payload contains only that ID and the Sirus version. The Worker HMAC-hashes the ID before storage, derives timestamps from its server clock, and retains records for 35 days. Network failures never block startup. Counts are estimates because the public endpoint can be submitted by arbitrary clients.
 
 On macOS, if memory reports that it cannot load `sqlite-vec`, install SQLite with `brew install sqlite`, or set `SIRUS_SQLITE_LIBRARY` to your SQLite dynamic library path.
 
@@ -245,6 +241,8 @@ The npm package includes the Bun runtime, so a separate Bun installation is not 
 ```sh
 bun install -g sirus-harness
 ```
+
+`/update` installs a newer release with `npm install --global` whichever way you installed Sirus, so a copy installed with Bun is left in place and the new release is installed through npm beside it.
 
 **Run in your current directory:**
 
