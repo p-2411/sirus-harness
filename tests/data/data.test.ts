@@ -80,8 +80,10 @@ test('ACP opts into notices and routes early notices to the session being opened
   let runtime: Runtime | undefined;
   try {
     runtime = await startAcpRuntime(options);
+    expect(runtime.sessionId).toBe('owner');
     expect(updates).toEqual([{ type: 'notice', severity: 'info', title: 'owner opening' }]);
     const worker = await runtime.fork({ ...options, onUpdate: update => { workerUpdates.push(update); } });
+    expect(worker.sessionId).toBe('worker');
     expect(workerUpdates).toEqual([{ type: 'notice', severity: 'info', title: 'worker opening' }]);
     expect(updates).toHaveLength(1);
     await worker.prompt({ text: 'Inspect', images: [] }, new AbortController().signal);
@@ -94,6 +96,128 @@ test('ACP opts into notices and routes early notices to the session being opened
     expect(updates).toHaveLength(1);
   } finally {
     runtime?.dispose();
+    spec.mockRestore();
+  }
+});
+
+test.each([
+  ['claude', 'resume'], ['claude', 'load'], ['gpt', 'resume'], ['gpt', 'load'],
+] as const)('ACP %s %s reopens the recorded session without replaying its transcript', async (vendor, method) => {
+  const adapter = `
+    import { createInterface } from 'node:readline';
+    const send = value => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\\n');
+    const update = update => send({ method: 'session/update', params: { sessionId: 'saved-session', update } });
+    const requests = [];
+    const configOptions = [
+      { id: 'model', name: 'Model', type: 'select', currentValue: 'old', options: [{ value: 'chosen', name: 'Chosen' }] },
+      { id: '${vendor === 'claude' ? 'effort' : 'reasoning_effort'}', name: 'Thinking', type: 'select', currentValue: 'low', options: [{ value: 'high', name: 'High' }] },
+    ];
+    for await (const line of createInterface({ input: process.stdin })) {
+      const request = JSON.parse(line);
+      const reply = result => send({ id: request.id, result });
+      if (request.method === 'initialize') {
+        reply({ protocolVersion: 1, agentCapabilities: {
+          loadSession: true, sessionCapabilities: ${method === 'resume' ? '{ resume: {} }' : '{}'},
+        } });
+      } else if (request.method === 'session/${method}') {
+        requests.push(request);
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Old answer' } });
+        update({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'Old reasoning' } });
+        update({ sessionUpdate: 'tool_call', toolCallId: 'old-tool', title: 'Old tool', status: 'completed' });
+        update({ sessionUpdate: 'plan', entries: [{ content: 'Old plan', priority: 'medium', status: 'completed' }] });
+        update({ sessionUpdate: 'compaction_update', compactionId: 'old-compact', status: 'completed' });
+        update({ sessionUpdate: 'usage_update', used: 99, size: 1000 });
+        update({ sessionUpdate: 'async_task_spawned', asyncTaskId: 'restored-task', name: 'Restored task', state: 'running', canStop: true });
+        update({ sessionUpdate: 'available_commands_update', availableCommands: [{ name: 'compact', description: 'Compact history' }] });
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Last replayed answer' } });
+        reply({ configOptions, modes: {
+          currentModeId: 'manual', availableModes: [{ id: 'auto', name: 'Auto', _meta: { kind: 'auto_review' } }],
+        } });
+      } else if (request.method === 'session/set_mode') {
+        requests.push(request);
+        reply({});
+      } else if (request.method === 'session/set_config_option') {
+        requests.push(request);
+        configOptions.find(option => option.id === request.params.configId).currentValue = request.params.value;
+        reply({ configOptions });
+      } else if (request.method === 'session/prompt') {
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: JSON.stringify(requests) } });
+        reply({ stopReason: 'end_turn' });
+      } else if (request.id !== undefined) {
+        send({ id: request.id, error: { code: -32601, message: 'Unexpected ' + request.method } });
+      }
+    }
+  `;
+  const spec = spyOn(launch, 'launchFor').mockImplementation(options => {
+    expect(options.directory).toBe('/recorded/project');
+    return {
+      command: process.execPath, args: ['-e', adapter], env: options.env,
+      mode: options.permissionMode, forkNeedsResume: true,
+      session: session => {
+        expect(session.directory).toBe('/recorded/project');
+        return { mcpServers: [], meta: { refreshed: true }, additionalDirectories: ['/skills'] };
+      },
+    };
+  });
+  const updates: RuntimeUpdate[] = [];
+  let runtime: Runtime | undefined;
+  try {
+    runtime = await startAcpRuntime({
+      vendor, model: 'chosen', thinkingLevel: 'high', directory: '/different/project',
+      resume: { sessionId: 'saved-session', directory: '/recorded/project' },
+      systemPrompt: '', env: { ...process.env }, mcpServer: null, permissionMode: 'auto',
+      onPermission: async () => ({ outcome: { outcome: 'cancelled' } }),
+      onUpdate: update => { updates.push(update); },
+    });
+    expect(runtime.sessionId).toBe('saved-session');
+    expect(runtime.context).toEqual({ tokens: 99, window: 1000 });
+    expect(updates.map(update => update.type).sort()).toEqual(['async_task', 'commands', 'context', 'models']);
+    await runtime.prompt({ text: 'Continue', images: [] }, new AbortController().signal);
+    const answer = updates.at(-1);
+    expect(answer?.type).toBe('text');
+    const requests = JSON.parse(answer?.type === 'text' ? answer.text : '[]');
+    expect(requests.map((request: { method: string }) => request.method)).toEqual([
+      `session/${method}`, 'session/set_mode', 'session/set_config_option', 'session/set_config_option',
+    ]);
+    expect(requests[0].params).toEqual({
+      sessionId: 'saved-session', cwd: '/recorded/project', mcpServers: [],
+      _meta: { refreshed: true }, additionalDirectories: ['/skills'],
+    });
+    expect(requests.slice(1).map((request: { params: unknown }) => request.params)).toEqual([
+      { sessionId: 'saved-session', modeId: 'auto' },
+      { sessionId: 'saved-session', configId: 'model', value: 'chosen' },
+      { sessionId: 'saved-session', configId: vendor === 'claude' ? 'effort' : 'reasoning_effort', value: 'high' },
+    ]);
+  } finally {
+    runtime?.dispose();
+    spec.mockRestore();
+  }
+});
+
+test('ACP resume failure rejects creation so the caller can seed a fresh runtime', async () => {
+  const adapter = `
+    import { createInterface } from 'node:readline';
+    const send = value => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\\n');
+    for await (const line of createInterface({ input: process.stdin })) {
+      const request = JSON.parse(line);
+      if (request.method === 'initialize') send({ id: request.id, result: {
+        protocolVersion: 1, agentCapabilities: { sessionCapabilities: { resume: {} } },
+      } });
+      else send({ id: request.id, error: { code: -32603, message: 'Internal error', data: { message: 'Session missing' } } });
+    }
+  `;
+  const spec = spyOn(launch, 'launchFor').mockImplementation(options => ({
+    command: process.execPath, args: ['-e', adapter], env: options.env,
+    mode: options.permissionMode, session: () => ({ mcpServers: [] }), forkNeedsResume: true,
+  }));
+  try {
+    await expect(startAcpRuntime({
+      vendor: 'gpt', model: 'chosen', thinkingLevel: 'high', directory: process.cwd(),
+      resume: { sessionId: 'missing', directory: process.cwd() },
+      systemPrompt: '', env: { ...process.env }, mcpServer: null, permissionMode: 'auto',
+      onPermission: async () => ({ outcome: { outcome: 'cancelled' } }), onUpdate: () => {},
+    })).rejects.toThrow('Session missing');
+  } finally {
     spec.mockRestore();
   }
 });
@@ -943,12 +1067,16 @@ describe('Session model', () => {
         await session.subagentHostFor('sirus')!.spawn('Carry on from here', { context: 'owner' }, { callId: 'spawn' });
       }
       emit({ type: 'text', text: 'Delegated it' });
-    });
+    }, true);
     session = new Session({ id: 'worker-fork', name: 'Fork', model: testModel });
     try {
       await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Delegate it' }] });
       const [worker] = session.getWorkers();
       expect(worker.context).toBe('owner');
+      expect(session.toSnapshot().workers![0]!.nativeSession).toMatchObject({
+        vendor: 'gpt', sessionId: binding.runtimes[1]!.sessionId, directory: worker.directory, sourceId: null,
+      });
+      expect(binding.runtimes[1]!.sessionId).not.toBe(binding.runtimes[0]!.sessionId);
       expect(binding.forks).toHaveLength(1);
       expect(binding.forks[0]).toMatchObject({ model: testModel, directory: session.getDirectory() });
       expect(binding.forks[0].systemPrompt).toContain('You are a Sirus subagent');
@@ -1567,6 +1695,51 @@ test('named workers wait, interrupt, resume warm conversations, and recover from
   }
 });
 
+test('a restored worker reopens its native session and snapshots its replacement after reset', async () => {
+  const profileHome = mkdtempSync(path.join(os.tmpdir(), 'sirus-worker-profile-'));
+  const previousHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = profileHome;
+  const binding = bindScriptedRuntime(testModel, textTurn('Finished'), true);
+  const session = new Session({ id: 'native-worker', name: 'Worker restart', model: testModel });
+  let reopened: Session | undefined;
+  try {
+    await session.subagentHostFor('sirus')!.spawn('Remember the tool results', { runInBackground: false }, { callId: 'spawn' });
+    const snapshot = session.toSnapshot();
+    const saved = snapshot.workers![0]!;
+    expect(saved.nativeSession).toMatchObject({
+      vendor: 'gpt', sessionId: binding.runtimes[0]!.sessionId,
+      directory: session.getDirectory(), sourceId: null, profileHome,
+    });
+    await session.dispose();
+    reopened = Session.fromSnapshot(snapshot);
+    expect(reopened.getWorkers()[0]!.worker).toBeNull();
+    await reopened.messageWorker(saved.id, 'Continue from the tool results');
+    await reopened.subagentHostFor('sirus')!.wait([saved.id], 1000);
+    const resumed = binding.runtimes[1]!;
+    expect(binding.starts[1]!.resume).toEqual(saved.nativeSession);
+    expect(resumed.prompts[0]!.text).toBe('Continue from the tool results');
+    expect(reopened.toSnapshot().workers![0]!.nativeSession).toEqual(saved.nativeSession);
+
+    // A reset invalidates the saved ref even though the run still holds the
+    // original restored record. The next continuation must use the recap.
+    const worker = reopened.getWorkers()[0]!;
+    worker.worker!.resetRuntime();
+    expect(reopened.toSnapshot().workers![0]!.nativeSession).toBeUndefined();
+    await reopened.messageWorker(saved.id, 'Start again');
+    await reopened.subagentHostFor('sirus')!.wait([saved.id], 1000);
+    const fresh = binding.runtimes.find(runtime => runtime.prompts[0]?.text.endsWith('Start again'))!;
+    expect(fresh.prompts[0]!.text).toContain('Earlier conversation');
+    expect(reopened.toSnapshot().workers![0]!.nativeSession!.sessionId).toBe(fresh.sessionId);
+    expect(fresh.sessionId).not.toBe(saved.nativeSession!.sessionId);
+  } finally {
+    await reopened?.dispose();
+    await session.dispose();
+    if (previousHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousHome;
+    rmSync(profileHome, { recursive: true, force: true });
+  }
+});
+
 test('foreground workers return their report without a notification and apply agent definitions', async () => {
   const { mkdirSync, writeFileSync } = await import('fs');
   const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-agent-definition-'));
@@ -1995,4 +2168,205 @@ test('a bound runtime resolving after startup cancellation is disposed before it
     await opening;
     unbindRuntime(model);
   }
+});
+
+describe('native participant sessions', () => {
+  test('reopens a snapshot and a lost process without a text recap', async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-native-participant-'));
+    const previousHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = directory;
+    const binding = bindScriptedRuntime(testModel, textTurn('Learned'), true);
+    const original = new Session({ model: testModel, directory });
+    let restored: Session | undefined;
+    try {
+      await original.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Learn a hidden detail' }] });
+      const snapshot = original.toSnapshot();
+      const native = snapshot.participants[0].nativeSession!;
+      expect(native).toMatchObject({ vendor: 'gpt', directory, sourceId: null, profileHome: directory });
+      expect(native.sessionId).toBe(binding.runtimes[0].sessionId);
+      await original.dispose();
+      restored = Session.fromSnapshot(snapshot);
+      // Switching away from a restored chat releases draft warmup resources,
+      // but must retain the session that has not been reopened yet.
+      restored.releaseWarmup();
+      expect(restored.toSnapshot().participants[0].nativeSession).toEqual(native);
+      await restored.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Recall it' }] });
+      expect(binding.starts[1].resume).toEqual(native);
+      expect(binding.runtimes[1].prompts).toEqual([{ text: 'Recall it', images: [] }]);
+      binding.runtimes[1].dispose();
+      await restored.sendMessage({ role: 'user', content: [{ type: 'text', text: 'After process loss' }] });
+      expect(binding.starts[2].resume?.sessionId).toBe(native.sessionId);
+      expect(binding.runtimes[2].prompts[0].text).toBe('After process loss');
+    } finally {
+      await restored?.dispose();
+      await original.dispose();
+      if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome;
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('cancelling a pending resume retains the native session for the next turn', async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-native-cancel-'));
+    const previousHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = directory;
+    const binding = bindScriptedRuntime(testModel, textTurn('Learned'), true);
+    const original = new Session({ model: testModel, directory });
+    const { boundRuntimes } = await import('../../src/agent_runtime/runtime/runtime');
+    const factory = boundRuntimes[testModel];
+    let restored: Session | undefined;
+    let turn: Promise<unknown> | undefined;
+    let started!: () => void;
+    let release!: () => void;
+    const opening = new Promise<void>(resolve => { started = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    try {
+      await original.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Learn a hidden detail' }] });
+      const snapshot = original.toSnapshot();
+      const native = snapshot.participants[0].nativeSession!;
+      await original.dispose();
+      boundRuntimes[testModel] = async options => {
+        expect(options.resume).toEqual(native);
+        started();
+        await gate;
+        return factory(options);
+      };
+      restored = Session.fromSnapshot(snapshot);
+      turn = restored.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Cancelled before prompting' }] }).catch(error => error);
+      await opening;
+      restored.cancel();
+      await turn;
+      expect(restored.toSnapshot().participants[0].nativeSession).toEqual(native);
+      release();
+      await until(() => binding.runtimes[1]?.disposed === true, 'cancelled resume cleanup');
+      expect(binding.runtimes[1].prompts).toEqual([]);
+      boundRuntimes[testModel] = factory;
+      await restored.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Recall it after cancellation' }] });
+      expect(binding.starts[2].resume).toEqual(native);
+      expect(binding.runtimes[2].prompts[0].text).toBe('Recall it after cancellation');
+    } finally {
+      release();
+      restored?.cancel();
+      await turn;
+      await restored?.dispose();
+      await original.dispose();
+      boundRuntimes[testModel] = factory;
+      if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome;
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test.each(['same', 'different'] as const)('credential fallback with a %s profile home preserves the appropriate native session', async profile => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-native-credentials-'));
+    const previous = { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR, SIRUS_DATA_DIR: process.env.SIRUS_DATA_DIR };
+    process.env.CLAUDE_CONFIG_DIR = directory;
+    process.env.SIRUS_DATA_DIR = path.join(directory, 'data');
+    const { providerFor } = await import('../../src/agent_runtime/providers');
+    const model = 'claude-sonnet-5';
+    const first = { id: 'first', kind: 'api' as const, key: 'test-first-key' };
+    const backup = profile === 'same'
+      ? { id: 'backup', kind: 'api' as const, key: 'test-backup-key' }
+      : { id: 'backup', kind: 'subscription' as const, profile: 'backup-profile' };
+    const credentials = spyOn(providerFor('claude').sources, 'list').mockReturnValue([first, backup]);
+    let failFirst = false;
+    const attempts: string[] = [];
+    const binding = bindScriptedRuntime(model, (_input, emit, options) => {
+      const source = options.env.ANTHROPIC_API_KEY === first.key ? 'first' : 'backup';
+      attempts.push(source);
+      if (failFirst && source === 'first') throw new Error('401 authentication rejected');
+      emit({ type: 'text', text: 'Earlier answer' });
+    }, true);
+    const original = new Session({ model, directory });
+    let restored: Session | undefined;
+    try {
+      await original.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Learn a hidden detail' }] });
+      const native = original.toSnapshot().participants[0].nativeSession!;
+      expect(native).toMatchObject({ sourceId: first.id, profileHome: directory });
+      failFirst = true;
+      await original.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Continue after credential failure' }] });
+      expect(attempts).toEqual(['first', 'first', 'backup']);
+      expect(binding.starts).toHaveLength(2);
+      const replacement = original.toSnapshot().participants[0].nativeSession!;
+      expect(replacement.sourceId).toBe(backup.id);
+      if (profile === 'same') {
+        expect(binding.starts[1].resume).toEqual(native);
+        expect(replacement.sessionId).toBe(native.sessionId);
+        expect(replacement.profileHome).toBe(native.profileHome);
+        expect(binding.runtimes[1].prompts[0].text).not.toContain('Earlier conversation, for context:');
+      } else {
+        expect(binding.starts[1].resume).toBeUndefined();
+        expect(replacement.sessionId).not.toBe(native.sessionId);
+        expect(replacement.profileHome).toBe(path.join(directory, 'data', 'subscriptions', 'claude', 'backup-profile'));
+        expect(binding.runtimes[1].prompts[0].text).toContain('Earlier answer');
+        expect(original.getMessages().at(-1)?.content).toContainEqual(expect.objectContaining({
+          type: 'notice', title: 'Starting fresh with a conversation recap',
+          description: expect.stringContaining('different profile home'),
+        }));
+      }
+
+      // The configured preference still puts the rejected credential first.
+      // Restoring must use the saved backup directly, without failing again.
+      const snapshot = original.toSnapshot();
+      await original.dispose();
+      restored = Session.fromSnapshot(snapshot);
+      await restored.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Resume on the saved credential' }] });
+      expect(attempts).toEqual(['first', 'first', 'backup', 'backup']);
+      expect(binding.starts).toHaveLength(3);
+      expect(binding.starts[2].resume).toEqual(replacement);
+      expect(binding.runtimes[2].prompts[0].text).toBe('Resume on the saved credential');
+      expect(restored.toSnapshot().participants[0].nativeSession!.sessionId).toBe(replacement.sessionId);
+    } finally {
+      await restored?.dispose();
+      await original.dispose();
+      credentials.mockRestore();
+      unbindRuntime(model);
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test.each(['directory', 'profile', 'missing profile', 'credential', 'prompt', 'refused'] as const)('uses a recap if native recovery is invalid: %s', async invalid => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-native-fallback-'));
+    const previousHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = directory;
+    const binding = bindScriptedRuntime(testModel, textTurn('Earlier answer'), true);
+    const original = new Session({ model: testModel, directory });
+    let restored: Session | undefined;
+    const { boundRuntimes } = await import('../../src/agent_runtime/runtime/runtime');
+    try {
+      await original.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Earlier question' }] });
+      const snapshot = original.toSnapshot();
+      const native = snapshot.participants[0].nativeSession!;
+      if (invalid === 'directory') native.directory = path.join(directory, 'missing');
+      if (invalid === 'profile' || invalid === 'missing profile') native.profileHome = path.join(directory, 'missing-profile');
+      if (invalid === 'missing profile') process.env.CODEX_HOME = native.profileHome;
+      if (invalid === 'credential') native.sourceId = 'removed-credential';
+      if (invalid === 'prompt') native.systemPromptHash = 'previous-prompt';
+      let attempted = false;
+      const factory = boundRuntimes[testModel];
+      if (invalid === 'refused') boundRuntimes[testModel] = options => {
+        if (options.resume) { attempted = true; throw new Error('Session not found'); }
+        return factory(options);
+      };
+      restored = Session.fromSnapshot(snapshot);
+      await restored.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Continue' }] });
+      expect(binding.starts.at(-1)?.resume).toBeUndefined();
+      expect(binding.runtimes.at(-1)?.prompts[0].text).toContain('Earlier conversation, for context:');
+      expect(binding.runtimes.at(-1)?.prompts[0].text).toContain('Earlier answer');
+      if (invalid === 'refused') expect(attempted).toBe(true);
+      if (invalid === 'missing profile') expect(restored.getMessages().at(-1)?.content).toContainEqual(expect.objectContaining({
+        type: 'notice', description: expect.stringContaining('saved profile home is missing'),
+      }));
+      if (invalid !== 'prompt') expect(restored.getMessages().at(-1)?.content).toContainEqual(expect.objectContaining({
+        type: 'notice', title: 'Starting fresh with a conversation recap',
+      }));
+      expect(restored.toSnapshot().participants[0].nativeSession?.sessionId).not.toBe(native.sessionId);
+    } finally {
+      await restored?.dispose();
+      await original.dispose();
+      if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome;
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
 });

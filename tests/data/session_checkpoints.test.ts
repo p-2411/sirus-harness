@@ -191,6 +191,55 @@ describe('session checkpoint integration', () => {
     expect(fork.getContextUsage()).toEqual({ tokens: 330, window: 200_000 });
   });
 
+  test.each(['fork', 'rewind'] as const)('%s starts a separate native session while the source remains resumable', async operation => {
+    const previousHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = root;
+    let response = 0;
+    const binding = bindScriptedRuntime(model, (_input, emit) => {
+      emit({ type: 'text', text: `Response ${++response}` });
+    }, true);
+    let fork: Session | undefined;
+    try {
+      await session.sendMessage(prompt);
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'A later turn' }] });
+      const originalNative = session.toSnapshot().participants[0].nativeSession!;
+      const snapshot = operation === 'fork' ? session.fork()
+        : (await session.rewind(session.getCheckpoints()[1].id, { files: false, chat: true })).fork!;
+      expect(snapshot.participants.every(participant => participant.nativeSession === undefined)).toBe(true);
+      expect(snapshot.defaultModel.nativeSession).toBeUndefined();
+      expect(session.toSnapshot().participants[0].nativeSession).toEqual(originalNative);
+      fork = Session.fromSnapshot(snapshot);
+      await fork.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Continue separately' }] });
+      expect(binding.starts[1].resume).toBeUndefined();
+      expect(binding.runtimes[1].prompts[0].text).toContain('Earlier conversation, for context:');
+      expect(binding.runtimes[1].prompts[0].text).toContain('Response 1');
+      if (operation === 'rewind') {
+        expect(binding.runtimes[1].prompts[0].text).not.toContain('Response 2');
+        expect(binding.runtimes[1].prompts[0].text).not.toContain('A later turn');
+      }
+      expect(fork.toSnapshot().participants[0].nativeSession!.sessionId).not.toBe(originalNative.sessionId);
+
+      binding.runtimes[0].dispose();
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Continue the original' }] });
+      expect(binding.starts[2].resume).toEqual(originalNative);
+      expect(binding.runtimes[2].prompts[0].text).toBe('Continue the original');
+      expect(session.toSnapshot().participants[0].nativeSession!.sessionId).toBe(originalNative.sessionId);
+
+      const forkNative = fork.toSnapshot().participants[0].nativeSession!;
+      fork.clear();
+      expect(fork.toSnapshot().participants[0].nativeSession).toBeUndefined();
+      expect(fork.toSnapshot().defaultModel.nativeSession).toBeUndefined();
+      await fork.sendMessage({ role: 'user', content: [{ type: 'text', text: 'After clear' }] });
+      expect(binding.starts[3].resume).toBeUndefined();
+      expect(binding.runtimes[3].prompts[0].text).toBe('After clear');
+      expect(fork.toSnapshot().participants[0].nativeSession!.sessionId).not.toBe(forkNative.sessionId);
+    } finally {
+      await fork?.dispose();
+      await session.dispose();
+      if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome;
+    }
+  });
+
   test('queued prompts capture their own pre-turn files and history position', async () => {
     let releaseFirst!: () => void;
     const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });

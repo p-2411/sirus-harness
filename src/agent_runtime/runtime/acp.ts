@@ -212,10 +212,14 @@ interface SessionState {
   // is holding a turn nobody can end, so the session takes no more prompts
   // and its owner rebuilds it.
   stuck: boolean;
+  // A load can replay transcript updates before it answers. Sirus already
+  // owns that transcript; only live metadata should reach its callbacks.
+  reopening: boolean;
 }
 
 export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime> {
   throwIfAborted(options.signal);
+  if (options.resume) options = { ...options, directory: options.resume.directory };
   const launch = launchFor(options);
   const child = spawn(launch.command, launch.args, { stdio: ['pipe', 'pipe', 'pipe'], env: launch.env });
 
@@ -279,6 +283,7 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
       inFlight: Promise.resolve(),
       closed: false,
       stuck: false,
+      reopening: false,
     };
     sessions.set(id, state);
     for (const update of openingUpdates.get(id) ?? []) receive(id, update);
@@ -297,6 +302,14 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
       openingSessions--;
       if (openingSessions === 0) openingUpdates.clear();
     }
+  }
+
+  async function finishReopening(state: SessionState): Promise<void> {
+    // The SDK resolves responses ahead of its asynchronous notification
+    // handlers. Drain updates already read before enabling transcript output,
+    // including the last replay chunk immediately preceding the response.
+    await new Promise<void>(resolve => setImmediate(resolve));
+    state.reopening = false;
   }
 
   // The error a call on a session that can no longer answer rejects with.
@@ -430,6 +443,9 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
       }
       return;
     }
+    if (state.reopening && !String(update.sessionUpdate).startsWith('async_task_') && ![
+      'notice', 'usage_update', 'current_mode_update', 'config_option_update', 'available_commands_update',
+    ].includes(update.sessionUpdate)) return;
     const reduced = reduce(state, update);
     if (!reduced) return;
     try {
@@ -754,6 +770,7 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
     // Registered before the resume, since the adapter starts pushing updates
     // for the new session the moment it opens it.
     try {
+      state.reopening = launch.forkNeedsResume;
       const opened = launch.forkNeedsResume
         ? await connection.agent.request(methods.agent.session.resume, {
           sessionId: created.sessionId,
@@ -761,6 +778,7 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
           ...extras,
         })
         : created;
+      if (state.reopening) await finishReopening(state);
       state.modes = opened.modes?.availableModes ?? [];
       state.currentModeId = opened.modes?.currentModeId ?? '';
       state.configOptions = opened.configOptions ?? [];
@@ -776,6 +794,7 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
   function runtimeFor(state: SessionState, dispose: () => void): Runtime {
     return {
       vendor: options.vendor,
+      sessionId: state.id,
       get model() { return state.model; },
       get modes() { return state.modes; },
       get context() { return state.context; },
@@ -817,12 +836,32 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
       mcpServer: options.mcpServer,
       tools: options.tools,
     });
-    const { opened: session, state } = await openSession(() => connection.agent.request(methods.agent.session.new, {
+    const openingParams = {
       cwd: options.directory,
       mcpServers: params.mcpServers,
       ...(params.meta ? { _meta: params.meta } : {}),
       ...(params.additionalDirectories ? { additionalDirectories: params.additionalDirectories } : {}),
-    }), options.directory, options, options.model);
+    };
+    let session;
+    let state: SessionState;
+    if (options.resume) {
+      // Resume preserves the conversation without replay; older adapters may
+      // offer only load, whose historical notifications are discarded below.
+      const capabilities = initialized.agentCapabilities;
+      const method = capabilities?.sessionCapabilities?.resume != null
+        ? methods.agent.session.resume
+        : capabilities?.loadSession ? methods.agent.session.load : null;
+      if (!method) throw new Error(`The ${options.vendor} adapter cannot reopen a session`);
+      state = register(options.resume.sessionId, options.directory, options, options.model);
+      state.reopening = true;
+      session = await connection.agent.request(method, { sessionId: state.id, ...openingParams });
+      await finishReopening(state);
+    } else {
+      ({ opened: session, state } = await openSession(
+        () => connection.agent.request(methods.agent.session.new, openingParams),
+        options.directory, options, options.model,
+      ));
+    }
     state.modes = session.modes?.availableModes ?? [];
     state.currentModeId = session.modes?.currentModeId ?? '';
     state.configOptions = session.configOptions ?? [];

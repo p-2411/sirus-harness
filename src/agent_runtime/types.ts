@@ -1,4 +1,16 @@
 import crypto from 'crypto';
+import type { Vendor } from './providers/catalog';
+
+// The vendor's durable conversation, in the credential profile and directory
+// where it was opened. A snapshot keeps this even when its process is gone.
+export interface NativeSession {
+  vendor: Vendor;
+  sessionId: string;
+  directory: string;
+  sourceId: string | null;
+  profileHome: string;
+  systemPromptHash?: string;
+}
 
 export interface TextBlock {
   type: 'text';

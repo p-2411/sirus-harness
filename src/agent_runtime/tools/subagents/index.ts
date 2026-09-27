@@ -1,6 +1,6 @@
 import path from 'path';
 import type { SessionAgent } from '../../agent';
-import type { Message, MessageBlock, ThinkingLevel } from '../../types';
+import type { Message, MessageBlock, NativeSession, ThinkingLevel } from '../../types';
 import type { AgentDefinition } from './definitions';
 import type { WorkerContext } from '../types';
 
@@ -24,6 +24,7 @@ export type { WorkerContext };
 // What the session file keeps of a worker: enough to show its record, tell
 // where its branch is, and give its owner the report it never received.
 export interface WorkerRecord {
+  nativeSession?: NativeSession;
   id: string;
   name?: string;
   description?: string;
@@ -171,6 +172,7 @@ export function workerRecord(run: SubagentRun): WorkerRecord {
     baseDirectory: run.baseDirectory,
     startHead: run.startHead,
     definition: run.definition,
+    nativeSession: run.worker ? run.worker.nativeSession : run.nativeSession,
     callId: run.callId,
     owner: run.owner,
     model: run.model,

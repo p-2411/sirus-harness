@@ -710,6 +710,10 @@ export class Session {
   fork(): SessionSnapshot {
     const snapshot = structuredClone(this.toSnapshot());
     delete snapshot.workers;
+    // A copied or rewound Sirus record must never reopen and append to the
+    // original vendor session, whose history may include later turns.
+    for (const participant of snapshot.participants) delete participant.nativeSession;
+    delete snapshot.defaultModel.nativeSession;
     return {
       ...snapshot, id: crypto.randomUUID(), name: `${this.name} (fork)`,
       archived: false, updatedAt: Date.now(), autoNamePending: false,

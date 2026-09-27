@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import {
   boundRuntimes,
   type ForkOptions,
@@ -27,6 +28,7 @@ export interface ScriptedBinding {
   // forked runtime itself is the matching entry appended to `runtimes`.
   forks: ForkOptions[];
   runtimes: ScriptedRuntime[];
+  nativeSessions?: boolean;
 }
 
 export interface ScriptedRuntime extends Omit<Runtime, 'context' | 'model' | 'fork'> {
@@ -61,6 +63,8 @@ function scriptedRuntime(model: string, options: RuntimeOptions, binding: Script
   let running = false;
   const runtime: ScriptedRuntime = {
     vendor: options.vendor,
+    // Tests opt into persistence with a nonempty vendor session id.
+    sessionId: options.resume?.sessionId ?? (binding.nativeSessions ? randomUUID() : ''),
     model: options.model,
     modes: [],
     context: null,
@@ -110,7 +114,7 @@ function scriptedRuntime(model: string, options: RuntimeOptions, binding: Script
     async fork(forked) {
       if (runtime.disposed) throw new Error(`The scripted ${model} runtime was disposed`);
       binding.forks.push(forked);
-      return scriptedRuntime(model, { ...options, ...forked }, binding);
+      return scriptedRuntime(model, { ...options, ...forked, resume: undefined }, binding);
     },
     async steer(text) {
       if (runtime.disposed) throw new Error(`The scripted ${model} runtime was disposed`);
@@ -133,8 +137,8 @@ function scriptedRuntime(model: string, options: RuntimeOptions, binding: Script
 
 // Binds a scripted runtime to a model id so sessions run without an agent
 // process. Unbind in afterEach.
-export function bindScriptedRuntime(model: string, turn: ScriptedTurn): ScriptedBinding {
-  const binding: ScriptedBinding = { starts: [], forks: [], runtimes: [] };
+export function bindScriptedRuntime(model: string, turn: ScriptedTurn, nativeSessions = false): ScriptedBinding {
+  const binding: ScriptedBinding = { starts: [], forks: [], runtimes: [], nativeSessions };
   turns.set(model, turn);
   boundRuntimes[model] = options => {
     binding.starts.push(options);

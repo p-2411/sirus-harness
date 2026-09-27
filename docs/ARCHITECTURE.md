@@ -36,12 +36,12 @@ One user prompt, in the order a reader opens the files:
    attributed, and those run in the next round, until nobody is mentioned.
 4. `agent_runtime/agent.ts`: `SessionAgent.respond` walks the vendor's credentials in order
    and starts a runtime on one. A new runtime is seeded with this participant's own record
-   in its first prompt; a warm one is prompted with the turn's text alone. Everything the
+   in its first prompt; a warm or natively resumed one gets the turn's text alone. Everything the
    runtime reports is recorded into the assistant entry as it arrives.
 5. `agent_runtime/runtime/runtime.ts`: `createRuntime` starts the vendor's adapter, or the
    scripted runtime the test suite bound to that model id.
 6. `agent_runtime/runtime/acp.ts`: the ACP client. Spawn, `initialize` advertising
-   compaction and form elicitation and nothing else, `session/new`, `session/set_mode`, one `session/prompt` per
+   compaction and form elicitation and nothing else, `session/new` (or `session/resume` for a saved vendor session), `session/set_mode`, one `session/prompt` per
    turn, `session/cancel` to stop one, `session/fork` for a worker that starts from its
    owner's conversation, and `_session/steering` to put text into a prompt in flight. One
    process can hold several sessions, so every update is routed by the session id it names.
@@ -103,7 +103,8 @@ call the run came from (`toolCallOf`), which is where the user reads it. The sna
 carries a `WorkerRecord` per run, so a run still working when Sirus quits comes back
 `interrupted`, a record with no agent behind it, and `appendRestoredReports` reads its
 report into the owner's record at the start of the next prompt rather than starting a turn
-on launch. Nothing restarts on its own. `getWorkers`, `cancelWorker`, `messageWorker` and
+on launch. Nothing restarts on its own. A later SendMessage reopens the worker’s saved vendor
+session, including an owner-context fork, before giving it the new message. `getWorkers`, `cancelWorker`, `messageWorker` and
 `dismissWorker` are what `/agents` and the worker strip call; `dispose` is asynchronous for
 the workers' sake, since each one must be stopped and waited for before its worktree can be
 removed.
@@ -177,13 +178,23 @@ directory)`, with the subagent contract and none of the delegation tools, and `f
 starts its first runtime as a fork of the owner's, falling back to a fresh runtime seeded
 with the owner's record as text when there is nothing to fork or the vendor refuses.
 
-Runtimes stay warm between turns. One is rebuilt when a credential fails, a model change
-cannot be applied to the live session, the system prompt changes under it
-(`invalidateAllRuntimes`), the record it mirrors is rewound or cleared, or it is `lost`: its
-process ended between turns, or a cancelled prompt went unanswered for 30 seconds and the
-session was marked stuck. A turn that is cancelled or fails marks the tool calls it left
-open as failed, since nothing more will be heard of them, and a snapshot restores an open
-call the same way.
+Runtimes stay warm between turns. Each participant and worker snapshot carries a
+`nativeSession`: vendor, vendor session id, original session directory, credential source
+id, profile home and a hash of Sirus's system prompt. After restart or process loss,
+including a stuck cancel or the automatic crash retry, the next turn reopens that session.
+The saved credential is tried first. A fallback credential can reuse the session when it
+uses the same profile home; a different home starts fresh. Claude looks up its transcript
+in the original directory; Codex resumes its thread log. `acp.ts` prefers `session/resume`
+and uses `session/load` only when resume is not advertised, suppressing replayed transcript
+updates while preserving live session configuration and recovered background tasks.
+
+A rewind, clear, incompatible model switch or system-prompt change discards the native
+handle and starts fresh with the bounded text recap. Prompt hashes catch changes across
+app restarts too. Missing sessions, directories, credentials or profile homes, and vendor
+resume refusals, produce a brief notice and use the same recap fallback. A cancelled
+startup keeps an existing handle for the next attempt. A turn that is cancelled or fails
+marks the tool calls it left open as failed, since nothing more will be heard of them, and
+a snapshot restores an open call the same way.
 
 A participant keeps the time its runtime last reported anything (`quietFor`), not counting
 time spent waiting on the user's approval. After a minute of silence the turn status line

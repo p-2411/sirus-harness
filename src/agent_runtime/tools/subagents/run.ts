@@ -131,12 +131,14 @@ export async function messageSubagent(run: SubagentRun, owner: SessionAgent, tex
       const worktree = await createWorktree(run.baseDirectory ?? owner.directory, run.sessionId, run.id);
       run.worker?.resetRuntime();
       run.worker = null;
+      run.nativeSession = undefined;
       run.directory = worktree?.directory ?? run.baseDirectory ?? owner.directory;
       run.branch = worktree?.branch ?? null;
       run.startHead = worktree?.startHead;
     }
     if (!run.worker) {
       run.worker = owner.createSubagent(run.id, run.model, run.thinkingLevel, run.directory, run.definition);
+      if (run.nativeSession) run.worker.restoreNativeSession(run.nativeSession);
       for (const entry of run.transcript) run.worker.transcript.append(entry);
       run.transcript = run.worker.transcript.entries() as Message[];
     }

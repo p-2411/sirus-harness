@@ -49,7 +49,10 @@ describe('session persistence', () => {
       id: 'image-session',
       name: 'With image',
       directory: '/projects/image',
-      model: 'gpt-5.6-luna',
+      participants: [{ name: 'sirus', model: 'gpt-5.6-luna', nativeSession: {
+        vendor: 'gpt', sessionId: 'codex-participant', directory: '/projects/image',
+        sourceId: null, profileHome: '/profiles/codex', systemPromptHash: 'system-hash',
+      } }],
       messages: [
         { role: 'user', to: ['sirus'], content: [image, { type: 'text', text: 'Explain this screenshot' }] },
         { role: 'assistant', participant: 'sirus', model: 'gpt-5.6-luna', content: [
@@ -72,6 +75,10 @@ describe('session persistence', () => {
     const restored = loadSessionSnapshots(directory);
     expect(restored.selectedSessionId).toBe(session.getId());
     expect(restored.snapshots[0]).toEqual(session.toSnapshot());
+    expect(restored.snapshots[0]!.participants[0]!.nativeSession).toEqual({
+      vendor: 'gpt', sessionId: 'codex-participant', directory: '/projects/image',
+      sourceId: null, profileHome: '/profiles/codex', systemPromptHash: 'system-hash',
+    });
     expect(Session.fromSnapshot(restored.snapshots[0]).toSnapshot().checkpoints?.[0].changes).toEqual(checkpoint.changes);
 
     // Exercise migration on a scratch copy of a realistic old workspace,
@@ -165,6 +172,11 @@ describe('session persistence', () => {
 
   test('round-trips the session’s workers, transcripts included', async () => {
     const worker: WorkerRecord = {
+      nativeSession: {
+        vendor: 'claude', sessionId: 'claude-worker',
+        directory: path.join(directory, 'worktrees', 'worker-session', 'sub-1a2b3c4d'),
+        sourceId: 'subscription-2', profileHome: '/profiles/claude-worker', systemPromptHash: 'worker-hash',
+      },
       id: 'sub-1a2b3c4d',
       callId: 'call-spawn',
       owner: 'sirus',

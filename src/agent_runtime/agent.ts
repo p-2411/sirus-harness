@@ -1,3 +1,5 @@
+import { createHash } from 'crypto';
+import { statSync } from 'fs';
 import type {
   CreateElicitationRequest,
   CreateElicitationResponse,
@@ -9,7 +11,7 @@ import type { Requester } from './permissions/approvals';
 import { PERMISSION_MODE_NAMES, type PermissionMode } from './permissions/policy';
 import { providerFor } from './providers';
 import { DEFAULT_MODEL, rememberListedModels, VENDOR_INFO, vendorOf, type Vendor } from './providers/catalog';
-import { sourceEnvironment } from './providers/profiles';
+import { sourceEnvironment, sourceProfileHome } from './providers/profiles';
 import { maskApiKey, type Source } from './providers/sources';
 import { turnFailure, type TurnFailure } from './runtime/errors';
 import {
@@ -37,6 +39,7 @@ import {
   planCall,
   type ImageBlock,
   type Message,
+  type NativeSession,
   type NoticeBlock,
   type ThinkingLevel,
   type ToolCallBlock,
@@ -51,6 +54,7 @@ export interface Participant {
   // Absent in older snapshots and for untouched participants; high is the
   // default in both cases.
   thinkingLevel?: ThinkingLevel;
+  nativeSession?: NativeSession;
 }
 
 // What a participant needs from the session it belongs to, or a worker from
@@ -130,7 +134,8 @@ export class SessionAgent {
   private runtime: Runtime | null = null;
   private opening: { controller: AbortController; promise: Promise<Runtime>; model: string; source: string } | null = null;
   private seededRuntime = false;
-  private generation = -1;
+  private generation = runtimeGeneration();
+  private savedSession?: NativeSession;
   // The credential the runtime is on; a source that worked stays first.
   private source: Source | null = null;
   private turn: AbortController | null = null;
@@ -159,6 +164,18 @@ export class SessionAgent {
     this.definition = options.definition;
     this.subagentId = options.subagentId ?? null;
     if (options.thinkingLevel) this.level = options.thinkingLevel;
+    if (options.nativeSession) this.restoreNativeSession(options.nativeSession);
+  }
+
+  get nativeSession(): NativeSession | undefined {
+    // Invalidating the system prompt also invalidates idle persisted handles.
+    if (this.generation !== runtimeGeneration()) return undefined;
+    return this.savedSession ? { ...this.savedSession } : undefined;
+  }
+
+  restoreNativeSession(session: NativeSession): void {
+    this.savedSession = { ...session };
+    this.generation = runtimeGeneration();
   }
 
   get subagent(): boolean {
@@ -183,7 +200,7 @@ export class SessionAgent {
 
   set thinkingLevel(level: ThinkingLevel) {
     this.level = level;
-    void this.runtime?.setThinkingLevel(level).catch(() => this.resetRuntime());
+    void this.runtime?.setThinkingLevel(level).catch(() => this.releaseRuntime());
   }
 
   get busy(): boolean {
@@ -207,13 +224,14 @@ export class SessionAgent {
       name: this.name,
       model: this.model,
       ...(this.level ? { thinkingLevel: this.level } : {}),
+      ...(this.nativeSession ? { nativeSession: this.nativeSession } : {}),
     };
   }
 
   // Runs one turn: the vendor runtime is prompted and everything it reports
   // lands in the entry as it arrives. Credentials are tried in order; a
-  // runtime lost mid-turn is retried once on the same credential, reseeded
-  // from this agent's record, before falling back to the next credential.
+  // runtime lost mid-turn is retried once on the same credential, reopening
+  // its durable session before falling back to the next credential.
   async respond(input: TurnInput, options: RespondOptions): Promise<void> {
     if (this.turn) throw new Error(`@${this.name} is already responding`);
     const controller = new AbortController();
@@ -253,7 +271,7 @@ export class SessionAgent {
             for (const credential of [source, ...this.candidateSources()]) {
               if (credential?.kind === 'api') failure.message = failure.message.replaceAll(credential.key, maskApiKey(credential.key));
             }
-            this.resetRuntime();
+            this.releaseRuntime();
             failOpenToolCalls(options.entry.content);
             if (failure.kind === 'crash' && !retried) {
               retried = true;
@@ -281,7 +299,7 @@ export class SessionAgent {
       // A turn that was cancelled or failed reports nothing more: updates
       // arriving after this are dropped, so a call it left open would read
       // as running for good.
-      if (!answered && this.opening) this.resetRuntime();
+      if (!answered && this.opening) this.releaseRuntime();
       if (!answered && failOpenToolCalls(options.entry.content)) options.onUpdate?.();
       this.turn = null;
       this.record = null;
@@ -304,8 +322,8 @@ export class SessionAgent {
   // directory, on its model, with its own tools and callbacks. False when
   // there is nothing to fork or the vendor refused, and the caller then lets
   // the ordinary credential loop start a fresh runtime. A lost fork (the
-  // owner's runtime was disposed) is rebuilt fresh from this agent's own
-  // record, like any other lost runtime.
+  // owner's runtime was disposed) reopens its own durable session on the
+  // next turn, like any other lost runtime.
   async forkFrom(owner: SessionAgent): Promise<boolean> {
     const source = owner.runtime;
     if (!source || this.runtime || this.vendor !== owner.vendor) return false;
@@ -333,6 +351,7 @@ export class SessionAgent {
       this.source = owner.source;
       this.context = forked.context;
       this.seededRuntime = true;
+      this.saveNativeSession(forked, owner.source, owner.savedSession?.profileHome);
       return true;
     } catch {
       return false;
@@ -350,6 +369,12 @@ export class SessionAgent {
   // from this agent's record: after a rewind, a cleared history, or a change
   // the running session cannot take.
   resetRuntime(): void {
+    this.savedSession = undefined;
+    this.releaseRuntime();
+  }
+
+  // Process loss leaves its durable vendor session available for recovery.
+  private releaseRuntime(): void {
     this.opening?.controller.abort(new TurnCancelledError());
     this.opening = null;
     const runtime = this.runtime;
@@ -385,11 +410,18 @@ export class SessionAgent {
     }
     this.model = model;
     const runtime = this.runtime;
-    if (!runtime) return;
+    if (!runtime) {
+      this.savedSession = undefined;
+      return;
+    }
+    if (runtime.vendor !== this.vendor) {
+      this.resetRuntime();
+      return;
+    }
     void runtime.setModel(model).then(applied => {
-      if (!applied && this.runtime === runtime && this.model === model) { warn(); this.resetRuntime(); }
+      if (!applied && this.runtime === runtime && this.model === model) { this.resetRuntime(); warn(); }
     }).catch(() => {
-      if (this.runtime === runtime && this.model === model) { warn(); this.resetRuntime(); }
+      if (this.runtime === runtime && this.model === model) { this.resetRuntime(); warn(); }
     });
   }
 
@@ -421,9 +453,9 @@ export class SessionAgent {
     const provider = this.provider;
     if (!provider) return [null];
     const sources = provider.sources.list();
-    const current = this.source;
-    if (!current) return sources;
-    return [...sources.filter(source => source.id === current.id), ...sources.filter(source => source.id !== current.id)];
+    const currentId = this.source?.id ?? this.savedSession?.sourceId;
+    if (!currentId) return sources;
+    return [...sources.filter(source => source.id === currentId), ...sources.filter(source => source.id !== currentId)];
   }
 
   // Opening is shared with the first prompt. A replaced draft cannot adopt
@@ -436,7 +468,7 @@ export class SessionAgent {
   }
 
   releaseWarmup(): void {
-    if (!this.busy && !this.seededRuntime) this.resetRuntime();
+    if (!this.busy && !this.seededRuntime && (this.runtime || this.opening)) this.resetRuntime();
   }
 
   private async ensureRuntime(
@@ -444,35 +476,56 @@ export class SessionAgent {
     signal: AbortSignal,
   ): Promise<{ runtime: Runtime; fresh: boolean }> {
     const identity = JSON.stringify(source);
-    if (this.opening && (this.opening.model !== this.model || this.opening.source !== identity)) this.resetRuntime();
-    const stale = this.runtime !== null
-      && (this.runtime.lost
-        || this.generation !== runtimeGeneration()
-        || JSON.stringify(this.source) !== identity
-        || this.runtime.model !== this.model);
-    if (stale) this.resetRuntime();
+    const systemPrompt = this.systemPrompt();
+    const promptHash = createHash('sha256').update(systemPrompt).digest('hex');
+    if (this.generation !== runtimeGeneration()
+      || (this.savedSession?.systemPromptHash && this.savedSession.systemPromptHash !== promptHash)
+      || (this.runtime && this.runtime.model !== this.model)) {
+      this.resetRuntime();
+    } else if (this.runtime?.lost || (this.runtime && JSON.stringify(this.source) !== identity)
+      || (this.opening && (this.opening.model !== this.model || this.opening.source !== identity))) {
+      this.releaseRuntime();
+    }
     if (this.runtime) return { runtime: this.runtime, fresh: !this.seededRuntime };
     if (!this.opening) {
       const controller = new AbortController();
       const model = this.model;
       const vendor = this.vendor;
       const generation = runtimeGeneration();
+      // A new opening belongs to the current generation, including when a
+      // first prompt joins a draft warmup after system-prompt invalidation.
+      this.generation = generation;
       const opening = {
         controller, model, source: identity,
         promise: null as unknown as Promise<Runtime>,
       };
       this.opening = opening;
       opening.promise = (async () => {
+        const profileHome = sourceProfileHome(vendor, source);
+        let resume = this.savedSession;
+        if (resume) {
+          const reason = resume.vendor !== vendor ? 'the model uses another vendor'
+            : resume.sourceId !== null && !this.candidateSources().some(candidate => candidate?.id === resume!.sourceId)
+              ? 'the saved credential is no longer available'
+            : resume.profileHome !== profileHome ? 'the credential uses a different profile home'
+            : !isDirectory(resume.profileHome) ? 'the saved profile home is missing'
+            : !isDirectory(resume.directory) ? 'the saved session directory is missing'
+            : undefined;
+          if (reason) {
+            this.resumeFallback(reason);
+            resume = undefined;
+          }
+        }
         const mcpServer = await this.host.mcpServer(this);
         throwIfAborted(controller.signal);
         const thinkingLevel = this.thinkingLevel;
         const permissionMode = this.host.permissionMode();
-        const runtime = await createRuntime({
+        const options: RuntimeOptions = {
           vendor, model,
           signal: controller.signal,
           thinkingLevel,
           directory: this.host.directory,
-          systemPrompt: this.systemPrompt(),
+          systemPrompt,
           tools: this.definition?.tools,
           readOnly: readOnlyTools(this.definition?.tools),
           env: source && vendorOf(model) ? sourceEnvironment(vendor, source) : { ...process.env },
@@ -481,7 +534,20 @@ export class SessionAgent {
           onPermission: (request, promptSignal) => this.askPermission(request, promptSignal),
           onElicitation: (request, promptSignal) => this.askUser(request, promptSignal),
           onUpdate: update => { if (!controller.signal.aborted) this.hear(update); },
-        });
+        };
+        let runtime: Runtime;
+        if (resume) {
+          try {
+            runtime = await createRuntime({ ...options, resume });
+          } catch (error) {
+            throwIfAborted(controller.signal);
+            this.resumeFallback(maskSecrets(error, this.candidateSources()));
+            resume = undefined;
+            runtime = await createRuntime(options);
+          }
+        } else {
+          runtime = await createRuntime(options);
+        }
         try {
           if (permissionMode !== this.host.permissionMode()) {
             const mode = vendor === 'gpt' && readOnlyTools(this.definition?.tools) ? 'ask' : this.host.permissionMode();
@@ -500,12 +566,33 @@ export class SessionAgent {
         this.generation = generation;
         this.source = source;
         this.context = runtime.context;
+        this.seededRuntime = !!resume;
+        this.saveNativeSession(runtime, source, profileHome, resume?.directory);
         if (source) this.provider?.markActive(this.runtimeId, source);
         return runtime;
       })().finally(() => { if (this.opening === opening) this.opening = null; });
     }
     const runtime = await abortable(this.opening.promise, signal);
     return { runtime, fresh: !this.seededRuntime };
+  }
+
+  private saveNativeSession(runtime: Runtime, source: Source | null, profileHome?: string, directory?: string): void {
+    this.savedSession = runtime.sessionId ? {
+      vendor: runtime.vendor,
+      sessionId: runtime.sessionId,
+      directory: directory ?? this.host.directory,
+      sourceId: source?.id ?? null,
+      profileHome: profileHome ?? sourceProfileHome(runtime.vendor, source),
+      systemPromptHash: createHash('sha256').update(this.systemPrompt()).digest('hex'),
+    } : undefined;
+  }
+
+  private resumeFallback(reason: string): void {
+    this.savedSession = undefined;
+    this.hear({
+      type: 'notice', severity: 'warning', title: 'Starting fresh with a conversation recap',
+      description: `Could not reopen the vendor session: ${reason.replace(/\s+/g, ' ').slice(0, 240)}`,
+    });
   }
 
   private hear(update: RuntimeUpdate): void {
@@ -792,4 +879,15 @@ export class SessionAgent {
       ? `Unknown subagent "${id}". Known subagents: ${known.join(', ')}`
       : `Unknown subagent "${id}". No subagent has been spawned yet.`);
   }
+}
+// A failure message must not carry a key it was handed.
+function maskSecrets(error: unknown, sources: readonly (Source | null)[]): string {
+  const detail = error instanceof Error ? error.message : String(error);
+  return sources.reduce((text, source) => source?.kind === 'api'
+    ? text.replaceAll(source.key, maskApiKey(source.key))
+    : text, detail);
+}
+
+function isDirectory(directory: string): boolean {
+  try { return statSync(directory).isDirectory(); } catch { return false; }
 }

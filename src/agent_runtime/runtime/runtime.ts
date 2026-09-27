@@ -43,6 +43,9 @@ export interface RuntimeOptions {
   thinkingLevel: ThinkingLevel;
   // Where the session runs; relative paths in tool calls resolve here.
   directory: string;
+  // Reopen the vendor's conversation in the directory it was created in.
+  // Failure rejects creation; the owner decides whether to seed a fresh one.
+  resume?: { sessionId: string; directory: string };
   // Sirus's system prompt for this participant, repository instructions
   // included. The launch spec decides how the vendor receives it.
   systemPrompt: string;
@@ -149,6 +152,8 @@ export type ForkOptions = Pick<RuntimeOptions,
 
 export interface Runtime {
   readonly vendor: Vendor;
+  // The vendor's persisted session/thread id, including for owner forks.
+  readonly sessionId: string;
   readonly model: string;
   // The vendor's modes as `session/new` returned them, in the vendor's order.
   readonly modes: readonly SessionMode[];

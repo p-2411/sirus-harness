@@ -125,7 +125,17 @@ const messageSchema = z.object({
   usage: z.object({}).passthrough().optional(),
 });
 
+const nativeSessionSchema = z.object({
+  vendor: z.enum(['claude', 'gpt']),
+  sessionId: z.string().min(1),
+  directory: z.string().min(1),
+  sourceId: z.string().min(1).nullable(),
+  profileHome: z.string().min(1),
+  systemPromptHash: z.string().optional(),
+});
+
 const participantSchema = z.object({
+  nativeSession: nativeSessionSchema.optional(),
   name: z.string().min(1),
   model: z.string().min(1),
   thinkingLevel: z.enum(THINKING_LEVELS).optional(),
@@ -136,6 +146,7 @@ const participantSchema = z.object({
 // it. `content` is not stored — it is the content array of the transcript's
 // assistant entry, and restoring points at that.
 const workerSchema = z.object({
+  nativeSession: nativeSessionSchema.optional(),
   id: z.string().min(1),
   name: z.string().optional(),
   description: z.string().optional(),
