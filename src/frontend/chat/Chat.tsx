@@ -21,6 +21,7 @@ import {
 import { parseMouseWheel } from '../interaction/mouse';
 import { SIDEBAR_WIDTH } from '../Sidebar';
 import { useSelectionRegion } from '../interaction/useTextSelection';
+import { clearSelection, hasSelection } from '../interaction/selection';
 import type { Feedback } from '../../commands/feedback';
 import { participantColorMap, type ParticipantColors } from '../MentionText';
 import { isAbortError, TurnCancelledError } from '../../abort';
@@ -270,8 +271,8 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     replaceAttachments(attachmentsRef.current.filter(item => item.path !== image.path));
   };
   const [commandStartedAt, setCommandStartedAt] = useState<number | null>(null);
-  // Whether the worker strip under the input has the keyboard right now.
-  const workerFocus = useRef(false);
+  // Whether the input bar has something open that escape closes.
+  const inputBarDismissible = useRef(false);
   const queued = currSession.getQueuedMessageCount();
   const history = promptHistory(messages);
   // A tool call of this session (or of a subagent it spawned) waiting on the
@@ -341,11 +342,21 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   }, [contentHeight, maxScroll, panelFeedback, viewportHeight]);
 
   useInput((input, key) => {
+    // What escape means is decided here. It closes the nearest thing open,
+    // and cancels the turn only when nothing is: pressed to close a menu, it
+    // must not also stop the agents.
     if (key.escape) {
-      // Escape with the worker strip focused only hands the keyboard back to
-      // the draft; the input bar does that itself.
-      if (workerFocus.current) return;
-      setInputMode({ type: 'text' });
+      if (hasSelection()) {
+        clearSelection();
+        return;
+      }
+      if (panelFeedback) {
+        setFeedback(null);
+        return;
+      }
+      // A menu or entry of the chat's own closes through its onCancel, and
+      // whatever the input bar has open it closes itself.
+      if (inputMode.type !== 'text' || inputBarDismissible.current) return;
       setFeedback(null);
       // The turn only: the session's workers keep going in the background and
       // are stopped from /agents. Queued messages stay, and the next one goes
@@ -631,7 +642,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         permissionMode={currSession.getPermissionMode()}
         modeNotice={currSession.getModeNotice()}
         onCyclePermissionMode={cyclePermissionMode}
-        onWorkerFocusChange={focused => { workerFocus.current = focused; }}
+        onDismissibleChange={dismissible => { inputBarDismissible.current = dismissible; }}
         attachments={attachments}
         onPasteImage={pasteImage}
         onRemoveAttachment={removeAttachment}

@@ -44,9 +44,11 @@ interface InputBarProps {
   modeNotice?: string | null;
   // shift+tab in text mode
   onCyclePermissionMode?: () => void;
-  // Told when the worker strip takes the keyboard and when it gives it back,
-  // so the chat's own Escape leaves a focused strip alone.
-  onWorkerFocusChange?: (focused: boolean) => void;
+  // Told whether the bar has something open that escape closes: the worker
+  // strip's focus, a command or mention menu, a queued message being edited.
+  // The bar closes it itself, and the chat cancels the turn on escape only
+  // when there is nothing to close.
+  onDismissibleChange?: (dismissible: boolean) => void;
   // images waiting to go with the next message, oldest first
   attachments?: readonly ImageBlock[];
   // ctrl+v in text mode
@@ -91,7 +93,7 @@ export function InputBar({
   permissionMode,
   modeNotice,
   onCyclePermissionMode,
-  onWorkerFocusChange,
+  onDismissibleChange,
   attachments = NO_ATTACHMENTS,
   onPasteImage,
   onRemoveAttachment,
@@ -230,9 +232,6 @@ export function InputBar({
   useEffect(() => {
     if (mode.type !== 'text') setWorkerSelection(null);
   }, [mode]);
-  useEffect(() => {
-    onWorkerFocusChange?.(workerSelection !== null);
-  }, [workerSelection !== null]);
   const focusWorkers = (): boolean => {
     const runs = stripWorkers(workers);
     if (runs.length === 0) return false;
@@ -247,6 +246,15 @@ export function InputBar({
       return index < current.runs.length ? { ...current, index } : current;
     });
   };
+
+  // What escape closes here, which the chat has to know before it treats the
+  // key as the turn's cancel. Reported after each render, so the chat reads
+  // what was on screen when the key was pressed.
+  const dismissible = workerSelection !== null || commands.matches.length > 0
+    || mentionActive || selectedQueued !== undefined;
+  useEffect(() => {
+    onDismissibleChange?.(dismissible);
+  }, [dismissible]);
 
   const edit = (change: InputEdit) => {
     setRecall(null);

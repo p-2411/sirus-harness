@@ -4,7 +4,7 @@ import { DISABLE_MOUSE_TRACKING, ENABLE_MOUSE_TRACKING, parseMouseEvent } from '
 import { rowToLine } from '../terminal/screen';
 import { isPressingTarget, moveAt, pressAt, releaseAt } from './clickable';
 import {
-  beginSelection, clearSelection, endSelection, extendSelection, registerSelectionRegion,
+  beginSelection, endSelection, extendSelection, registerSelectionRegion,
   type RegionOptions,
 } from './selection';
 
@@ -38,11 +38,9 @@ export function useTextSelection() {
     };
   }, [stdout]);
 
-  useInput((input, key) => {
-    if (key.escape) {
-      clearSelection();
-      return;
-    }
+  // Escape clears a selection too, but the chat decides that, since the same
+  // key also closes menus and cancels turns and must do only one of them.
+  useInput(input => {
     const event = parseMouseEvent(input);
     if (!event) return;
     // wheel scrolling is Chat's business; the selection follows the content

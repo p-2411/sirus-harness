@@ -13,6 +13,7 @@ import type { Message, ToolCallBlock } from '../../src/agent_runtime/types';
 import Chat, { formatElapsed, promptHistory, turnPhase } from '../../src/frontend/chat/Chat';
 import { usageCommandSpec } from '../../src/commands/authentication/commands';
 import { pendingApprovals, requestPermission, resolveApproval } from '../../src/agent_runtime/permissions/approvals';
+import { beginSelection, clearSelection, extendSelection, hasSelection } from '../../src/frontend/interaction/selection';
 import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
 
 // A Chat in a terminal the test types into. `frame` is the last frame drawn;
@@ -371,6 +372,95 @@ test('the approval prompt keeps the choice the arrows moved to while the chat re
     for (const approval of pendingApprovals(session.getId())) resolveApproval(approval.id, 'deny');
     await chat.unmount();
     session.dispose();
+  }
+});
+
+test('escape closes what is open before it cancels the turn', async () => {
+  const model = 'test-chat-escape';
+  // A turn that runs until it is cancelled.
+  bindScriptedRuntime(model, () => new Promise<void>(() => {}));
+  const session = new Session({ model });
+  const chat = mountChat(session);
+  const turns: Promise<unknown>[] = [];
+  const startTurn = async () => {
+    turns.push(session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Go on.' }] }).catch(() => undefined));
+    await chat.flush();
+    expect(session.getStatus()).toBe('working');
+  };
+  const cancelsTurn = async () => {
+    await chat.press('\u001b');
+    await turns[turns.length - 1];
+    await chat.flush();
+    expect(session.getStatus()).not.toBe('working');
+  };
+  try {
+    await chat.flush();
+    // A menu of the chat's own, open when a turn starts on its own (a
+    // worker's report arriving, say).
+    await chat.press('/model');
+    await chat.press('\r');
+    expect(chat.frame()).toContain('enter to select');
+    await startTurn();
+    await chat.press('\u001b');
+    expect(chat.frame()).not.toContain('enter to select');
+    expect(session.getStatus()).toBe('working');
+
+    // The command menu the draft opened.
+    await chat.press('/mod');
+    expect(chat.frame()).toContain('set an agent\'s model');
+    await chat.press('\u001b');
+    expect(chat.frame()).not.toContain('set an agent\'s model');
+    expect(session.getStatus()).toBe('working');
+    await chat.press('\u0015');
+
+    // The mention menu.
+    await chat.press('@');
+    expect(chat.frame()).toContain('@sirus');
+    await chat.press('\u001b');
+    expect(chat.frame()).not.toContain('@sirus');
+    expect(session.getStatus()).toBe('working');
+    await chat.press('\u0015');
+
+    // A queued message being edited.
+    await chat.press('later');
+    await chat.press('\r');
+    await chat.press('\u001b[A');
+    expect(chat.frame()).toContain('later▌');
+    await chat.press('\u001b');
+    expect(chat.frame()).not.toContain('later▌');
+    expect(session.getStatus()).toBe('working');
+    // Emptied, it leaves the queue, so no turn follows the cancel below.
+    await chat.press('\u001b[A');
+    await chat.press('\u0015');
+    expect(session.getQueuedMessageCount()).toBe(0);
+
+    // A text selection.
+    beginSelection({ line: 4, col: 2 });
+    extendSelection({ line: 5, col: 12 });
+    expect(hasSelection()).toBe(true);
+    await chat.press('\u001b');
+    expect(hasSelection()).toBe(false);
+    expect(session.getStatus()).toBe('working');
+
+    // With nothing left open, escape is the turn's cancel.
+    await cancelsTurn();
+
+    // A command's panel, open when the next turn starts.
+    await chat.press('/help');
+    await chat.press('\r');
+    expect(chat.frame()).toContain('esc closes');
+    await startTurn();
+    await chat.press('\u001b');
+    expect(chat.frame()).not.toContain('esc closes');
+    expect(session.getStatus()).toBe('working');
+    await cancelsTurn();
+  } finally {
+    clearSelection();
+    session.cancel();
+    await Promise.all(turns);
+    await chat.unmount();
+    session.dispose();
+    unbindRuntime(model);
   }
 });
 
