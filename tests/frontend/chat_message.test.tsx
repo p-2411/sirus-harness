@@ -413,7 +413,7 @@ describe('thinking', () => {
     const stdout = Object.assign(new PassThrough(), { columns: 120 }) as unknown as NodeJS.WriteStream;
     const frames: string[] = [];
     stdout.on('data', data => frames.push(stripAnsi(data.toString())));
-    const app = render(<ChatMessage message={message} />, {
+    const app = render(<ChatMessage message={message} live />, {
       stdout, debug: true, patchConsole: false, exitOnCtrlC: false,
     });
     try {
@@ -466,7 +466,7 @@ describe('compaction rule', () => {
     const stdout = Object.assign(new PassThrough(), { columns: 120 }) as unknown as NodeJS.WriteStream;
     const frames: string[] = [];
     stdout.on('data', data => frames.push(stripAnsi(data.toString())));
-    const app = render(<ChatMessage message={message} />, {
+    const app = render(<ChatMessage message={message} live />, {
       stdout, debug: true, patchConsole: false, exitOnCtrlC: false,
     });
     try {

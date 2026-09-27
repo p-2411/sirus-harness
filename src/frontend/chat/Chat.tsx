@@ -535,6 +535,21 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     if (next !== undefined) send(next);
   }, [currSession, isLoading, queued, effectiveInputMode.type]);
 
+  // Each participant's newest reply, the one a running turn is still writing.
+  const working = currSession.getStatus() === 'working';
+  const latestReplies = new Set<number>();
+  if (working) {
+    const seen = new Set<string>();
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i]!;
+      if (message.role !== 'assistant') continue;
+      const name = (message.participant ?? 'sirus').toLocaleLowerCase();
+      if (seen.has(name)) continue;
+      seen.add(name);
+      latestReplies.add(i);
+    }
+  }
+
   historyContent.current = (
     <>
       {messages.length === 0 && !isLoading && (
@@ -563,6 +578,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
             message={message}
             model={message.model ?? participant?.model}
             participantColors={participantColors}
+            live={working && latestReplies.has(i)}
           />
         );
       })}
