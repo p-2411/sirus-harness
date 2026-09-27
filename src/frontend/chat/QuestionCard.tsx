@@ -1,44 +1,44 @@
-// An agent's question to the user as a framed card, one field at a time:
-// a choice among options (several for a multiple choice), with "Other…" for
-// an answer of the user's own where the agent takes one, or a typed value.
-// ← steps back to the field before; the answers go back when the last field
-// is answered.
-import { useState } from 'react';
-import { Box, Text, useInput, usePaste } from 'ink';
+// One question at a time, with drafts kept while the user moves back and
+// forth. A form with several questions is reviewed before its answers go out.
+import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { Box, Text, useBoxMetrics, useInput, usePaste, useStdout, type DOMElement } from 'ink';
 import { theme } from '../styles/theme';
 import { FramedCard } from './FramedCard';
+import { applyInputEdit, type InputEdit, type InputState } from './editor';
+import { useClickable } from '../interaction/clickable';
 import { isMouseInput } from '../interaction/mouse';
 import { isFocusInput } from '../terminal/window-focus';
 import { describeRequester } from '../../agent_runtime/permissions/approvals';
-import type { QuestionAnswer, QuestionField, QuestionOption, QuestionRequest } from '../../agent_runtime/permissions/questions';
+import type { QuestionAnswer, QuestionField, QuestionRequest } from '../../agent_runtime/permissions/questions';
 
 type Answers = Record<string, string | number | boolean | string[]>;
+interface Draft {
+  selected: number;
+  picked: readonly string[];
+  typingOther: boolean;
+  editor: InputState;
+}
+const EMPTY_DRAFT: Draft = { selected: 0, picked: [], typingOther: false, editor: { text: '', cursor: 0 } };
 
-// The rows a field offers: its options, Yes and No for a yes-or-no, and
-// "Other…" last when the agent takes an answer of the user's own.
 interface Row {
   label: string;
   description?: string;
   value?: string | boolean;
-  other?: true;
+  action?: 'other' | 'continue' | 'skip';
 }
 
 function rowsOf(field: QuestionField): Row[] {
-  if (field.kind === 'boolean') return [{ label: 'Yes', value: true }, { label: 'No', value: false }];
-  if (field.kind !== 'choice') return [];
-  const rows: Row[] = field.options.map((option: QuestionOption) => ({
-    label: option.label,
-    value: option.value,
-    ...(option.description ? { description: option.description } : {}),
-  }));
-  if (field.other) rows.push({ label: 'Other…', description: 'type your own answer', other: true });
+  const rows: Row[] = field.kind === 'boolean'
+    ? [{ label: 'Yes', value: true }, { label: 'No', value: false }]
+    : field.kind === 'choice' ? [...field.options] : [];
+  if (field.kind === 'choice' && field.other) rows.push({ label: 'Other…', description: 'Type your own answer', action: 'other' });
+  if (field.kind === 'choice' && field.multiple) rows.push({ label: 'Continue', action: 'continue' });
+  else if (!field.required) rows.push({ label: 'Skip question', action: 'skip' });
   return rows;
 }
 
-// What the card asks for a field. Claude puts a lone question in the form's
-// message and a short header in the field's title; Codex puts the question
-// in the title and the header in the description. The question is the line
-// that reads as one, and a short other line becomes its label.
+// Claude puts a lone question in the message and a short header in the
+// field's title; Codex puts the question in the title and header in description.
 export function questionText(request: QuestionRequest, field: QuestionField): { question: string; label?: string } {
   const single = request.fields.length === 1;
   const candidates = [single ? request.message : undefined, field.description, field.title]
@@ -48,9 +48,72 @@ export function questionText(request: QuestionRequest, field: QuestionField): { 
   return { question, ...(label ? { label } : {}) };
 }
 
-function progress(count: number, index: number): string {
-  if (count <= 1) return '';
-  return `${index + 1} of ${count} ${Array.from({ length: count }, (_, dot) => (dot <= index ? '●' : '○')).join(' ')}`;
+function QuestionRow({ label, description, active, prefix, onChoose, focusRef }: {
+  label: string;
+  description?: string;
+  active: boolean;
+  prefix?: string;
+  onChoose: () => void;
+  focusRef?: RefObject<DOMElement | null>;
+}) {
+  const ref = useRef<DOMElement>(null);
+  const hovered = useClickable(ref, onChoose);
+  return (
+    <Box ref={focusRef} flexShrink={0} width="100%">
+      <Box ref={ref} width="100%">
+        <Box width={2} flexShrink={0}><Text color={active ? theme.accent : theme.textSubtle}>{active ? '› ' : '  '}</Text></Box>
+        <Box flexDirection="column" flexGrow={1} flexBasis={0} minWidth={0}>
+          <Text color={active || hovered ? theme.highlight : theme.text} bold={active} wrap="wrap">{prefix}{label}</Text>
+          {description && <Text color={theme.textMuted} wrap="wrap">{description}</Text>}
+        </Box>
+      </Box>
+    </Box>
+  );
+}
+
+// Long option lists keep the current choice in view without displacing the
+// question or its keys. Descriptions wrap at the width the card actually has.
+function Choices({ selected, children, focusRef }: {
+  selected: number;
+  children: ReactNode;
+  focusRef: RefObject<DOMElement | null>;
+}) {
+  const { stdout } = useStdout();
+  const contentRef = useRef<DOMElement>(null);
+  const { height } = useBoxMetrics(contentRef);
+  const focused = useBoxMetrics(focusRef);
+  const limit = Math.max(3, Math.floor((stdout.rows ?? 24) * 0.4));
+  const [offset, setOffset] = useState(0);
+  const maxOffset = Math.max(0, height - limit);
+  useEffect(() => {
+    setOffset(current => Math.max(0, Math.min(maxOffset,
+      focused.top < current ? focused.top
+        : focused.top + Math.min(focused.height, limit) > current + limit
+          ? focused.top + Math.min(focused.height, limit) - limit : current)));
+  }, [selected, focused.top, focused.height, limit, maxOffset]);
+  return (
+    <Box flexDirection="column">
+      {maxOffset > 0 && <Text color={theme.textSubtle}>  ↑↓ more choices</Text>}
+      <Box height={Math.min(height || limit, limit)} overflow="hidden" position="relative">
+        <Box ref={contentRef} position="absolute" top={-Math.min(offset, maxOffset)} width="100%" flexDirection="column">
+          {children}
+        </Box>
+      </Box>
+    </Box>
+  );
+}
+
+function answerText(field: QuestionField, answers: Answers): string {
+  const value = answers[field.key];
+  if (field.kind === 'text' && field.secret && value !== undefined) return '••••••••';
+  if (field.kind === 'choice') {
+    const values = Array.isArray(value) ? value : value === undefined ? [] : [value];
+    const labels = values.filter(item => item !== field.other?.value)
+      .map(item => field.options.find(option => option.value === item)?.label ?? String(item));
+    const other = field.other && answers[field.other.key];
+    return [...labels, ...(other ? [String(other)] : [])].join(', ') || 'Skipped';
+  }
+  return value === undefined ? 'Skipped' : typeof value === 'boolean' ? value ? 'Yes' : 'No' : String(value);
 }
 
 export function QuestionCard({ request, waiting, onAnswer }: {
@@ -60,186 +123,195 @@ export function QuestionCard({ request, waiting, onAnswer }: {
 }) {
   const [index, setIndex] = useState(0);
   const [answers, setAnswers] = useState<Answers>({});
-  const [selected, setSelected] = useState(0);
-  const [picked, setPicked] = useState<readonly string[]>([]);
-  // Typing a value: the field's own, or the answer behind "Other…".
-  const [typingOther, setTypingOther] = useState(false);
-  const [entry, setEntry] = useState('');
+  const [drafts, setDrafts] = useState<Record<string, Draft>>({});
+  const [reviewSelected, setReviewSelected] = useState(request.fields.length);
+  const [editingReview, setEditingReview] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
+  const sent = useRef(false);
+  const focusRef = useRef<DOMElement>(null);
+  const reviewing = index === request.fields.length;
   const field = request.fields[index];
-  const rows = rowsOf(field);
-  const typing = typingOther || field.kind === 'text' || field.kind === 'number';
+  const draft = field ? drafts[field.key] ?? EMPTY_DRAFT : EMPTY_DRAFT;
+  const rows = field ? rowsOf(field) : [];
+  const multiple = field?.kind === 'choice' && field.multiple;
+  const typing = draft.typingOther || field?.kind === 'text' || field?.kind === 'number';
 
-  // Moves to a field with what was answered so far, showing what it had.
-  const goTo = (next: number, nextAnswers: Answers) => {
-    if (next >= request.fields.length) {
-      onAnswer({ action: 'accept', content: nextAnswers });
-      return;
-    }
-    const target = request.fields[next];
-    const had = nextAnswers[target.key];
-    setAnswers(nextAnswers);
-    setIndex(next);
-    setPicked(Array.isArray(had) ? had : []);
-    setSelected(Math.max(0, rowsOf(target).findIndex(row => row.value !== undefined && row.value === had)));
-    setTypingOther(false);
-    setEntry(target.kind === 'text' || target.kind === 'number' ? String(had ?? '') : '');
+  const updateDraft = (patch: Partial<Draft>) => {
+    if (!field) return;
+    setDrafts(current => ({ ...current, [field.key]: { ...current[field.key] ?? EMPTY_DRAFT, ...patch } }));
     setError(null);
   };
-
-  const without = (keys: readonly (string | undefined)[]): Answers => {
+  const goTo = (next: number) => {
+    if (reviewing && next < request.fields.length) setEditingReview(true);
+    setIndex(next);
+    setError(null);
+    if (next === request.fields.length) setReviewSelected(request.fields.length);
+  };
+  const finish = (content: Answers) => {
+    if (sent.current) return;
+    sent.current = true;
+    onAnswer({ action: 'accept', content });
+  };
+  const commit = (next: Answers) => {
+    setAnswers(next);
+    if (request.fields.length === 1) finish(next);
+    else if (editingReview) {
+      setEditingReview(false);
+      goTo(request.fields.length);
+    }
+    else goTo(index + 1);
+  };
+  const withoutField = (): Answers => {
     const next = { ...answers };
-    for (const key of keys) if (key) delete next[key];
+    delete next[field.key];
+    if (field.kind === 'choice' && field.other) delete next[field.other.key];
     return next;
   };
-
+  const submitChoices = (custom?: string) => {
+    if (field.kind !== 'choice') return;
+    const minimum = Math.max(field.required ? 1 : 0, field.minimum ?? 0);
+    if (!custom && (field.required || draft.picked.length > 0) && draft.picked.length < minimum) {
+      setError(`Choose at least ${minimum} option${minimum === 1 ? '' : 's'}.`);
+      return;
+    }
+    if (field.maximum !== undefined && draft.picked.length > field.maximum) {
+      setError(`Choose at most ${field.maximum} option${field.maximum === 1 ? '' : 's'}.`);
+      return;
+    }
+    const next = withoutField();
+    if (draft.picked.length || field.required || custom) next[field.key] = [...draft.picked];
+    if (custom && field.other) next[field.other.key] = custom;
+    commit(next);
+  };
   const submitEntry = () => {
-    const value = entry.trim();
-    if (typingOther && field.kind === 'choice' && field.other) {
-      if (!value) return;
-      const next = { ...without([field.key]), [field.other.key]: value };
-      if (field.multiple) next[field.key] = [...picked];
-      else if (field.other.value) next[field.key] = field.other.value;
-      goTo(index + 1, next);
-      return;
-    }
-    if (field.kind === 'text') {
-      if (!value && field.required) return;
-      goTo(index + 1, value ? { ...answers, [field.key]: value } : without([field.key]));
-      return;
-    }
-    if (field.kind === 'number') {
+    const value = draft.editor.text.trim();
+    if (draft.typingOther && field.kind === 'choice' && field.other) {
+      if (!value) return setError('Enter your answer.');
+      if (field.multiple) return submitChoices(value);
+      const next = { ...withoutField(), [field.other.key]: value };
+      if (field.other.value) next[field.key] = field.other.value;
+      commit(next);
+    } else if (field.kind === 'text' || field.kind === 'number') {
       if (!value) {
-        if (!field.required) goTo(index + 1, without([field.key]));
-        return;
+        if (field.required) return setError('Enter your answer.');
+        return commit(withoutField());
       }
+      if (field.kind === 'text') return commit({ ...answers, [field.key]: value });
       const number = Number(value);
       if (!Number.isFinite(number) || (field.integer && !Number.isInteger(number))) {
-        setError(field.integer ? 'Enter a whole number.' : 'Enter a number.');
-        return;
+        return setError(field.integer ? 'Enter a whole number.' : 'Enter a number.');
       }
       if (field.minimum !== undefined && number < field.minimum) return setError(`At least ${field.minimum}.`);
       if (field.maximum !== undefined && number > field.maximum) return setError(`At most ${field.maximum}.`);
-      goTo(index + 1, { ...answers, [field.key]: number });
+      commit({ ...answers, [field.key]: number });
     }
   };
-
-  const choose = (row: Row | undefined) => {
-    if (!row) return;
-    if (row.other) {
-      setTypingOther(true);
-      setEntry(field.kind === 'choice' && field.other ? String(answers[field.other.key] ?? '') : '');
-      return;
-    }
-    if (field.kind === 'choice' && field.multiple) {
-      goTo(index + 1, { ...without([field.other?.key]), [field.key]: [...picked] });
-      return;
-    }
-    goTo(index + 1, { ...without([field.kind === 'choice' ? field.other?.key : undefined]), [field.key]: row.value! });
+  const choose = (row: Row, rowIndex: number) => {
+    updateDraft({ selected: rowIndex });
+    if (row.action === 'other') updateDraft({ typingOther: true });
+    else if (row.action === 'continue') submitChoices();
+    else if (row.action === 'skip') commit(withoutField());
+    else if (multiple && typeof row.value === 'string') {
+      const value = row.value;
+      updateDraft({ picked: draft.picked.includes(value) ? draft.picked.filter(item => item !== value) : [...draft.picked, value] });
+    } else commit({ ...withoutField(), [field.key]: row.value! });
   };
-
-  const toggle = (row: Row | undefined) => {
-    if (!row || typeof row.value !== 'string') return;
-    const value = row.value;
-    setPicked(current => (current.includes(value) ? current.filter(item => item !== value) : [...current, value]));
-  };
+  const edit = (change: InputEdit) => updateDraft({ editor: applyInputEdit(draft.editor, change) });
 
   usePaste(text => {
-    if (typing) setEntry(current => current + text.replace(/\r?\n/g, ' '));
+    if (typing && !reviewing) edit({ type: 'insert', text: text.replace(/\r\n?|\n/g, ' ') });
   });
-
   useInput((input, key) => {
-    if (isMouseInput(input) || isFocusInput(input)) return;
-    // Escape is the turn's cancel and session switching the sidebar's.
-    if (key.escape || (key.meta && (key.upArrow || key.downArrow))) return;
-    const isBackspace = key.backspace || key.delete;
-    if (typing) {
-      if (key.return) submitEntry();
-      else if ((key.leftArrow || isBackspace) && entry === '') {
-        if (typingOther) setTypingOther(false);
-        else if (key.leftArrow && index > 0) goTo(index - 1, answers);
-      } else if (isBackspace) setEntry(current => current.slice(0, -1));
-      else if (key.ctrl && input === 'u') setEntry('');
-      else if (!key.ctrl && !key.meta && !key.tab && !key.upArrow && !key.downArrow
-        && !key.leftArrow && !key.rightArrow && !key.pageUp && !key.pageDown && !key.home && !key.end) {
-        setEntry(current => current + input);
-        setError(null);
-      }
+    if (isMouseInput(input) || isFocusInput(input) || key.escape || sent.current
+      || (key.meta && (key.upArrow || key.downArrow))) return;
+    if (key.tab && key.shift) {
+      if (index > 0) goTo(index - 1);
+      else if (draft.typingOther) updateDraft({ typingOther: false });
       return;
     }
-    const multiple = field.kind === 'choice' && field.multiple;
-    if (key.upArrow) setSelected(current => (current - 1 + rows.length) % rows.length);
-    else if (key.downArrow) setSelected(current => (current + 1) % rows.length);
-    else if (key.leftArrow && index > 0) goTo(index - 1, answers);
-    else if (multiple && input === ' ') {
-      if (rows[selected]?.other) choose(rows[selected]);
-      else toggle(rows[selected]);
-    } else if (key.return) choose(rows[selected]);
-    else if (/^[1-9]$/.test(input) && Number(input) <= rows.length) {
-      const row = rows[Number(input) - 1];
-      setSelected(Number(input) - 1);
-      if (multiple && !row.other) toggle(row);
-      else choose(row);
+    if (reviewing) {
+      if (key.upArrow || key.downArrow) setReviewSelected(current => (current + (key.upArrow ? -1 : 1) + request.fields.length + 1) % (request.fields.length + 1));
+      else if (key.return) reviewSelected === request.fields.length ? finish(answers) : goTo(reviewSelected);
+      else if (!key.ctrl && !key.meta && /^[1-9]$/.test(input) && Number(input) <= request.fields.length) goTo(Number(input) - 1);
+      return;
     }
+    const isBackspace = key.backspace || key.delete;
+    if (typing) {
+      if (key.return || key.tab) submitEntry();
+      else if (key.ctrl && input === 'u') edit({ type: 'clear' });
+      else if ((key.ctrl && input === 'w') || (key.meta && isBackspace)) edit({ type: 'delete-word-backward' });
+      else if (isBackspace) edit({ type: 'backspace' });
+      else if (key.leftArrow || key.rightArrow) edit({ type: key.leftArrow ? 'left' : 'right' });
+      else if (key.home || key.end) updateDraft({ editor: { ...draft.editor, cursor: key.home ? 0 : draft.editor.text.length } });
+      else if (!key.ctrl && !key.meta && !key.upArrow && !key.downArrow && !key.pageUp && !key.pageDown) edit({ type: 'insert', text: input });
+      return;
+    }
+    if (key.ctrl || key.meta) return;
+    if (key.upArrow || key.downArrow) updateDraft({ selected: (draft.selected + (key.upArrow ? -1 : 1) + rows.length) % rows.length });
+    else if (key.leftArrow && index > 0) goTo(index - 1);
+    else if (key.tab && multiple) submitChoices();
+    else if (key.return || (multiple && input === ' ')) {
+      const row = rows[draft.selected];
+      if (row) choose(row, draft.selected);
+    } else if (/^[1-9]$/.test(input) && Number(input) <= rows.length) choose(rows[Number(input) - 1], Number(input) - 1);
   });
 
-  const { question, label } = questionText(request, field);
-  const count = progress(request.fields.length, index);
-  const right = [count, waiting > 0 ? `${waiting} more` : ''].filter(Boolean).join(' · ');
-  const multiple = field.kind === 'choice' && field.multiple;
-  const back = index > 0 ? ' · ← back' : '';
-  const footer = typing
-    ? `enter ${typingOther || entry.trim() || (field.kind !== 'choice' && field.required) ? 'submit' : 'skip'}${typingOther ? ' · ← options' : back} · esc cancels`
-    : multiple
-      ? `↑↓ move · space toggle · enter confirm${back} · esc cancels`
-      : `↑↓ move · enter select${back} · esc cancels`;
-  const column = Math.max(0, ...rows.map(row => row.label.length)) + (multiple ? 6 : 2);
-  const secret = field.kind === 'text' && field.secret && !typingOther;
+  const { question, label } = reviewing ? { question: 'Review your answers', label: undefined } : questionText(request, field);
+  const right = [request.fields.length > 1 ? reviewing ? 'Review' : `${index + 1} of ${request.fields.length}` : '', waiting > 0 ? `${waiting} more` : ''].filter(Boolean).join(' · ');
+  const next = request.fields.length === 1 ? 'submit' : index === request.fields.length - 1 ? 'review' : 'next';
+  const footer = reviewing ? '↑↓ edit · enter select · esc cancels'
+    : typing ? `enter ${!field.required && !draft.typingOther && !draft.editor.text.trim() ? 'skip' : next} · shift+tab back · esc cancels`
+      : multiple ? '↑↓ move · space toggle · tab continue · esc cancels'
+        : '↑↓ move · enter select · esc cancels';
+  const secret = field?.kind === 'text' && field.secret;
+  const displayText = (text: string) => secret ? '•'.repeat([...text].length) : text;
 
   return (
-    <FramedCard
-      tone={theme.accent}
-      title={[
-        { text: '? ', color: theme.accent },
-        { text: describeRequester(request.requester), color: theme.accent, bold: true },
-        { text: ' asks' },
-        ...(label ? [{ text: ` · ${label}`, color: theme.textMuted }] : []),
-      ]}
-      {...(right ? { right } : {})}
-      footer={footer}
-    >
+    <FramedCard tone={theme.accent} title={[
+      { text: '? ', color: theme.accent },
+      { text: describeRequester(request.requester), color: theme.accent, bold: true },
+      { text: ' asks' },
+      ...(label ? [{ text: ` · ${label}`, color: theme.textMuted }] : []),
+    ]} {...(right ? { right } : {})} footer={footer}>
       <Box flexDirection="column" marginBottom={1} paddingLeft={2}>
-        {/* A form of several fields says what it is for once, above each. */}
-        {request.fields.length > 1 && request.message !== question && (
-          <Text color={theme.textMuted} wrap="wrap">{request.message}</Text>
-        )}
         <Text color={theme.text} bold wrap="wrap">{question}</Text>
+        <Text color={theme.textMuted}>{reviewing ? 'Select an answer to change it, or submit below.'
+          : multiple ? `Select all that apply · ${draft.picked.length} selected` : typing ? 'Type your answer below.' : 'Choose one option.'}</Text>
       </Box>
-      {!typing && rows.map((row, rowIndex) => {
-        const active = rowIndex === selected;
-        const mark = multiple && !row.other
-          ? (typeof row.value === 'string' && picked.includes(row.value) ? '[x] ' : '[ ] ')
-          : multiple ? '    ' : '';
-        return (
-          <Box key={`${row.label}-${rowIndex}`}>
-            <Text color={active ? theme.accent : theme.textSubtle}>{active ? '› ' : '  '}</Text>
-            <Text color={active ? theme.accent : theme.text} wrap="truncate-end">
-              {`${mark}${row.label}`.padEnd(column)}
-            </Text>
-            {row.description && <Text color={theme.textMuted} wrap="truncate-end">{row.description}</Text>}
-          </Box>
-        );
-      })}
-      {typing && (
-        <Box flexDirection="column">
-          {typingOther && <Text color={theme.textMuted}>  Your answer</Text>}
-          <Text>
-            <Text color={theme.accent}>› </Text>
-            <Text color={theme.text}>{secret ? '•'.repeat(entry.length) : entry}</Text>
+      {reviewing ? (
+        <Choices key="review" selected={reviewSelected} focusRef={focusRef}>
+          {request.fields.map((item, itemIndex) => (
+            <QuestionRow key={item.key} focusRef={reviewSelected === itemIndex ? focusRef : undefined}
+              prefix={`${itemIndex + 1}. `} label={questionText(request, item).label ?? item.title} description={answerText(item, answers)}
+              active={reviewSelected === itemIndex} onChoose={() => goTo(itemIndex)} />
+          ))}
+          <QuestionRow focusRef={reviewSelected === request.fields.length ? focusRef : undefined}
+            label="Submit answers" active={reviewSelected === request.fields.length} onChoose={() => finish(answers)} />
+        </Choices>
+      ) : typing ? (
+        <Box paddingLeft={2} flexDirection="column">
+          {draft.typingOther && <Text color={theme.textMuted}>Your answer</Text>}
+          <Text wrap="wrap">
+            <Text color={theme.text}>{displayText(draft.editor.text.slice(0, draft.editor.cursor))}</Text>
             <Text color={theme.accent}>▌</Text>
+            <Text color={theme.text}>{displayText(draft.editor.text.slice(draft.editor.cursor))}</Text>
           </Text>
-          {error && <Text color={theme.danger}>  {error}</Text>}
+        </Box>
+      ) : (
+        <Choices key={field.key} selected={draft.selected} focusRef={focusRef}>
+          {rows.map((row, rowIndex) => (
+            <QuestionRow key={rowIndex} focusRef={draft.selected === rowIndex ? focusRef : undefined}
+              active={draft.selected === rowIndex} label={row.label} description={row.description}
+              prefix={row.action === 'continue' || row.action === 'skip' ? '' : `${rowIndex + 1}. ${multiple && !row.action ? draft.picked.includes(row.value as string) ? '[x] ' : '[ ] ' : ''}`}
+              onChoose={() => choose(row, rowIndex)} />
+          ))}
+        </Choices>
+      )}
+      {error && <Text color={theme.danger}>  {error}</Text>}
+      {!reviewing && (draft.typingOther || index > 0) && (
+        <Box marginTop={1}>
+          <QuestionRow label={draft.typingOther ? 'Back to options' : 'Back'} active={false}
+            onChoose={() => draft.typingOther ? updateDraft({ typingOther: false }) : goTo(index - 1)} />
         </Box>
       )}
     </FramedCard>

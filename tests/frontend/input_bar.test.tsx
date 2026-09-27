@@ -1,10 +1,11 @@
 import { describe, expect, test } from 'bun:test';
-import { render as renderInk, renderToString } from 'ink';
+import { Box, render as renderInk, renderToString } from 'ink';
 import { PassThrough } from 'node:stream';
 import { useState, useSyncExternalStore } from 'react';
 import stripAnsi from 'strip-ansi';
 import { InputBar } from '../../src/frontend/chat/InputBar';
 import { ApprovalPrompt, approvalChoices } from '../../src/frontend/chat/ApprovalPrompt';
+import { QuestionCard } from '../../src/frontend/chat/QuestionCard';
 import { EntryInput, InputFeedback, QueuedRow } from '../../src/frontend/chat/InputRows';
 import { SubagentStatusRow } from '../../src/frontend/chat/StatusRow';
 import { WorkerStrip } from '../../src/frontend/chat/WorkerStrip';
@@ -21,9 +22,12 @@ import type { Feedback } from '../../src/commands/feedback';
 import { Session } from '../../src/agent_runtime/session';
 import Sidebar from '../../src/frontend/Sidebar';
 import type { ApprovalRequest } from '../../src/agent_runtime/permissions/approvals';
+import type { QuestionAnswer, QuestionField, QuestionRequest } from '../../src/agent_runtime/permissions/questions';
 import type { PermissionOption } from '@agentclientprotocol/sdk';
 import { notifySubagents, type SubagentRun } from '../../src/agent_runtime/tools/subagents';
 import type { ToolCallBlock } from '../../src/agent_runtime/types';
+import { pressAt, releaseAt } from '../../src/frontend/interaction/clickable';
+import stringWidth from 'string-width';
 
 describe('session input drafts', () => {
   test('edits and restores drafts when switching session panes with Option+arrows', async () => {
@@ -347,6 +351,325 @@ describe('approval prompt', () => {
   });
 });
 
+describe('question card', () => {
+  const choices = [
+    { value: 'fast', label: 'Fast', description: 'A small change with a quick check.' },
+    { value: 'careful', label: 'Careful', description: 'A detailed review before making changes.' },
+    { value: 'manual', label: 'Manual', description: 'Work through every step yourself.' },
+  ];
+  const choice = (field: Partial<Extract<QuestionField, { kind: 'choice' }>> = {}): QuestionField => ({
+    kind: 'choice', key: 'approach', title: 'Which approach?', options: choices,
+    multiple: false, required: true, ...field,
+  });
+
+  function card(fields: QuestionField[], columns = 90, rows = 30, inPane = false) {
+    const request: QuestionRequest = {
+      id: 'question-1', sessionId: 'session-1', requester: { participant: 'sirus' },
+      message: fields.length === 1 ? fields[0].title : 'Choose how to proceed.', fields,
+    };
+    const answers: QuestionAnswer[] = [];
+    const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {}, ref() {}, unref() {} });
+    const stdout = Object.assign(new PassThrough(), { columns, rows });
+    let output = '';
+    stdout.on('data', chunk => {
+      const frame = stripAnsi(chunk.toString());
+      if (frame.trim()) output = frame;
+    });
+    const view = () => {
+      const question = <QuestionCard request={request} waiting={0} onAnswer={answer => answers.push(answer)} />;
+      return inPane ? (
+        <Box width={stdout.columns} height={stdout.rows}>
+          <Box width={26} flexShrink={0} />
+          <Box flexDirection="column" flexGrow={1} flexBasis={0} minWidth={0} height="100%" minHeight={0}>
+            <Box flexGrow={1} minHeight={0} />
+            {question}
+          </Box>
+        </Box>
+      ) : question;
+    };
+    const app = renderInk(view(), {
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      stdout: stdout as unknown as NodeJS.WriteStream,
+      debug: true, patchConsole: false, exitOnCtrlC: false, interactive: true,
+    });
+    const flush = async () => {
+      await new Promise(resolve => setImmediate(resolve));
+      await app.waitUntilRenderFlush();
+    };
+    const cellOf = (text: string) => {
+      const lines = output.split('\n');
+      const line = lines.findIndex(value => value.includes(text));
+      expect(line).toBeGreaterThanOrEqual(0);
+      return { line, col: stringWidth(lines[line].slice(0, lines[line].indexOf(text))) + 1 };
+    };
+    return {
+      answers,
+      output: () => output,
+      cellOf,
+      flush,
+      async type(input: string) { stdin.write(input); await flush(); },
+      async resize(columns: number, rows: number) {
+        stdout.columns = columns;
+        stdout.rows = rows;
+        stdout.emit('resize');
+        if (inPane) app.rerender(view());
+        await flush();
+      },
+      async click(text: string) {
+        await new Promise(resolve => setImmediate(resolve));
+        const cell = cellOf(text);
+        expect(pressAt(cell)).toBe(true);
+        expect(releaseAt(cell)).toBe(true);
+        await flush();
+      },
+      async close() {
+        app.unmount();
+        await app.waitUntilExit();
+        app.cleanup();
+        stdin.destroy();
+        stdout.destroy();
+      },
+    };
+  }
+
+  test('numbers the choices and immediately submits a clicked single answer', async () => {
+    const view = card([choice()]);
+    try {
+      await view.flush();
+      expect(view.output()).toMatch(/1[.)]\s+Fast/);
+      expect(view.output()).toMatch(/2[.)]\s+Careful/);
+      expect(view.output()).toContain('A detailed review before making changes.');
+      await view.click('Careful');
+      expect(view.answers).toEqual([{ action: 'accept', content: { approach: 'careful' } }]);
+    } finally {
+      await view.close();
+    }
+  });
+
+  test('edits a typed answer at the cursor without splitting Unicode characters', async () => {
+    const view = card([{ kind: 'text', key: 'answer', title: 'Your answer?', required: true, secret: false }]);
+    try {
+      await view.flush();
+      await view.type('\r');
+      expect(view.answers).toEqual([]);
+      expect(view.output()).toContain('Enter your answer.');
+      await view.type('A🐎B');
+      await view.type('\u001b[D');
+      await view.type('\u007f');
+      await view.type('é');
+      expect(view.output()).toContain('Aé▌B');
+      await view.type('\r');
+      expect(view.answers).toEqual([{ action: 'accept', content: { answer: 'AéB' } }]);
+    } finally {
+      await view.close();
+    }
+  });
+
+  test.each([['Claude', undefined], ['Codex', 'None of the above']] as const)('sends a custom choice in the %s form', async (_vendor, value) => {
+    const other = { key: 'custom', ...(value ? { value } : {}) };
+    const view = card([choice({ other })]);
+    try {
+      await view.flush();
+      await view.click('Other…');
+      await view.type('A different approach');
+      await view.type('\r');
+      expect(view.answers).toEqual([{
+        action: 'accept', content: { custom: 'A different approach', ...(value ? { approach: value } : {}) },
+      }]);
+    } finally {
+      await view.close();
+    }
+  });
+
+  test('validates multiple choices on Continue and submits the toggled values', async () => {
+    const view = card([choice({ multiple: true, minimum: 2, maximum: 2 })]);
+    try {
+      await view.flush();
+      await view.click('Continue');
+      expect(view.answers).toEqual([]);
+      expect(view.output()).toMatch(/at least 2/i);
+      await view.type('1');
+      await view.type('\t');
+      expect(view.answers).toEqual([]);
+      expect(view.output()).toMatch(/at least 2/i);
+      await view.type('2');
+      await view.click('Manual');
+      await view.type('\t');
+      expect(view.answers).toEqual([]);
+      expect(view.output()).toMatch(/at most 2/i);
+      await view.click('Manual');
+      await view.click('Continue');
+      expect(view.answers).toEqual([{ action: 'accept', content: { approach: ['fast', 'careful'] } }]);
+    } finally {
+      await view.close();
+    }
+  });
+
+  test('does not send an empty required selection', async () => {
+    const view = card([choice({ multiple: true })]);
+    try {
+      await view.flush();
+      await view.type('\t');
+      expect(view.answers).toEqual([]);
+      expect(view.output()).toMatch(/at least (?:one|1)/i);
+      await view.type(' ');
+      await view.click('Continue');
+      expect(view.answers).toEqual([{ action: 'accept', content: { approach: ['fast'] } }]);
+    } finally {
+      await view.close();
+    }
+  });
+
+  test('reviews several answers before submitting, lets an answer be edited, and masks secrets', async () => {
+    const view = card([
+      choice(),
+      { kind: 'text', key: 'token', title: 'Access token?', required: true, secret: true },
+    ]);
+    try {
+      await view.flush();
+      expect(view.output()).toMatch(/1 of 2/);
+      await view.type('1');
+      expect(view.output()).toMatch(/2 of 2/);
+      await view.type('private-token');
+      expect(view.output()).not.toContain('private-token');
+      expect(view.output()).toContain('••••');
+      await view.type('\r');
+      expect(view.answers).toEqual([]);
+      expect(view.output()).toContain('Submit answers');
+      expect(view.output()).toContain('Fast');
+      expect(view.output()).not.toContain('private-token');
+      expect(view.output()).toContain('••••');
+
+      await view.click('Which approach?');
+      await view.click('Careful');
+      expect(view.answers).toEqual([]);
+      expect(view.output()).toContain('Submit answers');
+      expect(view.output()).toContain('Careful');
+      expect(view.output()).not.toContain('private-token');
+      await view.type('\r');
+      expect(view.answers).toEqual([{ action: 'accept', content: { approach: 'careful', token: 'private-token' } }]);
+    } finally {
+      await view.close();
+    }
+  });
+
+  test('keeps custom text, selected options, and unfinished drafts when going back', async () => {
+    const view = card([
+      choice({ multiple: true, other: { key: 'custom' } }),
+      { kind: 'text', key: 'reason', title: 'Why this approach?', required: true, secret: false },
+    ]);
+    try {
+      await view.flush();
+      await view.type(' ');
+      await view.click('Other…');
+      await view.type('Custom source');
+      await view.type('\r');
+      expect(view.output()).toContain('Why this approach?');
+      await view.type('Remember this');
+
+      await view.type('\u001b[Z');
+      expect(view.output()).toContain('Custom source▌');
+      await view.click('Back to options');
+      expect(view.output()).toContain('[x] Fast');
+      await view.click('Other…');
+      expect(view.output()).toContain('Custom source▌');
+      await view.type('\u001b[H');
+      await view.type('A ');
+      await view.type('\r');
+      expect(view.output()).toContain('Remember this▌');
+
+      await view.click('Back');
+      expect(view.output()).toContain('A ▌Custom source');
+      await view.type('\r');
+      await view.type('\r');
+      expect(view.answers).toEqual([]);
+      expect(view.output()).toContain('Submit answers');
+      expect(view.output()).toContain('Fast, A Custom source');
+      expect(view.output()).toContain('Remember this');
+      await view.type('\r');
+      expect(view.answers).toEqual([{
+        action: 'accept', content: { approach: ['fast'], custom: 'A Custom source', reason: 'Remember this' },
+      }]);
+    } finally {
+      await view.close();
+    }
+  });
+
+  test('wraps option descriptions and keeps the selected row visible in a narrow terminal', async () => {
+    const description = 'A longer explanation that stays readable across several narrow rows, right through its final words.';
+    const options = Array.from({ length: 12 }, (_, index) => ({
+      value: `value-${index}`, label: `Choice ${index + 1}`,
+      description: index === 0 ? description : `Details for choice ${index + 1}.`,
+    }));
+    const view = card([choice({ options })], 48, 24);
+    try {
+      await view.flush();
+      const words = view.output().replace(/[│\n]/g, ' ').replace(/\s+/g, ' ');
+      expect(words).toContain(description);
+      for (const line of view.output().split('\n')) expect(stringWidth(line)).toBeLessThanOrEqual(48);
+      for (let index = 1; index < 12; index++) await view.type('\u001b[B');
+      expect(view.output()).toContain('Choice 12');
+      expect(view.output()).not.toContain('Choice 1 ');
+      expect(view.output().split('\n').length).toBeLessThanOrEqual(24);
+      await view.type('\r');
+      expect(view.answers).toEqual([{ action: 'accept', content: { approach: 'value-11' } }]);
+    } finally {
+      await view.close();
+    }
+  });
+
+  test('scrolled-out choices cannot intercept clicks on Back or the footer', async () => {
+    const options = Array.from({ length: 20 }, (_, index) => ({ value: `${index}`, label: `Choice ${index + 1}` }));
+    const view = card([
+      { kind: 'text', key: 'context', title: 'Your context?', required: true, secret: false },
+      choice({ options }),
+    ], 70, 24);
+    try {
+      await view.flush();
+      await view.type('Keep this context');
+      await view.type('\r');
+      for (let index = 0; index < 11; index++) await view.type('\u001b[B');
+      expect(view.output()).toContain('Choice 12');
+      expect(view.output()).not.toContain('Choice 20');
+      // Hidden rows still have layout boxes below the viewport, where the
+      // frame and Back sit. Those boxes must not remain mouse targets.
+      const footer = view.cellOf('esc cancels');
+      expect(pressAt(footer)).toBe(false);
+      expect(releaseAt(footer)).toBe(false);
+      await view.click('Back');
+      expect(view.output()).toContain('Your context?');
+      expect(view.output()).toContain('Keep this context▌');
+      expect(view.answers).toEqual([]);
+    } finally {
+      await view.close();
+    }
+  });
+
+  test('keeps a short review compact after resizing and editing an answer', async () => {
+    const view = card([choice(), choice({ key: 'checks', title: 'Which checks?' })], 150, 48, true);
+    try {
+      await view.flush();
+      await view.type('1');
+      await view.resize(80, 24);
+      await view.type('2');
+      expect(view.output()).toContain('Submit answers');
+      await view.resize(150, 48);
+      await view.type('1');
+      await view.type('2');
+      const lines = view.output().split('\n');
+      const submit = lines.findIndex(line => line.includes('Submit answers'));
+      const footer = lines.findIndex(line => line.includes('╰'));
+      expect(submit).toBeGreaterThanOrEqual(0);
+      expect(footer - submit).toBe(2);
+      expect(view.answers).toEqual([]);
+      await view.type('\r');
+      expect(view.answers).toEqual([{ action: 'accept', content: { approach: 'careful', checks: 'careful' } }]);
+    } finally {
+      await view.close();
+    }
+  });
+});
+
 describe('select menu', () => {
   const items: CommandMenuItem[] = [
     { type: 'item', key: 'a', label: 'Claude · subscription', description: 'browser sign-in', command: '/login claude' },
@@ -419,21 +742,20 @@ function worker(run: Partial<SubagentRun> & { id: string }): SubagentRun {
 }
 
 describe('worker strip', () => {
-  const now = Date.now();
-  const running = [
-    worker({
-      id: 'sub-one', model: 'gpt-5.6-terra', thinkingLevel: 'high',
-      startedAt: now - 45_000, updatedAt: now - 2_000, branch: 'sirus/sub-one',
-      content: [
-        { type: 'tool_call', id: 'one', kind: 'read', title: 'notes.md', status: 'completed', locations: [], content: [] },
-        { type: 'tool_call', id: 'two', kind: 'execute', title: 'bun test', status: 'pending', locations: [], content: [] },
-      ],
-    }),
-    worker({ id: 'sub-two', startedAt: now - 45_000, updatedAt: now - 1_000 }),
-    worker({ id: 'sub-three', startedAt: now - 45_000, updatedAt: now }),
-  ];
-
   test('shows the run that changed last, and how many are behind it', () => {
+    const now = Date.now();
+    const running = [
+      worker({
+        id: 'sub-one', model: 'gpt-5.6-terra', thinkingLevel: 'high',
+        startedAt: now - 45_000, updatedAt: now - 2_000, branch: 'sirus/sub-one',
+        content: [
+          { type: 'tool_call', id: 'one', kind: 'read', title: 'notes.md', status: 'completed', locations: [], content: [] },
+          { type: 'tool_call', id: 'two', kind: 'execute', title: 'bun test', status: 'pending', locations: [], content: [] },
+        ],
+      }),
+      worker({ id: 'sub-two', startedAt: now - 45_000, updatedAt: now - 1_000 }),
+      worker({ id: 'sub-three', startedAt: now - 45_000, updatedAt: now }),
+    ];
     const lines = stripAnsi(renderToString(
       <WorkerStrip workers={[running[0], running[1]]} />,
       { columns: 120 },

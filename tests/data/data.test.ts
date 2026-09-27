@@ -5,6 +5,7 @@ import path from 'path';
 import * as naming from '../../src/agent_runtime/session/naming';
 import * as launch from '../../src/agent_runtime/runtime/launch';
 import { startAcpRuntime } from '../../src/agent_runtime/runtime/acp';
+import { pendingQuestions, questionFields, requestAnswers, resolveQuestion } from '../../src/agent_runtime/permissions/questions';
 import type { Runtime, RuntimeOptions, RuntimeUpdate } from '../../src/agent_runtime/runtime/runtime';
 import type { Draft } from '../../src/agent_runtime/session';
 import { Session } from '../../src/agent_runtime/session';
@@ -95,6 +96,93 @@ test('ACP opts into notices and routes early notices to the session being opened
     runtime?.dispose();
     spec.mockRestore();
   }
+});
+
+test.each(['answer', 'withdraw', 'turn-cancel', 'disconnect'] as const)('ACP questions settle and leave the queue after %s', async ending => {
+  const adapter = `
+    import { createInterface } from 'node:readline';
+    const send = value => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\\n');
+    let promptId;
+    for await (const line of createInterface({ input: process.stdin })) {
+      const request = JSON.parse(line);
+      const reply = result => send({ id: request.id, result });
+      if (request.id === 'question') {
+        send({ method: 'session/update', params: { sessionId: 'owner', update: {
+          sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: JSON.stringify(request.result ?? request.error) }
+        } } });
+        send({ id: promptId, result: { stopReason: 'end_turn' } });
+      } else if (request.method === 'initialize') {
+        if (!request.params.clientCapabilities.elicitation.form) throw new Error('Forms were not advertised');
+        reply({ protocolVersion: 1 });
+      } else if (request.method === 'session/new') reply({ sessionId: 'owner' });
+      else if (request.method === 'session/prompt') {
+        promptId = request.id;
+        send({ id: 'question', method: 'elicitation/create', params: {
+          sessionId: 'owner', mode: 'form', message: 'Codex needs your input to continue.',
+          requestedSchema: { type: 'object', required: ['color'], properties: {
+            color: { type: 'string', title: 'Which color?', oneOf: [{ const: 'Blue', title: 'Blue' }, { const: 'None of the above', title: 'None of the above' }] },
+            color_note: { type: 'string', _meta: { codex: { role: 'user_note', questionId: 'color' } } }
+          } }
+        } });
+        if ('${ending}' === 'withdraw') setTimeout(() => send({ method: '$/cancel_request', params: { requestId: 'question' } }), 100);
+        if ('${ending}' === 'disconnect') setTimeout(() => process.exit(0), 100);
+      } else if (request.method === 'session/cancel') send({ id: promptId, result: { stopReason: 'cancelled' } });
+      else if (request.id !== undefined) reply({});
+    }
+  `;
+  const spec = spyOn(launch, 'launchFor').mockImplementation(options => ({
+    command: process.execPath, args: ['-e', adapter], env: options.env,
+    mode: options.permissionMode, session: () => ({ mcpServers: [] }), forkNeedsResume: false,
+  }));
+  const context = { sessionId: `question-${ending}`, requester: { participant: 'sirus' } };
+  const updates: RuntimeUpdate[] = [];
+  const controller = new AbortController();
+  let runtime: Runtime | undefined;
+  let turn: Promise<unknown> | undefined;
+  try {
+    runtime = await startAcpRuntime({
+      vendor: 'gpt', model: 'gpt-5.6-luna', thinkingLevel: 'high', directory: process.cwd(),
+      systemPrompt: '', env: { ...process.env }, mcpServer: null, permissionMode: 'auto',
+      onPermission: async () => ({ outcome: { outcome: 'cancelled' } }),
+      onElicitation: (request, signal) => requestAnswers(context, request, signal),
+      onUpdate: update => { updates.push(update); },
+    });
+    turn = runtime.prompt({ text: 'Ask', images: [] }, controller.signal).catch(error => error);
+    await until(() => pendingQuestions(context.sessionId).length === 1, 'question card');
+    const [question] = pendingQuestions(context.sessionId);
+    expect(question.fields[0]).toMatchObject({ kind: 'choice', required: true, other: { key: 'color_note', value: 'None of the above' } });
+    if (ending === 'answer') {
+      expect(resolveQuestion(question.id, { action: 'accept', content: { color: 'None of the above', color_note: 'Purple' } })).toBe(true);
+    } else if (ending === 'turn-cancel') controller.abort(new Error('Turn stopped'));
+    const result = await turn;
+    if (ending === 'disconnect' || ending === 'turn-cancel') expect(result).toBeInstanceOf(Error);
+    else expect(result).toEqual({ stopReason: 'end_turn' });
+    await until(() => pendingQuestions(context.sessionId).length === 0, 'question withdrawal');
+    expect(resolveQuestion(question.id, { action: 'decline' })).toBe(false);
+    if (ending === 'answer') expect(updates).toContainEqual({ type: 'text', text: JSON.stringify({ action: 'accept', content: { color: 'None of the above', color_note: 'Purple' } }) });
+  } finally {
+    controller.abort();
+    runtime?.dispose();
+    await turn;
+    spec.mockRestore();
+  }
+});
+
+test('question schemas retain choice requirements and fold custom answers', () => {
+  const fields = questionFields({
+    sessionId: 'owner', mode: 'form', message: 'Choose preferences',
+    requestedSchema: { type: 'object', required: ['features'], properties: {
+      features: { type: 'array', title: 'Features', minItems: 1, maxItems: 2, items: { type: 'string', enum: ['Search', 'Export'] } },
+      custom: { type: 'string', _meta: { _askUserQuestionCustomAnswer: { isCustomAnswer: true, questionId: 'features' } } },
+      theme: { type: 'string', title: 'Theme', enum: ['Dark', 'Light'] },
+    } },
+  });
+  expect(fields).toEqual([
+    { kind: 'choice', key: 'features', title: 'Features', multiple: true, required: true, minimum: 1, maximum: 2,
+      options: [{ value: 'Search', label: 'Search' }, { value: 'Export', label: 'Export' }], other: { key: 'custom' } },
+    { kind: 'choice', key: 'theme', title: 'Theme', multiple: false, required: false,
+      options: [{ value: 'Dark', label: 'Dark' }, { value: 'Light', label: 'Light' }] },
+  ]);
 });
 
 describe('Session model', () => {

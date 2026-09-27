@@ -432,11 +432,15 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
 
   // A question outside a turn, or one tied to no session (asked while the
   // adapter is still starting up), has nobody to answer it.
-  async function elicitation(request: CreateElicitationRequest): Promise<CreateElicitationResponse> {
+  async function elicitation(request: CreateElicitationRequest, requestSignal: AbortSignal): Promise<CreateElicitationResponse> {
     const sessionId = 'sessionId' in request && typeof request.sessionId === 'string' ? request.sessionId : null;
     const state = sessionId ? answeringSession(sessionId, request) : undefined;
-    const signal = state?.turn?.signal;
-    if (!state || !signal || signal.aborted) return CANCELLED_ELICITATION;
+    const turnSignal = state?.turn?.signal;
+    if (!state || !turnSignal) return CANCELLED_ELICITATION;
+    // Codex can withdraw a question without ending the turn, including when
+    // it auto-resolves one. The card must stop waiting along with the request.
+    const signal = AbortSignal.any([turnSignal, requestSignal]);
+    if (signal.aborted) return CANCELLED_ELICITATION;
     if (!state.hooks.onElicitation) return DECLINED;
     try {
       return await state.hooks.onElicitation(request, signal);
@@ -450,7 +454,7 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
   // name the same objects.
   const connection = client({ name: 'sirus' })
     .onRequest(methods.client.session.requestPermission, ({ params }) => permission(params))
-    .onRequest(methods.client.elicitation.create, ({ params }) => elicitation(params))
+    .onRequest(methods.client.elicitation.create, ({ params, signal }) => elicitation(params, signal))
     .onNotification(methods.client.session.update, ({ params }) => { receive(params.sessionId, params.update); })
     .connect(ndJsonStream(
       Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,

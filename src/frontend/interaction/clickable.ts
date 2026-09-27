@@ -23,8 +23,19 @@ let pressed: ElementRef | null = null;
 function hitArea(ref: ElementRef, cell: Cell): number | null {
   if (!ref.current) return null;
   const { x, y, width, height } = measureElement(ref.current);
-  const inside = cell.col >= x && cell.col < x + width && cell.line >= y && cell.line < y + height;
-  return inside ? width * height : null;
+  let left = x, right = x + width, top = y, bottom = y + height;
+  // A scrolled-out option must not answer clicks on the card around it.
+  for (let parent = ref.current.parentNode; parent; parent = parent.parentNode) {
+    if (parent.style.display === 'none') return null;
+    const clipsX = parent.style.overflowX === 'hidden';
+    const clipsY = parent.style.overflowY === 'hidden';
+    if (!clipsX && !clipsY) continue;
+    const bounds = measureElement(parent);
+    if (clipsX) { left = Math.max(left, bounds.x); right = Math.min(right, bounds.x + bounds.width); }
+    if (clipsY) { top = Math.max(top, bounds.y); bottom = Math.min(bottom, bounds.y + bounds.height); }
+  }
+  const inside = cell.col >= left && cell.col < right && cell.line >= top && cell.line < bottom;
+  return inside ? (right - left) * (bottom - top) : null;
 }
 
 function hit(ref: ElementRef, cell: Cell): boolean {

@@ -27,6 +27,9 @@ export type QuestionField =
     description?: string;
     options: QuestionOption[];
     multiple: boolean;
+    required: boolean;
+    minimum?: number;
+    maximum?: number;
     // The field an answer of the user's own goes in, and for Codex the
     // option that says the answer is in it.
     other?: { key: string; value?: string };
@@ -145,13 +148,15 @@ export function questionFields(request: CreateElicitationRequest): QuestionField
       const codexOther = otherKey ? options.find(option => option.value === CODEX_OTHER_OPTION) : undefined;
       if (codexOther) options = options.filter(option => option !== codexOther);
       fields.push({
-        kind: 'choice', ...base, options, multiple: false,
+        kind: 'choice', ...base, options, multiple: false, required: isRequired,
         ...(otherKey ? { other: { key: otherKey, ...(codexOther ? { value: codexOther.value } : {}) } } : {}),
       });
     } else if (schema.type === 'array' && isRecord(schema.items)) {
       const otherKey = others.get(key);
       fields.push({
-        kind: 'choice', ...base, options: optionsOf(schema.items.anyOf, schema.items.enum), multiple: true,
+        kind: 'choice', ...base, options: optionsOf(schema.items.anyOf, schema.items.enum), multiple: true, required: isRequired,
+        ...(typeof schema.minItems === 'number' ? { minimum: schema.minItems } : {}),
+        ...(typeof schema.maxItems === 'number' ? { maximum: schema.maxItems } : {}),
         ...(otherKey ? { other: { key: otherKey } } : {}),
       });
     } else if (schema.type === 'string') {

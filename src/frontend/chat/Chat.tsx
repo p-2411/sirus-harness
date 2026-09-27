@@ -401,9 +401,9 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       setScrollOffset(current => Math.min(maxScroll, current + pageSize));
     } else if (key.pageDown) {
       setScrollOffset(current => Math.max(0, current - pageSize));
-    } else if (key.home) {
+    } else if (key.home && effectiveInputMode.type !== 'question') {
       setScrollOffset(maxScroll);
-    } else if (key.end) {
+    } else if (key.end && effectiveInputMode.type !== 'question') {
       setScrollOffset(0);
     }
   });
