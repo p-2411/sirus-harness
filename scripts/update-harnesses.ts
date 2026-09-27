@@ -6,6 +6,9 @@
 // both lockfiles, then runs the typecheck and the tests.
 // `bun run update-harnesses`.
 import { $ } from 'bun';
+import { mkdirSync, mkdtempSync, rmSync } from 'fs';
+import os from 'os';
+import path from 'path';
 
 const CLAUDE_ADAPTER = '@agentclientprotocol/claude-agent-acp';
 const CODEX_ADAPTER = '@agentclientprotocol/codex-acp';
@@ -43,5 +46,16 @@ await $`bun add --exact ${changes.map(([name, version]) => `${name}@${version}`)
 // The published package installs through npm, so its lockfile follows.
 await $`npm install --package-lock-only --ignore-scripts --no-audit --no-fund`.quiet();
 await $`bun run typecheck`;
-await $`bun test tests`;
+// The suite writes to the data directory and starts sessions that read the
+// vendors' homes, so it runs in a scratch home of its own, never the user's.
+const scratch = mkdtempSync(path.join(os.tmpdir(), 'sirus-update-harnesses-'));
+try {
+  const home = path.join(scratch, 'home');
+  const data = path.join(scratch, 'data');
+  mkdirSync(home);
+  mkdirSync(data);
+  await $`bun test tests`.env({ ...process.env, HOME: home, SIRUS_DATA_DIR: data });
+} finally {
+  rmSync(scratch, { recursive: true, force: true });
+}
 console.log('Updated and verified. Review the adapters\' changelogs before committing.');
