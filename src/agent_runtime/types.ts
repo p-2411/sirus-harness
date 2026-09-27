@@ -206,6 +206,10 @@ export const SUBAGENT_STATUSES = ['working', 'done', 'failed', 'cancelled', 'int
 
 export type SubagentStatus = typeof SUBAGENT_STATUSES[number];
 
+// The participant every session starts with, and the one a message that names
+// no participant belongs to.
+export const DEFAULT_PARTICIPANT = 'sirus';
+
 // The prose of a message: its text blocks joined with exactly one newline.
 export function textOf(message: Pick<Message, 'content'>): string {
   return message.content
