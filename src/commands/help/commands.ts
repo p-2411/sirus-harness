@@ -1,7 +1,7 @@
 import { commandUsage, type CommandSpec } from '../types';
 
 // Every key the app answers to, in the words the status hints use.
-export const KEY_BINDINGS: ReadonlyArray<readonly [keys: string, action: string]> = [
+const KEY_BINDINGS: ReadonlyArray<readonly [keys: string, action: string]> = [
   ['enter', 'send · queues while the agents are busy'],
   ['shift+enter · \\ + enter', 'new line'],
   ['↑ / ↓', 'previous / next prompt · select a queued message'],
@@ -18,7 +18,7 @@ export const KEY_BINDINGS: ReadonlyArray<readonly [keys: string, action: string]
   ['ctrl+u · ctrl+w', 'clear the line · delete the previous word'],
 ];
 
-export function helpText(commands: readonly CommandSpec[]): string {
+function helpText(commands: readonly CommandSpec[]): string {
   const labels = commands.map(commandUsage);
   const column = Math.max(
     ...labels.map(label => label.length),

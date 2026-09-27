@@ -65,7 +65,7 @@ function useMinuteClock(): number {
   return now;
 }
 
-export function SidebarHeader({ updateAvailable = false }: { updateAvailable?: boolean }) {
+function SidebarHeader({ updateAvailable = false }: { updateAvailable?: boolean }) {
   const now = useMinuteClock();
 
   return (

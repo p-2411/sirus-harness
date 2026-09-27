@@ -86,7 +86,7 @@ function diffsOf(call: ToolCallBlock): ToolCallDiff[] {
 
 // Lines added and removed by a file change, read off the diffs the call
 // carries; null for a call that changed no file.
-export function editCounts(call: ToolCallBlock): { added: number; removed: number } | null {
+function editCounts(call: ToolCallBlock): { added: number; removed: number } | null {
 	const diffs = diffsOf(call);
 	if (diffs.length === 0) return null;
 	let added = 0;
@@ -140,7 +140,7 @@ function spawnReport(call: ToolCallBlock): string {
 
 // What the call produced: the worker's report on a SpawnAgent row, otherwise
 // its text content, or failing that a string output.
-export function outputPreview(call: ToolCallBlock): DiffLine[] {
+function outputPreview(call: ToolCallBlock): DiffLine[] {
 	const report = spawnReport(call);
 	if (report) return diffLines(' ', report);
 	const text = call.content
@@ -411,15 +411,14 @@ function AnimatedCommandStatus({ count }: { count: number }) {
 }
 
 // A group is known by its first call, which stays first as the run grows.
-export function ToolRunGroup({ message, calls, defaultExpanded = false, sessionId }: {
+export function ToolRunGroup({ message, calls, sessionId }: {
 	message: Message;
 	sessionId?: string;
 	calls: readonly ToolCallBlock[];
-	defaultExpanded?: boolean;
 }) {
 	const hasCompletedEdit = calls.some(call => call.status === 'completed' && editPreview(call).length > 0);
 	// Follow arriving file changes until the user chooses whether to expand.
-	const [expanded, toggle] = useRowExpansion(message, `group:${calls[0]?.id}`, defaultExpanded || hasCompletedEdit);
+	const [expanded, toggle] = useRowExpansion(message, `group:${calls[0]?.id}`, hasCompletedEdit);
 	const ref = useRef<DOMElement>(null);
 	const hovered = useClickable(ref, toggle);
 	const complete = calls.every(finished);
@@ -512,7 +511,7 @@ function CompactionRule({ message, block, participantColors }: {
 }
 
 // An attached image: the terminal cannot show it, so its row says what it is.
-export function ImageLine({ image }: { image: ImageBlock }) {
+function ImageLine({ image }: { image: ImageBlock }) {
 	return <Text color={theme.textMuted}>▣ {describeImage(image)}</Text>;
 }
 

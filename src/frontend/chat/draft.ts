@@ -9,7 +9,7 @@ import { applyInputEdit, type InputState } from './editor';
 const FIRST_PLACEHOLDER = 0xE000;
 const LAST_PLACEHOLDER = 0xF8FF;
 
-export function imagePlaceholder(index: number): string {
+function imagePlaceholder(index: number): string {
   return String.fromCharCode(FIRST_PLACEHOLDER + (index % (LAST_PLACEHOLDER - FIRST_PLACEHOLDER + 1)));
 }
 
@@ -18,7 +18,7 @@ export function isImagePlaceholder(character: string): boolean {
   return character.length === 1 && code >= FIRST_PLACEHOLDER && code <= LAST_PLACEHOLDER;
 }
 
-export function imagePlaceholders(text: string): string[] {
+function imagePlaceholders(text: string): string[] {
   return [...text].filter(isImagePlaceholder);
 }
 
@@ -29,7 +29,7 @@ export function removedPlaceholders(before: string, after: string): string[] {
 }
 
 // Drops the placeholders `keep` rejects, moving the cursor with the text.
-export function stripPlaceholders(state: InputState, keep: (placeholder: string) => boolean): InputState {
+function stripPlaceholders(state: InputState, keep: (placeholder: string) => boolean): InputState {
   let text = '';
   let cursor = state.cursor;
   for (let index = 0; index < state.text.length; index++) {

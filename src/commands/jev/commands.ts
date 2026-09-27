@@ -18,7 +18,7 @@ function status(): string {
   return 'Jev is off: sessions and subagents stay on their default models.';
 }
 
-export function jevMenuItems(args: readonly string[] = []): CommandMenuEntry[] | null {
+function jevMenuItems(args: readonly string[] = []): CommandMenuEntry[] | null {
   if (args.length > 0) return null;
   const source = jevKeySource();
   return [
@@ -41,7 +41,7 @@ export function jevMenuItems(args: readonly string[] = []): CommandMenuEntry[] |
   ];
 }
 
-export function jevCommand(args: readonly string[]): Feedback {
+function jevCommand(args: readonly string[]): Feedback {
   if (args.length === 0) return { kind: 'info', text: status() };
   if (args[0] === 'key' && args.length === 2) {
     const key = args[1].trim();

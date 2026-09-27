@@ -48,7 +48,7 @@ const PLAN_LINES = 30;
 // the change it makes, the command it runs, the plan it would carry out, or
 // failing all of those its input. Each is the vendor's text and is made safe
 // to print before a mark is put in front of it; the input's JSON already is.
-export function approvalDetail(call: ToolCallBlock): string[] {
+function approvalDetail(call: ToolCallBlock): string[] {
   const lines = call.locations.map(location => terminalText(location.path));
   const diff = editPreview(call);
   if (diff.length > 0) return [...lines, ...diff.map(markLine)];

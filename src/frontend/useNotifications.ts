@@ -72,7 +72,7 @@ export function subscribeApprovalNotifications(getSessions: () => readonly Sessi
 }
 
 // A question waits on the user like an approval does.
-export function subscribeQuestionNotifications(getSessions: () => readonly Session[], send = notify): () => void {
+function subscribeQuestionNotifications(getSessions: () => readonly Session[], send = notify): () => void {
   let seen = new Set(pendingQuestions().map(request => request.id));
   return subscribeQuestions(() => {
     const current = pendingQuestions();

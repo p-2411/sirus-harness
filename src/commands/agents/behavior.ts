@@ -122,7 +122,7 @@ export function subagentModelCommand(args: readonly string[], session: CommandSe
   return { kind: 'success', text: describe(model) };
 }
 
-export function changeThinkingLevel(
+function changeThinkingLevel(
   participantName: string,
   value: string,
   session: CommandSession,
@@ -177,7 +177,7 @@ export function thinkingCommand(args: readonly string[], session: CommandSession
 
 // The compact age the worker strip and the `/agents` menu both show: 45s,
 // 2m10s, 1h04m. It lives beside the menu so the two cannot drift apart.
-export function formatWorkerElapsed(ms: number): string {
+function formatWorkerElapsed(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
@@ -192,7 +192,7 @@ export function workerAge(run: SubagentRun, now: number = Date.now()): string {
 // Every worker `/agents` offers, in the order it lists them: the ones still
 // working first, then the finished ones the user has not yet dismissed. The
 // strip has an order of its own, since it shows one line at a time.
-export function visibleWorkers(workers: readonly SubagentRun[]): SubagentRun[] {
+function visibleWorkers(workers: readonly SubagentRun[]): SubagentRun[] {
   const shown = workers.filter(run => !run.dismissed);
   return [
     ...shown.filter(run => run.status === 'working'),

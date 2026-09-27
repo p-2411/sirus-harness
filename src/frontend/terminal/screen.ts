@@ -17,7 +17,7 @@ let writingOverlay = false;
 const LEADING_CONTROL = /^(?:\x1b\[[0-9;?]*[A-HJKhl])+/;
 const TRAILING_CONTROL = /(?:\x1b\[[0-9;?]*[A-HJKhl])+$/;
 
-export function extractFrame(chunk: string): string[] | null {
+function extractFrame(chunk: string): string[] | null {
   const body = chunk.replace(LEADING_CONTROL, '').replace(TRAILING_CONTROL, '');
   if (!body.includes('\n')) return null;
   return body.split('\n');

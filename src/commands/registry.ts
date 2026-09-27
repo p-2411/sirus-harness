@@ -73,7 +73,7 @@ export interface CommandMatch {
 
 // The vendor commands `/name` reaches. A Sirus command of the same name wins:
 // `/model`, `/rename` and `/logout` are Sirus's in both vendors' lists.
-export function invocableNativeCommands(commands: readonly NativeCommand[]): NativeCommand[] {
+function invocableNativeCommands(commands: readonly NativeCommand[]): NativeCommand[] {
   return commands.filter(command => !commandRegistry.some(spec => spec.name === command.name));
 }
 

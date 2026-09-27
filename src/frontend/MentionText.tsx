@@ -14,7 +14,7 @@ const filenamePattern = /(?<![\w@])@(?:[A-Za-z0-9_.-]+\/)*(?=[A-Za-z0-9_.-]*\.[A
 
 // Sirus keeps the original soft grey. Additional participants are ordered by
 // creation and receive stable shades from the restrained blue-purple family.
-export const participantPalette = [
+const participantPalette = [
   theme.accentSoft,
   theme.mention,
   '#A184D8',

@@ -123,7 +123,7 @@ export function describeSubscriptionUsage(usage: SubscriptionUsage): string {
 
 // How full each participant's window is, from the last usage its runtime
 // reported. A participant whose runtime has not reported yet is left out.
-export function describeSessionUsage(session: CommandSession): string {
+function describeSessionUsage(session: CommandSession): string {
   const parts = session.getParticipants().flatMap(participant => {
     const context = session.getContextUsage(participant.name);
     if (!context) return [];

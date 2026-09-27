@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { spawn } from 'child_process';
 import { loadNotificationPreference, saveNotificationPreference } from '../../persistence';
+import type { NotificationPreference } from '../../persistence/settings';
 import { osc } from './osc';
 import { writeOverlay } from './screen';
 import { terminalFocused } from './window-focus';
@@ -11,30 +12,26 @@ import { terminalFocused } from './window-focus';
 // sequence also works over SSH); otherwise the platform's notifier runs.
 // A bell goes with every notification, for terminals that badge or bounce.
 
-export type NotificationMode = 'off' | 'background' | 'always';
+export const NOTIFICATION_MODES: readonly NotificationPreference[] = ['off', 'background', 'always'];
 
-export const NOTIFICATION_MODES: readonly NotificationMode[] = ['off', 'background', 'always'];
-
-export const NOTIFICATION_MODE_DESCRIPTIONS: Record<NotificationMode, string> = {
+export const NOTIFICATION_MODE_DESCRIPTIONS: Record<NotificationPreference, string> = {
   off: 'never notify',
   background: 'notify when the terminal window is not focused (default)',
   always: 'notify whether or not the terminal is focused',
 };
 
-export const DEFAULT_NOTIFICATION_MODE: NotificationMode = 'background';
-
-export function parseNotificationMode(value: unknown): NotificationMode | null {
+export function parseNotificationMode(value: unknown): NotificationPreference | null {
   return value === 'off' || value === 'background' || value === 'always' ? value : null;
 }
 
-let mode: NotificationMode | null = null;
+let mode: NotificationPreference | null = null;
 
-export function notificationMode(): NotificationMode {
+export function notificationMode(): NotificationPreference {
   mode ??= loadNotificationPreference();
   return mode;
 }
 
-export function setNotificationMode(next: NotificationMode): void {
+export function setNotificationMode(next: NotificationPreference): void {
   if (!saveNotificationPreference(next)) throw new Error('Could not save notification settings.');
   mode = next;
 }
