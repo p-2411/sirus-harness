@@ -195,6 +195,73 @@ test.each([
   }
 });
 
+test('ACP keeps messages apart, marks a declined call, and reports what the turn used', async () => {
+  const adapter = `
+    import { createInterface } from 'node:readline';
+    const send = value => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\\n');
+    const update = update => send({ method: 'session/update', params: { sessionId: 'owner', update } });
+    let promptId;
+    for await (const line of createInterface({ input: process.stdin })) {
+      const request = JSON.parse(line);
+      const reply = result => send({ id: request.id, result });
+      if (request.id === 'approval') {
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'write-1', status: 'failed', content: [
+          { type: 'content', content: { type: 'text', text: 'The user declined.' } },
+        ] });
+        update({ sessionUpdate: 'usage_update', used: 500, size: 1000, cost: { amount: 0.25, currency: 'USD' } });
+        send({ id: promptId, result: { stopReason: 'end_turn', usage: {
+          inputTokens: 100, outputTokens: 40, cachedReadTokens: 900, totalTokens: 1040,
+        } } });
+      } else if (request.method === 'initialize') reply({ protocolVersion: 1 });
+      else if (request.method === 'session/new') reply({ sessionId: 'owner' });
+      else if (request.method === 'session/prompt') {
+        promptId = request.id;
+        update({ sessionUpdate: 'agent_message_chunk', messageId: 'first', content: { type: 'text', text: 'task details.' } });
+        update({ sessionUpdate: 'agent_message_chunk', messageId: 'second', content: { type: 'text', text: 'What next?' } });
+        update({ sessionUpdate: 'tool_call', toolCallId: 'write-1', title: 'Write a.txt', kind: 'edit', status: 'pending',
+          locations: [{ path: 'a.txt' }], content: [{ type: 'diff', path: 'a.txt', oldText: null, newText: 'a' }] });
+        send({ id: 'approval', method: 'session/request_permission', params: {
+          sessionId: 'owner', toolCall: { toolCallId: 'write-1', title: 'Write a.txt', kind: 'edit' },
+          options: [{ optionId: 'yes', name: 'Yes', kind: 'allow_once' }, { optionId: 'no', name: 'No', kind: 'reject_once' }],
+        } });
+      } else if (request.id !== undefined) reply({});
+    }
+  `;
+  const spec = spyOn(launch, 'launchFor').mockImplementation(options => ({
+    command: process.execPath, args: ['-e', adapter], env: options.env,
+    mode: options.permissionMode, session: () => ({ mcpServers: [] }), forkNeedsResume: false,
+  }));
+  const updates: RuntimeUpdate[] = [];
+  let runtime: Runtime | undefined;
+  try {
+    runtime = await startAcpRuntime({
+      vendor: 'claude', model: 'claude-sonnet-5', thinkingLevel: 'high', directory: process.cwd(),
+      systemPrompt: '', env: { ...process.env }, mcpServer: null, permissionMode: 'ask',
+      onPermission: async () => ({ outcome: { outcome: 'selected', optionId: 'no' } }),
+      onUpdate: update => { updates.push(update); },
+    });
+    await runtime.prompt({ text: 'Write it', images: [] }, new AbortController().signal);
+    expect(updates.filter(update => update.type === 'text')).toEqual([
+      { type: 'text', text: 'task details.', messageId: 'first' },
+      { type: 'text', text: 'What next?', messageId: 'second' },
+    ]);
+    // Declined as soon as the user answered, and still declined when the
+    // vendor reports the call failed.
+    const calls = updates.flatMap(update => update.type === 'tool_call' ? [update.call] : []);
+    expect(calls.map(call => [call.status, call.outcome])).toEqual([
+      ['pending', undefined], ['pending', 'declined'], ['failed', 'declined'],
+    ]);
+    // A new file's diff starts at its first line.
+    expect(calls[0]?.content[0]).toEqual({ type: 'diff', path: 'a.txt', oldText: null, newText: 'a', line: 1 });
+    expect(updates.at(-1)).toEqual({ type: 'usage', usage: {
+      inputTokens: 100, outputTokens: 40, cachedReadTokens: 900, totalTokens: 1040, costUsd: 0.25,
+    } });
+  } finally {
+    runtime?.dispose();
+    spec.mockRestore();
+  }
+});
+
 test('ACP resume failure rejects creation so the caller can seed a fresh runtime', async () => {
   const adapter = `
     import { createInterface } from 'node:readline';
@@ -466,6 +533,8 @@ describe('Session model', () => {
         participant: 'sirus',
         model: testModel,
         content: [{ type: 'text', text: 'Hello back' }],
+        startedAt: expect.any(Number),
+        finishedAt: expect.any(Number),
       },
     ]);
     expect(session.getMessages()).toEqual(messages);
@@ -513,12 +582,14 @@ describe('Session model', () => {
     await new Promise(resolve => setTimeout(resolve, 0));
 
     expect(session.getAssistantVersion()).toBeGreaterThan(0);
+    // Timed from its start; the end is stamped when the turn is over.
     expect(session.getMessages().at(-1)).toEqual({
       seq: 1,
       role: 'assistant',
       participant: 'sirus',
       model: testModel,
       content: [{ type: 'text', text: 'Working' }],
+      startedAt: expect.any(Number),
     });
 
     finish();
@@ -543,13 +614,45 @@ describe('Session model', () => {
     const session = new Session({ id: 'tools', name: 'Tools', model: testModel });
     await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'What does file.txt say?' }] });
     expect(session.getMessages().at(-1)?.content).toEqual([
-      { type: 'thought', text: 'Let me look.' },
+      { type: 'thought', text: 'Let me look.', startedAt: expect.any(Number), endedAt: expect.any(Number) },
       { type: 'tool_call', id: 'call-1', title: 'cat file.txt', kind: 'execute', status: 'completed', locations: [], content: [{ type: 'text', text: 'hi' }], output: 'hi' },
       { type: 'compaction', summary: 'Read the file.' },
       { type: 'text', text: 'Read it.' },
       { type: 'notice', severity: 'warning', title: 'Model fallback', description: 'Using the available model.' },
       { type: 'text', text: 'It says hi.' },
     ]);
+  });
+
+  test('keeps two messages apart, records what the turn used, and recaps an interruption', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let turns = 0;
+    bindScriptedRuntime(testModel, async (_input, emit) => {
+      if (turns++ === 0) {
+        emit({ type: 'text', text: 'task details.', messageId: 'a' });
+        emit({ type: 'text', text: ' More.', messageId: 'a' });
+        emit({ type: 'text', text: 'What next?', messageId: 'b' });
+        emit({ type: 'usage', usage: { inputTokens: 10, outputTokens: 3, totalTokens: 13 } });
+        return;
+      }
+      emit({ type: 'text', text: 'Half' });
+      await gate;
+    });
+    const session = new Session({ id: 'messages', name: 'Messages', model: testModel });
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Go' }] });
+    expect(session.getMessages().at(-1)).toMatchObject({
+      content: [{ type: 'text', text: 'task details. More.' }, { type: 'text', text: 'What next?' }],
+      usage: { inputTokens: 10, outputTokens: 3, totalTokens: 13 },
+    });
+    const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Again' }] });
+    while (session.getMessages().length < 4) await new Promise(resolve => setTimeout(resolve, 0));
+    session.cancel();
+    await expect(turn).rejects.toMatchObject({ name: 'AbortError' });
+    release();
+    const restored = Session.fromSnapshot(session.toSnapshot());
+    const next = bindScriptedRuntime(testModel, textTurn('Ok'));
+    await restored.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Third' }] });
+    expect(next.runtimes[0]!.prompts[0]!.text).toContain('@sirus: Half\n@sirus: [interrupted by the user]\n');
   });
 
   test('keeps notices out of mention routing, peer prompts and rebuilt runtime history', async () => {
@@ -1167,6 +1270,7 @@ describe('Session model', () => {
     expect(runtimeSignal?.aborted).toBe(true);
     expect(session.getStatus()).toBe('idle');
     expect(session.wasLastTurnCancelled()).toBe(true);
+    // Where the turn was cut short stays in the record.
     expect(session.getMessages()).toEqual([
       { seq: 0, role: 'user', to: ['sirus'], content: [{ type: 'text', text: 'Start' }] },
       {
@@ -1174,7 +1278,12 @@ describe('Session model', () => {
         role: 'assistant',
         participant: 'sirus',
         model: testModel,
-        content: [{ type: 'text', text: 'Partial' }],
+        content: [
+          { type: 'text', text: 'Partial' },
+          { type: 'notice', severity: 'interrupted', title: 'Interrupted', description: 'What should @sirus do instead?' },
+        ],
+        startedAt: expect.any(Number),
+        finishedAt: expect.any(Number),
       },
     ]);
     expect(session.cancel()).toBe(false);
@@ -1204,17 +1313,21 @@ describe('Session model', () => {
     expect(binding.starts[0].directory).toBe(process.cwd());
     expect(binding.runtimes[0].prompts.map(prompt => prompt.text))
       .toEqual(['@Reviewer inspect this', '@reviewer check it again']);
+    // The prompt stays as typed; the runtime read it without the model.
     expect(session.getMessages()[0]).toEqual({
       seq: 0,
       role: 'user',
       to: ['Reviewer'],
-      content: [{ type: 'text', text: '@Reviewer inspect this' }],
+      content: [{ type: 'text', text: '@Reviewer test-session-model inspect this' }],
+      creationModels: [{ start: 9, end: 28 }],
     });
+    const timed = { startedAt: expect.any(Number), finishedAt: expect.any(Number) };
     expect(session.getMessages().filter(message => message.role === 'assistant'))
       .toEqual([
-        { seq: 1, role: 'assistant', participant: 'Reviewer', model: testModel, content: [{ type: 'text', text: 'reviewed' }] },
-        { seq: 3, role: 'assistant', participant: 'Reviewer', model: testModel, content: [{ type: 'text', text: 'reviewed' }] },
+        { seq: 1, role: 'assistant', participant: 'Reviewer', model: testModel, content: [{ type: 'text', text: 'reviewed' }], ...timed },
+        { seq: 3, role: 'assistant', participant: 'Reviewer', model: testModel, content: [{ type: 'text', text: 'reviewed' }], ...timed },
       ]);
+    expect(Session.fromSnapshot(session.toSnapshot()).getMessages()[0]?.creationModels).toEqual([{ start: 9, end: 28 }]);
   });
 
   test('tells the others a prompt addresses who it added to the session', async () => {
@@ -1232,16 +1345,16 @@ describe('Session model', () => {
       '@reviewer review the diff, then ask @sirus to fix it',
     ].join('\n'));
     // The new participant knows its own name, and the record keeps the
-    // prompt as the chat shows it.
+    // prompt as the user typed it and the chat shows it.
     expect(reviewer.runtimes[0].prompts[0].text).toBe('@reviewer review the diff, then ask @sirus to fix it');
-    expect(textOf(session.getMessages()[0])).toBe('@reviewer review the diff, then ask @sirus to fix it');
+    expect(textOf(session.getMessages()[0])).toBe('@reviewer test-session-model review the diff, then ask @sirus to fix it');
 
     // Once it exists, a prompt naming it introduces nobody.
     await session.sendMessage({ role: 'user', content: [{ type: 'text', text: '@sirus @reviewer compare notes' }] });
     expect(sirus.runtimes[0].prompts[1].text).toBe('@sirus @reviewer compare notes');
   });
 
-  test('runs unique mentions in parallel and commits responses in mention order', async () => {
+  test('runs unique mentions in parallel and orders replies by their first output', async () => {
     let releaseFirst!: () => void;
     let releaseSecond!: () => void;
     const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
@@ -1278,12 +1391,15 @@ describe('Session model', () => {
       seq: 0,
       role: 'user',
       to: ['first', 'second'],
-      content: [{ type: 'text', text: '@first @second @FIRST compare' }],
+      content: [{ type: 'text', text: '@first test-session-model @second test-second-session-model @FIRST compare' }],
+      creationModels: [{ start: 6, end: 25 }, { start: 33, end: 59 }],
     });
+    // The second reply began first, so a first reply that arrives later
+    // takes its place below it rather than pushing it down.
     expect(session.getMessages().slice(1).map(message => [message.participant, message.content[0]]))
       .toEqual([
-        ['first', { type: 'text', text: 'first response' }],
         ['second', { type: 'text', text: 'second response' }],
+        ['first', { type: 'text', text: 'first response' }],
       ]);
   });
 
@@ -1506,8 +1622,9 @@ describe('Session model', () => {
     expect(started).toEqual(['reviewer', 'verifier']);
     await turn;
 
+    // The verifier was released first, so its reply came first.
     expect(session.getMessages().filter(message => message.role === 'assistant')
-      .map(message => message.participant)).toEqual(['sirus', 'reviewer', 'verifier']);
+      .map(message => message.participant)).toEqual(['sirus', 'verifier', 'reviewer']);
   });
 
   test('persists all participants and their model choices in snapshots', () => {
@@ -1580,6 +1697,8 @@ describe('Session subscriptions', () => {
       participant: 'sirus',
       model: testModel,
       content: [{ type: 'text', text: 'Partial before failure' }, { type: 'notice', severity: 'error', title: 'OpenAI refused or could not complete this request. Try again or revise the prompt.' }],
+      startedAt: expect.any(Number),
+      finishedAt: expect.any(Number),
     });
   });
 

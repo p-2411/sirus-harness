@@ -13,6 +13,8 @@ export const theme = {
   success: "#00C853",    // traffic-signal green — the one green: tool activity, copied
   toolIndicator: "#00C853", // same green as success, kept as a named role
   danger: "#BF6A6A",     // restrained signal red
+  diffAddedBg: "#15291D",   // deep green tint behind an added line
+  diffRemovedBg: "#321A1C", // deep red tint behind a removed line
   selectionBg: "#3A4048", // slate — highlighted text under a drag-selection
   selectionFg: "#F2F3F5", // arctic white on the slate
 } as const;

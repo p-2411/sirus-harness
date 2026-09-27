@@ -22,7 +22,16 @@ import {
 import { INTERRUPTED_REASON, workerName, workerReport } from '../tools/subagents/report';
 import { cancelSubagent, messageSubagent } from '../tools/subagents/run';
 import type { SubagentHost } from '../tools/types';
-import { textOf, type ImageBlock, type MessageBlock, type Message, type NoticeBlock, type ThinkingLevel, type ToolCallBlock } from '../types';
+import {
+  textOf,
+  withoutCreationModels,
+  type ImageBlock,
+  type MessageBlock,
+  type Message,
+  type NoticeBlock,
+  type ThinkingLevel,
+  type ToolCallBlock,
+} from '../types';
 import type { ContextUsage } from '../usage';
 import { parseFileMentions, resolveFileMentions } from '../../fileMentions';
 import { isAbortError, TurnCancelledError } from '../../abort';
@@ -38,7 +47,7 @@ import {
 } from './checkpointLog';
 import { MessageQueue, isAutoSendable, type QueuedMessage } from './messageQueue';
 import { generateSessionName } from './naming';
-import { keyOf, NAME_PATTERN_SOURCE, ParticipantRoster, stripCreationModels, type Participant } from './roster';
+import { keyOf, NAME_PATTERN_SOURCE, ParticipantRoster, type Participant } from './roster';
 import { Timeline, type Draft } from './timeline';
 import { TurnRunner, withIntroductions } from './turnRunner';
 
@@ -432,15 +441,17 @@ export class Session {
         ? [...new Set(message.to.map(name => this.roster.require(name)))]
         : this.roster.resolveMentions(mentions);
 
-      // A model following a newly introduced @name is host routing metadata,
-      // not part of the conversation. Strip it before either the UI history or
-      // any runtime sees the turn.
-      const stored = stripCreationModels(resolved, mentions);
-      const queued = stripCreationModels(message, mentions);
+      // A model following a newly introduced @name is routing, not
+      // conversation. The history keeps the prompt as typed and marks where
+      // it is; everything a runtime reads goes without it, told instead who
+      // the prompt introduced.
+      const creationModels = mentions.flatMap(mention => mention.modelSpan ? [mention.modelSpan] : []);
+      const stored = creationModels.length > 0 ? { ...resolved, creationModels } : resolved;
+      const queued = withoutCreationModels({ ...message, creationModels });
       const introduced = mentions.filter(mention => mention.model);
       if (this.timeline.isEmpty() && this.autoNamePending) {
         // Name from the user's text, not the contents of resolved attachments.
-        this.startNaming(textOf(stripCreationModels(message, mentions)));
+        this.startNaming(textOf(queued));
       }
       if (this.activeSends === 1) this.timeline.startConversationIfNeeded(Date.now());
       accepted = true;
@@ -480,10 +491,12 @@ export class Session {
           const reply = target.activeReply;
           const tail = reply?.content.at(-1);
           const textTail = tail?.type === 'text' || tail?.type === 'thought';
-          const injectedAt = reply ? { seq: reply.seq,
+          // A reply takes its seq with its first output; one that has none
+          // yet has nothing for the message to sit inside.
+          const injectedAt = reply && reply.seq >= 0 ? { seq: reply.seq,
             block: reply.content.length - (textTail ? 1 : 0),
             offset: textTail ? tail.text.length : 0 } : undefined;
-          await target.steer(withIntroductions(textOf(stored), introduced, target.name));
+          await target.steer(withIntroductions(textOf(withoutCreationModels(stored)), introduced, target.name));
           entry.injectedAt ??= injectedAt;
           this.timeline.deliver(entry, [{ name: target.name, transcript: target.transcript }]);
         } catch (error) {
@@ -800,7 +813,9 @@ export class Session {
         droppedMessages = fork.messages.length - retained.length;
         fork.messages = retained;
         fork.checkpoints = fork.checkpoints?.slice(0, found.index);
-        fork.inputContent = prompt?.role === 'user' ? textOf(prompt) : '';
+        // The fork keeps every participant, so a model that introduced one
+        // would now be read as prose.
+        fork.inputContent = prompt?.role === 'user' ? textOf(withoutCreationModels(prompt)) : '';
       }
       return { checkpoint: found.checkpoint, files, droppedMessages, fork };
     } finally {

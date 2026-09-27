@@ -9,9 +9,8 @@ import {
   type SubagentStatus,
 } from '../agent_runtime/tools/subagents';
 import { workerName } from '../agent_runtime/tools/subagents/report';
-import { sentenceCase } from './chat/ApprovalPrompt';
+import { approvalAction } from './chat/ApprovalPrompt';
 import { questionText } from './chat/QuestionCard';
-import { toolLine } from './chat/ChatMessage';
 import { notify } from './terminal/notifications';
 
 const BODY_LENGTH = 120;
@@ -65,7 +64,7 @@ export function subscribeApprovalNotifications(getSessions: () => readonly Sessi
       const session = getSessions().find(candidate => candidate.getId() === request.sessionId);
       send(
         `Sirus · ${session?.getName() ?? 'approval needed'}`,
-        `${describeRequester(request.requester)} wants to ${firstLine(sentenceCase(toolLine(request.toolCall)))}`,
+        `${describeRequester(request.requester)} wants to ${firstLine(approvalAction(request.toolCall))}`,
       );
     }
     seen = new Set(current.map(request => request.id));

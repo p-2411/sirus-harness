@@ -2,7 +2,7 @@ import { isAbortError, TurnCancelledError } from '../../abort';
 import type { SessionAgent, TurnInput } from '../agent';
 import { vendorOf } from '../providers/catalog';
 import { nativePrompt } from '../runtime/commands';
-import { textOf, type ImageBlock, type Message } from '../types';
+import { textOf, withoutCreationModels, type ImageBlock, type Message } from '../types';
 import { keyOf, type Mention, type ParticipantRoster } from './roster';
 import type { Timeline } from './timeline';
 
@@ -48,7 +48,7 @@ function promptFor(invocation: Invocation): TurnInput {
   if (first?.role === 'user' && invocation.entries.length === 1) {
     const { participant } = invocation;
     const vendor = vendorOf(participant.model);
-    const text = textOf(first);
+    const text = textOf(withoutCreationModels(first));
     return {
       text: withIntroductions(vendor ? nativePrompt(text, vendor, participant.directory) : text, invocation.introduced ?? [], participant.name),
       images: first.content.filter((block): block is ImageBlock => block.type === 'image'),
@@ -56,7 +56,7 @@ function promptFor(invocation: Invocation): TurnInput {
   }
   return {
     text: invocation.entries
-      .map(entry => `${entry.role === 'user' ? 'The user' : `@${entry.participant ?? 'sirus'}`} wrote:\n${textOf(entry)}`)
+      .map(entry => `${entry.role === 'user' ? 'The user' : `@${entry.participant ?? 'sirus'}`} wrote:\n${textOf(withoutCreationModels(entry))}`)
       .join('\n\n'),
     images: invocation.entries.flatMap(entry => entry.role === 'user'
       ? entry.content.filter((block): block is ImageBlock => block.type === 'image') : []),

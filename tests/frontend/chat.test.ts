@@ -5,7 +5,8 @@ import { PassThrough } from 'node:stream';
 import stripAnsi from 'strip-ansi';
 import { Session } from '../../src/agent_runtime/session';
 import { planCall, type Message, type PlanEntry, type ToolCallBlock } from '../../src/agent_runtime/types';
-import Chat, { currentPlans, formatElapsed, promptHistory, turnPhase } from '../../src/frontend/chat/Chat';
+import Chat, { currentPlans, promptHistory, turnPhase } from '../../src/frontend/chat/Chat';
+import { formatElapsed } from '../../src/frontend/chat/ChatMessage';
 import { usageCommandSpec } from '../../src/commands/authentication/commands';
 import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
 import * as updater from '../../src/updater';
@@ -619,6 +620,11 @@ describe('turn status', () => {
     const title = 'bun test --coverage --reporter junit tests/frontend';
     expect(turnPhase([{ seq: 0, role: 'assistant', content: [{ ...running, title }] }]))
       .toBe(`running Run ${title.slice(0, 39)}…`);
+  });
+
+  test('names a running call the way its row does', () => {
+    const reading: Message = { seq: 3, role: 'assistant', content: [{ ...running, kind: 'read', title: "Read file '/project/notes.txt'" }] };
+    expect(turnPhase([reading], '/project')).toBe("running Read file 'notes.txt'");
   });
 
   test('formats elapsed seconds and minutes', () => {

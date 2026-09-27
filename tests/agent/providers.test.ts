@@ -242,6 +242,9 @@ test('worker launch policies disable native delegation and apply definition tool
   const codex = launchFor({ ...options, vendor: 'gpt', model: 'gpt-5.6-luna' });
   expect(codex.env.INITIAL_AGENT_MODE).toBe('read-only');
   expect(JSON.parse(codex.env.CODEX_CONFIG!).features.multi_agent).toBe(false);
+  // Sirus's own config switches on an unstable feature; Codex must not warn
+  // the user about it.
+  expect(JSON.parse(codex.env.CODEX_CONFIG!).suppress_unstable_features_warning).toBe(true);
   // 1.13.1 unsubscribes forks: a resume is required to receive updates.
   expect(codex.forkNeedsResume).toBe(true);
 });

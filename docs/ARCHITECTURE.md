@@ -28,7 +28,10 @@ One user prompt, in the order a reader opens the files:
    `session.sendMessage(draft)`.
 2. `agent_runtime/session/index.ts`: `Session.sendMessage` reads the mentions through
    `ParticipantRoster`, stamps the entry with the session-wide sequence number and puts it
-   in the transcript of every participant it addresses, and nothing else's. The pre-turn
+   in the transcript of every participant it addresses, and nothing else's. The entry keeps
+   the prompt as typed; the model that introduced a participant is marked
+   (`creationModels`) and everything a runtime reads goes without it
+   (`withoutCreationModels`). The pre-turn
    checkpoint is awaited before anything is prompted, because the runtimes run their tools
    themselves and cannot wait on a barrier. Then the round goes to `TurnRunner`.
 3. `agent_runtime/session/turnRunner.ts`: the round loop. Every addressed participant runs
@@ -49,8 +52,11 @@ One user prompt, in the order a reader opens the files:
    the credential, and `session()`, which every session opened on that process goes
    through.
 7. The adapter process runs the model and the vendor's own file, shell, search and web
-   tools. Its `session/update` notifications become transcript entries: text, thoughts,
-   tool calls merged by id, the context gauge, a compaction boundary.
+   tools. Its `session/update` notifications become transcript entries: text (a new block
+   for each message), timed thoughts, tool calls merged by id, the context gauge, a
+   compaction boundary, and once the turn ends what it used (`TurnUsage`, from the prompt
+   response). A call the user declined at the approval prompt is marked so in `acp.ts`
+   (`outcome`), since both vendors report it only as failed.
 8. `agent_runtime/tools/server.ts`: a Sirus tool the model called arrives here over
    loopback HTTP, carrying the session's bearer token and the caller's name, so the call
    knows which session it belongs to and who issued it. The registry is `tools/index.ts`;
@@ -70,14 +76,16 @@ facade over collaborators in the same folder, each constructible on its own:
   user prompt that addressed it, another participant's message that mentioned it, its own
   responses. The same entry object sits in every transcript it was delivered to.
 - `Timeline`: what sits above the transcripts. It hands out the session-wide sequence
-  numbers, merges the transcripts into the one ordered view the UI and the snapshot read,
+  numbers, a reply's when its first output arrives, so replies running in parallel stand
+  in the order they began; merges the transcripts into the one ordered view the UI and the snapshot read,
   keeps the activity clocks, and owns the identity of the assistant entries a round fills
   in.
 - `ParticipantRoster`: the agents in the session and all `@name` routing. The mention
   grammar exists once, here.
 - `TurnRunner`: the round loop, and the one place that decides what a participant is
   prompted with, including who a user prompt added to the session
-  (`withIntroductions`), since the model that created them is stripped from its text.
+  (`withIntroductions`), since the runtimes read the prompt without the model that created
+  them.
 - `CheckpointLog`: directory snapshots taken before each turn, and the cross-session
   interlock that makes restoring one safe. Injectable `DirectoryActivity`; the default is
   process-wide.
@@ -197,8 +205,9 @@ handle and starts fresh with the bounded text recap. Prompt hashes catch changes
 app restarts too. Missing sessions, directories, credentials or profile homes, and vendor
 resume refusals, produce a brief notice and use the same recap fallback. A cancelled
 startup keeps an existing handle for the next attempt. A turn that is cancelled or fails
-marks the tool calls it left open as failed, since nothing more will be heard of them, and
-a snapshot restores an open call the same way.
+marks the tool calls it left open as failed, since nothing more will be heard of them; a
+cancelled one marks them cancelled, and leaves an `Interrupted` notice where it stopped,
+which a recap passes on. A snapshot restores an open call as cancelled.
 
 A participant keeps the time its runtime last reported anything (`quietFor`), not counting
 time spent waiting on the user's approval or inside a tool call that is still running. After
@@ -242,7 +251,9 @@ so nothing fails silently.
 
 The vendors run their own file, shell, search and web tools, so what is left in
 `tools/index.ts` is what only Sirus can do: memory and delegation. A `Tool` is a plain
-object: name, description, argument schema, optional `audience` and `requires`, and `run`.
+object: name, description, argument schema, optional `audience` and `requires`, `label`
+(how a call reads in the chat and on an approval prompt, since the vendors know it only by
+its MCP name) and `run`.
 Adding a tool is one entry in one family file.
 
 `tools/server.ts` is the one MCP server inside the Sirus process, on loopback at an
@@ -267,7 +278,8 @@ every action that is not a read, in `auto` its own reviewer escalates only what 
 unsafe, in `bypass` nothing is asked. `approvals.ts` is the queue for what does get
 escalated: the prompt renders from the ACP tool call and nothing else, and the answer is one
 of the vendor's own options, so "allow for this session" is the vendor's allow-always and
-Sirus keeps no allowance of its own. There is no `permissions/index.ts`: every import names
+Sirus keeps no allowance of its own. What the user decided stays on the call itself: the
+ACP client marks one they declined, and the transcript keeps saying so after a restart. There is no `permissions/index.ts`: every import names
 the file that defines the symbol.
 
 Questions are the vendors' too: Claude's AskUserQuestion (on the allowlist) and Codex's
@@ -311,11 +323,14 @@ it the keyboard against a list frozen as focus arrives, so nothing moves under t
 `enter` sends `/agents <id>` down the path typing it takes; the ordering is the strip's own,
 while `/agents` keeps listing every run nobody has dismissed. A worker goes by the name its owner gave it (`workerName`), or its id when it has none, in
 all of these and on its approval prompts. In the history, `ChatMessage.tsx` lets the
-SpawnAgent row follow the run it started and keeps it out of the `Ran N commands` groups. The
+SpawnAgent row follow the run it started and keeps it out of the groups of ordinary calls. The
 row is laid out like Claude Code's Agent row: the worker and its task, then how the run stands
 (`runSummary`, "Done (3 tool uses · 24k tokens · 16s)"), then the report the session set as
 the call's output, whole and as Markdown, open already once the run has ended. A spawn that
-started no worker shows the tool's error instead.
+started no worker shows the tool's error instead. How every other call reads is
+`frontend/chat/toolCalls.ts`: its line (the kind's verb unless the vendor's title has one,
+Sirus's own tools by their `label`), the change it made as a numbered line diff, why it
+failed, and a group of calls summed up by kind ("Read 2 files, edited 1 file").
 
 ## Verification
 

@@ -7,6 +7,7 @@ import {
   failOpenToolCalls,
   IMAGE_MEDIA_TYPES,
   THINKING_LEVELS,
+  TOOL_CALL_OUTCOMES,
   TOOL_CALL_STATUSES,
   TOOL_KINDS,
   type Message,
@@ -37,6 +38,8 @@ const imageBlockSchema = z.object({
 const thoughtBlockSchema = z.object({
   type: z.literal('thought'),
   text: z.string(),
+  startedAt: z.number().optional(),
+  endedAt: z.number().optional(),
 });
 
 const compactionBlockSchema = z.object({
@@ -60,7 +63,10 @@ function knownBlocks(value: unknown, types: ReadonlySet<string>): unknown {
 }
 
 const toolCallContentSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('diff'), path: z.string(), oldText: z.string().nullable(), newText: z.string() }),
+  z.object({
+    type: z.literal('diff'), path: z.string(), oldText: z.string().nullable(), newText: z.string(),
+    line: z.number().int().positive().optional(),
+  }),
   z.object({ type: z.literal('text'), text: z.string() }),
 ]);
 const toolCallContentTypes = new Set(toolCallContentSchema.options.map(schema => schema.shape.type.value));
@@ -75,6 +81,7 @@ const toolCallBlockSchema = z.object({
   content: z.preprocess(value => knownBlocks(value, toolCallContentTypes), z.array(toolCallContentSchema)),
   input: z.unknown().optional(),
   output: z.unknown().optional(),
+  outcome: z.enum(TOOL_CALL_OUTCOMES).optional(),
 });
 
 // Files written before the runtimes ran the tools: a call Sirus made and the
@@ -122,12 +129,26 @@ const messageSchema = z.object({
     block: z.number().int().nonnegative(),
     offset: z.number().int().nonnegative(),
   }).optional(),
+  creationModels: z.array(z.object({ start: z.number().int().nonnegative(), end: z.number().int().nonnegative() })).optional(),
+  startedAt: z.number().optional(),
+  finishedAt: z.number().optional(),
   // A compaction summary written by Sirus itself, before the runtimes
   // compacted their own conversations. It becomes a boundary with the
   // summary text; the token figures it carried are gone with the gauge.
   compaction: z.object({}).passthrough().optional(),
-  // Token usage the old transports reported per message; not kept.
-  usage: z.object({}).passthrough().optional(),
+  // What the turn used. The old transports wrote another shape under the
+  // same name, per message and without a total; that one is not kept.
+  usage: z.unknown().optional(),
+});
+
+const turnUsageSchema = z.object({
+  inputTokens: z.number().nonnegative(),
+  outputTokens: z.number().nonnegative(),
+  cachedReadTokens: z.number().nonnegative().optional(),
+  cachedWriteTokens: z.number().nonnegative().optional(),
+  thoughtTokens: z.number().nonnegative().optional(),
+  totalTokens: z.number().nonnegative(),
+  costUsd: z.number().nonnegative().optional(),
 });
 
 const nativeSessionSchema = z.object({
@@ -299,7 +320,7 @@ function toBlocks(content: readonly StoredBlock[]): MessageBlock[] {
   }
   // Nothing is running after a restart: a call saved mid-turn ended with the
   // process that ran it.
-  failOpenToolCalls(blocks);
+  failOpenToolCalls(blocks, 'cancelled');
   return blocks;
 }
 
@@ -310,6 +331,7 @@ function toMessage(stored: StoredMessage, index: number, defaultParticipant: str
     ? [{ type: 'compaction' as const, summary: stored.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n') }]
     : toBlocks(stored.content);
   const role = stored.compaction ? 'assistant' : stored.role;
+  const usage = turnUsageSchema.safeParse(stored.usage);
   return {
     seq: stored.seq ?? index,
     role,
@@ -319,6 +341,10 @@ function toMessage(stored: StoredMessage, index: number, defaultParticipant: str
     ...(stored.model ? { model: stored.model } : {}),
     ...(stored.hidden ? { hidden: true as const } : {}),
     ...(stored.injectedAt ? { injectedAt: stored.injectedAt } : {}),
+    ...(stored.creationModels?.length ? { creationModels: stored.creationModels } : {}),
+    ...(stored.startedAt !== undefined ? { startedAt: stored.startedAt } : {}),
+    ...(stored.finishedAt !== undefined ? { finishedAt: stored.finishedAt } : {}),
+    ...(usage.success ? { usage: usage.data } : {}),
   };
 }
 

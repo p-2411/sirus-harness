@@ -134,14 +134,17 @@ describe('session persistence', () => {
         sourceId: null, profileHome: '/profiles/codex', systemPromptHash: 'system-hash',
       } }],
       messages: [
-        { role: 'user', to: ['sirus'], content: [image, { type: 'text', text: 'Explain this screenshot' }] },
-        { role: 'assistant', participant: 'sirus', model: 'gpt-5.6-luna', content: [
-          { type: 'thought', text: 'Looking at it.' },
+        { role: 'user', to: ['sirus'], creationModels: [{ start: 4, end: 17 }], content: [image, { type: 'text', text: 'Explain this screenshot' }] },
+        { role: 'assistant', participant: 'sirus', model: 'gpt-5.6-luna', startedAt: 500, finishedAt: 900,
+          usage: { inputTokens: 10, outputTokens: 20, cachedReadTokens: 5, totalTokens: 35, costUsd: 0.01 }, content: [
+          { type: 'thought', text: 'Looking at it.', startedAt: 500, endedAt: 700 },
           { type: 'notice', severity: 'warning', title: 'Model fallback', description: 'Using another model.' },
           { type: 'tool_call', id: 'call-1', title: 'ls', kind: 'execute', status: 'completed', locations: [], content: [{ type: 'text', text: 'a.png' }], input: { command: 'ls' }, output: 'a.png' },
+          { type: 'tool_call', id: 'call-2', title: 'Write a.txt', kind: 'edit', status: 'failed', outcome: 'declined', locations: [], content: [{ type: 'diff', path: 'a.txt', oldText: null, newText: 'a', line: 1 }] },
           { type: 'text', text: 'Explanation' },
           { type: 'notice', severity: 'vendor-hint', title: 'Finished' },
           { type: 'compaction', summary: 'The screenshot was explained.' },
+          { type: 'notice', severity: 'interrupted', title: 'Interrupted' },
         ] },
       ],
       checkpoints: [checkpoint],
@@ -175,6 +178,24 @@ describe('session persistence', () => {
     expect(migrated.selectedSessionId).toBe(session.getId());
     expect(readFileSync(path.join(copiedDirectory, 'sessions.json.migrated'), 'utf8')).toBe(original);
     expect(readFileSync(fixture, 'utf8')).toBe(original);
+  });
+
+  test('restores a call left open as cancelled, and drops usage the old transports wrote', () => {
+    const session = new Session({
+      id: 'open-call', name: 'Open call', directory: '/projects/open',
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'Run it' }] },
+        { role: 'assistant', participant: 'sirus', content: [
+          { type: 'tool_call', id: 'running', title: 'sleep 60', kind: 'execute', status: 'in_progress', locations: [], content: [] },
+        ] },
+      ],
+    });
+    const snapshot = session.toSnapshot();
+    (snapshot.messages[1] as { usage?: unknown }).usage = { inputTokens: 1, outputTokens: 2, contextTokens: 3 };
+    expect(saveSessionSnapshots([snapshot], snapshot.id, directory)).toBe(true);
+    const [restored] = loadSessionSnapshots(directory).snapshots;
+    expect(restored!.messages[1]!.content[0]).toMatchObject({ status: 'failed', outcome: 'cancelled' });
+    expect(restored!.messages[1]!.usage).toBeUndefined();
   });
 
   test('drops unknown block kinds without dropping messages or other sessions', () => {

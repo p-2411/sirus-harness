@@ -223,8 +223,8 @@ test('tool approval indicators do not leak between sessions reusing a call ID', 
     for (const approval of pendingApprovals(second.getId())) resolveApproval(approval.id, 'deny');
     await pending;
   }
-  // The vendor moves on, but the transcript keeps saying what the user chose.
-  expect(row(second)).toContain('declined by user');
-  expect(row(first)).not.toContain('declined by user');
+  // What the user chose is the call's own record from here on.
+  expect(row(second)).not.toContain('waiting for approval');
+  expect(row(first)).not.toContain('declined');
   for (const session of [first, second]) session.dispose();
 });

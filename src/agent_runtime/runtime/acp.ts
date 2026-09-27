@@ -14,13 +14,14 @@ import {
   type SessionConfigOption,
   type SessionMode,
   type SessionUpdate,
+  type Usage,
 } from '@agentclientprotocol/sdk';
 import { abortable, abortReason, throwIfAborted } from '../../abort';
 import { imageData } from '../../images';
 import { SIRUS_VERSION } from '../../version';
 import type { PermissionMode } from '../permissions/policy';
 import type { ListedModel, Vendor } from '../providers/catalog';
-import { THINKING_LEVELS, type ThinkingLevel, type ToolCallBlock } from '../types';
+import { THINKING_LEVELS, type ThinkingLevel, type ToolCallBlock, type ToolCallOutcome, type TurnUsage } from '../types';
 import type { ContextUsage } from '../usage';
 import { nativeCommandFrom } from './commands';
 import { AdapterLostError } from './errors';
@@ -135,6 +136,20 @@ function textOf(blocks: readonly ContentBlock[]): string {
   return blocks.filter(block => block.type === 'text').map(block => block.text).join('');
 }
 
+// A prompt response's usage as the transcript keeps it, with the turn's share
+// of the session's cost when the vendor reports one.
+function turnUsage(usage: Usage, cost: number | null): TurnUsage {
+  return {
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    totalTokens: usage.totalTokens,
+    ...(typeof usage.cachedReadTokens === 'number' ? { cachedReadTokens: usage.cachedReadTokens } : {}),
+    ...(typeof usage.cachedWriteTokens === 'number' ? { cachedWriteTokens: usage.cachedWriteTokens } : {}),
+    ...(typeof usage.thoughtTokens === 'number' ? { thoughtTokens: usage.thoughtTokens } : {}),
+    ...(cost !== null && cost >= 0 ? { costUsd: cost } : {}),
+  };
+}
+
 type CompactionStatus = 'in_progress' | 'completed' | 'failed' | 'cancelled';
 
 function compactionStatus(status: string): CompactionStatus | null {
@@ -188,7 +203,14 @@ interface SessionState {
   modeUpdates: number;
   configOptions: SessionConfigOption[];
   context: ContextUsage | null;
+  // The session's running cost as the vendor last reported it (Claude does;
+  // codex-acp does not), from which each turn's own share is read.
+  cost: number | null;
   toolCalls: Map<string, ToolCallBlock>;
+  // Calls the user declined, or whose approval the turn's end withdrew, with
+  // why: the vendors report either as failed, and may report the call only
+  // after its approval was answered.
+  stopped: Map<string, ToolCallOutcome>;
   tasks: Map<string, BackgroundTask>;
   stoppingTasks: Set<string>;
   stopBackgroundOnCancel: boolean;
@@ -273,7 +295,9 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
       modeUpdates: 0,
       configOptions: [],
       context: null,
+      cost: null,
       toolCalls: new Map(),
+      stopped: new Map(),
       tasks: new Map(),
       stoppingTasks: new Set(),
       stopBackgroundOnCancel: false,
@@ -340,7 +364,9 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
     }
     switch (update.sessionUpdate) {
       case 'agent_message_chunk':
-        return update.content.type === 'text' ? { type: 'text', text: update.content.text } : null;
+        return update.content.type === 'text' ? {
+          type: 'text', text: update.content.text, ...(update.messageId ? { messageId: update.messageId } : {}),
+        } : null;
       case 'agent_thought_chunk':
         return update.content.type === 'text' ? { type: 'thought', text: update.content.text } : null;
       case 'notice':
@@ -358,12 +384,15 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
           const status = compactionStatus(update.status ?? 'in_progress');
           return status ? compaction(state, update.toolCallId, status) : null;
         }
-        const call = toolCallBlockFrom(update, state.toolCalls.get(update.toolCallId));
+        const reduced = toolCallBlockFrom(update, state.toolCalls.get(update.toolCallId));
+        const outcome = state.stopped.get(reduced.id);
+        const call = outcome && !reduced.outcome ? { ...reduced, outcome } : reduced;
         state.toolCalls.set(call.id, call);
         return { type: 'tool_call', call };
       }
       case 'usage_update':
         state.context = { tokens: update.used, window: update.size };
+        if (typeof update.cost?.amount === 'number' && Number.isFinite(update.cost.amount)) state.cost = update.cost.amount;
         return { type: 'context', usage: state.context };
       case 'compaction_summary_chunk':
         if (update.content.type === 'text') {
@@ -469,11 +498,35 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
     const state = answeringSession(request.sessionId, request.toolCall);
     const signal = state?.turn?.signal;
     if (!state || !signal || signal.aborted) return CANCELLED;
+    let response: RequestPermissionResponse;
     try {
-      return await state.hooks.onPermission(request, signal);
+      response = await state.hooks.onPermission(request, signal);
     } catch (error) {
       if (signal.aborted) return CANCELLED;
       throw error;
+    }
+    const { outcome } = response;
+    const chosen = outcome.outcome === 'selected'
+      ? request.options.find(option => option.optionId === outcome.optionId)
+      : undefined;
+    if (!chosen || chosen.kind.startsWith('reject')) {
+      stopCall(state, request.toolCall.toolCallId, chosen || !signal.aborted ? 'declined' : 'cancelled');
+    }
+    return response;
+  }
+
+  // Records why a call will not run, and says so at once when the call is
+  // already in the transcript.
+  function stopCall(state: SessionState, id: string, outcome: ToolCallOutcome): void {
+    state.stopped.set(id, outcome);
+    const call = state.toolCalls.get(id);
+    if (!call || call.outcome) return;
+    const stopped = { ...call, outcome };
+    state.toolCalls.set(id, stopped);
+    try {
+      state.hooks.onUpdate({ type: 'tool_call', call: stopped });
+    } catch (error) {
+      if (state.turn) state.turn.error = error instanceof Error ? error : new Error(String(error));
     }
   }
 
@@ -601,8 +654,15 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
       unanswered,
     ]);
     try {
+      const costBefore = state.cost ?? 0;
       const response = await abortable(request, signal);
       if (response.stopReason === 'cancelled' && signal.aborted) throw abortReason(signal);
+      if (response.usage) {
+        // The SDK answers a request ahead of the notifications read before
+        // it, and the vendor's last cost update is one of those.
+        await new Promise<void>(resolve => setImmediate(resolve));
+        state.hooks.onUpdate({ type: 'usage', usage: turnUsage(response.usage, state.cost === null ? null : state.cost - costBefore) });
+      }
       if (current.error) throw current.error;
       return { stopReason: response.stopReason };
     } catch (error) {

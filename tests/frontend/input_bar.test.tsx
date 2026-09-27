@@ -25,7 +25,7 @@ import type { CommandMenuEntry, CommandMenuItem } from '../../src/commands/regis
 import type { Feedback } from '../../src/commands/feedback';
 import { Session } from '../../src/agent_runtime/session';
 import Sidebar from '../../src/frontend/Sidebar';
-import { lastDecision, pendingApprovals, requestPermission, resolveApproval, type ApprovalDecision, type ApprovalRequest } from '../../src/agent_runtime/permissions/approvals';
+import { pendingApprovals, requestPermission, resolveApproval, type ApprovalDecision, type ApprovalRequest } from '../../src/agent_runtime/permissions/approvals';
 import type { QuestionAnswer, QuestionField, QuestionRequest } from '../../src/agent_runtime/permissions/questions';
 import type { PermissionOption } from '@agentclientprotocol/sdk';
 import { notifySubagents, type SubagentRun } from '../../src/agent_runtime/tools/subagents';
@@ -437,21 +437,44 @@ describe('approval prompt', () => {
     expect(output).toContain('esc decline');
   });
 
-  test('cuts an unrecognised input down to a readable line', () => {
+  test('names Sirus’s own tools and lists their arguments, never raw JSON', () => {
     const output = render(approval({
       type: 'tool_call',
       id: 'call-3',
       kind: 'other',
-      title: 'sirus - SaveMemory',
+      title: 'mcp__sirus__SpawnAgent',
       status: 'pending',
       locations: [],
       content: [],
-      input: { note: 'x'.repeat(400) },
+      input: { prompt: 'Review the loader.\nRun its tests.', description: 'Review loader', runInBackground: true },
     }));
 
-    expect(output).toContain('@sirus wants to tool sirus - SaveMemory');
-    expect(output).toContain('…');
-    expect(output).not.toContain('x'.repeat(300));
+    expect(output).toContain('@sirus wants to start subagent: Review loader');
+    expect(output).toContain('prompt:');
+    expect(output).toContain('Review the loader.');
+    expect(output).toContain('runInBackground: true');
+    expect(output).not.toContain('{');
+    expect(output).not.toContain('mcp__sirus');
+    // Codex wraps the same arguments with its server and tool names.
+    const codex = render(approval({
+      type: 'tool_call', id: 'call-4', kind: 'execute', title: 'mcp.sirus.CancelAgent',
+      status: 'pending', locations: [], content: [],
+      input: { server: 'sirus', tool: 'CancelAgent', arguments: { id: 'sub-1' } },
+    }));
+    expect(codex).toContain('@sirus wants to cancel subagent sub-1');
+    expect(codex).toContain('id: sub-1');
+    expect(codex).not.toContain('server:');
+  });
+
+  test('asks to go ahead with a plan in words', () => {
+    const output = render(approval({
+      type: 'tool_call', id: 'call-5', kind: 'switch_mode', title: 'Approve Plan',
+      status: 'pending', locations: [], content: [],
+      input: { plan: '# Add notes\n\n1. Write notes.txt' },
+    }));
+    expect(output).toContain('@sirus wants to proceed with this plan');
+    expect(output).toContain('1. Write notes.txt');
+    expect(output).not.toContain('mode');
   });
 
   test.each(['escape', 'feedback', 'feedback-escape', 'selection'] as const)('answers a worker approval through %s across streaming updates', async action => {
@@ -518,8 +541,9 @@ describe('approval prompt', () => {
     });
     const [request] = pendingApprovals(sessionId);
     expect(resolveApproval(request.id, 'deny')).toBe(true);
+    // The ACP client reads a cancelled answer to a request still in its turn
+    // as the user's refusal, and marks the call declined.
     expect(await response).toEqual({ outcome: { outcome: 'cancelled' } });
-    expect(lastDecision('allow-only-call', sessionId)).toBe('deny');
   });
 });
 

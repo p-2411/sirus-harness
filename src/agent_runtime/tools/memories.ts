@@ -1,5 +1,5 @@
 import { memorySearchScope, memoryStoreFor, memoryTarget } from '../../memory/store';
-import { requiredInteger, requiredString } from './arguments';
+import { labelText, requiredInteger, requiredString } from './arguments';
 import type { Tool } from './types';
 
 // The durable notes the agent keeps for itself. Every one of them needs
@@ -33,6 +33,7 @@ export const memoryTools: Tool[] = [
       },
     },
     requires: 'memory',
+    label: args => ({ verb: 'Save memory', subject: labelText(args, 'name') }),
     async run(args, { directory }) {
       const target = memoryTarget(args.scope, directory);
       return memoryStoreFor().save(target, {
@@ -50,6 +51,7 @@ export const memoryTools: Tool[] = [
       name: { type: 'string', description: 'The exact memory name.' },
     },
     requires: 'memory',
+    label: args => ({ verb: 'Read memory', subject: labelText(args, 'name') }),
     async run(args, { directory }) {
       const target = memoryTarget(args.scope, directory);
       const name = requiredString(args, 'name', 'GetMemory');
@@ -70,6 +72,10 @@ export const memoryTools: Tool[] = [
       limit: { type: 'integer', description: 'Maximum number of matches to return, from 1 to 50.' },
     },
     requires: 'memory',
+    label: args => {
+      const query = labelText(args, 'query');
+      return { verb: 'Search memories', subject: query ? `for “${query}”` : '' };
+    },
     async run(args, { directory }) {
       const scope = memorySearchScope(args.scope);
       const query = requiredString(args, 'query', 'SearchMemories');
@@ -85,6 +91,7 @@ export const memoryTools: Tool[] = [
       name: { type: 'string', description: 'The exact memory name to delete.' },
     },
     requires: 'memory',
+    label: args => ({ verb: 'Delete memory', subject: labelText(args, 'name') }),
     async run(args, { directory }) {
       const target = memoryTarget(args.scope, directory);
       const name = requiredString(args, 'name', 'DeleteMemory');

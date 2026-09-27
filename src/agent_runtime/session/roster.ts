@@ -72,44 +72,6 @@ function requireKnownModel(model: string): void {
   }
 }
 
-// A model following a newly introduced @name is host routing metadata, not
-// part of the conversation. Strip it before either the UI history or any
-// runtime sees the turn.
-export function stripCreationModels<T extends Pick<Message, 'content'>>(message: T, mentions: readonly Mention[]): T {
-  const spans = mentions
-    .flatMap(mention => mention.modelSpan ? [mention.modelSpan] : [])
-    .sort((left, right) => right.start - left.start);
-  if (spans.length === 0) return message;
-
-  const content = [...message.content];
-  const textBlocks = content
-    .map((block, contentIndex) => ({ block, contentIndex }))
-    .filter((entry): entry is { block: Extract<Message['content'][number], { type: 'text' }>; contentIndex: number } =>
-      entry.block.type === 'text');
-  let globalStart = 0;
-  const ranges = textBlocks.map(entry => {
-    const range = {
-      ...entry,
-      start: globalStart,
-      end: globalStart + entry.block.text.length,
-    };
-    // textOf joins text blocks with exactly one newline.
-    globalStart = range.end + 1;
-    return range;
-  });
-
-  for (const range of ranges) {
-    const localSpans = spans.filter(span => span.start >= range.start && span.end <= range.end);
-    if (localSpans.length === 0) continue;
-    let text = range.block.text;
-    for (const span of localSpans) {
-      text = text.slice(0, span.start - range.start) + text.slice(span.end - range.start);
-    }
-    content[range.contentIndex] = { type: 'text', text };
-  }
-  return { ...message, content };
-}
-
 // The session's agents and all @name routing between them.
 export class ParticipantRoster {
   private readonly sessionId: string;

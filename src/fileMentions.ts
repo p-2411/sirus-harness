@@ -94,6 +94,21 @@ function directoryListing(directory: string): string {
   return shown.join('\n');
 }
 
+// An attachment as the chat names it, read back from the block
+// `snapshotBlock` wrote (a blank line, the fence, the heading, the body, the
+// fence), the way Claude Code notes one: "Read notes.txt (12 lines)", or for a
+// directory "Listed src/ (8 entries)". A final newline ends a file's last line.
+export function describeAttachment(block: TextBlock): string {
+  const lines = block.text.split('\n').slice(4, -1);
+  if (block.filePath?.endsWith('/')) {
+    const more = /^… (\d+) more$/.exec(lines.at(-1) ?? '');
+    const entries = lines[0] === '(empty)' ? 0 : lines.length + (more ? Number(more[1]) - 1 : 0);
+    return `Listed ${block.filePath} (${entries} entr${entries === 1 ? 'y' : 'ies'})`;
+  }
+  if (lines[lines.length - 1] === '') lines.pop();
+  return `Read ${block.filePath} (${lines.length} line${lines.length === 1 ? '' : 's'})`;
+}
+
 export function resolveFileMentions<T extends Pick<Message, 'content'>>(message: T, directory: string): T {
   const text = message.content.filter(block => block.type === 'text').map(block => block.text).join('\n');
   const mentions = parseFileMentions(text, directory);

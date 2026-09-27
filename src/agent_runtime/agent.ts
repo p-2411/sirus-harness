@@ -35,10 +35,12 @@ import type { SpawnOptions, SubagentHost } from './tools/types';
 import {
   DEFAULT_THINKING_LEVEL,
   failOpenToolCalls,
+  INTERRUPTED_SEVERITY,
   isPlanCall,
   planCall,
   type ImageBlock,
   type Message,
+  type MessageBlock,
   type NativeSession,
   type NoticeBlock,
   type ThinkingLevel,
@@ -248,6 +250,7 @@ export class SessionAgent {
     this.heardAt = Date.now();
     const { signal } = controller;
     this.entry = options.entry;
+    options.entry.startedAt = Date.now();
     this.record = this.recorder(options.entry, options.onUpdate);
     let answered = false;
     try {
@@ -297,6 +300,13 @@ export class SessionAgent {
       if (!signal.aborted && !isAbortError(error)) {
         const title = error instanceof Error ? error.message : String(error);
         this.record?.({ type: 'notice', severity: 'error', title });
+      } else {
+        // Where the turn was cut short stays in the record, the way both
+        // vendors' terminals mark it, whether or not anything came before.
+        this.record?.({
+          type: 'notice', severity: INTERRUPTED_SEVERITY, title: 'Interrupted',
+          ...(this.subagentId ? {} : { description: `What should @${this.name} do instead?` }),
+        });
       }
       throw error;
     } finally {
@@ -305,7 +315,9 @@ export class SessionAgent {
       // arriving after this are dropped, so a call it left open would read
       // as running for good.
       if (!answered && this.opening) this.releaseRuntime();
-      if (!answered && failOpenToolCalls(options.entry.content)) options.onUpdate?.();
+      if (!answered && failOpenToolCalls(options.entry.content, signal.aborted ? 'cancelled' : undefined)) options.onUpdate?.();
+      endThought(options.entry.content);
+      options.entry.finishedAt = Date.now();
       this.turn = null;
       this.record = null;
       this.entry = null;
@@ -682,25 +694,37 @@ export class SessionAgent {
   }
 
   // Everything the runtime reports lands in the entry: text and thoughts as
-  // blocks, tool calls merged by id, compaction as a boundary; usage and mode
-  // changes on the agent itself.
+  // blocks, tool calls merged by id, compaction as a boundary, what the turn
+  // used; the context gauge and mode changes on the agent itself.
   private recorder(entry: Message, onUpdate?: () => void): (update: RuntimeUpdate) => void {
+    // When the runtime last said anything, which is when a thought that
+    // starts now began, and the message the last text chunk belonged to.
+    let heardAt = Date.now();
+    let messageId: string | undefined;
+    const append = (block: MessageBlock) => {
+      endThought(entry.content);
+      entry.content.push(block);
+    };
     return update => {
       switch (update.type) {
         case 'text': {
+          // A new message starts a new block, so two messages in a row do not
+          // run together as one paragraph.
           const last = entry.content[entry.content.length - 1];
-          if (last?.type === 'text' && !last.filePath) last.text += update.text;
-          else entry.content.push({ type: 'text', text: update.text });
+          const sameMessage = update.messageId === undefined || update.messageId === messageId;
+          if (last?.type === 'text' && !last.filePath && sameMessage) last.text += update.text;
+          else append({ type: 'text', text: update.text });
+          messageId = update.messageId;
           break;
         }
         case 'thought': {
           const last = entry.content[entry.content.length - 1];
           if (last?.type === 'thought') last.text += update.text;
-          else entry.content.push({ type: 'thought', text: update.text });
+          else entry.content.push({ type: 'thought', text: update.text, startedAt: heardAt });
           break;
         }
         case 'notice':
-          entry.content.push(update);
+          append(update);
           break;
         case 'tool_call': {
           const run = this.listSubagents().find(run => run.callId === update.call.id && run.status !== 'working');
@@ -708,7 +732,7 @@ export class SessionAgent {
           const index = entry.content.findIndex(
             (block): block is ToolCallBlock => block.type === 'tool_call' && block.id === update.call.id,
           );
-          if (index === -1) entry.content.push(update.call);
+          if (index === -1) append(update.call);
           else entry.content[index] = update.call;
           break;
         }
@@ -718,15 +742,18 @@ export class SessionAgent {
           const last = entry.content.length - 1;
           const previous = entry.content[last];
           if (previous?.type === 'tool_call' && isPlanCall(previous)) entry.content[last] = planCall(update.entries, previous.id);
-          else entry.content.push(planCall(update.entries));
+          else append(planCall(update.entries));
           break;
         }
         case 'compaction': {
           if (update.status === 'in_progress') return;
           if (update.status !== 'completed') return;
-          entry.content.push({ type: 'compaction', ...(update.summary ? { summary: update.summary } : {}) });
+          append({ type: 'compaction', ...(update.summary ? { summary: update.summary } : {}) });
           break;
         }
+        case 'usage':
+          entry.usage = update.usage;
+          break;
         case 'context':
           this.context = update.usage;
           break;
@@ -734,6 +761,7 @@ export class SessionAgent {
           this.noteMode(this.host.permissionMode(), update, true);
           break;
       }
+      heardAt = Date.now();
       onUpdate?.();
     };
   }
@@ -899,6 +927,12 @@ export class SessionAgent {
       : `Unknown subagent "${id}". No subagent has been spawned yet.`);
   }
 }
+// A thought is over once anything follows it, or once its turn is.
+function endThought(content: MessageBlock[]): void {
+  const last = content[content.length - 1];
+  if (last?.type === 'thought' && last.endedAt === undefined) last.endedAt = Date.now();
+}
+
 // A failure message must not carry a key it was handed.
 function maskSecrets(error: unknown, sources: readonly (Source | null)[]): string {
   const detail = error instanceof Error ? error.message : String(error);

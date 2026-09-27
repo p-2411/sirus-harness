@@ -165,10 +165,10 @@ test('a background approval marks its agent without taking over the selected inp
   try {
     await chat.flush();
     expect(chat.output().split('\n')[0]).toContain('reviewer!');
-    expect(chat.output()).not.toContain('Write reviewed file');
+    expect(chat.output()).not.toContain('write reviewed file');
     await chat.press('Keep my draft');
     await chat.select('right');
-    expect(chat.output()).toContain('Write reviewed file');
+    expect(chat.output()).toContain('wants to write reviewed file');
     await chat.select('left');
     expect(session.getSelectedParticipant()).toBe('sirus');
     expect(session.getInputContent()).toBe('Keep my draft');

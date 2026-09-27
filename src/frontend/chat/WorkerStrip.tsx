@@ -5,7 +5,7 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../styles/theme';
-import { toolLine } from './ChatMessage';
+import { toolLine } from './toolCalls';
 import { workerAge } from '../../commands/agents/behavior';
 import {
   getSubagentsVersion,

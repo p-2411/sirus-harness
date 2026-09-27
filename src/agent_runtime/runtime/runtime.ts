@@ -20,6 +20,7 @@ import type {
   ToolCallContent,
   ToolCallLocation,
   ToolKind,
+  TurnUsage,
 } from '../types';
 import type { ContextUsage } from '../usage';
 import { startAcpRuntime } from './acp';
@@ -110,12 +111,16 @@ export function backgroundTaskFrom(update: unknown, previous?: BackgroundTask): 
 export type RuntimeUpdate =
   | { type: 'async_task'; task: BackgroundTask }
   | { type: 'rate_limit'; resetsAt?: number }
-  | { type: 'text'; text: string }
+  // A chunk of the reply. Chunks of one message share its id, when the
+  // vendor sends one; a new id starts a new message.
+  | { type: 'text'; text: string; messageId?: string }
   | { type: 'thought'; text: string }
   | NoticeBlock
   // A new call, or an update to one already reported: merge by id.
   | { type: 'tool_call'; call: ToolCallBlock }
   | { type: 'context'; usage: ContextUsage }
+  // What the turn used, once it has ended.
+  | { type: 'usage'; usage: TurnUsage }
   | { type: 'compaction'; status: 'in_progress' | 'completed' | 'failed' | 'cancelled'; summary?: string }
   // The vendor changed the session's mode, on request or on its own. Kind is
   // null when the vendor did not tag the mode.
@@ -294,19 +299,38 @@ function toolKind(kind: unknown): ToolKind {
   }
 }
 
-function toolContent(content: ToolCall['content'] | ToolCallUpdate['content']): ToolCallContent[] | undefined {
+// Where each diff starts. Claude sends one diff per hunk of a change, each
+// with a location carrying its line, in the same order. codex-acp sends whole
+// files, old and new, tagged with the change's kind in `_meta`; so is a new
+// file anyone sends. An excerpt with no line has no position to give.
+function diffLine(
+  item: { path: string; oldText?: string | null; _meta?: { [key: string]: unknown } | null },
+  location: { path: string; line?: number | null } | undefined,
+): number | undefined {
+  if (location?.path === item.path && typeof location.line === 'number') return location.line;
+  return item.oldText == null || typeof item._meta?.kind === 'string' ? 1 : undefined;
+}
+
+function toolContent(
+  content: ToolCall['content'] | ToolCallUpdate['content'],
+  locations: ToolCall['locations'] | ToolCallUpdate['locations'],
+): ToolCallContent[] | undefined {
   if (!content) return undefined;
   const blocks: ToolCallContent[] = [];
+  let diffs = 0;
   for (const item of content) {
     if (item.type === 'diff') {
-      blocks.push({ type: 'diff', path: item.path, oldText: item.oldText ?? null, newText: item.newText });
+      const line = diffLine(item, locations?.[diffs++]);
+      blocks.push({
+        type: 'diff', path: item.path, oldText: item.oldText ?? null, newText: item.newText,
+        ...(line !== undefined ? { line } : {}),
+      });
     } else if (item.type === 'content' && item.content.type === 'text') {
       blocks.push({ type: 'text', text: item.content.text });
-    } else if (item.type === 'terminal') {
-      // Terminals are never advertised, so none arrive; a vendor that sends
-      // one anyway is shown its id and nothing else.
-      blocks.push({ type: 'text', text: `[terminal ${item.terminalId}]` });
     }
+    // A terminal carries nothing to show: Sirus advertises none, yet
+    // codex-acp names one for every shell command. The command's output
+    // arrives as its raw output instead.
   }
   return blocks;
 }
@@ -329,7 +353,7 @@ export function toolCallBlockFrom(call: ToolCall | ToolCallUpdate, existing?: To
     locations: [],
     content: [],
   };
-  const content = toolContent(call.content);
+  const content = toolContent(call.content, call.locations);
   const locations = toolLocations(call.locations);
   return {
     ...base,

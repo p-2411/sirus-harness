@@ -5,7 +5,8 @@ import { readClipboard, removeStoredImage } from '../../images';
 import { Box, Text, measureElement, renderToString, useApp, useBoxMetrics, useInput, useStdout, type DOMElement } from 'ink';
 import { theme } from '../styles/theme';
 import { HORSE } from '../branding/horse';
-import { ChatHistory, PlanChecklist, thoughtHeading, toolLine } from './ChatMessage';
+import { ChatHistory, formatElapsed, PlanChecklist, thoughtHeading, visibleContent } from './ChatMessage';
+import { finished, toolLine } from './toolCalls';
 import { useClickable } from '../interaction/clickable';
 import { Spinner } from './Spinner';
 import { InputBar, createInputDraftState, type InputDraftState, type InputMode } from './InputBar';
@@ -149,16 +150,17 @@ function turnThought(messages: readonly Message[]): string | null {
 }
 
 // What the agents are up to, read off the end of the timeline: the tool call
-// the turn is waiting on, text arriving, or nothing visible yet.
-export function turnPhase(messages: readonly Message[]): string {
+// the turn is waiting on, text arriving, or nothing visible yet. A call is
+// named the way its row names it.
+export function turnPhase(messages: readonly Message[], directory?: string): string {
   const last = messages[messages.length - 1];
   if (!last || last.role !== 'assistant') return 'thinking';
-  const running = [...last.content]
+  const content = visibleContent(last.content);
+  const running = [...content]
     .reverse()
-    .find((block): block is ToolCallBlock =>
-      block.type === 'tool_call' && block.status !== 'completed' && block.status !== 'failed');
-  if (running) return `running ${toolLine(running, PHASE_TITLE_LENGTH)}`;
-  const tail = last.content[last.content.length - 1];
+    .find((block): block is ToolCallBlock => block.type === 'tool_call' && !finished(block));
+  if (running) return `running ${toolLine(running, PHASE_TITLE_LENGTH, directory)}`;
+  const tail = content[content.length - 1];
   if (tail?.type === 'text' && tail.text) return 'writing';
   const thought = turnThought(messages);
   if (thought) {
@@ -168,19 +170,16 @@ export function turnPhase(messages: readonly Message[]): string {
   return 'thinking';
 }
 
-export function formatElapsed(ms: number): string {
-  const seconds = Math.max(0, Math.floor(ms / 1000));
-  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-}
-
 // A turn whose runtime has said nothing for this long says so, since a
 // vendor that has stalled looks the same as one that is thinking.
 const QUIET_NOTICE_MS = 60_000;
 
 // The line at the foot of the history while a turn runs: what the agents are
 // doing, or that they are waiting on the user, and for how long.
-export function TurnStatus({ messages, awaitingApproval, awaitingAnswer, compacting, startedAt, quietFor }: {
+export function TurnStatus({ messages, directory, awaitingApproval, awaitingAnswer, compacting, startedAt, quietFor }: {
   messages: readonly Message[];
+  // The session's directory: paths inside it are named relative to it.
+  directory?: string;
   awaitingApproval: boolean;
   awaitingAnswer: boolean;
   compacting: boolean;
@@ -205,7 +204,7 @@ export function TurnStatus({ messages, awaitingApproval, awaitingAnswer, compact
   const phase = awaitingApproval ? 'waiting for your approval'
     : awaitingAnswer ? 'waiting for your answer'
     : compacting ? 'compacting context'
-      : turnPhase(messages);
+      : turnPhase(messages, directory);
   const quiet = waitingOnUser || compacting ? 0 : quietFor();
   return (
     <Box flexDirection="column" paddingX={3} marginBottom={1}>
@@ -687,6 +686,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         messages={messages}
         participants={participants}
         sessionId={currSession.getId()}
+        directory={currSession.getDirectory()}
         participantColors={participantColors}
         isMessageLive={message => currSession.isMessageLive(message)}
         hideThoughtFor={isWorking ? messages.at(-1)?.seq : undefined}
@@ -694,6 +694,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       {isWorking && (
         <TurnStatus
           messages={messages}
+          directory={currSession.getDirectory()}
           awaitingApproval={approvals.length > 0}
           awaitingAnswer={questions.length > 0}
           compacting={currSession.isCompacting()}

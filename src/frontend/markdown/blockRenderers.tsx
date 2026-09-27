@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { Box, Text } from 'ink';
+import { Box, Text, Transform, type TextProps } from 'ink';
 import type { Token, Tokens } from 'marked';
 import stringWidth from 'string-width';
 import { MentionText, type ParticipantColors } from '../MentionText';
@@ -13,28 +13,45 @@ export interface BlockContext {
 
 type BlockRenderer = (token: Token, key: string, context: BlockContext) => ReactNode;
 
+// Ink wraps with trimming off, so a row that breaks at a space begins with
+// that space. Every row after the first loses its leading whitespace, as a
+// terminal's own wrapping drops it. Meant for text whose line starts carry no
+// meaning of their own: a paragraph, or one line of what the user typed.
+export function WrappedText({ children, ...props }: Omit<TextProps, 'wrap'>) {
+  return (
+    <Transform transform={trimWrappedRow}>
+      <Text {...props} wrap="wrap">{children}</Text>
+    </Transform>
+  );
+}
+
+function trimWrappedRow(row: string, index: number): string {
+  // Colours a nested Text set are already in the row, ahead of its text.
+  return index === 0 ? row : row.replace(/^((?:\u001b\[[0-9;]*m)*)[ \t]+/, '$1');
+}
+
 function renderer<T extends Token>(render: (token: T, key: string, context: BlockContext) => ReactNode): BlockRenderer {
   return (token, key, context) => render(token as T, key, context);
 }
 
 const textBlock = renderer<Tokens.Text>((token, key, context) => (
-  <Text key={key} color={theme.text} wrap="wrap">
+  <WrappedText key={key} color={theme.text}>
     {token.tokens
       ? renderInline(token.tokens, key, context.participantColors)
       : <MentionText colors={context.participantColors}>{token.text}</MentionText>}
-  </Text>
+  </WrappedText>
 ));
 
 const blockRenderers: Record<string, BlockRenderer> = {
   paragraph: renderer<Tokens.Paragraph>((token, key, context) => (
-    <Text key={key} color={theme.text} wrap="wrap">
+    <WrappedText key={key} color={theme.text}>
       {renderInline(token.tokens, key, context.participantColors)}
-    </Text>
+    </WrappedText>
   )),
   heading: renderer<Tokens.Heading>((token, key, context) => (
-    <Text key={key} color={theme.highlight} bold underline={token.depth === 1} wrap="wrap">
+    <WrappedText key={key} color={theme.highlight} bold underline={token.depth === 1}>
       {renderInline(token.tokens, key, context.participantColors)}
-    </Text>
+    </WrappedText>
   )),
   code: renderer<Tokens.Code>((token, key, context) => (
     <Box

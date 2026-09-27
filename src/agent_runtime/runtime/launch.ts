@@ -259,6 +259,9 @@ function codexLaunch(options: RuntimeOptions, mode: PermissionMode): Launch {
     ? { instructions: options.systemPrompt, project_doc_max_bytes: 0 }
     : {
       developer_instructions: options.systemPrompt,
+      // The feature below is still marked under development, and Codex
+      // warns about it on every thread; the user never chose it.
+      suppress_unstable_features_warning: true,
       features: {
         // request_user_input is Codex's AskUserQuestion; Codex offers it
         // only in plan mode unless this is on.
