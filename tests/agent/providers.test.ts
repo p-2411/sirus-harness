@@ -1,9 +1,14 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
+import * as childProcess from 'child_process';
+import { EventEmitter } from 'events';
 import { existsSync, mkdtempSync, rmSync } from 'fs';
 import os from 'os';
 import path from 'path';
+import { PassThrough } from 'stream';
+import { TurnCancelledError } from '../../src/abort';
 import { providerFor, servableModelIds, servesModel } from '../../src/agent_runtime/providers';
 import { MODELS, modelInfo, VENDOR_INFO, type Vendor } from '../../src/agent_runtime/providers/catalog';
+import { readCodexAccount, readCodexRateLimits } from '../../src/agent_runtime/providers/openai/codex-account';
 import { sourceEnvironment } from '../../src/agent_runtime/providers/profiles';
 import { maskApiKey, type Source } from '../../src/agent_runtime/providers/sources';
 import * as acp from '../../src/agent_runtime/runtime/acp';
@@ -497,5 +502,58 @@ describe('routing a worker', () => {
       'Cost: $10 per million input tokens, $50 per million output (cache reads $0.25).',
       'Allowance: Anthropic has 47% of the 5-hour window remaining.',
     ].join('\n'));
+  });
+});
+
+// `codex app-server`, which the account helper starts for one request at a
+// time: a child that answers each request as the test says, or not at all.
+type AppServerAnswer = { result: unknown } | { error: { message: string } } | null;
+
+function fakeAppServer(answer: (method: string) => AppServerAnswer) {
+  const child = Object.assign(new EventEmitter(), {
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    killed: false,
+    kill() {
+      child.killed = true;
+      setImmediate(() => child.emit('exit', null, 'SIGTERM'));
+      return true;
+    },
+  });
+  let buffer = '';
+  child.stdin.setEncoding('utf8');
+  child.stdin.on('data', (chunk: string) => {
+    buffer += chunk;
+    for (let newline = buffer.indexOf('\n'); newline !== -1; newline = buffer.indexOf('\n')) {
+      const message = JSON.parse(buffer.slice(0, newline)) as { id?: number; method: string };
+      buffer = buffer.slice(newline + 1);
+      const reply = message.id === undefined ? null : answer(message.method);
+      if (reply) child.stdout.write(`${JSON.stringify({ id: message.id, ...reply })}\n`);
+    }
+  });
+  spyOn(childProcess, 'spawn').mockReturnValue(child as unknown as childProcess.ChildProcess);
+  return child;
+}
+
+describe('the Codex app-server behind an account request', () => {
+  afterEach(() => {
+    mock.restore();
+  });
+
+  test('a read cancelled while the app-server starts closes it', async () => {
+    const child = fakeAppServer(() => null);
+    const controller = new AbortController();
+    const read = readCodexRateLimits('default', controller.signal);
+    await new Promise(resolve => setImmediate(resolve));
+    controller.abort(new TurnCancelledError());
+    await expect(read).rejects.toThrow('Cancelled');
+    expect(child.killed).toBe(true);
+  });
+
+  test('an app-server that refuses to initialize is closed', async () => {
+    const child = fakeAppServer(method => method === 'initialize' ? { error: { message: 'unsupported client' } } : null);
+    await expect(readCodexAccount('default')).rejects.toThrow('unsupported client');
+    expect(child.killed).toBe(true);
   });
 });

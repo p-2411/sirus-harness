@@ -94,8 +94,10 @@ export class CodexRpc {
 
   // An app-server on the profile's store, initialized. A profile other than
   // the default keeps its login in a file: the keychain entry belongs to
-  // the default profile.
-  static async start(profile = 'default'): Promise<CodexRpc> {
+  // the default profile. The process is the caller's only once this
+  // resolves, so a start that is aborted or fails closes it here.
+  static async start(profile = 'default', signal?: AbortSignal): Promise<CodexRpc> {
+    throwIfAborted(signal);
     const args = ['app-server', '--listen', 'stdio://'];
     if (profile !== 'default') args.push('-c', 'cli_auth_credentials_store="file"');
     const child = spawn(codexBinaryPath(), args, {
@@ -103,9 +105,14 @@ export class CodexRpc {
       env: subscriptionEnvironment('gpt', profile),
     });
     const rpc = new CodexRpc(child);
-    await rpc.request('initialize', {
-      clientInfo: { name: 'sirus', title: 'Sirus', version: SIRUS_VERSION },
-    });
+    try {
+      await abortable(rpc.request('initialize', {
+        clientInfo: { name: 'sirus', title: 'Sirus', version: SIRUS_VERSION },
+      }), signal);
+    } catch (error) {
+      rpc.close();
+      throw error;
+    }
     rpc.notify('initialized');
     return rpc;
   }
@@ -210,8 +217,7 @@ async function withCodex<T>(
   signal: AbortSignal | undefined,
   work: (rpc: CodexRpc) => Promise<T>,
 ): Promise<T> {
-  throwIfAborted(signal);
-  const rpc = await abortable(CodexRpc.start(profile), signal);
+  const rpc = await CodexRpc.start(profile, signal);
   try {
     return await abortable(work(rpc), signal);
   } finally {
