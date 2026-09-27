@@ -22,7 +22,14 @@ import { INTERRUPTED_REASON, workerReport } from '../tools/subagents/report';
 import { cancelSubagent, messageSubagent } from '../tools/subagents/run';
 import { removeWorktree } from '../tools/subagents/worktree';
 import type { SubagentHost } from '../tools/types';
-import { textOf, type Message, type PermissionMode, type ThinkingLevel, type ToolCallBlock } from '../types';
+import {
+  DEFAULT_PARTICIPANT,
+  textOf,
+  type Message,
+  type PermissionMode,
+  type ThinkingLevel,
+  type ToolCallBlock,
+} from '../types';
 import type { ContextUsage } from '../usage';
 import { parseFileMentions, resolveFileMentions } from '../../fileMentions';
 import { isAbortError, throwIfAborted, TurnCancelledError } from '../../abort';
@@ -61,7 +68,6 @@ export type SessionStatus = 'idle' | 'working' | 'error';
 // shapes, and the one function that fills in every default.
 
 const DEFAULT_SESSION_NAME = 'Session 1';
-const DEFAULT_PARTICIPANT_NAME = 'sirus';
 
 // The clocks a restored session brings with it. All absent for a new one.
 export interface SessionTiming {
@@ -153,7 +159,7 @@ function resolveSessionOptions(options: SessionOptions = {}): ResolvedSessionOpt
     name: options.name ?? DEFAULT_SESSION_NAME,
     directory: options.directory ?? process.cwd(),
     model: options.model ?? DEFAULT_MODEL,
-    defaultParticipant: options.defaultParticipant ?? DEFAULT_PARTICIPANT_NAME,
+    defaultParticipant: options.defaultParticipant ?? DEFAULT_PARTICIPANT,
     participants: options.participants ?? [],
     messages,
     checkpoints: options.checkpoints ?? [],
@@ -283,7 +289,7 @@ export class Session {
       forWorker: (id, directory) => ({
         ...host,
         directory,
-        systemPrompt: () => sirusPrompt('sirus', true),
+        systemPrompt: () => sirusPrompt(DEFAULT_PARTICIPANT, true),
         mcpServer: () => this.mcpServerEntry(`subagent:${id}`),
         forWorker: () => { throw new Error('A subagent cannot spawn a subagent'); },
       }),

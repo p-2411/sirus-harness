@@ -29,6 +29,7 @@ import { describeSubagents } from './tools/subagents/report';
 import { cancelSubagent, checkSubagent, messageSubagent, startSubagent } from './tools/subagents/run';
 import type { SubagentHandle, SubagentHost } from './tools/types';
 import {
+  DEFAULT_PARTICIPANT,
   DEFAULT_THINKING_LEVEL,
   failOpenToolCalls,
   isPlanCall,
@@ -660,7 +661,7 @@ export class SessionAgent {
   // this agent's session, in its own directory, with the subagent contract.
   createSubagent(id: string, model: string, thinkingLevel: ThinkingLevel, directory: string): SessionAgent {
     return new SessionAgent({
-      name: 'sirus',
+      name: DEFAULT_PARTICIPANT,
       model,
       thinkingLevel,
       runtimeId: `${this.runtimeId}/subagents/${id}`,

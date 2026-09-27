@@ -3,6 +3,7 @@ import path from 'path';
 import { z } from 'zod';
 import { dataDirectory } from '../dataDirectory';
 import {
+  DEFAULT_PARTICIPANT,
   failOpenToolCalls,
   IMAGE_MEDIA_TYPES,
   PERMISSION_MODES,
@@ -198,8 +199,9 @@ const sessionFileSchema = z.object({
 type StoredSession = z.infer<typeof sessionSchema>;
 type StoredMessage = z.infer<typeof messageSchema>;
 
-// The name the single participant of a pre-multi-agent session has always had.
-const LEGACY_PARTICIPANT_NAME = 'sirus';
+// The name the single participant of a pre-multi-agent session has always
+// had: the default participant's.
+const LEGACY_PARTICIPANT_NAME = DEFAULT_PARTICIPANT;
 
 export interface PersistedSessionSnapshots {
   snapshots: SessionSnapshot[];

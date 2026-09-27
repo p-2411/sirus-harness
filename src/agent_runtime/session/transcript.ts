@@ -1,5 +1,5 @@
 import path from 'path';
-import { isPlanCall, textOf, type Message, type ToolCallBlock } from '../types';
+import { DEFAULT_PARTICIPANT, isPlanCall, textOf, type Message, type ToolCallBlock } from '../types';
 
 export { textOf };
 
@@ -87,7 +87,7 @@ export function transcriptText(entries: readonly Message[]): string {
   const lines: string[] = [];
   if (summary) lines.push('Summary of the earlier conversation:', summary, '');
   for (const entry of entries.slice(from)) {
-    const speaker = entry.role === 'user' ? 'User' : `@${entry.participant ?? 'sirus'}`;
+    const speaker = entry.role === 'user' ? 'User' : `@${entry.participant ?? DEFAULT_PARTICIPANT}`;
     for (const block of entry.content) {
       if (block.type === 'text') {
         if (block.text) lines.push(`${speaker}: ${block.text}`);
