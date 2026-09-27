@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import { abortable, isAbortError, TurnCancelledError } from '../../../abort';
 import type { SessionAgent } from '../../agent';
 import { FORKED_WORKER_HANDOVER } from '../../prompt';
-import { servableModelIds, servesModel } from '../../providers';
+import { requireKnownModel } from '../../providers';
 import { transcriptText } from '../../session/transcript';
 import type { Message, ThinkingLevel, WorkerContext } from '../../types';
 import {
@@ -48,9 +48,7 @@ export async function startSubagent(
   prompt: string,
   options: SubagentSpawnOptions,
 ): Promise<SubagentRun> {
-  if (!servesModel(options.model)) {
-    throw new Error(`Unknown model "${options.model}". Try: ${servableModelIds().join(', ')}`);
-  }
+  requireKnownModel(options.model);
   const id = `sub-${crypto.randomUUID().slice(0, 8)}`;
   const worktree = await createWorktree(owner.directory, owner.sessionId, id);
   const worker = owner.createSubagent(id, options.model, options.thinkingLevel, worktree?.directory ?? owner.directory);

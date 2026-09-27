@@ -31,4 +31,11 @@ export function servableModelIds(): string[] {
   return [...modelIds(), ...Object.keys(boundRuntimes)];
 }
 
+// Refuses a model this process cannot run, naming the ones it can.
+export function requireKnownModel(model: string): void {
+  if (!servesModel(model)) {
+    throw new Error(`Unknown model "${model}". Try: ${servableModelIds().join(', ')}`);
+  }
+}
+
 export const onProviderChange = onProviderSourceChange;

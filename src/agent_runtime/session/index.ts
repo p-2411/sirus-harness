@@ -6,7 +6,7 @@ import { requestAnswers } from '../permissions/questions';
 import { DEFAULT_PERMISSION_MODE } from '../permissions/policy';
 import { sirusPrompt } from '../prompt';
 import { jevApiKey, routeSessionModel, routingCandidates } from '../router';
-import { servableModelIds, servesModel } from '../providers';
+import { requireKnownModel } from '../providers';
 import { DEFAULT_MODEL, vendorOf } from '../providers/catalog';
 import { nativeCommands, type NativeCommand } from '../runtime/commands';
 import { registerToolSession, sirusMcpServerEntry, unregisterToolSession } from '../tools/server';
@@ -925,9 +925,7 @@ export class Session {
   }
 
   setSubagentModel(model: string | null): void {
-    if (model !== null && !servesModel(model)) {
-      throw new Error(`Unknown model "${model}". Try: ${servableModelIds().join(', ')}`);
-    }
+    if (model !== null) requireKnownModel(model);
     if (this.subagentModel === model) return;
     this.subagentModel = model;
     this.changes.notify();
