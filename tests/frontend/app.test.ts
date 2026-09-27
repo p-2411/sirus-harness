@@ -11,6 +11,7 @@ import { join } from 'path';
 import { Session } from '../../src/agent_runtime/session';
 import App, { createWorkspace, nextSessionName, startSession } from '../../src/frontend/app';
 import { changeModel } from '../../src/commands/agents/behavior';
+import * as persistence from '../../src/persistence';
 import { loadSessionSnapshots, saveSessionSnapshots } from '../../src/persistence';
 
 describe('app workspace startup', () => {
@@ -125,6 +126,54 @@ describe('app workspace startup', () => {
       update.mockRestore();
     }
   });
+  test('gathers a burst of session changes into one save, and saves what is left on unmount', async () => {
+    const update = spyOn(updater, 'checkSirusUpdate').mockResolvedValue({
+      updateAvailable: false, currentVersion: '1.0.0', latestVersion: '1.0.0',
+    });
+    // Typed keys go to the draft, not to the first launch's request for a Jev key.
+    persistence.saveJevKeyRequested();
+    const save = spyOn(persistence, 'saveSessionSnapshots');
+    const stdin = Object.assign(new PassThrough(), {
+      isTTY: true, setRawMode() {}, ref() {}, unref() {},
+    });
+    const stdout = Object.assign(new PassThrough(), { columns: 100, rows: 30 });
+    const app = render(createElement(App, { launchDirectory: '/projects/current' }), {
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      stdout: stdout as unknown as NodeJS.WriteStream,
+      debug: true, patchConsole: false, exitOnCtrlC: false,
+    });
+    const flush = async () => {
+      await new Promise(resolve => setImmediate(resolve));
+      await app.waitUntilRenderFlush();
+    };
+    try {
+      await flush();
+      const mounted = save.mock.calls.length;
+      expect(mounted).toBeGreaterThan(0);
+      // Every key changes the draft, and every change notifies.
+      for (const key of 'draft') {
+        stdin.write(key);
+        await flush();
+      }
+      expect(save.mock.calls.length).toBe(mounted);
+      await new Promise(resolve => setTimeout(resolve, 600));
+      expect(save.mock.calls.length).toBe(mounted + 1);
+
+      stdin.write('!');
+      await flush();
+      app.unmount();
+      expect(save.mock.calls.length).toBe(mounted + 2);
+      await new Promise(resolve => setTimeout(resolve, 600));
+      expect(save.mock.calls.length).toBe(mounted + 2);
+    } finally {
+      app.unmount();
+      stdin.destroy();
+      stdout.destroy();
+      save.mockRestore();
+      update.mockRestore();
+    }
+  });
+
   test('uses a collision-safe name for the startup draft', () => {
     const existing = new Session({ name: 'Session 2', directory: '/projects/previous', autoNamePending: true });
 

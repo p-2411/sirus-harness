@@ -1,7 +1,8 @@
+import { existsSync } from 'fs';
 import path from 'path';
 import { z } from 'zod';
 import { dataDirectory } from '../dataDirectory';
-import { readJson, writeJson } from './atomicJson';
+import { readJson, setAside, writeJson } from './atomicJson';
 
 // One settings file for the whole app, read through on every access so a test
 // (or a second window) that changes SIRUS_DATA_DIR sees the new file at once.
@@ -27,9 +28,9 @@ export interface StoredApiKeys {
   gpt?: string;
 }
 
-// The on-disk shape, unchanged since the file was introduced. Unknown keys are
-// kept through a parse so an older build cannot delete a setting a newer one
-// wrote.
+// The on-disk shape, unchanged since the file was introduced. Each section is
+// validated on its own, and a write carries over every key it does not
+// rewrite, so an older build cannot delete a setting a newer one wrote.
 const settingsFileSchema = z.object({
   version: z.literal(1),
   subscriptions: z.object({
@@ -60,7 +61,11 @@ const settingsFileSchema = z.object({
   }).passthrough().optional(),
 }).passthrough();
 
-type SettingsFile = z.infer<typeof settingsFileSchema>;
+// The sections of the file this build could read. One that failed its schema
+// is absent here, exactly like one that was never written.
+type SettingsFile = Partial<z.infer<typeof settingsFileSchema>>;
+
+type SectionName = keyof typeof settingsFileSchema.shape;
 
 // What the rest of the app sees: flat, always present, never a partial.
 export interface SettingsShape {
@@ -92,51 +97,70 @@ const DEFAULTS: SettingsShape = {
 // How one setting maps onto the file. Only `memoryEnabled` and the cleared
 // Sirus model are not a plain key of the same name.
 interface Codec<K extends keyof SettingsShape> {
+  // The top-level key of the file the setting is stored under.
+  section: SectionName;
   // The stored value, or undefined when the file does not carry it.
   read: (file: SettingsFile) => SettingsShape[K] | undefined;
   write: (file: Record<string, unknown>, value: SettingsShape[K]) => void;
 }
 
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+// Both Jev settings share one section, so each write keeps the other's field
+// as the file already carries it. A section that is not an object has nothing
+// worth keeping.
+function jevSection(file: Record<string, unknown>): Record<string, unknown> {
+  return isObject(file.jev) ? { ...file.jev } : {};
+}
+
 const CODECS: { [K in keyof SettingsShape]: Codec<K> } = {
   subscriptions: {
+    section: 'subscriptions',
     read: file => file.subscriptions,
     write: (file, value) => { file.subscriptions = value; },
   },
   providerSources: {
+    section: 'providerSources',
     read: file => file.providerSources,
     write: (file, value) => { file.providerSources = value; },
   },
   memoryEnabled: {
+    section: 'memory',
     read: file => file.memory?.enabled,
     write: (file, value) => { file.memory = { enabled: value }; },
   },
   apiKeys: {
+    section: 'apiKeys',
     read: file => file.apiKeys,
     write: (file, value) => { file.apiKeys = value; },
   },
   // A cleared preference is an absent key: the schema stores a model name or
   // nothing at all.
   sirusModel: {
+    section: 'sirusModel',
     read: file => file.sirusModel,
     write: (file, value) => { if (value === null) delete file.sirusModel; else file.sirusModel = value; },
   },
   notifications: {
+    section: 'notifications',
     read: file => file.notifications,
     write: (file, value) => { file.notifications = value; },
   },
-  // Both Jev settings share one section, so each write keeps the other's
-  // field as the file already carries it.
   jevApiKey: {
+    section: 'jev',
     read: file => file.jev?.apiKey ?? (file.jev ? null : undefined),
     write: (file, value) => {
-      const jev = { ...(file.jev as Record<string, unknown> | undefined ?? {}) };
+      const jev = jevSection(file);
       if (value === null) delete jev.apiKey; else jev.apiKey = value;
       file.jev = jev;
     },
   },
   jevKeyRequested: {
+    section: 'jev',
     read: file => file.jev?.keyRequested,
-    write: (file, value) => { file.jev = { ...(file.jev as Record<string, unknown> | undefined ?? {}), keyRequested: value }; },
+    write: (file, value) => { file.jev = { ...jevSection(file), keyRequested: value }; },
   },
 };
 
@@ -151,15 +175,37 @@ function settingsPath(directory: string): string {
   return path.join(directory, 'settings.json');
 }
 
-// A file that fails the schema is treated as absent: every value falls back to
-// its default, exactly as it does before the first save.
-function readSettingsFile(directory: string): SettingsFile | null {
-  const parsed = settingsFileSchema.safeParse(readJson(settingsPath(directory)));
-  return parsed.success ? parsed.data : null;
+// The file as it stands, and what this build can read of it.
+interface StoredSettings {
+  // Every key the file holds, as found.
+  raw: Record<string, unknown>;
+  sections: SettingsFile;
+  // The file is there but is no settings file this build knows: the JSON is
+  // broken, or it carries another version. It reads as empty.
+  unreadable: boolean;
 }
 
-function valueOf<K extends keyof SettingsShape>(file: SettingsFile | null, key: K): SettingsShape[K] {
-  const stored = file === null ? undefined : CODECS[key].read(file);
+// Each section is validated on its own, so one this build cannot read, a
+// value a newer build added or a hand edit gone wrong, falls back to its
+// defaults alone while the rest of the file still counts. A missing file
+// reads as empty, exactly as it does before the first save.
+function readSettingsFile(directory: string): StoredSettings {
+  const filePath = settingsPath(directory);
+  const raw = readJson(filePath);
+  if (!isObject(raw) || raw.version !== 1) {
+    return { raw: {}, sections: {}, unreadable: existsSync(filePath) };
+  }
+  const sections: Record<string, unknown> = {};
+  for (const [name, schema] of Object.entries(settingsFileSchema.shape)) {
+    if (!(name in raw)) continue;
+    const parsed = schema.safeParse(raw[name]);
+    if (parsed.success) sections[name] = parsed.data;
+  }
+  return { raw, sections: sections as SettingsFile, unreadable: false };
+}
+
+function valueOf<K extends keyof SettingsShape>(file: SettingsFile, key: K): SettingsShape[K] {
+  const stored = CODECS[key].read(file);
   // Defaults are handed out as copies: `providers/sources.ts` mutates the
   // object it gets back from `get('apiKeys')`, and nothing may edit the
   // table itself.
@@ -168,7 +214,7 @@ function valueOf<K extends keyof SettingsShape>(file: SettingsFile | null, key: 
 
 function carryOver<K extends keyof SettingsShape>(
   file: Record<string, unknown>,
-  current: SettingsFile | null,
+  current: SettingsFile,
   changes: Partial<SettingsShape>,
   key: K,
 ): void {
@@ -177,14 +223,22 @@ function carryOver<K extends keyof SettingsShape>(
 
 export function openSettings(directory: string = dataDirectory()): Settings {
   return {
-    get: key => valueOf(readSettingsFile(directory), key),
+    get: key => valueOf(readSettingsFile(directory).sections, key),
     set(changes) {
-      const current = readSettingsFile(directory);
+      const { raw, sections, unreadable } = readSettingsFile(directory);
+      if (unreadable && !setAside(settingsPath(directory))) return false;
+      const changed = new Set((Object.keys(changes) as (keyof SettingsShape)[]).map(key => CODECS[key].section));
       // Start from the file as it stands so keys this build does not know
       // about survive the write, then rewrite every known section from its
-      // current value or from the change.
-      const next: Record<string, unknown> = { ...(current ?? {}), version: 1 };
-      for (const key of SETTING_KEYS) carryOver(next, current, changes, key);
+      // current value or from the change. A section this build could not
+      // read stays exactly as found, since a newer build may have written
+      // it, unless the change is to one of its settings.
+      const next: Record<string, unknown> = { ...raw, version: 1 };
+      for (const key of SETTING_KEYS) {
+        const { section } = CODECS[key];
+        if (section in raw && !(section in sections) && !changed.has(section)) continue;
+        carryOver(next, sections, changes, key);
+      }
       return writeJson(settingsPath(directory), next);
     },
   };

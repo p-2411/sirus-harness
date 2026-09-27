@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { Session } from '../../src/agent_runtime/session';
@@ -19,6 +19,7 @@ import {
   saveNotificationPreference,
   loadJevApiKey,
   loadJevKeyRequested,
+  openSettings,
   saveJevApiKey,
   saveJevKeyRequested,
 } from '../../src/persistence';
@@ -197,6 +198,55 @@ describe('session persistence', () => {
 
     writeFileSync(path.join(directory, 'sessions.json'), JSON.stringify({ version: 999, sessions: [] }));
     expect(loadSessionSnapshots(directory)).toEqual({ snapshots: [], selectedSessionId: null });
+  });
+
+  test('a session this build cannot read costs that session alone and is written back unchanged', () => {
+    const readable = new Session({
+      id: 'readable',
+      name: 'Readable',
+      directory,
+      model: 'gpt-5.6-luna',
+      messages: [{ role: 'user', to: ['sirus'], content: [{ type: 'text', text: 'Still here' }] }],
+    });
+    // A permission mode a newer build added.
+    const newer = JSON.parse(JSON.stringify({ ...readable.toSnapshot(), id: 'newer', name: 'Newer', permissionMode: 'plan' }));
+    writeFileSync(path.join(directory, 'sessions.json'), JSON.stringify({
+      version: 1,
+      selectedSessionId: 'readable',
+      sessions: [readable.toSnapshot(), newer],
+    }));
+
+    const restored = loadSessionSnapshots(directory);
+    expect(restored.snapshots.map(snapshot => snapshot.id)).toEqual(['readable']);
+    expect(restored.selectedSessionId).toBe('readable');
+
+    // The app saves what it restored as soon as it mounts, and on every change.
+    for (let save = 0; save < 2; save++) {
+      expect(saveSessionSnapshots(restored.snapshots, restored.selectedSessionId, directory)).toBe(true);
+      const saved = JSON.parse(readFileSync(path.join(directory, 'sessions.json'), 'utf8'));
+      expect(saved.sessions.map((session: { id: string }) => session.id)).toEqual(['readable', 'newer']);
+      expect(saved.sessions[1]).toEqual(newer);
+    }
+  });
+
+  test('sets a session file it cannot read aside before the first save', () => {
+    const broken = '{"version":1,"selectedSessionId":null,"sessions":[{"id":"typo"},]}';
+    writeFileSync(path.join(directory, 'sessions.json'), broken);
+    expect(loadSessionSnapshots(directory)).toEqual({ snapshots: [], selectedSessionId: null });
+
+    const session = new Session({
+      id: 'fresh',
+      name: 'Fresh',
+      directory,
+      model: 'gpt-5.6-luna',
+      messages: [{ role: 'user', to: ['sirus'], content: [{ type: 'text', text: 'After the typo' }] }],
+    });
+    expect(saveSessionSnapshots([session.toSnapshot()], null, directory)).toBe(true);
+    expect(saveSessionSnapshots([session.toSnapshot()], null, directory)).toBe(true);
+    const aside = readdirSync(directory).filter(name => name.startsWith('sessions.json.unreadable-'));
+    expect(aside).toHaveLength(1);
+    expect(readFileSync(path.join(directory, aside[0]!), 'utf8')).toBe(broken);
+    expect(loadSessionSnapshots(directory).snapshots.map(snapshot => snapshot.id)).toEqual(['fresh']);
   });
 
   test('assigns legacy sessions without a directory to the launch directory', () => {
@@ -381,6 +431,59 @@ describe('subscription preference persistence', () => {
       subscriptions: { claude: 'yes', gpt: false },
     }));
     expect(loadSubscriptionPreferences(directory)).toEqual({ claude: false, gpt: false });
+  });
+
+  test('a section this build cannot read falls back alone and survives saves to the others', () => {
+    const file = path.join(directory, 'settings.json');
+    const sources = { claude: [{ id: 'work', type: 'api' as const, key: 'sk-ant-work' }] };
+    writeFileSync(file, JSON.stringify({
+      version: 1,
+      subscriptions: { claude: true, gpt: false },
+      providerSources: sources,
+      apiKeys: { gpt: 'sk-openai-test' },
+      // A value a newer build added to the enum.
+      notifications: 'mentions',
+      futureSetting: { kept: true },
+    }));
+    expect(loadNotificationPreference(directory)).toBe('background');
+    expect(loadApiKeys(directory)).toEqual({ gpt: 'sk-openai-test' });
+    expect(loadSubscriptionPreferences(directory)).toEqual({ claude: true, gpt: false });
+    expect(openSettings(directory).get('providerSources')).toEqual(sources);
+
+    expect(saveMemoryAccessPreference(false, directory)).toBe(true);
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({
+      version: 1,
+      subscriptions: { claude: true, gpt: false },
+      providerSources: sources,
+      apiKeys: { gpt: 'sk-openai-test' },
+      notifications: 'mentions',
+      futureSetting: { kept: true },
+      memory: { enabled: false },
+      jev: { keyRequested: false },
+    });
+
+    // Changing the setting itself replaces what this build could not read.
+    expect(saveNotificationPreference('always', directory)).toBe(true);
+    expect(loadNotificationPreference(directory)).toBe('always');
+    expect(loadApiKeys(directory)).toEqual({ gpt: 'sk-openai-test' });
+  });
+
+  test('sets a settings file it cannot read aside before writing over it', () => {
+    for (const unreadable of [
+      '{ "version": 1, "apiKeys": { "claude": "sk-ant-kept" }, }',
+      JSON.stringify({ version: 2, apiKeys: { claude: 'sk-ant-kept' } }),
+    ]) {
+      rmSync(directory, { recursive: true, force: true });
+      mkdirSync(directory);
+      writeFileSync(path.join(directory, 'settings.json'), unreadable);
+      expect(loadApiKeys(directory)).toEqual({});
+
+      expect(saveNotificationPreference('always', directory)).toBe(true);
+      expect(loadNotificationPreference(directory)).toBe('always');
+      const aside = readdirSync(directory).filter(name => name.startsWith('settings.json.unreadable-'));
+      expect(aside).toHaveLength(1);
+      expect(readFileSync(path.join(directory, aside[0]!), 'utf8')).toBe(unreadable);
+    }
   });
 });
 

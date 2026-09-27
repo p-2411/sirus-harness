@@ -1,7 +1,6 @@
 import path from 'path';
 import type { SessionAgent } from '../../agent';
-import type { Message, MessageBlock, ThinkingLevel } from '../../types';
-import type { WorkerContext } from '../types';
+import type { Message, MessageBlock, SubagentStatus, ThinkingLevel, WorkerContext } from '../../types';
 
 // Subagents: one detached runtime per delegated task, a worker like a
 // participant with a record of its own. This file is the process-wide index
@@ -14,11 +13,7 @@ import type { WorkerContext } from '../types';
 // the chat, the notifications and the rewind interlock can see runs they do
 // not own.
 
-// `interrupted` is a run that was still working when the process it lived in
-// ended: its record survives in the session file, nothing restarts it.
-export type SubagentStatus = 'working' | 'done' | 'failed' | 'cancelled' | 'interrupted';
-
-export type { WorkerContext };
+export type { SubagentStatus, WorkerContext };
 
 // What the session file keeps of a worker: enough to show its record, tell
 // where its branch is, and give its owner the report it never received.
