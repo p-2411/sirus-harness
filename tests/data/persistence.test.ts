@@ -200,6 +200,55 @@ describe('session persistence', () => {
     expect(loadSessionSnapshots(directory)).toEqual({ snapshots: [], selectedSessionId: null });
   });
 
+  test('a session this build cannot read costs that session alone and is written back unchanged', () => {
+    const readable = new Session({
+      id: 'readable',
+      name: 'Readable',
+      directory,
+      model: 'gpt-5.6-luna',
+      messages: [{ role: 'user', to: ['sirus'], content: [{ type: 'text', text: 'Still here' }] }],
+    });
+    // A permission mode a newer build added.
+    const newer = JSON.parse(JSON.stringify({ ...readable.toSnapshot(), id: 'newer', name: 'Newer', permissionMode: 'plan' }));
+    writeFileSync(path.join(directory, 'sessions.json'), JSON.stringify({
+      version: 1,
+      selectedSessionId: 'readable',
+      sessions: [readable.toSnapshot(), newer],
+    }));
+
+    const restored = loadSessionSnapshots(directory);
+    expect(restored.snapshots.map(snapshot => snapshot.id)).toEqual(['readable']);
+    expect(restored.selectedSessionId).toBe('readable');
+
+    // The app saves what it restored as soon as it mounts, and on every change.
+    for (let save = 0; save < 2; save++) {
+      expect(saveSessionSnapshots(restored.snapshots, restored.selectedSessionId, directory)).toBe(true);
+      const saved = JSON.parse(readFileSync(path.join(directory, 'sessions.json'), 'utf8'));
+      expect(saved.sessions.map((session: { id: string }) => session.id)).toEqual(['readable', 'newer']);
+      expect(saved.sessions[1]).toEqual(newer);
+    }
+  });
+
+  test('sets a session file it cannot read aside before the first save', () => {
+    const broken = '{"version":1,"selectedSessionId":null,"sessions":[{"id":"typo"},]}';
+    writeFileSync(path.join(directory, 'sessions.json'), broken);
+    expect(loadSessionSnapshots(directory)).toEqual({ snapshots: [], selectedSessionId: null });
+
+    const session = new Session({
+      id: 'fresh',
+      name: 'Fresh',
+      directory,
+      model: 'gpt-5.6-luna',
+      messages: [{ role: 'user', to: ['sirus'], content: [{ type: 'text', text: 'After the typo' }] }],
+    });
+    expect(saveSessionSnapshots([session.toSnapshot()], null, directory)).toBe(true);
+    expect(saveSessionSnapshots([session.toSnapshot()], null, directory)).toBe(true);
+    const aside = readdirSync(directory).filter(name => name.startsWith('sessions.json.unreadable-'));
+    expect(aside).toHaveLength(1);
+    expect(readFileSync(path.join(directory, aside[0]!), 'utf8')).toBe(broken);
+    expect(loadSessionSnapshots(directory).snapshots.map(snapshot => snapshot.id)).toEqual(['fresh']);
+  });
+
   test('assigns legacy sessions without a directory to the launch directory', () => {
     writeFileSync(path.join(directory, 'sessions.json'), JSON.stringify({
       version: 1,

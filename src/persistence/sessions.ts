@@ -1,3 +1,4 @@
+import { existsSync } from 'fs';
 import path from 'path';
 import { z } from 'zod';
 import { dataDirectory } from '../dataDirectory';
@@ -13,7 +14,7 @@ import {
 } from '../agent_runtime/types';
 import type { SessionSnapshot } from '../agent_runtime/session';
 import type { WorkerRecord } from '../agent_runtime/tools/subagents';
-import { readJson, writeJson } from './atomicJson';
+import { readJson, setAside, writeJson } from './atomicJson';
 
 // The session file: the whole conversation graph, validated on the way in and
 // normalised to one shape. Storage knows the snapshot record, never the
@@ -162,7 +163,7 @@ const sessionSchema = z.object({
   defaultModel: participantSchema.optional(),
   messages: z.array(messageSchema),
   inputContent: z.string().optional(),
-  // Unknown values fail the parse of that file; an absent one means the
+  // Unknown values fail the parse of that session; an absent one means the
   // default (auto approve).
   permissionMode: z.enum(['ask', 'auto', 'bypass']).optional(),
   subagentModel: z.string().min(1).optional(),
@@ -182,10 +183,13 @@ const sessionSchema = z.object({
   { message: 'Session must contain a model or participant list' },
 );
 
+// Each session is validated on its own, so one this build cannot read, say
+// one a newer build wrote with a status this one does not know, costs that
+// session alone.
 const sessionFileSchema = z.object({
   version: z.literal(1),
   selectedSessionId: z.string().nullable(),
-  sessions: z.array(sessionSchema),
+  sessions: z.array(z.unknown()),
 });
 
 type StoredSession = z.infer<typeof sessionSchema>;
@@ -310,16 +314,35 @@ function sessionsPath(directory: string): string {
   return path.join(directory, 'sessions.json');
 }
 
+// What the last load of each data directory found and could not read. The
+// next save there writes those sessions back unchanged, after the ones this
+// build knows, so a session a newer build wrote outlives a run of an older
+// one; and a file that could not be read at all is set aside before it is
+// written over.
+const unread = new Map<string, { sessions: unknown[]; fileUnreadable: boolean }>();
+
 export function loadSessionSnapshots(
   directory: string = dataDirectory(),
   fallbackSessionDirectory: string = process.cwd(),
 ): PersistedSessionSnapshots {
-  const parsed = sessionFileSchema.safeParse(readJson(sessionsPath(directory)));
-  if (!parsed.success) return { snapshots: [], selectedSessionId: null };
+  const filePath = sessionsPath(directory);
+  const parsed = sessionFileSchema.safeParse(readJson(filePath));
+  if (!parsed.success) {
+    unread.set(path.resolve(directory), { sessions: [], fileUnreadable: existsSync(filePath) });
+    return { snapshots: [], selectedSessionId: null };
+  }
+  const stored: StoredSession[] = [];
+  const unreadable: unknown[] = [];
+  for (const session of parsed.data.sessions) {
+    const read = sessionSchema.safeParse(session);
+    if (read.success) stored.push(read.data);
+    else unreadable.push(session);
+  }
+  unread.set(path.resolve(directory), { sessions: unreadable, fileUnreadable: false });
   // A session with no history is a draft, not something to restore; files
   // written before that rule existed still contain them.
-  const snapshots = parsed.data.sessions
-    .map(stored => toSnapshot(stored, fallbackSessionDirectory))
+  const snapshots = stored
+    .map(session => toSnapshot(session, fallbackSessionDirectory))
     .filter(snapshot => snapshot.messages.length > 0);
   return {
     snapshots,
@@ -334,12 +357,18 @@ export function saveSessionSnapshots(
   selectedSessionId: string | null,
   directory: string = dataDirectory(),
 ): boolean {
-  return writeJson(sessionsPath(directory), {
+  const filePath = sessionsPath(directory);
+  const found = unread.get(path.resolve(directory));
+  if (found?.fileUnreadable) {
+    if (!setAside(filePath)) return false;
+    found.fileUnreadable = false;
+  }
+  return writeJson(filePath, {
     version: 1,
     // A selection that was not written is no selection at all.
     selectedSessionId: snapshots.some(snapshot => snapshot.id === selectedSessionId)
       ? selectedSessionId
       : null,
-    sessions: snapshots,
+    sessions: [...snapshots, ...(found?.sessions ?? [])],
   });
 }
