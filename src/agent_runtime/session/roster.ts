@@ -250,13 +250,19 @@ export class ParticipantRoster {
     return mentioned;
   }
 
+  // Every working worker, and every spawn still setting one up.
   activeSubagentCount(): number {
-    return this.agents.reduce((count, agent) =>
-      count + agent.listSubagents().filter(run => run.status === 'working').length, 0);
+    return this.agents.reduce((count, agent) => count + agent.spawningSubagents
+      + agent.listSubagents().filter(run => run.status === 'working').length, 0);
   }
 
   hasWorkingSubagents(): boolean {
-    return this.agents.some(agent => agent.listSubagents().some(run => run.status === 'working'));
+    return this.activeSubagentCount() > 0;
+  }
+
+  // Resolves once no agent is still setting up a worker.
+  async spawnsSettled(): Promise<void> {
+    await Promise.all(this.agents.map(agent => agent.spawnsSettled()));
   }
 
   // Stops every turn in flight. Workers are background tasks of the session

@@ -9,7 +9,9 @@ import type { RuntimeOptions } from '../../src/agent_runtime/runtime/runtime';
 import type { Draft } from '../../src/agent_runtime/session';
 import { Session } from '../../src/agent_runtime/session';
 import { sirusMcpServerEntry } from '../../src/agent_runtime/tools/server';
+import { findSubagent } from '../../src/agent_runtime/tools/subagents';
 import { subagentDone } from '../../src/agent_runtime/tools/subagents/run';
+import * as worktree from '../../src/agent_runtime/tools/subagents/worktree';
 import { textOf } from '../../src/agent_runtime/types';
 import { bindScriptedRuntime, textTurn, unbindRuntime, type ScriptedTurn } from '../support/runtime';
 
@@ -739,6 +741,35 @@ describe('Session model', () => {
     } finally {
       release();
       await session.dispose();
+    }
+  });
+
+  test('a worker still being set up counts as working, and deleting the session stops it', async () => {
+    bindScriptedRuntime(testModel, textTurn('Done'));
+    // Never created: removing the worktree is stubbed out below.
+    const directory = path.join(os.tmpdir(), `sirus-spawn-setup-${process.pid}`);
+    let cut!: () => void;
+    const create = spyOn(worktree, 'createWorktree')
+      .mockImplementation(() => new Promise(resolve => { cut = () => resolve({ directory, branch: 'sirus/setup' }); }));
+    const remove = spyOn(worktree, 'removeWorktree').mockResolvedValue();
+    const session = new Session({ id: 'spawn-setup', name: 'Setup', model: testModel });
+    session.append({ role: 'user', to: ['sirus'], content: [{ type: 'text', text: 'Earlier' }] });
+    try {
+      const spawn = session.subagentHostFor('sirus')!.spawn('Background task', 'fresh', { callId: 'spawn' });
+      await until(() => create.mock.calls.length === 1, 'the spawn to ask for a worktree');
+      // The run does not exist yet, but its worker starts from this record.
+      expect(session.getActiveSubagentCount()).toBe(1);
+      expect(() => session.clear()).toThrow('Wait for this session’s subagents to finish');
+
+      const disposed = session.dispose();
+      cut();
+      await disposed;
+      const run = await spawn;
+      expect(remove).toHaveBeenCalledWith(session.getDirectory(), directory);
+      expect(findSubagent(run.id)).toBeUndefined();
+    } finally {
+      create.mockRestore();
+      remove.mockRestore();
     }
   });
 

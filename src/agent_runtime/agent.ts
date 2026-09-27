@@ -135,6 +135,11 @@ export class SessionAgent {
   private record: ((update: RuntimeUpdate) => void) | null = null;
   private entry: Message | null = null;
   private readonly subagents = new Map<string, SubagentRun>();
+  // Spawns whose run does not exist yet: Jev's pick, the worktree and the
+  // fork come first. The session counts them as working, since the worker
+  // starts from the record as it stands then, and a session deleted
+  // meanwhile waits for them so it can stop what they started.
+  private readonly settingUp = new Set<Promise<SubagentRun>>();
   // Rows claimed by a SpawnAgent request whose worker is still being set up,
   // so two parallel requests never choose the same row.
   private readonly claimedSpawnCallIds = new Set<string>();
@@ -523,18 +528,32 @@ export class SessionAgent {
   // Spawning returns once the worker is on its way: it runs in the
   // background and reports back when it ends.
   async spawnSubagent(prompt: string, context: WorkerContext, callId?: string): Promise<SubagentRun> {
+    const setUp = this.workerModel(prompt).then(settled => startSubagent(this, prompt, {
+      ...settled,
+      context,
+      ...(callId ? { callId } : {}),
+    }));
+    this.settingUp.add(setUp);
     try {
-      const run = await startSubagent(this, prompt, {
-        ...await this.workerModel(prompt),
-        context,
-        ...(callId ? { callId } : {}),
-      });
+      const run = await setUp;
       this.subagents.set(run.id, run);
       notifySubagents();
       return run;
     } finally {
+      this.settingUp.delete(setUp);
       if (callId) this.claimedSpawnCallIds.delete(callId);
     }
+  }
+
+  // How many of this agent's spawns are still setting up their worker.
+  get spawningSubagents(): number {
+    return this.settingUp.size;
+  }
+
+  // Resolves once none of this agent's spawns is still being set up, however
+  // they ended. A run that was set up is in `listSubagents` by then.
+  async spawnsSettled(): Promise<void> {
+    while (this.settingUp.size > 0) await Promise.allSettled([...this.settingUp]);
   }
 
   // The model and thinking level a worker of this agent runs on: the

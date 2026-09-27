@@ -989,15 +989,16 @@ export class Session {
   // binding with it. The workers are the slow part — each one is stopped and
   // waited for before its worktree can be removed — so this resolves when
   // the last of them is gone; callers that only need the session out of the
-  // way need not wait.
+  // way need not wait. A spawn still setting up its worker is waited for
+  // first, so the run it started is among them.
   async dispose(): Promise<void> {
     this.disposed = true;
     this.cancel();
     this.stopNaming();
-    const workers = this.getWorkers();
     this.roster.resetRuntimes();
     unregisterToolSession(this.id);
-    await Promise.all(workers.map(run => this.disposeWorker(run)));
+    await this.roster.spawnsSettled();
+    await Promise.all(this.getWorkers().map(run => this.disposeWorker(run)));
   }
 
   // One worker at the end of the session: stopped if it was still working,
