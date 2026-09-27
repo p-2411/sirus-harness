@@ -110,7 +110,7 @@ describe('app workspace startup', () => {
     });
     saveSessionSnapshots(sessions.filter(s => !s.isEmpty()).map(s => s.toSnapshot()), null);
     const update = spyOn(updater, 'checkSirusUpdate').mockResolvedValue({
-      updateAvailable: false, currentVersion: '1.0.0', latestVersion: '1.0.0',
+      updateAvailable: true, currentVersion: '1.0.0', latestVersion: '1.2.9',
     });
     const stdin = Object.assign(new PassThrough(), {
       isTTY: true, setRawMode() {}, ref() {}, unref() {},
@@ -152,6 +152,7 @@ describe('app workspace startup', () => {
     try {
       await flush();
       expectPanes(26);
+      expect(output).toContain('Sirus 1.2.9 available · /update');
       const originalDots = dots();
       expect(originalDots).toHaveLength(2);
       for (const command of ['/help', '/login', '/model']) {
@@ -166,6 +167,7 @@ describe('app workspace startup', () => {
       await type('\r');
       await type('\u0002'); // Ctrl+B, including while a menu is open.
       expectPanes(4);
+      expect(output).toContain('Sirus 1.2.9 available · /update');
       expect(dots()).toEqual(originalDots);
       for (const { row } of originalDots) {
         expect(output.split('\n')[row]!.slice(0, 4)).toBe(' ○ │');

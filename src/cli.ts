@@ -11,6 +11,8 @@ export const USAGE = `Usage: sirus [directory] [prompt] [options]
 Open a fresh draft in the current directory, or an existing directory supplied first.
 Other positional text is a prompt and starts a new conversation.
 
+  doctor                  Check runtimes, login, storage and git
+
   -c, --continue           Continue the latest conversation in this directory
   -r, --resume [query]     Open the session picker, or match a session name or id
   -p, --print              Run one prompt, print its reply and exit (also reads stdin)
@@ -174,6 +176,14 @@ export async function runPrint(
 }
 
 export async function runCli(args: readonly string[] = process.argv.slice(2)): Promise<void> {
+  if (args[0] === 'doctor') {
+    if (args.length !== 1) throw new Error('Usage: sirus doctor');
+    const { runDoctor, formatDoctor } = await import('./doctor');
+    const checks = await runDoctor();
+    process.stdout.write(`${formatDoctor(checks)}\n`);
+    if (checks.some(check => check.status === 'error')) process.exitCode = 1;
+    return;
+  }
   const options = parseCliArguments(args);
   if (options.help) {
     process.stdout.write(`${USAGE}\n`);

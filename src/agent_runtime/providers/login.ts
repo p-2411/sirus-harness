@@ -33,7 +33,7 @@ interface ClaudeAuthStatus {
 // The Agent SDK's platform package ships the Claude Code binary. Logging in
 // through it lands in the store the ACP adapter's Claude Code reads, so the
 // login and the runtimes share one credential.
-function claudeBinaryPath(): string {
+export function claudeBinaryPath(): string {
   try {
     const require = createRequire(import.meta.url);
     const packageJson = require.resolve(

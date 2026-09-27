@@ -20,6 +20,7 @@ import { isKnownModel } from '../agent_runtime/providers/catalog';
 import ResumePicker from './ResumePicker';
 import type { CliOptions } from '../cli';
 import type { SessionSnapshot } from '../agent_runtime/session';
+import { theme } from './styles/theme';
 import { checkSirusUpdate } from '../updater';
 import { onProviderChange } from '../agent_runtime/providers';
 
@@ -113,7 +114,7 @@ export default function App({ launchDirectory = process.cwd(), startup }: { laun
   const activeSession = selectedSession ?? draftSession;
   const { stdout } = useStdout();
   const [terminalHeight, setTerminalHeight] = useState(() => stdout.rows ?? 24);
-  const [updateAvailable, setUpdateAvailable] = useState(false);
+  const [updateVersion, setUpdateVersion] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const sidebarWidth = sidebarCollapsed ? COLLAPSED_SIDEBAR_WIDTH : SIDEBAR_WIDTH;
   // tracked so width-only resizes also re-render (the header rule spans the width)
@@ -152,7 +153,7 @@ export default function App({ launchDirectory = process.cwd(), startup }: { laun
       activeController = new AbortController();
       void checkSirusUpdate(activeController.signal)
         .then(result => {
-          if (!disposed) setUpdateAvailable(result.updateAvailable);
+          if (!disposed) setUpdateVersion(result.updateAvailable ? result.latestVersion : null);
         })
         .catch(() => void 0);
     };
@@ -375,8 +376,9 @@ export default function App({ launchDirectory = process.cwd(), startup }: { laun
     // render inside the chat column (bottom-anchored, clipped at the top), so
     // nothing ever lands in scrollback outside the viewport.
     <Box flexDirection="row" width={terminalWidth} height={Math.max(terminalHeight, 14)}>
-      <Sidebar isActive={resumeQuery === null} sessions={sessions.filter(session => !session.isArchived())} directory={launchDirectory} onArchive={archiveSession} onFocusChange={setSidebarFocused} currSession={selectedSession} selectSession={selectSession} addSession={addSession} deleteSession={deleteSession} updateAvailable={updateAvailable} collapsed={sidebarCollapsed} />
+      <Sidebar isActive={resumeQuery === null} sessions={sessions.filter(session => !session.isArchived())} directory={launchDirectory} onArchive={archiveSession} onFocusChange={setSidebarFocused} currSession={selectedSession} selectSession={selectSession} addSession={addSession} deleteSession={deleteSession} collapsed={sidebarCollapsed} />
       <Box flexDirection="column" flexGrow={1} flexBasis={0} minWidth={0}>
+      {updateVersion && <Text color={theme.success} wrap="truncate-end">Sirus {updateVersion} available · /update</Text>}
       {storageNotice && <Text color="yellow">{storageNotice}</Text>}
       {resumeQuery !== null && <ResumePicker sessions={sessions} directory={launchDirectory} initialQuery={resumeQuery} onSelect={selectSession} onClose={() => setResumeQuery(null)} />}
       {sidebarFocused && <Box padding={3}><Text>Manage sessions in the sidebar. Esc returns to the conversation.</Text></Box>}

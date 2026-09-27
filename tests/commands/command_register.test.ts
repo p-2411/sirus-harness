@@ -50,6 +50,7 @@ describe('matchCommands', () => {
     expect(all.map(c => c.name)).toContain('memory');
     expect(all.map(c => c.name)).toContain('thinking');
     expect(all.map(c => c.name)).toContain('update');
+    expect(all.map(c => c.name)).toContain('doctor');
   });
 
   test('filters by typed prefix', () => {
@@ -346,6 +347,7 @@ describe('executeCommand', () => {
 
   test('update command rejects arguments before running the updater', () => {
     expect(() => runCommand('update', ['now'])).toThrow('Usage: /update');
+    expect(() => runCommand('doctor', ['now'])).toThrow('Usage: /doctor');
   });
 });
 

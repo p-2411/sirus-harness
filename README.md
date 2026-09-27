@@ -189,6 +189,7 @@ Use `/usage` to see reported subscription allowance and how full each participan
 | `/agents` | Watch, message, cancel, or clear the session's subagents. |
 | `/undo` / `/rewind` | Choose what to restore from a checkpoint. |
 | `/notify` | Configure desktop notifications. |
+| `/doctor` | Check Bun, adapter and vendor versions, logins, data directory and git. Also available as `sirus doctor`. API key validity is not checked. |
 | `/update` | Install the latest release. |
 | `/help` | Show all commands and shortcuts. |
 | `/exit` | Quit Sirus. |

@@ -78,15 +78,13 @@ function useMinuteClock(): number {
   return now;
 }
 
-export function SidebarHeader({ updateAvailable = false }: { updateAvailable?: boolean }) {
+export function SidebarHeader() {
   const now = useMinuteClock();
 
   return (
     <Box justifyContent="space-between">
       <Text color={theme.accent}>sirus</Text>
-      {updateAvailable
-        ? <Text color={theme.success}>/update</Text>
-        : <Text color={theme.textSubtle} dimColor>{formatSidebarTime(now)}</Text>}
+      <Text color={theme.textSubtle} dimColor>{formatSidebarTime(now)}</Text>
     </Box>
   );
 }
@@ -173,8 +171,8 @@ export function SessionItem({ session, isSelected, onSelect, onDelete, now = Dat
   );
 }
 
-export default function SideBar({ sessions, currSession, selectSession, addSession, deleteSession, updateAvailable = false, collapsed = false, directory = process.cwd(), onArchive, onFocusChange, isActive = true }: {
-  sessions: Session[]; currSession: Session | null; selectSession: (session: Session) => void; addSession: () => void; deleteSession: (session: Session) => void; updateAvailable?: boolean; collapsed?: boolean;
+export default function SideBar({ sessions, currSession, selectSession, addSession, deleteSession, collapsed = false, directory = process.cwd(), onArchive, onFocusChange, isActive = true }: {
+  sessions: Session[]; currSession: Session | null; selectSession: (session: Session) => void; addSession: () => void; deleteSession: (session: Session) => void; collapsed?: boolean;
   directory?: string; onArchive?: (session: Session) => void; onFocusChange?: (focused: boolean) => void; isActive?: boolean;
 }) {
   const ref = useRef<DOMElement>(null);
@@ -301,7 +299,7 @@ export default function SideBar({ sessions, currSession, selectSession, addSessi
     >
       <Box flexDirection="column" flexShrink={0}>
         <Box height={1} flexShrink={0} flexDirection="column">
-          {!collapsed && <SidebarHeader updateAvailable={updateAvailable} />}
+          {!collapsed && <SidebarHeader />}
         </Box>
         {!collapsed && <SubscriptionLimits />}
         {!collapsed && focused && <Text color={theme.accent} wrap="truncate-start">filter: {query}▌</Text>}

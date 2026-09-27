@@ -1,3 +1,4 @@
+import { doctorCommandSpec } from './doctor/commands';
 import { tasksCommandSpec } from './tasks/commands';
 import { agentsCommandSpec, modelCommand, thinkingCommandSpec } from './agents/commands';
 import {
@@ -45,6 +46,7 @@ export const commandRegistry: readonly CommandSpec[] = [
   usageCommandSpec,
   updateCommandSpec,
   versionCommandSpec,
+  doctorCommandSpec,
   memoryCommandSpec,
   permissionsCommandSpec,
   undoCommandSpec,

@@ -1,8 +1,10 @@
-import { describe, expect, test } from 'bun:test';
+import * as doctor from '../src/doctor';
+import { openSettings } from '../src/persistence/settings';
+import { describe, expect, spyOn, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { parseCliArguments, resolveResumeSelection, runPrint } from '../src/cli';
+import { parseCliArguments, resolveResumeSelection, runCli, runPrint } from '../src/cli';
 import packageManifest from '../package.json';
 import { Session, type SessionSnapshot } from '../src/agent_runtime/session';
 import { loadSessionSnapshots, saveSessionSnapshot } from '../src/persistence';
@@ -168,4 +170,85 @@ describe('sirus CLI', () => {
     }
   });
 
+});
+
+
+describe('doctor', () => {
+  test('reports versions, configured profiles, storage and git without exposing credentials', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'sirus-doctor-'));
+    const previous = process.env.SIRUS_DATA_DIR;
+    process.env.SIRUS_DATA_DIR = directory;
+    try {
+      openSettings().set({ providerSources: {
+        claude: [{ id: 'api', type: 'api', key: 'secret-api-key' }, { id: 'work', type: 'subscription', profile: 'work' }],
+        gpt: [{ id: 'default', type: 'subscription', profile: 'default' }],
+      } });
+      const checks = await doctor.runDoctor(directory, undefined, async (command, args, env, cwd) => {
+        expect(cwd).toBe(directory);
+        if (args[0] === '--version') return { code: 0, stdout: command === process.execPath ? '1.4.0' : '2.3.4', stderr: '' };
+        if (args[0] === 'auth') {
+          expect(env.CLAUDE_CONFIG_DIR).toBe(join(directory, 'subscriptions', 'claude', 'work'));
+          expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+          return { code: 0, stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', token: 'secret-token' }), stderr: '' };
+        }
+        if (args[0] === 'login') return { code: 0, stdout: '', stderr: 'Logged in using ChatGPT' };
+        return { code: 0, stdout: 'true\n', stderr: '' };
+      });
+      expect(checks.every(check => check.status === 'ok')).toBe(true);
+      const output = doctor.formatDoctor(checks);
+      for (const name of ['Bun', 'claude-agent-acp', 'codex-acp', 'Claude Code', 'Codex', 'Anthropic login (work)', 'OpenAI login', 'Data directory', 'Git']) expect(output).toContain(name);
+      expect(output).toContain('validity not checked');
+      expect(output).not.toContain('secret');
+    } finally {
+      if (previous === undefined) delete process.env.SIRUS_DATA_DIR;
+      else process.env.SIRUS_DATA_DIR = previous;
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('reports old Bun, failed binaries, signed-out vendors and inaccessible data', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'sirus-doctor-'));
+    const previous = process.env.SIRUS_DATA_DIR;
+    writeFileSync(join(directory, 'file'), 'not a directory');
+    process.env.SIRUS_DATA_DIR = join(directory, 'file', 'data');
+    try {
+      const checks = await doctor.runDoctor(directory, undefined, async (command, args) => {
+        if (command === process.execPath) return { code: 0, stdout: '1.0.0', stderr: '' };
+        if (command === 'git') return { code: 0, stdout: args[0] === '--version' ? 'git version 2.40.0' : 'false', stderr: '' };
+        return { code: 1, stdout: 'secret-output', stderr: 'secret-error' };
+      });
+      expect(checks.find(check => check.name === 'Bun')).toMatchObject({ status: 'error' });
+      expect(checks.find(check => check.name === 'Claude Code')).toMatchObject({ status: 'error' });
+      expect(checks.find(check => check.name === 'Data directory')).toMatchObject({ status: 'error' });
+      expect(checks.find(check => check.name === 'Git')).toMatchObject({ status: 'warning' });
+      expect(checks.filter(check => check.name.includes('login')).every(check => check.status === 'warning')).toBe(true);
+      expect(doctor.formatDoctor(checks)).not.toContain('secret');
+      const controller = new AbortController();
+      controller.abort();
+      await expect(doctor.runDoctor(directory, controller.signal)).rejects.toThrow();
+    } finally {
+      if (previous === undefined) delete process.env.SIRUS_DATA_DIR;
+      else process.env.SIRUS_DATA_DIR = previous;
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('CLI doctor prints checks, exits unsuccessfully for errors and rejects arguments', async () => {
+    const checks: doctor.DoctorCheck[] = [{ name: 'Bun', status: 'error', detail: 'missing' }];
+    const run = spyOn(doctor, 'runDoctor').mockResolvedValue(checks);
+    const output = spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const previous = process.exitCode;
+    try {
+      await runCli(['doctor']);
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(output).toHaveBeenCalledWith(`${doctor.formatDoctor(checks)}\n`);
+      expect(process.exitCode).toBe(1);
+      await expect(runCli(['doctor', 'extra'])).rejects.toThrow('Usage: sirus doctor');
+      expect(parseCliArguments(['--', 'doctor']).prompt).toBe('doctor');
+    } finally {
+      process.exitCode = previous;
+      run.mockRestore();
+      output.mockRestore();
+    }
+  });
 });
