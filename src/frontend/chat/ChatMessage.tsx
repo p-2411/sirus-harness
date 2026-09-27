@@ -365,9 +365,16 @@ export function ToolRunGroup({ calls, defaultExpanded = false, sessionId }: {
 	);
 }
 
-function ToolCallRow({ call, sessionId }: { call: ToolCallBlock; sessionId?: string }) {
+// A row on its own is set off by a blank line; rows that follow one another
+// stack directly, as the entries of a group do.
+function ToolCallRow({ call, sessionId, joinsPrevious = false, joinsNext = false }: {
+	call: ToolCallBlock;
+	sessionId?: string;
+	joinsPrevious?: boolean;
+	joinsNext?: boolean;
+}) {
 	return (
-		<Box flexDirection="column" padding={1}>
+		<Box flexDirection="column" paddingX={1} paddingTop={joinsPrevious ? 0 : 1} paddingBottom={joinsNext ? 0 : 1}>
 			<ToolCallEntry call={call} indent="  " sessionId={sessionId} />
 		</Box>
 	);
@@ -443,6 +450,7 @@ export function ChatMessage({
 }) {
 	const isUser = message.role === "user";
 	const participantName = message.participant ?? 'sirus';
+	const segments = messageSegments(message.content);
 	return (
 		// no bars, no boxes — bold speaker label, body aligned flush beneath,
 		// whitespace doing the separating
@@ -462,7 +470,7 @@ export function ChatMessage({
 				</Text>
 				{!isUser && model && <Text color={theme.textSubtle} dimColor> {model}</Text>}
 			</Text>
-			{messageSegments(message.content).map((block, index) => {
+			{segments.map((block, index) => {
 				switch (block.type) {
 					case 'text':
 						if (block.filePath) return null;
@@ -476,7 +484,15 @@ export function ChatMessage({
 					case 'tool_run':
 						return <ToolRunGroup key={index} calls={block.calls} sessionId={sessionId} />;
 					case 'tool_call':
-						return <ToolCallRow key={index} call={block} sessionId={sessionId} />;
+						return (
+							<ToolCallRow
+								key={index}
+								call={block}
+								sessionId={sessionId}
+								joinsPrevious={segments[index - 1]?.type === 'tool_call'}
+								joinsNext={segments[index + 1]?.type === 'tool_call'}
+							/>
+						);
 				}
 			})}
 		</Box>

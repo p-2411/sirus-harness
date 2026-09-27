@@ -543,6 +543,17 @@ describe('the SpawnAgent row', () => {
     expect(output).toContain('● Tool sirus - SpawnAgent');
     expect(output).not.toContain('·');
   });
+
+  test('sits directly under a neighbouring tool row', () => {
+    const twins = [call, toolCall({ id: 'spawn-call-2', title: 'sirus - SpawnAgent' })];
+    const lines = stripAnsi(renderToString(
+      <ChatMessage message={{ seq: 0, role: 'assistant', content: twins }} />,
+      { columns: 140 },
+    )).split('\n');
+    const rows = lines.flatMap((line, index) => line.includes('SpawnAgent') ? [index] : []);
+    expect(rows).toHaveLength(2);
+    expect(rows[1] - rows[0]).toBe(1);
+  });
 });
 
 describe('a worker report', () => {

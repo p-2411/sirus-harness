@@ -138,11 +138,11 @@ export function SessionItem({ session, isSelected, onSelect, onDelete, now = Dat
             <Text color={theme.textSubtle} dimColor>{activity}</Text>
           </Box>
         )}
-        {!collapsed && hovered && (
+        {/*{!collapsed && hovered && (
           <Box ref={deleteRef} marginLeft={1} flexShrink={0}>
             <Text color={theme.textSubtle}>×</Text>
           </Box>
-        )}
+        )}*/}
       </Box>
     </Box>
   );
