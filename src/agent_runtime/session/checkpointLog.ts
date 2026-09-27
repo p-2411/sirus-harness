@@ -35,6 +35,9 @@ export interface DirectoryActivity {
   endRestore(directory: string): void;
   // Files here are being put back, by this session or by another.
   isRestoring(directory: string): boolean;
+  // Calls back once when the restore under way here ends, at once if none
+  // is. What waited on another session's restore hears it end this way.
+  afterRestore(directory: string, callback: () => void): void;
   // A turn or a file restore is running here, by this session or by another.
   isBusy(directory: string): boolean;
   // Detached workers outlive their parent turn, so the turn count alone does
@@ -45,6 +48,7 @@ export interface DirectoryActivity {
 class ProcessDirectoryActivity implements DirectoryActivity {
   private readonly turns = new Map<string, number>();
   private readonly restoring = new Set<string>();
+  private readonly waitingOnRestore = new Map<string, (() => void)[]>();
 
   beginTurn(directory: string): void {
     const key = keyFor(directory);
@@ -63,11 +67,21 @@ class ProcessDirectoryActivity implements DirectoryActivity {
   }
 
   endRestore(directory: string): void {
-    this.restoring.delete(keyFor(directory));
+    const key = keyFor(directory);
+    this.restoring.delete(key);
+    const waiting = this.waitingOnRestore.get(key) ?? [];
+    this.waitingOnRestore.delete(key);
+    for (const callback of waiting) callback();
   }
 
   isRestoring(directory: string): boolean {
     return this.restoring.has(keyFor(directory));
+  }
+
+  afterRestore(directory: string, callback: () => void): void {
+    const key = keyFor(directory);
+    if (!this.restoring.has(key)) return callback();
+    this.waitingOnRestore.set(key, [...this.waitingOnRestore.get(key) ?? [], callback]);
   }
 
   isBusy(directory: string): boolean {
@@ -156,6 +170,10 @@ export class CheckpointLog {
 
   isRestoringDirectory(): boolean {
     return this.activity.isRestoring(this.directory);
+  }
+
+  afterDirectoryRestore(callback: () => void): void {
+    this.activity.afterRestore(this.directory, callback);
   }
 
   isDirectoryBusy(): boolean {

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { execFileSync } from 'child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import os from 'os';
@@ -6,6 +6,7 @@ import path from 'path';
 import { Session, type Draft } from '../../src/agent_runtime/session';
 import type { RuntimeOptions } from '../../src/agent_runtime/runtime/runtime';
 import { subagentDone } from '../../src/agent_runtime/tools/subagents/run';
+import * as checkpointStore from '../../src/checkpoints';
 import { enableCheckpoints } from '../../src/checkpoints';
 import { TurnCancelledError } from '../../src/abort';
 import { bindScriptedRuntime, unbindRuntime, type ScriptedBinding } from '../support/runtime';
@@ -364,6 +365,54 @@ describe('session checkpoint integration', () => {
     expect(existsSync(worktree)).toBe(false);
     expect(git(repository, ['branch', '--list', branch])).toContain(branch);
     expect(git(repository, ['worktree', 'list'])).not.toContain(worktree);
+  });
+
+  test('a report held back by another session’s file restore goes out when the restore ends', async () => {
+    const repository = committedRepository();
+    const restorer = new Session({ id: 'restoring-session', name: 'Restoring', directory: repository, model });
+    const owner = new Session({ id: 'waiting-owner', name: 'Waiting owner', directory: repository, model });
+    let releaseWorker!: () => void;
+    const workerGate = new Promise<void>(resolve => { releaseWorker = resolve; });
+    const prompts: string[] = [];
+    bindScriptedRuntime(model, async (input, emit, options) => {
+      if (isWorker(options)) {
+        await workerGate;
+        emit({ type: 'text', text: 'Worker result' });
+        return;
+      }
+      prompts.push(input.text);
+      if (input.text === 'Delegate it') {
+        await owner.subagentHostFor('sirus')!.spawn('Work on your own branch', 'fresh', { callId: 'spawn' });
+      }
+      emit({ type: 'text', text: 'Done' });
+    });
+    let finishRestore = () => {};
+    const restore = spyOn(checkpointStore, 'restoreCheckpoint')
+      .mockImplementation(() => new Promise(resolve => { finishRestore = () => resolve({ restored: [], removed: [] }); }));
+    try {
+      await restorer.sendMessage(prompt);
+      const [checkpoint] = restorer.getCheckpoints();
+      await owner.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Delegate it' }] });
+      const [worker] = owner.getWorkers();
+      // It works in a worktree of its own, so the files here may be restored.
+      expect(worker.branch).not.toBeNull();
+
+      const rewind = restorer.rewind(checkpoint.id, { files: true, chat: false });
+      releaseWorker();
+      await until(() => worker.status === 'done', 'the worker to finish');
+      expect(worker.reported).toBe(false);
+      finishRestore();
+      await rewind;
+      // Nothing else happens in the owner's session, and the report goes out.
+      await until(() => worker.reported && owner.getStatus() === 'idle', 'the report turn');
+      expect(prompts.at(-1)).toStartWith(`@${worker.id} wrote:`);
+    } finally {
+      restore.mockRestore();
+      releaseWorker();
+      finishRestore();
+      await owner.dispose();
+      await restorer.dispose();
+    }
   });
 
   test('a worktree git fails to cut fails the spawn and leaves nothing of it behind', async () => {

@@ -501,9 +501,16 @@ export class Session {
   }
 
   // Delivers whatever is waiting, unless something else has the session.
+  // This session's own turn, rewind or compaction flushes again as it ends;
+  // another session restoring the files here does not, so its restore is
+  // asked to call back when it is done.
   private flushReports(): void {
     if (this.pendingReports.length === 0 || this.disposed) return;
-    if (this.activeSends > 0 || this.rewinding || this.compacting || this.checkpoints.isRestoringDirectory()) return;
+    if (this.activeSends > 0 || this.rewinding || this.compacting) return;
+    if (this.checkpoints.isRestoringDirectory()) {
+      this.checkpoints.afterDirectoryRestore(() => this.flushReports());
+      return;
+    }
     void this.deliverReports();
   }
 
