@@ -383,7 +383,7 @@ export class SessionAgent {
       onPermission: (request, promptSignal) => this.askPermission(request, promptSignal),
       onElicitation: (request, promptSignal) => this.askUser(request, promptSignal),
       onUpdate: update => this.hear(update),
-    });
+    }, signal);
     if (signal.aborted) {
       runtime.dispose();
       throw abortReason(signal);

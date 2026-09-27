@@ -23,7 +23,7 @@ import type { ListedModel, Vendor } from '../providers/catalog';
 import { THINKING_LEVELS, type ThinkingLevel, type ToolCallBlock } from '../types';
 import type { ContextUsage } from '../usage';
 import { nativeCommandFrom } from './commands';
-import { launchFor, type SessionParams } from './launch';
+import { launchFor, type Launch, type SessionParams } from './launch';
 import {
   modeKindOf,
   toolCallBlockFrom,
@@ -204,8 +204,14 @@ interface SessionState {
   stuck: boolean;
 }
 
-export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime> {
-  const launch = launchFor(options);
+// The launch is the vendor's own; the test suite passes one that runs a
+// stand-in adapter.
+export async function startAcpRuntime(
+  options: RuntimeOptions,
+  signal?: AbortSignal,
+  launch: Launch = launchFor(options),
+): Promise<Runtime> {
+  throwIfAborted(signal);
   const child = spawn(launch.command, launch.args, { stdio: ['pipe', 'pipe', 'pipe'], env: launch.env });
 
   // Both adapters write their errors to stderr; the last lines are what the
@@ -676,6 +682,12 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
     };
   }
 
+  // Startup waits on the adapter several times over, and one that never
+  // answers would hold the turn for good. Cancelling the turn, which the
+  // user or a worker's watchdog does, ends the process instead, and that
+  // fails whichever request is still waiting.
+  const stop = () => disposeProcess();
+  signal?.addEventListener('abort', stop, { once: true });
   try {
     const initialized = await connection.agent.request(methods.agent.initialize, {
       protocolVersion: 1,
@@ -711,8 +723,10 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
     await configure(state, launch.mode, options.model, options.thinkingLevel);
     return runtimeFor(state, disposeProcess);
   } catch (error) {
-    const failure = settled(error);
+    const failure = signal?.aborted ? abortReason(signal) : settled(error);
     disposeProcess();
     throw failure;
+  } finally {
+    signal?.removeEventListener('abort', stop);
   }
 }

@@ -4,6 +4,7 @@ import os from 'os';
 import path from 'path';
 import * as naming from '../../src/agent_runtime/session/naming';
 import * as router from '../../src/agent_runtime/router';
+import * as acp from '../../src/agent_runtime/runtime/acp';
 import { invalidateAllRuntimes, type RuntimeOptions } from '../../src/agent_runtime/runtime/runtime';
 import type { Draft } from '../../src/agent_runtime/session';
 import { Session } from '../../src/agent_runtime/session';
@@ -996,6 +997,37 @@ describe('Session model', () => {
     ]);
     expect(session.cancel()).toBe(false);
     release();
+  });
+
+  test('cancelling a turn stops a runtime that is still starting', async () => {
+    const previousKey = process.env.OPENAI_SECRET;
+    process.env.OPENAI_SECRET = 'sk-proj-starting-0000';
+    const startSignals: (AbortSignal | undefined)[] = [];
+    // An adapter that does not finish starting: it stops when told to, and
+    // gives up by itself after a while, so a start nobody can stop still
+    // ends the test.
+    const start = spyOn(acp, 'startAcpRuntime').mockImplementation((_options, signal) => {
+      startSignals.push(signal);
+      return new Promise((_resolve, reject) => {
+        const hung = setTimeout(() => reject(new Error('The adapter never started')), 2_000);
+        signal?.addEventListener('abort', () => {
+          clearTimeout(hung);
+          reject(signal.reason);
+        }, { once: true });
+      });
+    });
+    const session = new Session({ id: 'starting', name: 'Starting', model: 'gpt-5.6-luna' });
+    try {
+      const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Start' }] });
+      await until(() => startSignals.length === 1, 'the runtime to start');
+      expect(session.cancel()).toBe(true);
+      await expect(turn).rejects.toMatchObject({ name: 'AbortError' });
+      expect(startSignals[0]?.aborted).toBe(true);
+    } finally {
+      start.mockRestore();
+      if (previousKey === undefined) delete process.env.OPENAI_SECRET;
+      else process.env.OPENAI_SECRET = previousKey;
+    }
   });
 
   test('creates a named participant from a mention and targets it thereafter', async () => {

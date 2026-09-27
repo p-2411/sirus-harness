@@ -198,12 +198,13 @@ export function invalidateAllRuntimes(): void {
 // as one a vendor has since stopped listing that a restored session or the
 // subagent setting still names, has no credential to run on; started anyway,
 // its adapter would get this process's whole environment, keys included.
-export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
+// Aborting the signal ends a startup the adapter has not finished.
+export async function createRuntime(options: RuntimeOptions, signal?: AbortSignal): Promise<Runtime> {
   const bound = boundRuntimes[options.model];
   if (!bound && !vendorOf(options.model)) {
     throw new Error(`The model ${options.model} is no longer available. Pick another with /model.`);
   }
-  const runtime = bound ? await bound(options) : await startAcpRuntime(options);
+  const runtime = bound ? await bound(options) : await startAcpRuntime(options, signal);
   return trackRuntime(runtime);
 }
 
