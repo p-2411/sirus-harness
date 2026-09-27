@@ -11,6 +11,7 @@ export const KEY_BINDINGS: ReadonlyArray<readonly [keys: string, action: string]
   ['option+↑ / ↓', 'switch session'],
   ['← / →', 'switch agent when a task has multiple agents'],
   ['ctrl+n', 'focus the empty draft'],
+  ['ctrl+f', 'manage sessions'],
   ['sidebar: search · ctrl+a', 'find sessions · archive selected session'],
   ['resume: tab', 'toggle this project / all projects'],
   ['ctrl+b', 'collapse the sidebar'],

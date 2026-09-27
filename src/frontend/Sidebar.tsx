@@ -141,8 +141,8 @@ export function SessionItem({ session, isSelected, onSelect, onDelete, onRename,
   useClickable(deleteRef, remove);
   const yesRef = useRef<DOMElement>(null);
   const noRef = useRef<DOMElement>(null);
-  useClickable(yesRef, () => onConfirmDelete?.());
-  useClickable(noRef, () => onCancelEdit?.());
+  const yesHovered = useClickable(yesRef, () => onConfirmDelete?.());
+  const noHovered = useClickable(noRef, () => onCancelEdit?.());
   const subscribe = useCallback((listener: () => void) => session.subscribe(listener), [session]);
   const getSnapshot = useCallback(() => session.getVersion(), [session]);
   useSyncExternalStore(subscribe, getSnapshot);
@@ -176,7 +176,7 @@ export function SessionItem({ session, isSelected, onSelect, onDelete, onRename,
           <Box width={1} flexShrink={0}>
             {session.getStatus() === 'working' && !needsYou ? <Spinner /> : <Text color={status.color}>{status.symbol}</Text>}
           </Box>
-          {!collapsed && (rename ? <Text wrap="truncate-start"> <Text inverse={rename.selected}>
+          {!collapsed && (confirmingDelete ? <Text color={theme.danger}> Delete session?</Text> : rename ? <Text wrap="truncate-start"> <Text inverse={rename.selected}>
             {rename.text.slice(0, rename.cursor)}{!rename.selected && <Text inverse>{rename.text[rename.cursor] ?? ' '}</Text>}{rename.text.slice(rename.cursor + (rename.selected ? 0 : 1))}
           </Text></Text> : <Text color={hovered ? theme.highlight : isSelected ? theme.text : theme.textMuted} bold={isSelected} wrap="truncate-end"> {showDirectory ? `${path.basename(session.getDirectory()) || session.getDirectory()} · ` : ''}{session.getName()}</Text>)}
         </Box>
@@ -187,9 +187,9 @@ export function SessionItem({ session, isSelected, onSelect, onDelete, onRename,
           </Box>
         )}
         {!collapsed && confirmingDelete ? <Box marginLeft={1} flexShrink={0}>
-          <Box ref={yesRef}><Text color={theme.danger}>y</Text></Box>
+          <Box ref={yesRef}><Text color={yesHovered ? theme.highlight : theme.textMuted}>y</Text></Box>
           <Text color={theme.textSubtle}>/</Text>
-          <Box ref={noRef}><Text color={theme.textMuted}>n</Text></Box>
+          <Box ref={noRef}><Text color={noHovered ? theme.highlight : theme.textMuted}>n</Text></Box>
         </Box> : !collapsed && managing && hovered && !rename && (
           <Box ref={deleteRef} marginLeft={1} flexShrink={0}>
             <Text color={theme.textSubtle}>×</Text>
@@ -232,6 +232,8 @@ export default function SideBar({ sessions, currSession, selectSession, addSessi
   };
   const filterRef = useRef<DOMElement>(null);
   useClickable(filterRef, () => { if (isActive) { focus(true); setEditing(null); } });
+  const manageRef = useRef<DOMElement>(null);
+  const manageHovered = useClickable(manageRef, () => { if (isActive) focus(true); });
   const requestDelete = (session: Session) => {
     if (!isActive) return;
     focus(true);
@@ -293,6 +295,7 @@ export default function SideBar({ sessions, currSession, selectSession, addSessi
       return;
     }
     if (isMouseInput(input) || isFocusInput(input)) return;
+    if (key.ctrl && input === 'f') { focus(true); setEditing(null); return; }
     if (focused) {
       if (key.escape) { if (editing) setEditing(null); else focus(false); return; }
       if (editing) {
@@ -355,8 +358,15 @@ export default function SideBar({ sessions, currSession, selectSession, addSessi
           {!collapsed && <SidebarHeader />}
         </Box>
         {!collapsed && <SubscriptionLimits />}
+        <Box height={2} flexShrink={0} flexDirection="column" justifyContent="flex-end">
+          {!collapsed && focused && <Box ref={filterRef} height={1}>
+            <Text color={theme.textMuted}>search: </Text>
+            <Text wrap="truncate-start">{query.slice(-14)}{!editing ? '▌' : ''}</Text>
+            <Text color={theme.textSubtle} dimColor>{'_'.repeat(Math.max(0, 15 - stringWidth(query.slice(-14)) - (!editing ? 1 : 0)))}</Text>
+          </Box>}
+        </Box>
       </Box>
-      <Box ref={listRef} flexGrow={1} minHeight={0} overflow="hidden" marginTop={2}>
+      <Box ref={listRef} flexGrow={1} minHeight={0} overflow="hidden">
         <Box flexDirection="column" flexGrow={1} minWidth={0}>
           {!collapsed && ordered.length === 0 && <Text color={theme.textMuted}>No matching sessions</Text>}
           {ordered.map((session, index) => (
@@ -391,11 +401,10 @@ export default function SideBar({ sessions, currSession, selectSession, addSessi
       </Box>
       {!collapsed && <Box flexDirection="column" flexShrink={0}>
         {focused && <Text color={theme.textMuted}>^a archive · esc back</Text>}
-        <Box ref={filterRef} height={1}>
-          <Text color={theme.textMuted}>search: </Text>
-          <Text wrap="truncate-start">{query.slice(-14)}{focused && !editing ? '▌' : ''}</Text>
-          <Text color={theme.textSubtle} dimColor>{'_'.repeat(Math.max(0, 15 - stringWidth(query.slice(-14)) - (focused && !editing ? 1 : 0)))}</Text>
-        </Box>
+        {!focused && <Box ref={manageRef} justifyContent="space-between">
+          <Text color={manageHovered ? theme.highlight : theme.textMuted}>manage session</Text>
+          <Text color={theme.textSubtle}>ctrl+f</Text>
+        </Box>}
         <Box ref={newSessionRef} justifyContent="space-between">
           <Text color={newSessionHovered ? theme.highlight : theme.textMuted}>new session</Text>
           <Text color={theme.textSubtle}>ctrl+n</Text>

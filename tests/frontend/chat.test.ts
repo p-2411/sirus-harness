@@ -8,6 +8,7 @@ import { planCall, type Message, type PlanEntry, type ToolCallBlock } from '../.
 import Chat, { currentPlans, formatElapsed, promptHistory, turnPhase } from '../../src/frontend/chat/Chat';
 import { usageCommandSpec } from '../../src/commands/authentication/commands';
 import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
+import * as updater from '../../src/updater';
 
 test('Escape dismisses help, command suggestions, login stages and secret entry', async () => {
   const session = new Session();
@@ -267,6 +268,50 @@ function renderChat(session: Session) {
     },
   };
 }
+
+test('/update shows its own progress and reserves thinking for an actual agent turn', async () => {
+  let finishUpdate!: () => void;
+  const updating = new Promise<void>(resolve => { finishUpdate = resolve; });
+  let notify!: (text: string) => void;
+  const update = spyOn(updater, 'updateSirus').mockImplementation(async onProgress => {
+    notify = onProgress!;
+    notify('Checking npm for a newer Sirus release…');
+    await updating;
+    return { updated: true, currentVersion: '1.0.0', latestVersion: '1.0.1' };
+  });
+  const model = 'test-update-progress';
+  let finishTurn!: () => void;
+  const working = new Promise<void>(resolve => { finishTurn = resolve; });
+  bindScriptedRuntime(model, async (_input, emit) => { await working; emit({ type: 'text', text: 'Done.' }); });
+  const session = new Session({ model });
+  const chat = renderChat(session);
+  try {
+    await chat.flush();
+    await chat.type('/update');
+    await chat.type('\r');
+    await chat.waitFor('Checking npm for a newer Sirus release…');
+    expect(chat.output()).not.toContain('thinking');
+    notify('Updating Sirus 1.0.0 → 1.0.1…');
+    await chat.flush();
+    expect(chat.output()).toContain('Updating Sirus 1.0.0 → 1.0.1…');
+    expect(chat.output()).not.toContain('thinking');
+    expect(session.getStatus()).toBe('idle');
+    finishUpdate();
+    await chat.waitFor('Updated 1.0.0 → 1.0.1.');
+    await chat.type('Work');
+    await chat.type('\r');
+    await chat.waitFor('thinking');
+    finishTurn();
+    await chat.waitFor('Done.');
+  } finally {
+    finishUpdate();
+    finishTurn();
+    update.mockRestore();
+    await chat.close();
+    await session.dispose();
+    unbindRuntime(model);
+  }
+});
 
 test('thinking runs immediately while other commands queue and remain editable', async () => {
   const model = 'test-chat-command-queue';

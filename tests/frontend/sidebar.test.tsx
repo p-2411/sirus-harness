@@ -66,7 +66,8 @@ function mountSidebar() {
     archived: () => archived,
     focused: () => focused,
     async manage() {
-      const row = frame.split('\n').findIndex(line => line.includes('search:'));
+      const row = frame.split('\n').findIndex(line => line.includes('manage session'));
+      expect(row).toBeGreaterThanOrEqual(0);
       pressAt({ col: 3, line: row }); releaseAt({ col: 3, line: row }); await flush();
     },
     async wheel(direction: 'up' | 'down', column = 3, line?: number) {
@@ -107,25 +108,37 @@ describe('sidebar scrolling', () => {
     const app = mountSidebar();
     try {
       await app.flush();
-      expect(app.frame()).toContain('search: __');
+      expect(app.frame()).toMatch(/manage session\s+ctrl\+f/);
+      expect(app.frame()).not.toContain('search:');
+      const firstSessionRow = app.frame().split('\n').findIndex(line => line.includes('Session 00'));
       await app.hover('Session 00');
       expect(app.frame()).not.toContain('×');
       await app.manage();
+      expect(app.frame()).toContain('search: ▌__');
+      expect(app.frame().split('\n')[firstSessionRow - 1]).toContain('search:');
+      expect(app.frame().split('\n')[firstSessionRow]).toContain('Session 00');
+      expect(app.frame()).not.toContain('manage session');
       await app.hover('Session 00');
       expect(app.frame()).toContain('×');
       expect(app.frame()).toContain('^a archive · esc back');
       expect(app.frame()).not.toMatch(/\^d delete|\^r rename/);
       await app.click('×');
-      expect(app.frame()).toContain('Session 00');
+      expect(app.frame()).not.toContain('Session 00');
+      expect(app.frame()).toContain('Delete session?');
       expect(app.frame()).toContain('y/n');
       await app.click('y/n', 2);
       expect(app.deleted()).toHaveLength(0);
       expect(app.frame()).not.toContain('y/n');
+      expect(app.frame()).not.toContain('Delete session?');
+      expect(app.frame()).toContain('Session 00');
       await app.click('×');
       await app.click('y/n');
       expect(app.deleted().map(session => session.getName())).toEqual(['Session 00']);
       expect(app.frame()).not.toContain('Session 00');
       await app.type('\x1b');
+      expect(app.frame()).not.toContain('search:');
+      expect(app.frame()).toContain('manage session');
+      expect(app.frame().split('\n')[firstSessionRow]).toContain('Session 01');
       await app.hover('Session 01');
       expect(app.frame()).not.toContain('×');
     } finally { await app.close(); }
@@ -370,7 +383,7 @@ describe('sidebar management', () => {
       expect(app.frame()).not.toContain('Session 00');
       await app.type('\x04');
       expect(app.frame()).toContain('y/n');
-      expect(app.frame()).not.toContain('Delete session?');
+      expect(app.frame()).toContain('Delete session?');
       expect(app.deleted()).toHaveLength(0);
       await app.type('\r');
       expect(app.deleted()).toHaveLength(0);

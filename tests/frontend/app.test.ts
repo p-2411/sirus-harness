@@ -193,6 +193,21 @@ describe('app workspace startup', () => {
       await type('\u0002');
       expectPanes(4);
       expect(dots()).toEqual(originalDots);
+      await type('\u0006'); // Ctrl+F expands the sidebar and opens management.
+      expect(output).toContain('search: ▌__');
+      expect(output).toContain('Manage sessions in the sidebar');
+      expect(output).not.toContain('manage session');
+      await type('Second');
+      expect(output).not.toContain('First');
+      expect(output).toContain('Second');
+      await type('\u001b');
+      expectPanes(26);
+      expect(output).toContain('unfinished draft');
+      expect(output).toMatch(/manage session\s+ctrl\+f/);
+      expect(output).not.toContain('search:');
+      expect(dots()).toEqual(originalDots);
+      await type('\u0002');
+      expectPanes(4);
       // The sidebar remains interactive when collapsed.
       await type('\u001b[1;3B'); // Option+Down switches to a saved session.
       expect(output).toContain('Existing history');
