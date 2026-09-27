@@ -66,6 +66,15 @@ describe('image storage', () => {
     expect(existsSync(imagesDirectory())).toBe(false);
   });
 
+  test('reads a path as a terminal pastes a dropped file, and a backslash in a real name as it is', () => {
+    writeFileSync(path.join(directory, 'with space.png'), PNG);
+    writeFileSync(path.join(directory, 'back\\slash.png'), PNG);
+    expect(attachImageFile('with\\ space.png ', directory).bytes).toBe(PNG.length);
+    expect(attachImageFile('"with space.png"', directory).bytes).toBe(PNG.length);
+    expect(attachImageFile('back\\slash.png', directory).bytes).toBe(PNG.length);
+    expect(() => attachImageFile('with\\ nothing.png', directory)).toThrow(/Could not read .*with nothing\.png/);
+  });
+
   test('rejects modified attachment metadata and changed file contents', () => {
     const image = attach();
     expect(() => imageData({ ...image, bytes: image.bytes + 1 })).toThrow(/metadata/);

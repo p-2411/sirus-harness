@@ -218,6 +218,26 @@ describe('chat attachment lifecycle', () => {
     }
   });
 
+  test('attaches a dragged-in file whether the terminal escaped its name or quoted it', async () => {
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aKioAAAAASUVORK5CYII=', 'base64');
+    writeFileSync(join(directory, 'Screenshot 2026-09-28 at 10.00.00.png'), png);
+    writeFileSync(join(directory, 'two  spaces.png'), png);
+    const chat = createChat(new Session({ name: 'Dragged images', directory, model: testModel, autoNamePending: true }));
+    try {
+      // Terminal.app and iTerm2 escape a dropped path's spaces and add one
+      // after it; others quote it.
+      await chat.submit('/image Screenshot\\ 2026-09-28\\ at\\ 10.00.00.png ');
+      await chat.waitFor(() => storedImages().length === 1);
+      await chat.submit('/image \'two  spaces.png\'');
+      await chat.waitFor(() => storedImages().length === 2);
+      await chat.submit('/image two  spaces.png');
+      await chat.waitFor(() => storedImages().length === 3);
+      expect(chat.output()).not.toContain('Could not read');
+    } finally {
+      await chat.close();
+    }
+  });
+
   test('sends an image without text when idle', async () => {
     const session = new Session({ name: 'Image only', directory, model: testModel, autoNamePending: true });
     const chat = createChat(session);

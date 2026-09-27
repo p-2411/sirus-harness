@@ -71,6 +71,10 @@ export interface CommandContext {
   session: CommandSession;
   signal: AbortSignal;
   notify(text: string): void;
+  // Everything after the command's name as the user typed it, when they
+  // did. A command whose one argument may hold runs of spaces, a path say,
+  // reads it here rather than rejoining the split arguments.
+  argumentText?: string;
 }
 
 // Adds an image to the message the user is composing.

@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import { execFile } from 'child_process';
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { dataDirectory } from './dataDirectory';
@@ -66,12 +66,26 @@ function storeImage(bytes: Buffer, source: string): ImageBlock {
   return { type: 'image', path: target, mediaType, bytes: bytes.length };
 }
 
+// A path as the user typed it or a terminal pasted a dropped file: a
+// leading ~ is their home, and quotes around it go. A terminal that escapes
+// the spaces of a dropped file's name with backslashes has them undone,
+// unless a file by the literal name exists, since a backslash may be part of
+// a name.
+function typedPath(text: string, directory: string): string {
+  const trimmed = text.trim();
+  const quoted = /^(['"])(.+)\1$/.exec(trimmed);
+  const file = quoted ? quoted[2] : trimmed;
+  const resolve = (candidate: string) => path.resolve(directory, candidate === '~' || candidate.startsWith('~/')
+    ? path.join(os.homedir(), candidate.slice(1))
+    : candidate);
+  const literal = resolve(file);
+  if (quoted || !file.includes('\\') || existsSync(literal)) return literal;
+  return resolve(file.replace(/\\(.)/g, '$1'));
+}
+
 // Attaches an image file from disk (a saved screenshot, a dragged-in path).
 export function attachImageFile(file: string, directory: string = process.cwd()): ImageBlock {
-  const expanded = file === '~' || file.startsWith('~/')
-    ? path.join(os.homedir(), file.slice(1))
-    : file;
-  const resolved = path.resolve(directory, expanded);
+  const resolved = typedPath(file, directory);
   let size: number;
   try {
     const stat = statSync(resolved);

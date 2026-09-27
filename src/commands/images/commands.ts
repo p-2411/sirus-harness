@@ -11,9 +11,11 @@ export const imageCommandSpec: CommandSpec = {
   run: async (args, context) => {
     const attachImage = context.attachImage;
     if (!attachImage) throw new Error('/image is not available here.');
+    // A path is taken as typed: a dropped file's name can hold runs of
+    // spaces, and the terminal may have escaped or quoted it.
     const image = args.length === 0
       ? await attachClipboardImage()
-      : attachImageFile(args.join(' '), context.session.getDirectory());
+      : attachImageFile(context.argumentText ?? args.join(' '), context.session.getDirectory());
     attachImage(image);
     return { kind: 'success', text: `Attached ${describeImage(image)}.` };
   },

@@ -59,10 +59,16 @@ export const commandRegistry: readonly CommandSpec[] = [
 // Typed (or menu-composed) command text into its name and arguments:
 // '/login gpt api' → { name: 'login', args: ['gpt', 'api'] }. The one place
 // that splits command text, so the input bar and the secret-menu path can't
-// drift apart in how they parse it.
-export function parseCommandLine(text: string): { name: string; args: string[] } {
+// drift apart in how they parse it. `rest` is everything after the name as
+// it was typed, runs of spaces and all.
+export function parseCommandLine(text: string): { name: string; args: string[]; rest: string } {
   const words = text.split(' ');
-  return { name: words[0].slice(1), args: words.slice(1).filter(Boolean) };
+  const space = text.indexOf(' ');
+  return {
+    name: words[0].slice(1),
+    args: words.slice(1).filter(Boolean),
+    rest: space === -1 ? '' : text.slice(space + 1),
+  };
 }
 
 // One line of the `/` menu: a Sirus command, or one of the vendor's own

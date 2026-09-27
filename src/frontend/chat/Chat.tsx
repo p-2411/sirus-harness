@@ -422,8 +422,9 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   // only ever written once we know a command is async (below) — a sync
   // command (e.g. shift+tab's /permissions, fired while /login is still
   // awaiting the browser) must never touch, let alone clear, another
-  // command's still-live abort handle.
-  const runCommand = (command: string, args: readonly string[]) => {
+  // command's still-live abort handle. A typed command also hands over its
+  // arguments as they were typed.
+  const runCommand = (command: string, args: readonly string[], argumentText?: string) => {
     setFeedback(null);
     let menu: CommandMenuEntry[] | null;
     try {
@@ -446,6 +447,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         attachImage,
         exit: () => exit(),
         signal: controller.signal,
+        argumentText,
       });
     } catch (e) {
       setFeedback({ kind: 'error', text: e instanceof Error ? e.message : 'Something went wrong.' });
@@ -482,8 +484,8 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     // A `/name` for one of the agent's own commands is a prompt: the agent's
     // harness runs it.
     if (!isAutoSendable(text) && !isNativeCommand(text, currSession.getNativeCommands())) {
-      const { name, args } = parseCommandLine(text);
-      runCommand(name, args);
+      const { name, args, rest } = parseCommandLine(text);
+      runCommand(name, args, rest);
     } else {
       // Images sit where the draft placed them. The session stamps the
       // entry's seq when it enters the transcript.
