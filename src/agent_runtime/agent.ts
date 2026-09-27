@@ -168,9 +168,15 @@ export class SessionAgent {
     return this.level ?? DEFAULT_THINKING_LEVEL;
   }
 
+  // A live runtime that cannot take the level is rebuilt on it, unless it
+  // has been replaced by the time the vendor says so, as with `setModel`.
   set thinkingLevel(level: ThinkingLevel) {
     this.level = level;
-    void this.runtime?.setThinkingLevel(level).catch(() => this.resetRuntime());
+    const runtime = this.runtime;
+    if (!runtime) return;
+    void runtime.setThinkingLevel(level).catch(() => {
+      if (this.runtime === runtime) this.resetRuntime();
+    });
   }
 
   get busy(): boolean {

@@ -294,6 +294,22 @@ describe('Session model', () => {
     ].join('\n'));
   });
 
+  test('a thinking level change that fails late leaves a newer runtime alone', async () => {
+    const binding = bindScriptedRuntime(testModel, textTurn('Sure'));
+    const session = new Session({ id: 'late-level', name: 'Late level', model: testModel });
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'First' }] });
+    let refuse!: (error: Error) => void;
+    binding.runtimes[0].setThinkingLevel = () => new Promise((_, reject) => { refuse = reject; });
+    session.setThinkingLevel('low');
+    // The runtime is replaced before the vendor answers.
+    session.clear();
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Second' }] });
+    refuse(new Error('The vendor refused the level'));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(binding.runtimes).toHaveLength(2);
+    expect(binding.runtimes[1].disposed).toBe(false);
+  });
+
   test('makes a streaming assistant response visible before the runtime finishes', async () => {
     const session = new Session({ id: 'stream-session', name: 'Test', model: testModel });
     let finish!: () => void;
