@@ -9,7 +9,7 @@ import { moveSelection, SelectMenu } from './SelectMenu';
 import { ApprovalPrompt, approvalChoices } from './ApprovalPrompt';
 import { QuestionCard } from './QuestionCard';
 import { EntryInput, InputFeedback, QueuedRow } from './InputRows';
-import { SubagentStatusRow, type StatusRowProps } from './StatusRow';
+import { StatusRow, type StatusRowProps } from './StatusRow';
 import { WorkerStrip } from './WorkerStrip';
 import { backspaceAtEnd, isForeignInput, isTypedText } from './editor';
 import type { ParticipantColors } from '../MentionText';
@@ -120,7 +120,7 @@ export function PromptBar({ mode, feedback, participantColors, queuedMessages, w
           ? <ApprovalPrompt request={mode.request} waiting={mode.waiting} selected={selected} />
           : <QuestionCard key={mode.request.id} request={mode.request} waiting={mode.waiting} onAnswer={mode.onAnswer} />}
         <WorkerStrip workers={workers} />
-        <SubagentStatusRow {...status} />
+        <StatusRow {...status} />
       </>
     );
   }
@@ -151,7 +151,7 @@ export function PromptBar({ mode, feedback, participantColors, queuedMessages, w
         </Box>
       </Box>
       <WorkerStrip workers={workers} />
-      <SubagentStatusRow {...status} />
+      <StatusRow {...status} />
     </>
   );
 }

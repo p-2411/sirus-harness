@@ -6,7 +6,7 @@ import { isNativeCommand } from '../../commands/registry';
 import { MentionMenu, useFileSuggestions, useMentionMenu } from './MentionMenu';
 import { DraftText, TrailingImages } from './DraftText';
 import { InputFeedback, QueuedRow } from './InputRows';
-import { SubagentStatusRow, type StatusRowProps } from './StatusRow';
+import { StatusRow, type StatusRowProps } from './StatusRow';
 import { stripWorkers, WorkerStrip, type WorkerSelection } from './WorkerStrip';
 import { PromptBar, type PromptMode } from './PromptBar';
 import {
@@ -26,8 +26,6 @@ import type { Feedback } from '../../commands/feedback';
 import type { Participant, QueuedMessage } from '../../agent_runtime/session';
 import type { ImageBlock, MessageBlock } from '../../agent_runtime/types';
 import type { SubagentRun } from '../../agent_runtime/tools/subagents';
-import type { ContextUsage } from '../../agent_runtime/usage';
-import type { PermissionMode } from '../../agent_runtime/permissions/policy';
 import type { NativeCommand } from '../../agent_runtime/runtime/commands';
 
 // What the input bar is collecting: a message, or one of the prompts that
@@ -45,9 +43,9 @@ interface InputBarProps {
   workers?: readonly SubagentRun[];
   directory?: string;
   mode?: InputMode;
-  permissionMode?: PermissionMode;
-  // what the vendor made of that mode, when it could not honour it
-  modeNotice?: string | null;
+  // what the row under the input box says about the session: its permission
+  // mode, its model and how full that model's context is
+  status?: StatusRowProps;
   // shift+tab in text mode
   onCyclePermissionMode?: () => void;
   // Told whether the bar has something open that escape closes: the worker
@@ -61,9 +59,6 @@ interface InputBarProps {
   onPasteImage?: () => void;
   // backspace over an image in the draft drops it
   onRemoveAttachment?: (image: ImageBlock) => void;
-  // the session's current model, shown under the input bar
-  model?: string;
-  thinkingLevel?: string;
   // the session's earlier prompts, oldest first, for ↑/↓ recall
   history?: readonly string[];
   // messages waiting to go out once the agents are free, oldest first
@@ -73,13 +68,13 @@ interface InputBarProps {
   onQueue?: (text: string) => void;
   // Edits a waiting message in place; empty text removes it.
   onUpdateQueued?: (id: string, text: string) => void;
-  contextUsage?: ContextUsage | null;
   // The vendor's own commands `/name` reaches, read while a slash command is
   // being typed.
   nativeCommands?: () => readonly NativeCommand[];
 }
 
 const TEXT_MODE: InputMode = { type: 'text' };
+const NO_STATUS: StatusRowProps = {};
 const NO_WORKERS: readonly SubagentRun[] = [];
 const NO_ATTACHMENTS: readonly ImageBlock[] = [];
 const NO_HISTORY: readonly string[] = [];
@@ -96,24 +91,19 @@ export function InputBar({
   workers = NO_WORKERS,
   directory,
   mode = TEXT_MODE,
-  permissionMode,
-  modeNotice,
+  status = NO_STATUS,
   onCyclePermissionMode,
   onDismissibleChange,
   attachments = NO_ATTACHMENTS,
   onPasteImage,
   onRemoveAttachment,
-  model,
-  thinkingLevel,
   history = NO_HISTORY,
   queuedMessages = NO_QUEUE,
   onQueue,
   onUpdateQueued,
-  contextUsage,
   nativeCommands,
 }: InputBarProps) {
   const participantColors = participantColorMap(participants);
-  const status: StatusRowProps = { permissionMode, modeNotice, model, thinkingLevel, contextUsage };
 
   // ── The draft, and the waiting message standing in front of it ──────────
   // Identity survives edits and earlier messages draining from the queue.
@@ -533,7 +523,7 @@ export function InputBar({
         </Box>
       </Box>
       <WorkerStrip workers={workers} selection={workerSelection} />
-      <SubagentStatusRow {...status} />
+      <StatusRow {...status} />
     </>
   );
 }

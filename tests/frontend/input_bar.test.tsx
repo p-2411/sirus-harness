@@ -7,7 +7,7 @@ import { InputBar } from '../../src/frontend/chat/InputBar';
 import { ApprovalPrompt, approvalChoices } from '../../src/frontend/chat/ApprovalPrompt';
 import { QuestionCard } from '../../src/frontend/chat/QuestionCard';
 import { EntryInput, InputFeedback, QueuedRow } from '../../src/frontend/chat/InputRows';
-import { SubagentStatusRow } from '../../src/frontend/chat/StatusRow';
+import { StatusRow } from '../../src/frontend/chat/StatusRow';
 import { WorkerStrip } from '../../src/frontend/chat/WorkerStrip';
 import {
   applyInputEdit,
@@ -203,7 +203,7 @@ describe('input feedback', () => {
 describe('input status', () => {
   test('shows the active model and thinking level together', () => {
     const output = stripAnsi(renderToString(
-      <SubagentStatusRow model="gpt-5.6-sol" thinkingLevel="high" />,
+      <StatusRow model="gpt-5.6-sol" thinkingLevel="high" />,
       { columns: 80 },
     ));
     expect(output).toContain('gpt-5.6-sol · high');
@@ -211,7 +211,7 @@ describe('input status', () => {
 
   test('shows context usage beside the model', () => {
     const output = stripAnsi(renderToString(
-      <SubagentStatusRow
+      <StatusRow
         contextUsage={{ tokens: 150_000, window: 200_000 }}
         model="claude-sonnet-5"
       />,
@@ -223,12 +223,12 @@ describe('input status', () => {
   test('qualifies the mode with what the vendor made of it', () => {
     const notice = 'auto approve is unavailable to @sirus, which is on Manual';
     const output = stripAnsi(renderToString(
-      <SubagentStatusRow permissionMode="auto" modeNotice={notice} />,
+      <StatusRow permissionMode="auto" modeNotice={notice} />,
       { columns: 120 },
     ));
     expect(output).toContain(`auto approve · ${notice} · shift+tab`);
     expect(stripAnsi(renderToString(
-      <SubagentStatusRow permissionMode="auto" modeNotice={null} />,
+      <StatusRow permissionMode="auto" modeNotice={null} />,
       { columns: 120 },
     ))).toContain('auto approve · shift+tab');
   });

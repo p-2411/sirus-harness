@@ -649,20 +649,22 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         workers={currSession.getWorkers()}
         directory={currSession.getDirectory()}
         mode={effectiveInputMode}
-        permissionMode={currSession.getPermissionMode()}
-        modeNotice={currSession.getModeNotice()}
+        status={{
+          permissionMode: currSession.getPermissionMode(),
+          modeNotice: currSession.getModeNotice(),
+          model: currSession.isModelPending() ? undefined : currSession.getModel(),
+          thinkingLevel: currSession.isModelPending() ? undefined : currSession.getThinkingLevel(),
+          contextUsage: currSession.getContextUsage(),
+        }}
         onCyclePermissionMode={cyclePermissionMode}
         onDismissibleChange={dismissible => { inputBarDismissible.current = dismissible; }}
         attachments={attachments}
         onPasteImage={pasteImage}
         onRemoveAttachment={removeAttachment}
-        model={currSession.isModelPending() ? undefined : currSession.getModel()}
-        thinkingLevel={currSession.isModelPending() ? undefined : currSession.getThinkingLevel()}
         history={history}
         queuedMessages={currSession.getQueuedMessages()}
         onQueue={text => currSession.queueMessage(text)}
         onUpdateQueued={(id, text) => currSession.updateQueuedMessage(id, text)}
-        contextUsage={currSession.getContextUsage()}
         nativeCommands={() => currSession.getNativeCommands()}
       />
     </Box>
