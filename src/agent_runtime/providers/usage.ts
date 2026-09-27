@@ -2,6 +2,8 @@ import { abortable, throwIfAborted } from '../../abort';
 import { readClaudeSubscriptionUsage } from './anthropic/claude-account';
 import { readCodexRateLimits } from './openai/codex-account';
 import type { Vendor } from './catalog';
+import { providerFor } from './index';
+import { maskKeys } from './sources';
 import { dataDirectory } from '../../dataDirectory';
 import { loadSubscriptionLimitCache, saveSubscriptionLimitCache } from '../../persistence';
 
@@ -139,9 +141,15 @@ export async function readSubscriptionUsage(vendor: Vendor, signal?: AbortSignal
     }
     if (updated) saveSubscriptionLimitCache(entries, directory);
     return usage;
-  } catch {
+  } catch (error) {
     throwIfAborted(signal);
-    return { windows: [], unavailable: timeout.aborted ? 'request timed out; try /usage again' : 'could not read provider limits; try /usage again' };
+    if (timeout.aborted) return { windows: [], unavailable: 'request timed out; try /usage again' };
+    // Anything else says why, since trying again rarely helps: a missing
+    // binary, a signed-out account, a harness that cannot read usage. The
+    // reader's process inherits the key this vendor's source reads from the
+    // environment, so that and any stored key are masked in it.
+    const reason = maskKeys(error instanceof Error ? error.message : String(error), providerFor(vendor).sources.list());
+    return { windows: [], unavailable: `could not read provider limits: ${reason}` };
   }
 }
 
