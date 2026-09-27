@@ -13,7 +13,8 @@ import { subscriptionEnvironment } from '../profiles';
 // imports the Agent SDK: its usage control request, sent on a query that
 // never receives a prompt and is closed as soon as it has answered.
 // `@anthropic-ai/claude-agent-sdk` stays a pinned dependency for this file
-// alone. The login itself is `claude auth login` in `../login.ts`.
+// and for the Claude Code binary its platform package ships, which
+// `../login.ts` runs as `claude auth login`.
 
 type ClaudeUsageQuery = Pick<Query, 'close' | 'initializationResult'> & Partial<Pick<
   Query, 'usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET'

@@ -18,7 +18,8 @@ export interface SourceStore {
   addApiKey: (key: string) => ApiSource;
   addSubscription: (profile: string, label?: string) => SubscriptionSource;
   remove: (id: string) => boolean;
-  // Moves a source to the front: what /login and a pasted key do.
+  // Moves a listed source to the front. Adding one, as /login and a pasted
+  // key do, puts it there already.
   promote: (id: string) => void;
   // Fires after this vendor's list changes.
   onChange: (listener: () => void) => () => void;

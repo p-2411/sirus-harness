@@ -1,4 +1,3 @@
-import { isMemoryAccessEnabled } from '../memory-access';
 import { agentTools } from './agents';
 import { memoryTools } from './memories';
 import type { Tool, ToolAudience } from './types';
@@ -40,10 +39,4 @@ export function visibleTools(
   memoryEnabled: () => boolean,
 ): Tool[] {
   return tools.filter(tool => isVisible(tool, audience, memoryEnabled));
-}
-
-// The registry as one audience sees it: what a runtime is told about and
-// what the system prompt describes.
-export function availableTools(audience: ToolAudience = {}): Tool[] {
-  return visibleTools(toolRegistry, audience, isMemoryAccessEnabled);
 }

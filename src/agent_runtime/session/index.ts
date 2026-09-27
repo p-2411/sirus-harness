@@ -69,7 +69,8 @@ export interface SessionOptions {
   messages?: readonly (Message | Draft)[];
   checkpoints?: readonly Checkpoint[];
   permissionMode?: PermissionMode;
-  // The model spawned subagents run on; null for the owner's own.
+  // The model spawned subagents run on; null lets Jev pick one per task,
+  // and without a key or an answer from Jev a worker runs on its owner's.
   subagentModel?: string | null;
   // Workers of this session as the snapshot kept them. One still working
   // when it was saved is restored as interrupted.
@@ -95,7 +96,8 @@ export interface SessionSnapshot {
   inputContent?: string;
   // How tool calls are approved in this session; absent in older snapshots.
   permissionMode?: PermissionMode;
-  // The model spawned subagents run on; absent for the owner's own.
+  // The model spawned subagents run on; absent when Jev picks, as for null
+  // in SessionOptions.
   subagentModel?: string;
   // Every worker the session's participants spawned, oldest first; absent
   // when none.

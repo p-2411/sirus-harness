@@ -15,15 +15,20 @@ const providerSourceSchema = z.discriminatedUnion('type', [
 export type StoredProviderSource = z.infer<typeof providerSourceSchema>;
 export type StoredProviderSources = Partial<Record<'claude' | 'gpt', StoredProviderSource[]>>;
 
-export type NotificationPreference = 'off' | 'background' | 'always';
+// When to send desktop notifications.
+export const NOTIFICATION_PREFERENCES = ['off', 'background', 'always'] as const;
 
+export type NotificationPreference = typeof NOTIFICATION_PREFERENCES[number];
+
+// The two settings that held a vendor's credentials before source lists
+// did: whether it was on a subscription, and the one API key pasted for it.
+// Nothing is added to them now. `providers/sources.ts` reads them to build a
+// vendor's first list, and deletes the key once that list is written.
 export interface SubscriptionPreferences {
   claude: boolean;
   gpt: boolean;
 }
 
-// API keys the user pasted into Sirus; absent providers fall back to the
-// environment. Stored beside the other settings, which are written 0600.
 export interface StoredApiKeys {
   claude?: string;
   gpt?: string;
@@ -53,7 +58,7 @@ const settingsFileSchema = z.object({
   // own model in its snapshot; changing this preference never overrides it.
   sirusModel: z.string().min(1).optional(),
   // When to send desktop notifications; absent means background only.
-  notifications: z.enum(['off', 'background', 'always']).optional(),
+  notifications: z.enum(NOTIFICATION_PREFERENCES).optional(),
   // The TypeSafe AI key Jev routes with, and whether Sirus has already asked
   // for one once; absent means neither.
   jev: z.object({
@@ -95,8 +100,9 @@ const DEFAULTS: SettingsShape = {
   jevKeyRequested: false,
 };
 
-// How one setting maps onto the file. Only `memoryEnabled` and the cleared
-// Sirus model are not a plain key of the same name.
+// How one setting maps onto the file. Most are a plain key of the same name;
+// `memoryEnabled` is `memory.enabled`, a cleared Sirus model is an absent
+// key, and the two Jev settings share the `jev` section.
 interface Codec<K extends keyof SettingsShape> {
   // The top-level key of the file the setting is stored under.
   section: SectionName;

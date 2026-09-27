@@ -66,7 +66,8 @@ export interface RuntimeHost {
   permissionMode(): PermissionMode;
   requestPermission(agent: SessionAgent, request: RequestPermissionRequest, signal: AbortSignal): Promise<RequestPermissionResponse>;
   requestAnswers(agent: SessionAgent, request: CreateElicitationRequest, signal: AbortSignal): Promise<CreateElicitationResponse>;
-  // The model a subagent spawned here runs on; null means Jev picks one.
+  // The model a subagent spawned here runs on; null lets Jev pick one, and
+  // without a key or an answer from Jev the worker runs on its owner's.
   subagentModel(): string | null;
   // The host a worker of this session runs under: its own worktree, the
   // session's mode, the subagent contract, and permission requests

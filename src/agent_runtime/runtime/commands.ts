@@ -56,7 +56,7 @@ interface StoredLists {
   lists: { vendor: Vendor; directory: string; commands: NativeCommand[] }[];
 }
 
-function isNativeCommand(value: unknown): value is NativeCommand {
+function isWellFormedCommand(value: unknown): value is NativeCommand {
   if (typeof value !== 'object' || value === null) return false;
   const command = value as Record<string, unknown>;
   return typeof command.name === 'string' && typeof command.description === 'string'
@@ -71,7 +71,7 @@ const listsFile = cachedJsonFile<StoredLists>('native-commands.json', stored => 
     version: FILE_VERSION,
     lists: lists.filter(list => VENDORS.includes(list.vendor)
       && typeof list.directory === 'string'
-      && Array.isArray(list.commands) && list.commands.every(isNativeCommand)),
+      && Array.isArray(list.commands) && list.commands.every(isWellFormedCommand)),
   };
 });
 

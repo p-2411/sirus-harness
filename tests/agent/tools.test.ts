@@ -22,7 +22,8 @@ class TestEmbeddingProvider implements EmbeddingProvider {
 const embeddings = await import('../../src/memory/embeddings');
 mock.module('../../src/memory/embeddings', () => ({ ...embeddings, LocalEmbeddingProvider: TestEmbeddingProvider }));
 
-const { availableTools, toolRegistry } = await import('../../src/agent_runtime/tools');
+const { toolRegistry, visibleTools } = await import('../../src/agent_runtime/tools');
+const { isMemoryAccessEnabled } = await import('../../src/agent_runtime/memory-access');
 const {
   registerToolSession,
   sirusMcpServerEntry,
@@ -177,6 +178,7 @@ describe('tool registry', () => {
   });
 
   test('a subagent audience sees no agent tools and disabled memory hides the memory tools', () => {
+    const availableTools = (audience = {}) => visibleTools(toolRegistry, audience, isMemoryAccessEnabled);
     expect(availableTools().map(tool => tool.name)).toEqual([...MEMORY_TOOLS, ...AGENT_TOOLS]);
     expect(availableTools({ subagent: true }).map(tool => tool.name)).toEqual(MEMORY_TOOLS);
 

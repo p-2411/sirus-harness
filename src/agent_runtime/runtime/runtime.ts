@@ -47,8 +47,9 @@ export interface RuntimeOptions {
   thinkingLevel: ThinkingLevel;
   // Where the session runs; relative paths in tool calls resolve here.
   directory: string;
-  // Sirus's system prompt for this participant, repository instructions
-  // included. The launch spec decides how the vendor receives it.
+  // Sirus's addendum for this participant (`sirusPrompt`), which goes beside
+  // the vendor's own prompt and the project's instruction files the vendor
+  // reads itself. The launch spec decides how the vendor receives it.
   systemPrompt: string;
   // The environment of the agent process: the credential and the profile
   // directory, built by `sourceEnvironment`.
@@ -112,11 +113,12 @@ export interface PromptResult {
 // the runtime it was forked from: it runs somewhere else, for someone else,
 // with its own callbacks and its own Sirus tool entry, which both adapters
 // do honour. The conversation so far is inherited, and so, in practice, is
-// the system prompt: Codex's is the process's instructions file, and Claude
-// ignores the one a fork is opened with and keeps what the forked transcript
-// was written under. `systemPrompt` is still what a fork would be given, so
-// it is sent; a worker that needs its own instructions today has to carry
-// them in its first prompt.
+// the system prompt: Codex's is the developer instructions the whole process
+// was started with (`CODEX_CONFIG`), and Claude ignores the one a fork is
+// opened with and keeps what the forked transcript was written under.
+// `systemPrompt` is still what a fork would be given, so it is sent; a
+// worker that needs its own instructions today has to carry them in its
+// first prompt.
 export type ForkOptions = Pick<RuntimeOptions,
   'directory' | 'model' | 'thinkingLevel' | 'systemPrompt' | 'permissionMode' | 'mcpServer' | 'onPermission'
   | 'onElicitation' | 'onUpdate'>;
