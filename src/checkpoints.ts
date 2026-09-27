@@ -108,8 +108,10 @@ function withRepository<T>(directory: string, work: () => Promise<T>): Promise<T
 }
 
 // Repository settings that keep the shadow repository self-contained: no
-// hooks, no signing, no automatic gc (older checkpoints stay reachable), and
-// an identity so commits never depend on the user's git configuration.
+// hooks, no signing, and an identity so commits never depend on the user's
+// git configuration. Automatic gc is off too. It would prune no checkpoint,
+// since every one is an ancestor of HEAD; what turning it off does is keep
+// every object loose, never packed.
 const REPOSITORY_CONFIG: ReadonlyArray<[string, string]> = [
   ['gc.auto', '0'],
   ['core.hooksPath', '/dev/null'],
