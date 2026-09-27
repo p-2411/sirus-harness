@@ -409,6 +409,31 @@ describe('thinking', () => {
     content: [{ type: 'thought' as const, text: 'Weighing\nthe options carefully.' }],
   };
 
+  test('hides finished thoughts without leaving a speaker row', () => {
+    expect(stripAnsi(renderToString(<ChatMessage message={message} />))).toBe('');
+  });
+
+  test('shows only the current thought and removes it when text or a tool follows', () => {
+    const content: MessageBlock[] = [
+      { type: 'thought', text: 'Earlier step' },
+      { type: 'thought', text: '**Checking the result**\nDetails of the check.' },
+    ];
+    const output = () => stripAnsi(renderToString(
+      <ChatMessage message={{ ...message, content }} live />, { columns: 120 },
+    ));
+    expect(output()).toContain('Checking the result');
+    expect(output()).not.toContain('Earlier step');
+    expect(output()).not.toContain('Details of the check');
+    content.push(calls[0]!);
+    expect(output()).not.toContain('Checking the result');
+    expect(output()).toContain('one.ts');
+    content.push({ type: 'thought', text: 'One last check' });
+    expect(output()).toContain('One last check');
+    content.push({ type: 'text', text: 'The final answer.' });
+    expect(output()).not.toContain('One last check');
+    expect(output()).toContain('The final answer.');
+  });
+
   test('collapses a thought to one line and expands it on a click', async () => {
     const stdout = Object.assign(new PassThrough(), { columns: 120 }) as unknown as NodeJS.WriteStream;
     const frames: string[] = [];

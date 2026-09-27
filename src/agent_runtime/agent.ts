@@ -177,6 +177,10 @@ export class SessionAgent {
     return this.turn !== null;
   }
 
+  get activeReply(): Message | null {
+    return this.entry;
+  }
+
   // How long the turn in flight has gone without a word from its runtime:
   // no text, no tool call update, nothing. Zero when no turn is running or
   // the turn is waiting on the user's approval.

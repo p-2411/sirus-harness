@@ -779,6 +779,11 @@ export class Session {
     return this.timeline.entries();
   }
 
+  isMessageLive(message: Message): boolean {
+    return message.role === 'assistant'
+      && this.roster.find(message.participant ?? 'sirus')?.activeReply === message;
+  }
+
   isEmpty(): boolean {
     return this.timeline.isEmpty();
   }

@@ -186,7 +186,6 @@ function groupable(block: MessageBlock): block is ToolCallBlock {
 	return block.type === 'tool_call' && !isSpawnAgent(block);
 }
 
-/** Collapse only adjacent tool calls, and only two or more of them. */
 // A thought shows only while it is what the model is doing now: the last
 // block of a reply still being written. Once the model moves on it goes, and
 // the tool calls on either side of it group as though it was never there.
@@ -195,6 +194,7 @@ export function visibleContent(content: readonly MessageBlock[], live: boolean):
 	return content.filter((block, index) => block.type !== 'thought' || (live && index === last));
 }
 
+/** Collapse only adjacent tool calls, and only two or more of them. */
 export function messageSegments(content: readonly MessageBlock[]): MessageSegment[] {
 	const segments: MessageSegment[] = [];
 	for (let index = 0; index < content.length;) {
@@ -526,6 +526,7 @@ export function ChatMessage({
 	const isUser = message.role === "user";
 	const participantName = message.participant ?? 'sirus';
 	const segments = messageSegments(visibleContent(message.content, live));
+	if (message.content.length > 0 && segments.length === 0) return null;
 	return (
 		// no bars, no boxes — bold speaker label, body aligned flush beneath,
 		// whitespace doing the separating

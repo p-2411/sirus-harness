@@ -66,20 +66,24 @@ export class TurnRunner {
 
       const settled = await Promise.allSettled(pending.map(async (invocation, index) => {
         const entry = round.entries[index];
-        await invocation.participant.respond(promptFor(invocation), {
-          entry,
-          carried: invocation.entries,
-          onUpdate: () => round.update(index),
-          ...(signal ? { signal } : {}),
-        });
-        return entry;
+        try {
+          await invocation.participant.respond(promptFor(invocation), {
+            entry,
+            carried: invocation.entries,
+            onUpdate: () => round.update(index),
+            ...(signal ? { signal } : {}),
+          });
+          round.settle(index);
+          return entry;
+        } catch (error) {
+          round.discardIfEmpty(index);
+          throw error;
+        } finally {
+          // Repaint as each participant finishes, even if a peer is still
+          // streaming, so its transient thought disappears immediately.
+          round.flush();
+        }
       }));
-
-      for (let index = 0; index < settled.length; index++) {
-        if (settled[index].status === 'fulfilled') round.settle(index);
-        else round.discardIfEmpty(index);
-      }
-      round.flush();
 
       // A cancelled round is the end of the turn: a peer that finished first
       // must not start the next round of mentions.
