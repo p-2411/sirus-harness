@@ -1,11 +1,12 @@
 import path from 'path';
 import { dataDirectory } from '../../dataDirectory';
 import { readJson, writeJson } from '../../persistence/atomicJson';
+import type { LimitPeriod } from '../types';
 
 // Every fact about the models and vendors Sirus can talk to. This module
-// imports nothing from the rest of the app but where its one file lives: it
-// is the leaf that the launch specs, the credential store, the login flows
-// and the UI all read from.
+// imports nothing from the rest of the app but where its one file lives and
+// the allowance windows' names: it is the leaf that the launch specs, the
+// credential store, the login flows and the UI all read from.
 //
 // Which models there are is the vendors' to say: each runtime reports the
 // models its harness offers, and `/model` lists those (see "What the vendors
@@ -73,7 +74,7 @@ export interface VendorInfo {
   // own and the adapter logs it in there; Claude Code reads the key as it is.
   apiKeyLogin: boolean;
   // The allowance window the sidebar shows for this vendor.
-  limitPeriod: '5-hour' | '7-day';
+  limitPeriod: LimitPeriod;
 }
 
 const VENDOR_TABLE = {

@@ -2,7 +2,7 @@ import path from 'path';
 import type { AvailableCommand } from '@agentclientprotocol/sdk';
 import { dataDirectory } from '../../dataDirectory';
 import { readJson, writeJson } from '../../persistence/atomicJson';
-import type { Vendor } from '../providers/catalog';
+import { VENDORS, type Vendor } from '../providers/catalog';
 
 // Slash commands are the vendors' own. Each runtime reports what its harness
 // offers in `available_commands_update` — Claude Code's built-ins, the user's
@@ -79,7 +79,7 @@ function stored(): StoredLists {
   const lists = read?.version === FILE_VERSION && Array.isArray(read.lists) ? read.lists : [];
   const valid: StoredLists = {
     version: FILE_VERSION,
-    lists: lists.filter(list => (list.vendor === 'claude' || list.vendor === 'gpt')
+    lists: lists.filter(list => VENDORS.includes(list.vendor)
       && typeof list.directory === 'string'
       && Array.isArray(list.commands) && list.commands.every(isNativeCommand)),
   };

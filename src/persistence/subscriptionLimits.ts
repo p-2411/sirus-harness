@@ -1,6 +1,7 @@
 import path from 'path';
 import { z } from 'zod';
 import { dataDirectory } from '../dataDirectory';
+import { LIMIT_PERIODS } from '../agent_runtime/types';
 import { readJson, writeJson } from './atomicJson';
 
 // What each subscription had left the last time a provider told us, so the
@@ -11,7 +12,7 @@ const subscriptionLimitCacheSchema = z.object({
   entries: z.array(z.object({
     vendor: z.enum(['claude', 'gpt']),
     profile: z.string(),
-    period: z.enum(['5-hour', '7-day']),
+    period: z.enum(LIMIT_PERIODS),
     remaining: z.number().min(0).max(100),
     checkedAt: z.number().finite(),
     resetsAt: z.number().finite().nullable(),
