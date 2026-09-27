@@ -194,6 +194,10 @@ interface SessionState {
   modeUpdates: number;
   configOptions: SessionConfigOption[];
   context: ContextUsage | null;
+  // The running turn's tool calls, so each update folds into its call and a
+  // request from a vendor's subagent finds the Agent call it came from.
+  // Cleared when the turn ends: the transcript keeps them, and nothing more
+  // arrives for them.
   toolCalls: Map<string, ToolCallBlock>;
   // Summary chunks by compaction id, until the terminal update carries them.
   summaries: Map<string, string>;
@@ -532,6 +536,7 @@ export async function startAcpRuntime(
     } finally {
       signal.removeEventListener('abort', cancel);
       state.turn = null;
+      state.toolCalls.clear();
     }
   }
 

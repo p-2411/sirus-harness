@@ -148,6 +148,40 @@ test('what a cancelled prompt still streams stays out of the next one', async ()
   }
 });
 
+// The transcript holds a turn's tool calls, diffs and output included; the
+// client needs them only to merge the turn's own updates, so it lets them go
+// with the turn. A later update for one of them starts from nothing.
+test('a finished turn keeps none of its tool calls', async () => {
+  const updates: RuntimeUpdate[] = [];
+  const runtime = await startAcpRuntime(runtimeOptions(updates), undefined, standIn({
+    prompts: [
+      [
+        { update: { sessionUpdate: 'tool_call', toolCallId: 'call-1', title: 'Read notes.txt', kind: 'read', status: 'in_progress' } },
+        {
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'call-1',
+            status: 'completed',
+            content: [{ type: 'content', content: { type: 'text', text: 'the whole file' } }],
+          },
+        },
+      ],
+      [{ update: { sessionUpdate: 'tool_call_update', toolCallId: 'call-1', status: 'failed' } }],
+    ],
+  }));
+  try {
+    await runtime.prompt({ text: 'First', images: [] }, new AbortController().signal);
+    expect(updates.at(-1)).toMatchObject({ type: 'tool_call', call: { title: 'Read notes.txt', status: 'completed' } });
+    await runtime.prompt({ text: 'Second', images: [] }, new AbortController().signal);
+    expect(updates.at(-1)).toEqual({
+      type: 'tool_call',
+      call: { type: 'tool_call', id: 'call-1', title: '', kind: 'other', status: 'failed', locations: [], content: [] },
+    });
+  } finally {
+    runtime.dispose();
+  }
+});
+
 test('cancelling a turn ends an adapter that never finishes starting', async () => {
   const controller = new AbortController();
   const starting = startAcpRuntime(runtimeOptions(), controller.signal, standIn({ hang: 'initialize' }));
