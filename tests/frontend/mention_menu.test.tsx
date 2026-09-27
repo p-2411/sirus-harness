@@ -40,6 +40,31 @@ describe('unified mention menu', () => {
     expect(mentionMenuItems('@', [], [])[0]?.replacement).toBe('@name ');
   });
 
+  test('bare @ offers every participant and the one it would create', () => {
+    const labels = mentionMenuItems('@', participants, []).map(item => item.label);
+    expect(labels).toEqual(['@name <model> <prompt>', '@Researcher', '@Reviewer', '@sirus']);
+    expect(mentionMenuItems('@', participants, [])[0].description).toBe('create participant');
+  });
+
+  test('filters participants case-insensitively and personalizes a new name', () => {
+    expect(mentionMenuItems('@rev', participants, []).map(item => item.label))
+      .toEqual(['@rev <model> <prompt>', '@Reviewer']);
+    expect(mentionMenuItems('@REVIEWER', participants, []).map(item => item.label))
+      .toEqual(['@Reviewer']);
+  });
+
+  test('offers participants for a later mention and closes once prompt text begins', () => {
+    expect(mentionMenuItems('@sirus @rev', participants, []).map(item => item.label))
+      .toEqual(['@rev <model> <prompt>', '@Reviewer']);
+    expect(mentionMenuItems('@reviewer inspect this', participants, [])).toEqual([]);
+  });
+
+  test('ignores ordinary text, email addresses, and scoped packages', () => {
+    expect(mentionMenuItems('hello', participants, [])).toEqual([]);
+    expect(mentionMenuItems('user@', participants, [])).toEqual([]);
+    expect(mentionMenuItems('install @scope/package', participants, [])).toEqual([]);
+  });
+
   test('aligns agent and file descriptions with identical fixed selection slots', () => {
     const items = mentionMenuItems('@Re', participants, ['README.md']);
     const output = stripAnsi(renderToString(
