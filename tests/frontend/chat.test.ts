@@ -13,7 +13,10 @@ import type { Message, ToolCallBlock } from '../../src/agent_runtime/types';
 import Chat, { formatElapsed, promptHistory, turnPhase } from '../../src/frontend/chat/Chat';
 import { usageCommandSpec } from '../../src/commands/authentication/commands';
 import { pendingApprovals, requestPermission, resolveApproval } from '../../src/agent_runtime/permissions/approvals';
-import { beginSelection, clearSelection, extendSelection, hasSelection } from '../../src/frontend/interaction/selection';
+import {
+  beginSelection, clearSelection, extendSelection, getSelectedText, hasSelection,
+} from '../../src/frontend/interaction/selection';
+import { pressAt, releaseAt } from '../../src/frontend/interaction/clickable';
 import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
 
 // A Chat in a terminal the test types into. `frame` is the last frame drawn;
@@ -458,6 +461,45 @@ test('escape closes what is open before it cancels the turn', async () => {
     clearSelection();
     session.cancel();
     await Promise.all(turns);
+    await chat.unmount();
+    session.dispose();
+    unbindRuntime(model);
+  }
+});
+
+test('copying from the history copies the lines on screen after a row was opened', async () => {
+  const model = 'test-chat-copy';
+  bindScriptedRuntime(model, (_input, emit) => {
+    emit({ type: 'tool_call', call: {
+      type: 'tool_call', id: 'copy-edit', kind: 'edit', title: 'notes.md', status: 'completed',
+      locations: [], content: [{ type: 'diff', path: 'notes.md', oldText: 'old line', newText: 'new line' }],
+    } });
+    emit({ type: 'text', text: 'The edit is done.' });
+  });
+  const session = new Session({ model });
+  await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Edit the notes.' }] });
+  const chat = mountChat(session);
+  // Where a marker sits in the frame, as the mouse would report it.
+  const cellOf = (marker: string) => {
+    const lines = chat.frame().split('\n');
+    const line = lines.findIndex(text => text.includes(marker));
+    expect(line).toBeGreaterThanOrEqual(0);
+    return { line, col: lines[line]!.indexOf(marker) };
+  };
+  try {
+    await chat.flush();
+    const row = cellOf('● Edit notes.md');
+    expect(pressAt(row)).toBe(true);
+    expect(releaseAt(row)).toBe(true);
+    await chat.flush();
+    expect(chat.frame()).toContain('+ new line');
+
+    const reply = cellOf('The edit is done.');
+    beginSelection(reply);
+    extendSelection({ line: reply.line, col: reply.col + 'The edit is done.'.length - 1 });
+    expect(getSelectedText()).toBe('The edit is done.');
+  } finally {
+    clearSelection();
     await chat.unmount();
     session.dispose();
     unbindRuntime(model);

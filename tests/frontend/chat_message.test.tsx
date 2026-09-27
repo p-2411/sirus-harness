@@ -15,7 +15,7 @@ import {
   unregisterSubagent,
   type SubagentRun,
 } from '../../src/agent_runtime/tools/subagents';
-import type { MessageBlock, ToolCallBlock } from '../../src/agent_runtime/types';
+import type { Message, MessageBlock, ToolCallBlock } from '../../src/agent_runtime/types';
 
 // Everything ACP guarantees on a tool call, so each case writes only the
 // fields it is about.
@@ -35,6 +35,12 @@ const calls: ToolCallBlock[] = [
   toolCall({ id: 'call-1', kind: 'read', title: 'one.ts' }),
   toolCall({ id: 'call-2', kind: 'execute', title: 'bun test' }),
 ];
+
+// The message a group is shown in, which keeps what the user opened in it:
+// a fresh one per case, so nothing one case opens carries into the next.
+function reply(): Message {
+  return { seq: 0, role: 'assistant', content: [] };
+}
 
 // Where a marker sits in a rendered frame, so a click lands on the row that
 // carries it rather than on a line number the layout might move.
@@ -171,7 +177,7 @@ describe('chat message', () => {
       content: [{ type: 'diff', path: 'src/new.ts', oldText: null, newText: 'first\nsecond' }],
     });
     const output = stripAnsi(renderToString(
-      <ToolRunGroup calls={[calls[0], edit]} />,
+      <ToolRunGroup message={reply()} calls={[calls[0], edit]} />,
       { columns: 120 },
     ));
 
@@ -194,13 +200,14 @@ describe('chat message', () => {
     const stdout = Object.assign(new PassThrough(), { columns: 120 }) as unknown as NodeJS.WriteStream;
     const frames: string[] = [];
     stdout.on('data', data => frames.push(stripAnsi(data.toString())));
-    const app = render(<ToolRunGroup calls={pending} />, {
+    const message = reply();
+    const app = render(<ToolRunGroup message={message} calls={pending} />, {
       stdout, debug: true, patchConsole: false, exitOnCtrlC: false,
     });
     try {
       await app.waitUntilRenderFlush();
       expect(frames.at(-1)).not.toContain('new.ts');
-      app.rerender(<ToolRunGroup calls={completed} />);
+      app.rerender(<ToolRunGroup message={message} calls={completed} />);
       await app.waitUntilRenderFlush();
       expect(frames.at(-1)).toContain('● Edit new.ts +1');
       expect(frames.at(-1)).not.toMatch(/[›⌄]/);
@@ -222,7 +229,7 @@ describe('chat message', () => {
       await new Promise<void>(resolve => setImmediate(resolve));
       await app.waitUntilRenderFlush();
       expect(frames.at(-1)).not.toContain('new.ts');
-      app.rerender(<ToolRunGroup calls={[...completed]} />);
+      app.rerender(<ToolRunGroup message={message} calls={[...completed]} />);
       await app.waitUntilRenderFlush();
       expect(frames.at(-1)).not.toContain('new.ts');
     } finally {
@@ -295,11 +302,11 @@ describe('chat message', () => {
 
   test('summarizes completed and running tool groups while collapsed', () => {
     const completed = stripAnsi(renderToString(
-      <ToolRunGroup calls={calls} />,
+      <ToolRunGroup message={reply()} calls={calls} />,
       { columns: 120 },
     ));
     const running = stripAnsi(renderToString(
-      <ToolRunGroup calls={[calls[0], { ...calls[1], status: 'in_progress' }]} />,
+      <ToolRunGroup message={reply()} calls={[calls[0], { ...calls[1], status: 'in_progress' }]} />,
       { columns: 120 },
     ));
 
@@ -311,7 +318,7 @@ describe('chat message', () => {
 
   test('counts a failed call as finished', () => {
     const output = stripAnsi(renderToString(
-      <ToolRunGroup calls={[calls[0], { ...calls[1], status: 'failed' }]} />,
+      <ToolRunGroup message={reply()} calls={[calls[0], { ...calls[1], status: 'failed' }]} />,
       { columns: 120 },
     ));
 
@@ -320,7 +327,7 @@ describe('chat message', () => {
 
   test('expands a tool group into compact indented one-line calls', () => {
     const output = stripAnsi(renderToString(
-      <ToolRunGroup calls={calls} defaultExpanded />,
+      <ToolRunGroup message={reply()} calls={calls} defaultExpanded />,
       { columns: 120 },
     ));
     const lines = output.split('\n');

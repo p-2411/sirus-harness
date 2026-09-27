@@ -7,6 +7,7 @@ import {
 	type Message,
 	type MessageBlock,
 	type PlanEntry,
+	type ThoughtBlock,
 	type ToolCallBlock,
 	type ToolCallDiff,
 	type ToolCallStatus,
@@ -343,20 +344,49 @@ function DiffPreview({ lines }: { lines: readonly DiffLine[] }) {
 	);
 }
 
+// Which rows the user opened or closed, kept apart from the components that
+// show them. Copying a selection renders the history again off screen to
+// reach what has scrolled away, and that render has to open the rows the
+// screen has open, or the copy reads the wrong lines. Held per message, so a
+// rewind that drops a message drops what was opened in it too.
+const openedRows = new WeakMap<Message, Map<string, boolean>>();
+const openedRowListeners = new Set<() => void>();
+
+function subscribeOpenedRows(listener: () => void): () => void {
+	openedRowListeners.add(listener);
+	return () => {
+		openedRowListeners.delete(listener);
+	};
+}
+
+// Whether one row of a message is open: the user's choice once they have
+// made one, `fallback` until then. The toggle records the opposite of what
+// is showing.
+function useRowExpansion(message: Message, row: string, fallback: boolean): [boolean, () => void] {
+	const chosen = useSyncExternalStore(subscribeOpenedRows, () => openedRows.get(message)?.get(row));
+	const expanded = chosen ?? fallback;
+	const toggle = useCallback(() => {
+		const rows = openedRows.get(message) ?? new Map<string, boolean>();
+		rows.set(row, !expanded);
+		openedRows.set(message, rows);
+		for (const listener of openedRowListeners) listener();
+	}, [message, row, expanded]);
+	return [expanded, toggle];
+}
+
 // One call, collapsed to its summary line until clicked; expanded, it also
 // shows what the call carried. A worker's report is the exception: it is what
 // the user has been waiting for, so the SpawnAgent row opens itself once the
 // run has ended, and a click still closes it.
-function ToolCallEntry({ call, indent, sessionId }: {
+function ToolCallEntry({ message, call, indent, sessionId }: {
+	message: Message;
 	sessionId?: string;
 	call: ToolCallBlock;
 	indent?: string;
 }) {
 	const { status } = useSubagentRun(call, sessionId);
 	const showsReport = spawnReport(call) !== '' && status !== 'working';
-	const [expansionOverride, setExpansionOverride] = useState<boolean | null>(null);
-	const expanded = expansionOverride ?? showsReport;
-	const toggle = useCallback(() => setExpansionOverride(!expanded), [expanded]);
+	const [expanded, toggle] = useRowExpansion(message, `call:${call.id}`, showsReport);
 	const ref = useRef<DOMElement>(null);
 	const hovered = useClickable(ref, toggle);
 	const detail = expanded ? callDetail(call) : [];
@@ -379,16 +409,16 @@ function AnimatedCommandStatus({ count }: { count: number }) {
 	return <>Running {count} commands{'.'.repeat(dots)}</>;
 }
 
-export function ToolRunGroup({ calls, defaultExpanded = false, sessionId }: {
+// A group is known by its first call, which stays first as the run grows.
+export function ToolRunGroup({ message, calls, defaultExpanded = false, sessionId }: {
+	message: Message;
 	sessionId?: string;
 	calls: readonly ToolCallBlock[];
 	defaultExpanded?: boolean;
 }) {
 	const hasCompletedEdit = calls.some(call => call.status === 'completed' && editPreview(call).length > 0);
 	// Follow arriving file changes until the user chooses whether to expand.
-	const [expansionOverride, setExpansionOverride] = useState<boolean | null>(null);
-	const expanded = expansionOverride ?? (defaultExpanded || hasCompletedEdit);
-	const toggle = useCallback(() => setExpansionOverride(!expanded), [expanded]);
+	const [expanded, toggle] = useRowExpansion(message, `group:${calls[0]?.id}`, defaultExpanded || hasCompletedEdit);
 	const ref = useRef<DOMElement>(null);
 	const hovered = useClickable(ref, toggle);
 	const complete = calls.every(finished);
@@ -404,7 +434,7 @@ export function ToolRunGroup({ calls, defaultExpanded = false, sessionId }: {
 			{expanded ? (
 				<Box flexDirection="column" marginLeft={2}>
 					{calls.map(call => (
-						<ToolCallEntry key={call.id} call={call} sessionId={sessionId} />
+						<ToolCallEntry key={call.id} message={message} call={call} sessionId={sessionId} />
 					))}
 				</Box>
 			) : null}
@@ -414,7 +444,8 @@ export function ToolRunGroup({ calls, defaultExpanded = false, sessionId }: {
 
 // A row on its own is set off by a blank line; rows that follow one another
 // stack directly, as the entries of a group do.
-function ToolCallRow({ call, sessionId, joinsPrevious = false, joinsNext = false }: {
+function ToolCallRow({ message, call, sessionId, joinsPrevious = false, joinsNext = false }: {
+	message: Message;
 	call: ToolCallBlock;
 	sessionId?: string;
 	joinsPrevious?: boolean;
@@ -422,18 +453,18 @@ function ToolCallRow({ call, sessionId, joinsPrevious = false, joinsNext = false
 }) {
 	return (
 		<Box flexDirection="column" paddingX={1} paddingTop={joinsPrevious ? 0 : 1} paddingBottom={joinsNext ? 0 : 1}>
-			<ToolCallEntry call={call} indent="  " sessionId={sessionId} />
+			<ToolCallEntry message={message} call={call} indent="  " sessionId={sessionId} />
 		</Box>
 	);
 }
 
 // Reasoning the runtime streamed: one dim line until clicked, then the whole
 // thought, laid out like a tool row.
-function ThoughtRow({ text }: { text: string }) {
-	const [expanded, setExpanded] = useState(false);
-	const toggle = useCallback(() => setExpanded(current => !current), []);
+function ThoughtRow({ message, block }: { message: Message; block: ThoughtBlock }) {
+	const [expanded, toggle] = useRowExpansion(message, `block:${message.content.indexOf(block)}`, false);
 	const ref = useRef<DOMElement>(null);
 	const hovered = useClickable(ref, toggle);
+	const text = block.text;
 	return (
 		<Box flexDirection="column" padding={1}>
 			<Box ref={ref}>
@@ -454,12 +485,12 @@ function ThoughtRow({ text }: { text: string }) {
 // The runtime folded its own conversation here: one rule across the message,
 // and on a click the summary it reported, since that is all the participant
 // now knows of the conversation above it.
-function CompactionRule({ block, participantColors }: {
+function CompactionRule({ message, block, participantColors }: {
+	message: Message;
 	block: CompactionBlock;
 	participantColors?: ParticipantColors;
 }) {
-	const [expanded, setExpanded] = useState(false);
-	const toggle = useCallback(() => setExpanded(current => !current), []);
+	const [expanded, toggle] = useRowExpansion(message, `block:${message.content.indexOf(block)}`, false);
 	const ref = useRef<DOMElement>(null);
 	const hovered = useClickable(ref, toggle);
 	const summary = block.summary?.trim() || null;
@@ -525,17 +556,18 @@ export function ChatMessage({
 					case 'image':
 						return <ImageLine key={index} image={block} />;
 					case 'thought':
-						return <ThoughtRow key={index} text={block.text} />;
+						return <ThoughtRow key={index} message={message} block={block} />;
 					case 'plan':
 						return <PlanRow key={index} call={block.call} />;
 					case 'compaction':
-						return <CompactionRule key={index} block={block} participantColors={participantColors} />;
+						return <CompactionRule key={index} message={message} block={block} participantColors={participantColors} />;
 					case 'tool_run':
-						return <ToolRunGroup key={index} calls={block.calls} sessionId={sessionId} />;
+						return <ToolRunGroup key={index} message={message} calls={block.calls} sessionId={sessionId} />;
 					case 'tool_call':
 						return (
 							<ToolCallRow
 								key={index}
+								message={message}
 								call={block}
 								sessionId={sessionId}
 								joinsPrevious={segments[index - 1]?.type === 'tool_call'}
