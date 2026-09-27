@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { abortable, isAbortError, TurnCancelledError } from '../../../abort';
+import { abortable, errorMessage, isAbortError, TurnCancelledError } from '../../../abort';
 import type { SessionAgent } from '../../agent';
 import { FORKED_WORKER_HANDOVER } from '../../prompt';
 import { requireKnownModel } from '../../providers';
@@ -176,7 +176,7 @@ async function execute(run: SubagentRun, owner: SessionAgent, turn: WorkerTurn):
     run.finalMessage = finalMessageOf(turn.entry.content);
     run.status = 'done';
   } catch (error) {
-    run.error = error instanceof Error ? error.message : String(error);
+    run.error = errorMessage(error);
     run.status = isAbortError(error) ? 'cancelled' : 'failed';
   } finally {
     clearInterval(watchdog);

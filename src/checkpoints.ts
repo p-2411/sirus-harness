@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import { execFile } from 'child_process';
 import { existsSync, lstatSync, mkdirSync, unlinkSync, writeFileSync } from 'fs';
 import path from 'path';
+import { errorMessage } from './abort';
 import { dataDirectory } from './dataDirectory';
 
 // A checkpoint is the state of a session's directory just before a turn
@@ -241,7 +242,7 @@ export async function captureCheckpoint(
     failures.delete(key);
     return { id, createdAt: Date.now() };
   } catch (error) {
-    failures.set(key, error instanceof Error ? error.message : String(error));
+    failures.set(key, errorMessage(error));
     return null;
   }
 }

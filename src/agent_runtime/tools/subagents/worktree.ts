@@ -1,5 +1,6 @@
 import { rmSync } from 'fs';
 import path from 'path';
+import { errorMessage } from '../../../abort';
 import { checkpointsEnabled, projectGit } from '../../../checkpoints';
 import { dataDirectory } from '../../../dataDirectory';
 
@@ -58,7 +59,7 @@ export async function createWorktree(
     // deletes the branch only while it holds nothing HEAD lacks.
     await removeWorktree(project, directory);
     await git(project, ['branch', '-d', branch]).catch(() => {});
-    throw new Error(`Could not create a worktree for the worker: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`Could not create a worktree for the worker: ${errorMessage(error)}`);
   }
 }
 

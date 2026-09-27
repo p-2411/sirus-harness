@@ -4,13 +4,13 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
-import { abortReason, isAbortError, throwIfAborted, TurnCancelledError } from '../abort';
+import { abortReason, errorMessage, isAbortError, throwIfAborted, TurnCancelledError } from '../abort';
 import type { Requester } from './permissions/approvals';
 import { PERMISSION_MODE_NAMES } from './permissions/policy';
 import { providerFor } from './providers';
 import { DEFAULT_MODEL, rememberListedModels, VENDOR_INFO, vendorOf, type Vendor } from './providers/catalog';
 import { sourceEnvironment } from './providers/profiles';
-import { maskApiKey, type Source } from './providers/sources';
+import { maskApiKey, maskKeys, type Source } from './providers/sources';
 import { routeWorker, vendorAllowance, workerCandidates } from './router';
 import {
   createRuntime,
@@ -245,7 +245,8 @@ export class SessionAgent {
           // A scripted runtime has no credentials to fall back to; its
           // failure is the turn's failure.
           if (!source) throw error;
-          failures.push(`${describeSource(source)}: ${maskSecrets(error, this.candidateSources())}`);
+          // A failure message must not carry a key it was handed.
+          failures.push(`${describeSource(source)}: ${maskKeys(errorMessage(error), this.candidateSources())}`);
           // The next attempt reads the record, partial response included.
           text = `${input.text}\n\nThe previous attempt was interrupted. Continue from the completed work above without repeating it.`;
         }
@@ -678,12 +679,4 @@ export class SessionAgent {
 function describeSource(source: Source | null): string {
   if (!source) return 'process environment';
   return source.kind === 'api' ? `API ${maskApiKey(source.key)}` : `subscription ${source.label ?? source.id}`;
-}
-
-// A failure message must not carry a key it was handed.
-function maskSecrets(error: unknown, sources: readonly (Source | null)[]): string {
-  const detail = error instanceof Error ? error.message : String(error);
-  return sources.reduce((text, source) => source?.kind === 'api'
-    ? text.replaceAll(source.key, maskApiKey(source.key))
-    : text, detail);
 }

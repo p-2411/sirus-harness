@@ -1,4 +1,4 @@
-import { abortable, throwIfAborted } from '../../abort';
+import { abortable, errorMessage, throwIfAborted } from '../../abort';
 import { readClaudeSubscriptionUsage } from './anthropic/claude-account';
 import { readCodexRateLimits } from './openai/codex-account';
 import type { Vendor } from './catalog';
@@ -149,7 +149,7 @@ export async function readSubscriptionUsage(vendor: Vendor, signal?: AbortSignal
     // binary, a signed-out account, a harness that cannot read usage. The
     // reader's process inherits the key this vendor's source reads from the
     // environment, so that and any stored key are masked in it.
-    const reason = maskKeys(error instanceof Error ? error.message : String(error), providerFor(vendor).sources.list());
+    const reason = maskKeys(errorMessage(error), providerFor(vendor).sources.list());
     return { windows: [], unavailable: `could not read provider limits: ${reason}` };
   }
 }

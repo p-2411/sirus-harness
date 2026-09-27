@@ -2,6 +2,7 @@
 
 import { realpathSync, statSync } from 'fs';
 import path from 'path';
+import { errorMessage } from './abort';
 
 export const USAGE = `Usage: sirus [directory]
 
@@ -51,7 +52,7 @@ export async function runCli(args: readonly string[] = process.argv.slice(2)): P
 
 if (import.meta.main) {
   runCli().catch(error => {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     process.stderr.write(`sirus: ${message}\n\n${USAGE}\n`);
     process.exitCode = 1;
   });

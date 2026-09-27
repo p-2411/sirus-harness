@@ -1,5 +1,6 @@
 import { closeSync, constants, existsSync, fstatSync, openSync, readSync, realpathSync } from 'fs';
 import path from 'path';
+import { errorMessage } from './abort';
 import { rootTextRanges } from './mentions';
 import type { Message, TextBlock } from './agent_runtime/types';
 
@@ -109,7 +110,7 @@ export function resolveFileMentions<T extends Pick<Message, 'content'>>(message:
       const fence = '`'.repeat(longestBackticks + 1);
       attachments.push({ type: 'text', filePath, text: `\n\n${fence}\nFile: ${label}\n${file.text}\n${fence}` });
     } catch (error) {
-      throw new Error(`Could not attach ${formatFileMention(mention.path)}: ${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(`Could not attach ${formatFileMention(mention.path)}: ${errorMessage(error)}`);
     }
   }
   return { ...message, content: [...message.content, ...attachments] };

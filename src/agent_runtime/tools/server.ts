@@ -5,7 +5,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { SIRUS_VERSION } from '../../version';
-import { errorMessage } from './arguments';
+import { errorMessage } from '../../abort';
 import { isVisible, toolRegistry, visibleTools } from './index';
 import type { SubagentHost, ToolAudience } from './types';
 

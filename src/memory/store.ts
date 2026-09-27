@@ -2,6 +2,7 @@ import { Database } from 'bun:sqlite';
 import { existsSync, mkdirSync } from 'fs';
 import { dirname, join, resolve } from 'path';
 import * as sqliteVec from 'sqlite-vec';
+import { errorMessage } from '../abort';
 import { dataDirectory } from '../dataDirectory';
 import { LocalEmbeddingProvider, type EmbeddingProvider } from './embeddings';
 import { SELECT_MEMORIES, globalScopeId, migrate, type MemoryRow } from './schema';
@@ -91,7 +92,7 @@ function loadVectorExtension(database: Database): void {
   try {
     sqliteVec.load(database);
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
+    const detail = errorMessage(error);
     const macHint = process.platform === 'darwin'
       ? ' Install SQLite with `brew install sqlite` or set SIRUS_SQLITE_LIBRARY.'
       : '';
