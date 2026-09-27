@@ -9,7 +9,8 @@ import { dataDirectory } from '../../../dataDirectory';
 // changes and ignored directories are not carried over, so two workers and
 // the user never edit the same files. Anything else — a directory that is not
 // a repository, a repository with no commit yet — runs the worker in the
-// project itself.
+// project itself. A repository git fails to cut a worktree from fails the
+// spawn.
 //
 // The worktree outlives the run: the report names the branch so the owner or
 // the user can merge or inspect it. It goes when the session does; the branch
@@ -55,10 +56,20 @@ export async function createWorktree(
     // An unborn HEAD has no commit to branch from, and a directory outside a
     // repository fails the same way.
     await git(project, ['rev-parse', '--verify', 'HEAD']);
-    await git(project, ['worktree', 'add', '--quiet', '-b', branch, directory, 'HEAD']);
-    return { directory, branch };
   } catch {
     return null;
+  }
+  try {
+    await git(project, ['worktree', 'add', '--quiet', '-b', branch, directory, 'HEAD']);
+    return { directory, branch };
+  } catch (error) {
+    // A repository that cannot make one fails the spawn: running the worker
+    // in the user's own checkout instead is not a fallback. Git may have
+    // made the branch, or part of the checkout, before it failed; `-d`
+    // deletes the branch only while it holds nothing HEAD lacks.
+    await removeWorktree(project, directory);
+    await git(project, ['branch', '-d', branch]).catch(() => {});
+    throw new Error(`Could not create a worktree for the worker: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 

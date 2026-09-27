@@ -319,15 +319,7 @@ describe('session checkpoint integration', () => {
   });
 
   test('a worker in a git project gets its own worktree, which goes when the session does', async () => {
-    const repository = path.join(root, 'repository');
-    mkdirSync(repository);
-    git(repository, ['init', '--quiet', '-b', 'main']);
-    git(repository, ['config', 'user.email', 'worker@example.com']);
-    git(repository, ['config', 'user.name', 'Worker Test']);
-    writeFileSync(path.join(repository, 'file.txt'), 'committed');
-    git(repository, ['add', 'file.txt']);
-    git(repository, ['commit', '--quiet', '-m', 'first']);
-
+    const repository = committedRepository();
     const owner = new Session({ id: 'worktree-session', name: 'Worktree', directory: repository, model });
     owner.setPermissionMode('bypass');
     let release!: () => void;
@@ -373,4 +365,37 @@ describe('session checkpoint integration', () => {
     expect(git(repository, ['branch', '--list', branch])).toContain(branch);
     expect(git(repository, ['worktree', 'list'])).not.toContain(worktree);
   });
+
+  test('a worktree git fails to cut fails the spawn and leaves nothing of it behind', async () => {
+    const repository = committedRepository();
+    // A file where the session's worktrees go: the project has a commit to
+    // branch from, but git has nowhere to put the checkout.
+    mkdirSync(path.join(root, 'state', 'worktrees'), { recursive: true });
+    writeFileSync(path.join(root, 'state', 'worktrees', 'worktree-failure'), '');
+    bindScriptedRuntime(model, () => {});
+    const owner = new Session({ id: 'worktree-failure', name: 'Worktree failure', directory: repository, model });
+    try {
+      await expect(owner.subagentHostFor('sirus')!.spawn('Work on your own branch', 'fresh', { callId: 'spawn' }))
+        .rejects.toThrow('Could not create a worktree for the worker: fatal: could not create leading directories');
+      // No worker went to work in the project instead.
+      expect(owner.getWorkers()).toEqual([]);
+      expect(git(repository, ['branch', '--list', 'sirus/*'])).toBe('');
+      expect(git(repository, ['worktree', 'list']).trim().split('\n')).toHaveLength(1);
+    } finally {
+      await owner.dispose();
+    }
+  });
 });
+
+// A git project with one commit, which a worker's worktree can be cut from.
+function committedRepository(): string {
+  const repository = path.join(root, 'repository');
+  mkdirSync(repository);
+  git(repository, ['init', '--quiet', '-b', 'main']);
+  git(repository, ['config', 'user.email', 'worker@example.com']);
+  git(repository, ['config', 'user.name', 'Worker Test']);
+  writeFileSync(path.join(repository, 'file.txt'), 'committed');
+  git(repository, ['add', 'file.txt']);
+  git(repository, ['commit', '--quiet', '-m', 'first']);
+  return repository;
+}
