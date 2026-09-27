@@ -146,11 +146,17 @@ function describeGpt(account: CodexAccount): string {
   return `Signed in to ${VENDOR_INFO.gpt.accountName}${account.email ? ` as ${account.email}` : ''} (${gptPlan(account)}).`;
 }
 
+// How the platform opens a URL in the default browser. Windows goes through
+// rundll32 rather than `cmd /c start`: cmd reads the `&` between query
+// parameters as the end of the command and opens the URL cut short.
+export function browserCommand(url: string, platform: NodeJS.Platform = process.platform): { command: string; args: string[] } {
+  if (platform === 'darwin') return { command: 'open', args: [url] };
+  if (platform === 'win32') return { command: 'rundll32', args: ['url.dll,FileProtocolHandler', url] };
+  return { command: 'xdg-open', args: [url] };
+}
+
 function openInBrowser(url: string): void {
-  const command = process.platform === 'darwin' ? 'open'
-    : process.platform === 'win32' ? 'cmd'
-    : 'xdg-open';
-  const args = process.platform === 'win32' ? ['/c', 'start', '', url] : [url];
+  const { command, args } = browserCommand(url);
   try {
     spawn(command, args, { stdio: 'ignore', detached: true }).on('error', () => void 0).unref();
   } catch {

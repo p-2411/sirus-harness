@@ -8,6 +8,7 @@ import { PassThrough } from 'stream';
 import { TurnCancelledError } from '../../src/abort';
 import { providerFor, servableModelIds, servesModel } from '../../src/agent_runtime/providers';
 import { MODELS, modelInfo, VENDOR_INFO, type Vendor } from '../../src/agent_runtime/providers/catalog';
+import { browserCommand } from '../../src/agent_runtime/providers/login';
 import { loginCodex, readCodexAccount, readCodexRateLimits } from '../../src/agent_runtime/providers/openai/codex-account';
 import { sourceEnvironment } from '../../src/agent_runtime/providers/profiles';
 import { maskApiKey, type Source } from '../../src/agent_runtime/providers/sources';
@@ -535,6 +536,14 @@ function fakeAppServer(answer: (method: string) => AppServerAnswer) {
   spyOn(childProcess, 'spawn').mockReturnValue(child as unknown as childProcess.ChildProcess);
   return child;
 }
+
+test('a sign-in link opens whole on every platform', () => {
+  const url = 'https://auth.openai.com/oauth/authorize?response_type=code&client_id=app&state=abc';
+  // Through cmd, everything after the first `&` would be read as another command.
+  expect(browserCommand(url, 'win32')).toEqual({ command: 'rundll32', args: ['url.dll,FileProtocolHandler', url] });
+  expect(browserCommand(url, 'darwin')).toEqual({ command: 'open', args: [url] });
+  expect(browserCommand(url, 'linux')).toEqual({ command: 'xdg-open', args: [url] });
+});
 
 describe('the Codex app-server behind an account request', () => {
   afterEach(() => {
