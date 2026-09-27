@@ -3,6 +3,7 @@ import { Box, Text } from 'ink';
 import stringWidth from 'string-width';
 import type { Participant } from '../../agent_runtime/session';
 import { formatFileMention } from '../../fileMentions';
+import { activeFileMention } from '../../fileSearch';
 import { MentionText, participantColorMap } from '../MentionText';
 import { theme } from '../styles/theme';
 import { participantMenuItems } from './ParticipantMenu';
@@ -14,7 +15,7 @@ export interface MentionMenuItem {
   label: string;
   description: string;
   replacement: string;
-  kind: 'participant' | 'file' | 'create';
+  kind: 'participant' | 'file' | 'directory' | 'create';
 }
 
 export function mentionMenuItems(
@@ -34,12 +35,18 @@ export function mentionMenuItems(
   }
   agents.sort((left, right) => left.label.length - right.label.length
     || left.label.localeCompare(right.label));
+  const typed = activeFileMention(input, input.length)?.query.replace(/^\.\//, '');
   return [
     ...creation,
     ...agents.reverse(),
-    ...[...files].reverse().map(file => {
+    ...[...files].reverse().map((file): MentionMenuItem => {
       const label = formatFileMention(file);
-      return { key: `file:${file}`, label, description: 'attach file', replacement: `${label} `, kind: 'file' as const };
+      if (!file.endsWith('/')) return { key: `file:${file}`, label, description: 'attach file', replacement: `${label} `, kind: 'file' };
+      // Choosing a directory opens it and leaves the menu up for what is
+      // inside; choosing the directory already typed attaches it as is.
+      return file === typed
+        ? { key: `directory:${file}`, label, description: 'attach directory', replacement: `${label} `, kind: 'directory' }
+        : { key: `directory:${file}`, label, description: 'open directory', replacement: label, kind: 'directory' };
     }),
   ];
 }
