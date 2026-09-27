@@ -404,6 +404,8 @@ export class Session {
         const pick = await routeSessionModel({ prompt: ownWords, directory: this.directory }, routingCandidates(), { signal });
         if (pick && pick.model !== this.roster.default.model) this.roster.changeModel(this.roster.default.name, pick.model);
       }
+      // The naming runs on the model the pick left, and for a prompt
+      // cancelled meanwhile too, since that prompt stays in the history.
       if (firstPrompt && this.autoNamePending) this.startNaming(ownWords);
       throwIfAborted(signal);
       // The runtimes run their tools themselves and cannot wait on a barrier,
