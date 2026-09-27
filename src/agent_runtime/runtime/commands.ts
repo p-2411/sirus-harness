@@ -1,7 +1,6 @@
 import path from 'path';
 import type { AvailableCommand } from '@agentclientprotocol/sdk';
-import { dataDirectory } from '../../dataDirectory';
-import { readJson, writeJson } from '../../persistence/atomicJson';
+import { cachedJsonFile } from '../../persistence/atomicJson';
 import { VENDORS, type Vendor } from '../providers/catalog';
 
 // Slash commands are the vendors' own. Each runtime reports what its harness
@@ -57,13 +56,6 @@ interface StoredLists {
   lists: { vendor: Vendor; directory: string; commands: NativeCommand[] }[];
 }
 
-function listsFile(): string {
-  return path.join(dataDirectory(), 'native-commands.json');
-}
-
-// Read once per data directory, which the test suite moves between files.
-let loaded: { file: string; lists: StoredLists } | null = null;
-
 function isNativeCommand(value: unknown): value is NativeCommand {
   if (typeof value !== 'object' || value === null) return false;
   const command = value as Record<string, unknown>;
@@ -72,36 +64,30 @@ function isNativeCommand(value: unknown): value is NativeCommand {
     && (command.argumentHint === undefined || typeof command.argumentHint === 'string');
 }
 
-function stored(): StoredLists {
-  const file = listsFile();
-  if (loaded?.file === file) return loaded.lists;
-  const read = readJson(file) as Partial<StoredLists> | null;
+const listsFile = cachedJsonFile<StoredLists>('native-commands.json', stored => {
+  const read = stored as Partial<StoredLists> | null;
   const lists = read?.version === FILE_VERSION && Array.isArray(read.lists) ? read.lists : [];
-  const valid: StoredLists = {
+  return {
     version: FILE_VERSION,
     lists: lists.filter(list => VENDORS.includes(list.vendor)
       && typeof list.directory === 'string'
       && Array.isArray(list.commands) && list.commands.every(isNativeCommand)),
   };
-  loaded = { file, lists: valid };
-  return valid;
-}
+});
 
 // Keeps what a runtime in the directory just reported.
 export function rememberNativeCommands(vendor: Vendor, directory: string, commands: readonly NativeCommand[]): void {
   const resolved = path.resolve(directory);
-  const lists = stored().lists.filter(list => !(list.vendor === vendor && list.directory === resolved));
+  const lists = listsFile.read().lists.filter(list => !(list.vendor === vendor && list.directory === resolved));
   lists.unshift({ vendor, directory: resolved, commands: [...commands] });
-  const updated: StoredLists = { version: FILE_VERSION, lists: lists.slice(0, KEPT_LISTS) };
-  loaded = { file: listsFile(), lists: updated };
-  writeJson(loaded.file, updated);
+  listsFile.write({ version: FILE_VERSION, lists: lists.slice(0, KEPT_LISTS) });
 }
 
 // The commands a participant of the vendor, running in the directory, last
 // said it offers; empty before any runtime there has reported.
 export function nativeCommands(vendor: Vendor, directory: string): NativeCommand[] {
   const resolved = path.resolve(directory);
-  return stored().lists.find(list => list.vendor === vendor && list.directory === resolved)?.commands ?? [];
+  return listsFile.read().lists.find(list => list.vendor === vendor && list.directory === resolved)?.commands ?? [];
 }
 
 // A prompt that opens with `/name` for one of the vendor's commands, in the

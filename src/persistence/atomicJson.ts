@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs';
 import path from 'path';
+import { dataDirectory } from '../dataDirectory';
 
 // Every file Sirus owns is read and written through here: a missing or
 // unreadable file is `null` rather than a throw, and a write lands whole or
@@ -34,6 +35,33 @@ export function writeJson(filePath: string, value: unknown): boolean {
       }
     }
   }
+}
+
+// A file under the data directory that is read once and kept in memory after,
+// for the caches the UI consults on every render. It is read again when the
+// data directory changes, as it does between tests.
+export interface CachedJsonFile<T> {
+  read(): T;
+  write(value: T): void;
+}
+
+export function cachedJsonFile<T>(
+  name: string,
+  parse: (stored: unknown) => T,
+  serialize: (value: T) => unknown = value => value,
+): CachedJsonFile<T> {
+  let cached: { file: string; value: T } | null = null;
+  return {
+    read() {
+      const file = path.join(dataDirectory(), name);
+      if (cached?.file !== file) cached = { file, value: parse(readJson(file)) };
+      return cached.value;
+    },
+    write(value) {
+      cached = { file: path.join(dataDirectory(), name), value };
+      writeJson(cached.file, serialize(value));
+    },
+  };
 }
 
 // A file that is there but that this build cannot read, a hand edit that broke
