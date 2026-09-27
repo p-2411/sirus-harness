@@ -1,7 +1,8 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'fs';
 import os from 'os';
 import path from 'path';
+import * as acp from '../../src/agent_runtime/runtime/acp';
 import { generateSessionName, SESSION_NAME_LIMIT, sessionNamingModel } from '../../src/agent_runtime/session/naming';
 import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
 
@@ -105,5 +106,19 @@ describe('generateSessionName', () => {
 
   test('returns null when no vendor is connected', async () => {
     expect(await generateSessionName('Name this', '/workspace', 'claude-sonnet-5')).toBeNull();
+  });
+
+  test('its timeout also ends an adapter that never finishes starting', async () => {
+    process.env.OPENAI_SECRET = 'test-openai-key';
+    // An adapter whose startup ends only when it is told to stop.
+    const start = spyOn(acp, 'startAcpRuntime').mockImplementation((_options, signal) => new Promise((_resolve, reject) => {
+      signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+    }));
+    try {
+      expect(await generateSessionName('Name this', dataDirectory, 'gpt-5.6-sol', undefined, 10)).toBeNull();
+      expect(start).toHaveBeenCalledTimes(1);
+    } finally {
+      start.mockRestore();
+    }
   });
 });
