@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { execFileSync } from 'child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import os from 'os';
@@ -6,6 +6,7 @@ import path from 'path';
 import { Session, type Draft } from '../../src/agent_runtime/session';
 import type { RuntimeOptions } from '../../src/agent_runtime/runtime/runtime';
 import { subagentDone } from '../../src/agent_runtime/tools/subagents/run';
+import * as checkpointStore from '../../src/checkpoints';
 import { enableCheckpoints } from '../../src/checkpoints';
 import { TurnCancelledError } from '../../src/abort';
 import { bindScriptedRuntime, unbindRuntime, type ScriptedBinding } from '../support/runtime';
@@ -319,15 +320,7 @@ describe('session checkpoint integration', () => {
   });
 
   test('a worker in a git project gets its own worktree, which goes when the session does', async () => {
-    const repository = path.join(root, 'repository');
-    mkdirSync(repository);
-    git(repository, ['init', '--quiet', '-b', 'main']);
-    git(repository, ['config', 'user.email', 'worker@example.com']);
-    git(repository, ['config', 'user.name', 'Worker Test']);
-    writeFileSync(path.join(repository, 'file.txt'), 'committed');
-    git(repository, ['add', 'file.txt']);
-    git(repository, ['commit', '--quiet', '-m', 'first']);
-
+    const repository = committedRepository();
     const owner = new Session({ id: 'worktree-session', name: 'Worktree', directory: repository, model });
     owner.setPermissionMode('bypass');
     let release!: () => void;
@@ -373,4 +366,85 @@ describe('session checkpoint integration', () => {
     expect(git(repository, ['branch', '--list', branch])).toContain(branch);
     expect(git(repository, ['worktree', 'list'])).not.toContain(worktree);
   });
+
+  test('a report held back by another session’s file restore goes out when the restore ends', async () => {
+    const repository = committedRepository();
+    const restorer = new Session({ id: 'restoring-session', name: 'Restoring', directory: repository, model });
+    const owner = new Session({ id: 'waiting-owner', name: 'Waiting owner', directory: repository, model });
+    let releaseWorker!: () => void;
+    const workerGate = new Promise<void>(resolve => { releaseWorker = resolve; });
+    const prompts: string[] = [];
+    bindScriptedRuntime(model, async (input, emit, options) => {
+      if (isWorker(options)) {
+        await workerGate;
+        emit({ type: 'text', text: 'Worker result' });
+        return;
+      }
+      prompts.push(input.text);
+      if (input.text === 'Delegate it') {
+        await owner.subagentHostFor('sirus')!.spawn('Work on your own branch', 'fresh', { callId: 'spawn' });
+      }
+      emit({ type: 'text', text: 'Done' });
+    });
+    let finishRestore = () => {};
+    const restore = spyOn(checkpointStore, 'restoreCheckpoint')
+      .mockImplementation(() => new Promise(resolve => { finishRestore = () => resolve({ restored: [], removed: [] }); }));
+    try {
+      await restorer.sendMessage(prompt);
+      const [checkpoint] = restorer.getCheckpoints();
+      await owner.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Delegate it' }] });
+      const [worker] = owner.getWorkers();
+      // It works in a worktree of its own, so the files here may be restored.
+      expect(worker.branch).not.toBeNull();
+
+      const rewind = restorer.rewind(checkpoint.id, { files: true, chat: false });
+      releaseWorker();
+      await until(() => worker.status === 'done', 'the worker to finish');
+      expect(worker.reported).toBe(false);
+      finishRestore();
+      await rewind;
+      // Nothing else happens in the owner's session, and the report goes out.
+      await until(() => worker.reported && owner.getStatus() === 'idle', 'the report turn');
+      expect(prompts.at(-1)).toStartWith(`@${worker.id} wrote:`);
+    } finally {
+      restore.mockRestore();
+      releaseWorker();
+      finishRestore();
+      await owner.dispose();
+      await restorer.dispose();
+    }
+  });
+
+  test('a worktree git fails to cut fails the spawn and leaves nothing of it behind', async () => {
+    const repository = committedRepository();
+    // A file where the session's worktrees go: the project has a commit to
+    // branch from, but git has nowhere to put the checkout.
+    mkdirSync(path.join(root, 'state', 'worktrees'), { recursive: true });
+    writeFileSync(path.join(root, 'state', 'worktrees', 'worktree-failure'), '');
+    bindScriptedRuntime(model, () => {});
+    const owner = new Session({ id: 'worktree-failure', name: 'Worktree failure', directory: repository, model });
+    try {
+      await expect(owner.subagentHostFor('sirus')!.spawn('Work on your own branch', 'fresh', { callId: 'spawn' }))
+        .rejects.toThrow('Could not create a worktree for the worker: fatal: could not create leading directories');
+      // No worker went to work in the project instead.
+      expect(owner.getWorkers()).toEqual([]);
+      expect(git(repository, ['branch', '--list', 'sirus/*'])).toBe('');
+      expect(git(repository, ['worktree', 'list']).trim().split('\n')).toHaveLength(1);
+    } finally {
+      await owner.dispose();
+    }
+  });
 });
+
+// A git project with one commit, which a worker's worktree can be cut from.
+function committedRepository(): string {
+  const repository = path.join(root, 'repository');
+  mkdirSync(repository);
+  git(repository, ['init', '--quiet', '-b', 'main']);
+  git(repository, ['config', 'user.email', 'worker@example.com']);
+  git(repository, ['config', 'user.name', 'Worker Test']);
+  writeFileSync(path.join(repository, 'file.txt'), 'committed');
+  git(repository, ['add', 'file.txt']);
+  git(repository, ['commit', '--quiet', '-m', 'first']);
+  return repository;
+}

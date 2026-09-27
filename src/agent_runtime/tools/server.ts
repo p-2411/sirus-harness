@@ -54,7 +54,15 @@ export async function sirusMcpServerEntry(
 ): Promise<{ name: 'sirus'; url: string; headers: { name: string; value: string }[] }> {
   const session = sessions.get(sessionId);
   if (!session) throw new Error(`Tool session ${sessionId} is not registered`);
-  listening ??= listen();
+  if (!listening) {
+    const starting = listen();
+    listening = starting;
+    // A failed start is not kept, or every runtime after it would fail
+    // until Sirus restarts: the next one to ask tries again.
+    starting.catch(() => {
+      if (listening === starting) listening = null;
+    });
+  }
   return {
     name: 'sirus',
     url: await listening,

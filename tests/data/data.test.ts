@@ -2,11 +2,16 @@ import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'fs';
 import os from 'os';
 import path from 'path';
+import * as checkpoints from '../../src/checkpoints';
 import * as naming from '../../src/agent_runtime/session/naming';
 import * as router from '../../src/agent_runtime/router';
 import type { RuntimeOptions } from '../../src/agent_runtime/runtime/runtime';
 import type { Draft } from '../../src/agent_runtime/session';
 import { Session } from '../../src/agent_runtime/session';
+import { sirusMcpServerEntry } from '../../src/agent_runtime/tools/server';
+import { findSubagent } from '../../src/agent_runtime/tools/subagents';
+import { subagentDone } from '../../src/agent_runtime/tools/subagents/run';
+import * as worktree from '../../src/agent_runtime/tools/subagents/worktree';
 import { textOf } from '../../src/agent_runtime/types';
 import { bindScriptedRuntime, textTurn, unbindRuntime, type ScriptedTurn } from '../support/runtime';
 
@@ -125,7 +130,11 @@ describe('Session model', () => {
     const route = spyOn(router, 'routeSessionModel').mockResolvedValue({ model: secondTestModel, confidence: 0.9 });
     try {
       const routed = new Session({ name: 'Routed', directory: process.cwd(), model: testModel, routePending: true });
-      await routed.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Review the auth module carefully' }] });
+      const first = routed.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Review the auth module carefully' }] });
+      // The chat reads whether the prompt was accepted straight after the
+      // call, so it is in the history before Jev has answered.
+      expect(routed.isEmpty()).toBe(false);
+      await first;
       expect(route).toHaveBeenCalledTimes(1);
       expect(route.mock.calls[0]?.[0]).toEqual({ prompt: 'Review the auth module carefully', directory: process.cwd() });
       expect(routed.getModel()).toBe(secondTestModel);
@@ -266,6 +275,18 @@ describe('Session model', () => {
     expect(session.getMessages()).toEqual(messages);
   });
 
+  test('joins the tool server when a runtime first asks for its entry, and leaves it when deleted', async () => {
+    bindScriptedRuntime(testModel, textTurn('Hello back'));
+    const session = new Session({ id: 'tool-server-binding', name: 'Tools', model: testModel });
+    // A draft nobody sent to is dropped without being disposed, so nothing
+    // may hold on to it until then.
+    await expect(sirusMcpServerEntry('tool-server-binding', 'sirus')).rejects.toThrow('not registered');
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Hello' }] });
+    expect(await sirusMcpServerEntry('tool-server-binding', 'sirus')).toMatchObject({ name: 'sirus' });
+    await session.dispose();
+    await expect(sirusMcpServerEntry('tool-server-binding', 'sirus')).rejects.toThrow('not registered');
+  });
+
   test('keeps the runtime warm between turns and reseeds a rebuilt one from the record', async () => {
     const binding = bindScriptedRuntime(testModel, textTurn('Sure'));
     const session = new Session({ id: 'warm', name: 'Warm', model: testModel });
@@ -287,6 +308,22 @@ describe('Session model', () => {
       '',
       'Third',
     ].join('\n'));
+  });
+
+  test('a thinking level change that fails late leaves a newer runtime alone', async () => {
+    const binding = bindScriptedRuntime(testModel, textTurn('Sure'));
+    const session = new Session({ id: 'late-level', name: 'Late level', model: testModel });
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'First' }] });
+    let refuse!: (error: Error) => void;
+    binding.runtimes[0].setThinkingLevel = () => new Promise((_, reject) => { refuse = reject; });
+    session.setThinkingLevel('low');
+    // The runtime is replaced before the vendor answers.
+    session.clear();
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Second' }] });
+    refuse(new Error('The vendor refused the level'));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(binding.runtimes).toHaveLength(2);
+    expect(binding.runtimes[1].disposed).toBe(false);
   });
 
   test('makes a streaming assistant response visible before the runtime finishes', async () => {
@@ -457,6 +494,26 @@ describe('Session model', () => {
     expect(second.getMessages().filter(message => message.role === 'user')).toHaveLength(2);
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(first.getStatus()).toBe('idle');
+  });
+
+  test('a deleted session sends nothing it had queued and refuses new prompts', async () => {
+    const prompts: string[] = [];
+    bindScriptedRuntime(testModel, async (input, emit, _options, signal) => {
+      prompts.push(input.text);
+      await new Promise(resolve => signal.addEventListener('abort', resolve));
+      emit({ type: 'text', text: 'Done' });
+    });
+    const session = new Session({ id: 'disposed-queue', name: 'Disposed', model: testModel });
+    const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'start' }] });
+    session.queueMessage('never sent');
+    await until(() => prompts.length === 1, 'the turn to start');
+    await session.dispose();
+    await expect(turn).rejects.toMatchObject({ name: 'AbortError' });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(prompts).toEqual(['start']);
+    expect(session.getMessages().filter(message => message.role === 'user')).toHaveLength(1);
+    await expect(session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'again' }] }))
+      .rejects.toThrow('This session was deleted.');
   });
 
   test('cancelling a turn leaves its workers running; cancelWorker and dispose stop them', async () => {
@@ -650,6 +707,101 @@ describe('Session model', () => {
     } finally {
       releaseOwner();
       releaseWorker();
+      await session.dispose();
+    }
+  });
+
+  test('clearing waits for the session’s workers, whose reports belong to the history it drops', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let session!: Session;
+    let spawned = false;
+    bindScriptedRuntime(testModel, async (_input, emit, options) => {
+      if (isWorker(options)) {
+        await gate;
+        return;
+      }
+      if (!spawned) {
+        spawned = true;
+        await session.subagentHostFor('sirus')!.spawn('Background task', 'fresh', { callId: 'spawn' });
+      }
+      emit({ type: 'text', text: 'Noted' });
+    });
+    session = new Session({ id: 'clear-with-workers', name: 'Clear', model: testModel });
+    try {
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Delegate it' }] });
+      const [worker] = session.getWorkers();
+      expect(() => session.clear()).toThrow('Wait for this session’s subagents to finish before clearing it.');
+      expect(session.isEmpty()).toBe(false);
+
+      release();
+      await until(() => worker.reported && session.getStatus() === 'idle', 'the report turn');
+      session.clear();
+      expect(session.isEmpty()).toBe(true);
+    } finally {
+      release();
+      await session.dispose();
+    }
+  });
+
+  test('a worker still being set up counts as working, and deleting the session stops it', async () => {
+    bindScriptedRuntime(testModel, textTurn('Done'));
+    // Never created: removing the worktree is stubbed out below.
+    const directory = path.join(os.tmpdir(), `sirus-spawn-setup-${process.pid}`);
+    let cut!: () => void;
+    const create = spyOn(worktree, 'createWorktree')
+      .mockImplementation(() => new Promise(resolve => { cut = () => resolve({ directory, branch: 'sirus/setup' }); }));
+    const remove = spyOn(worktree, 'removeWorktree').mockResolvedValue();
+    const session = new Session({ id: 'spawn-setup', name: 'Setup', model: testModel });
+    session.append({ role: 'user', to: ['sirus'], content: [{ type: 'text', text: 'Earlier' }] });
+    try {
+      const spawn = session.subagentHostFor('sirus')!.spawn('Background task', 'fresh', { callId: 'spawn' });
+      await until(() => create.mock.calls.length === 1, 'the spawn to ask for a worktree');
+      // The run does not exist yet, but its worker starts from this record.
+      expect(session.getActiveSubagentCount()).toBe(1);
+      expect(() => session.clear()).toThrow('Wait for this session’s subagents to finish');
+
+      const disposed = session.dispose();
+      cut();
+      await disposed;
+      const run = await spawn;
+      expect(remove).toHaveBeenCalledWith(session.getDirectory(), directory);
+      expect(findSubagent(run.id)).toBeUndefined();
+    } finally {
+      create.mockRestore();
+      remove.mockRestore();
+    }
+  });
+
+  test('a worker that has ended is no longer held for anyone to wait on', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let session!: Session;
+    let spawned = false;
+    bindScriptedRuntime(testModel, async (_input, emit, options) => {
+      if (isWorker(options)) {
+        await gate;
+        return;
+      }
+      if (!spawned) {
+        spawned = true;
+        await session.subagentHostFor('sirus')!.spawn('Background task', 'fresh', { callId: 'spawn' });
+      }
+      emit({ type: 'text', text: 'Noted' });
+    });
+    session = new Session({ id: 'worker-completion', name: 'Completion', model: testModel });
+    try {
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Delegate it' }] });
+      const [worker] = session.getWorkers();
+      // What a canceller of the working run would wait on.
+      const completion = new WeakRef(subagentDone(worker));
+      release();
+      await until(() => worker.status === 'done' && session.getStatus() === 'idle', 'the worker and its report');
+      await new Promise(resolve => setTimeout(resolve, 0));
+      Bun.gc(true);
+      expect(completion.deref()).toBeUndefined();
+    } finally {
+      release();
       await session.dispose();
     }
   });
@@ -969,6 +1121,68 @@ describe('Session model', () => {
     ]);
     expect(session.cancel()).toBe(false);
     release();
+  });
+
+  test('Esc while Jev picks the model stops the turn before any runtime starts', async () => {
+    const binding = bindScriptedRuntime(testModel, textTurn('Done'));
+    let answer!: (pick: router.RoutingPick | null) => void;
+    const route = spyOn(router, 'routeSessionModel').mockImplementation(() => new Promise(resolve => { answer = resolve; }));
+    try {
+      const draft = new Session({ id: 'cancel-while-routing', name: 'Routing', model: testModel, routePending: true });
+      const turn = draft.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Go' }] });
+      // Nobody is answering yet, but the turn is under way and is stopped.
+      expect(draft.cancel()).toBe(true);
+      expect(route.mock.calls[0]?.[2]?.signal?.aborted).toBe(true);
+      answer(null);
+      await expect(turn).rejects.toMatchObject({ name: 'AbortError' });
+      expect(binding.starts).toHaveLength(0);
+      expect(draft.wasLastTurnCancelled()).toBe(true);
+      expect(draft.getStatus()).toBe('idle');
+      expect(draft.cancel()).toBe(false);
+    } finally {
+      route.mockRestore();
+    }
+  });
+
+  test('Esc while a report turn takes its checkpoint stops it before the owner is prompted', async () => {
+    const prompts: string[] = [];
+    let releaseWorker!: () => void;
+    const workerGate = new Promise<void>(resolve => { releaseWorker = resolve; });
+    let session!: Session;
+    let spawned = false;
+    bindScriptedRuntime(testModel, async (input, emit, options) => {
+      if (isWorker(options)) {
+        await workerGate;
+        return;
+      }
+      prompts.push(input.text);
+      if (!spawned) {
+        spawned = true;
+        await session.subagentHostFor('sirus')!.spawn('Background task', 'fresh', { callId: 'spawn' });
+      }
+      emit({ type: 'text', text: 'Noted' });
+    });
+    session = new Session({ id: 'cancel-report-capture', name: 'Report capture', model: testModel });
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Delegate it' }] });
+    const [worker] = session.getWorkers();
+    let releaseCapture!: () => void;
+    const capture = spyOn(checkpoints, 'captureCheckpoint')
+      .mockImplementation(() => new Promise(resolve => { releaseCapture = () => resolve(null); }));
+    try {
+      releaseWorker();
+      await until(() => worker.reported && capture.mock.calls.length === 1, 'the report turn to take its checkpoint');
+      expect(session.getStatus()).toBe('working');
+      expect(session.cancel()).toBe(true);
+      releaseCapture();
+      await until(() => session.getStatus() === 'idle', 'the report turn to end');
+      expect(prompts).toEqual(['Delegate it']);
+      expect(session.wasLastTurnCancelled()).toBe(true);
+    } finally {
+      releaseWorker();
+      releaseCapture?.();
+      capture.mockRestore();
+      await session.dispose();
+    }
   });
 
   test('creates a named participant from a mention and targets it thereafter', async () => {
@@ -1399,6 +1613,36 @@ describe('Session subscriptions', () => {
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(binding.runtimes[0].permissionMode).toBe('ask');
     expect(session.getModeNotice()).toBeNull();
+  });
+
+  test('switches a working worker’s runtime with the session’s', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let session!: Session;
+    let spawned = false;
+    const binding = bindScriptedRuntime(testModel, async (_input, emit, options) => {
+      if (isWorker(options)) {
+        await gate;
+        return;
+      }
+      if (!spawned) {
+        spawned = true;
+        await session.subagentHostFor('sirus')!.spawn('Background task', 'fresh', { callId: 'spawn' });
+      }
+      emit({ type: 'text', text: 'Noted' });
+    });
+    session = new Session({ id: 'worker-modes', name: 'Worker modes', model: testModel });
+    try {
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Delegate it' }] });
+      const worker = () => binding.runtimes[binding.starts.findIndex(isWorker)];
+      await until(() => worker()?.prompts.length === 1, 'the worker to start its turn');
+      session.setPermissionMode('ask');
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(worker().permissionMode).toBe('ask');
+    } finally {
+      release();
+      await session.dispose();
+    }
   });
 });
 

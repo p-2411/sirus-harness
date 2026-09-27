@@ -121,8 +121,10 @@ function chosenOption(decision: ApprovalDecision, options: readonly PermissionOp
     const option = options.find(candidate => candidate.kind === kind);
     if (option) return option;
   }
-  // No kind matched: vendors list allows first and rejects last.
-  return decision === 'deny' ? options[options.length - 1] : options[0];
+  // No kind matched. Vendors list allows first, so an allow takes the first
+  // option; a denial with nothing to reject picks none and is answered
+  // cancelled, since any option left would let the call through.
+  return decision === 'deny' ? undefined : options[0];
 }
 
 const CANCELLED: RequestPermissionResponse = { outcome: { outcome: 'cancelled' } };
@@ -157,7 +159,8 @@ export function requestPermission(
       settle: decision => {
         signal?.removeEventListener('abort', onAbort);
         const option = chosenOption(decision, approval.options);
-        // Only an empty option list leaves nothing to select.
+        // An empty option list, or a denial the vendor offered no way to
+        // reject, leaves nothing to select.
         resolve(option ? { outcome: { outcome: 'selected', optionId: option.optionId } } : CANCELLED);
       },
     });

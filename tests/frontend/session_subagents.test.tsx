@@ -13,10 +13,11 @@ import {
 } from '../../src/agent_runtime/tools/subagents';
 import { subagentDone } from '../../src/agent_runtime/tools/subagents/run';
 import { workerReport } from '../../src/agent_runtime/tools/subagents/report';
-import { sirusMcpServerEntry, stopSirusMcpServer } from '../../src/agent_runtime/tools/server';
+import { stopSirusMcpServer } from '../../src/agent_runtime/tools/server';
 import Chat from '../../src/frontend/chat/Chat';
 import { ChatMessage } from '../../src/frontend/chat/ChatMessage';
 import {
+  lastDecision,
   pendingApprovals,
   requestPermission,
   resolveApproval,
@@ -26,10 +27,11 @@ import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
 
 afterAll(() => stopSirusMcpServer());
 
-// SpawnAgent reaches Sirus over the session's own MCP server, the way a
-// vendor runtime calls it, so the runs the chat decorates are real ones.
+// SpawnAgent reaches Sirus over the session's own MCP server, on the entry
+// its runtimes are handed and the way a vendor runtime calls it, so the runs
+// the chat decorates are real ones.
 async function spawnWorker(session: Session): Promise<SubagentRun> {
-  const entry = await sirusMcpServerEntry(session.getId(), 'sirus');
+  const entry = await session.mcpServerEntry('sirus');
   const client = new Client({ name: 'session-subagents-test', version: '0' });
   await client.connect(new StreamableHTTPClientTransport(new URL(entry.url), {
     requestInit: { headers: Object.fromEntries(entry.headers.map(header => [header.name, header.value])) },
@@ -225,4 +227,23 @@ test('tool approval indicators do not leak between sessions reusing a call ID', 
   expect(row(second)).toContain('declined by user');
   expect(row(first)).not.toContain('declined by user');
   for (const session of [first, second]) session.dispose();
+});
+
+test('a denial with no reject option to pick answers cancelled, never an allow', async () => {
+  const sessionId = 'deny-without-reject';
+  const answer = requestPermission(
+    { sessionId, requester: { participant: 'sirus' } },
+    {
+      sessionId: 'acp-session',
+      toolCall: { toolCallId: 'deny-call', kind: 'edit', title: 'example.txt' },
+      options: [
+        { optionId: 'once', name: 'Yes', kind: 'allow_once' },
+        { optionId: 'always', name: 'Yes, and don’t ask again', kind: 'allow_always' },
+      ],
+    },
+  );
+  const [approval] = pendingApprovals(sessionId);
+  resolveApproval(approval.id, 'deny');
+  expect(await answer).toEqual({ outcome: { outcome: 'cancelled' } });
+  expect(lastDecision('deny-call', sessionId)).toBe('deny');
 });

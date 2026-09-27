@@ -1,5 +1,6 @@
-import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { afterAll, afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'fs';
+import http from 'http';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -341,6 +342,26 @@ describe('Sirus MCP server', () => {
       expect(await toolNames(client)).toEqual([...MEMORY_TOOLS, ...AGENT_TOOLS]);
     } finally {
       await client.close();
+    }
+  });
+
+  test('a server that failed to start is started again for the next runtime', async () => {
+    stopSirusMcpServer();
+    const { createServer } = http;
+    const create = spyOn(http, 'createServer').mockImplementationOnce(((...args: Parameters<typeof createServer>) => {
+      const server = createServer(...args);
+      server.listen = (() => {
+        queueMicrotask(() => server.emit('error', new Error('listen EADDRINUSE')));
+        return server;
+      }) as typeof server.listen;
+      return server;
+    }) as typeof createServer);
+    try {
+      await expect(sirusMcpServerEntry(SESSION, 'sirus')).rejects.toThrow('EADDRINUSE');
+      const entry = await sirusMcpServerEntry(SESSION, 'sirus');
+      expect(entry.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/mcp$/);
+    } finally {
+      create.mockRestore();
     }
   });
 
