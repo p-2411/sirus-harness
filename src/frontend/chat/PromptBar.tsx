@@ -60,10 +60,15 @@ export function PromptBar({ mode, feedback, participantColors, queuedMessages, w
 }) {
   const [selected, setSelected] = useState(0);
   const [entry, setEntry] = useState('');
+  // A new prompt starts on its first choice with nothing typed. The chat
+  // builds an approval's mode afresh each time it renders, which a streaming
+  // turn does many times a second, so an approval is told apart by its
+  // request rather than by the object that carries it.
+  const prompt = mode.type === 'approval' || mode.type === 'question' ? mode.request.id : mode;
   useEffect(() => {
     setSelected(0);
     setEntry('');
-  }, [mode]);
+  }, [prompt]);
 
   usePaste(text => {
     if (mode.type === 'entry') setEntry(current => current + text.trim());

@@ -12,7 +12,46 @@ import { Session } from '../../src/agent_runtime/session';
 import type { Message, ToolCallBlock } from '../../src/agent_runtime/types';
 import Chat, { formatElapsed, promptHistory, turnPhase } from '../../src/frontend/chat/Chat';
 import { usageCommandSpec } from '../../src/commands/authentication/commands';
+import { pendingApprovals, requestPermission, resolveApproval } from '../../src/agent_runtime/permissions/approvals';
 import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
+
+// A Chat in a terminal the test types into. `frame` is the last frame drawn;
+// `press` waits out Ink's pause after a lone escape, which it holds briefly
+// in case a longer sequence follows.
+function mountChat(session: Session, { columns = 120, rows = 40 } = {}) {
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {}, ref() {}, unref() {} });
+  const stdout = Object.assign(new PassThrough(), { columns, rows });
+  let output = '';
+  stdout.on('data', chunk => {
+    const frame = stripAnsi(chunk.toString());
+    if (frame.trim()) output = frame;
+  });
+  const app = render(createElement(Box, { height: rows, width: columns }, createElement(Chat, { currSession: session })), {
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    debug: true, patchConsole: false, exitOnCtrlC: false,
+  });
+  const flush = async () => {
+    await new Promise(resolve => setImmediate(resolve));
+    await app.waitUntilRenderFlush();
+  };
+  return {
+    frame: () => output,
+    flush,
+    async press(input: string) {
+      stdin.write(input);
+      if (input === '\u001b') await new Promise(resolve => setTimeout(resolve, 100));
+      await flush();
+    },
+    async unmount() {
+      app.unmount();
+      await app.waitUntilExit();
+      app.cleanup();
+      stdin.destroy();
+      stdout.destroy();
+    },
+  };
+}
 
 test('Escape dismisses help, command suggestions, login stages and secret entry', async () => {
   const session = new Session();
@@ -299,6 +338,39 @@ test('help and usage stay scrollable above the editor in an 80 by 24 terminal', 
     stdout.destroy();
     session.dispose();
     unbindRuntime(model);
+  }
+});
+
+test('the approval prompt keeps the choice the arrows moved to while the chat renders again', async () => {
+  const session = new Session();
+  const chat = mountChat(session);
+  const answer = requestPermission(
+    { sessionId: session.getId(), requester: { participant: 'sirus' } },
+    {
+      sessionId: 'acp-session',
+      toolCall: { toolCallId: 'call-held-choice', kind: 'edit', title: 'notes.md' },
+      options: [
+        { optionId: 'allow', name: 'Yes', kind: 'allow_once' },
+        { optionId: 'reject', name: 'No', kind: 'reject_once' },
+      ],
+    },
+  );
+  try {
+    await chat.flush();
+    expect(chat.frame()).toContain('wants to edit notes.md');
+    await chat.press('\u001b[B');
+    expect(chat.frame()).toContain('› No');
+    // Any change to the session draws the chat again, as a streaming turn
+    // or a worker's progress does many times a second.
+    session.setName('Renamed');
+    await chat.flush();
+    expect(chat.frame()).toContain('› No');
+    await chat.press('\r');
+    expect(await answer).toEqual({ outcome: { outcome: 'selected', optionId: 'reject' } });
+  } finally {
+    for (const approval of pendingApprovals(session.getId())) resolveApproval(approval.id, 'deny');
+    await chat.unmount();
+    session.dispose();
   }
 });
 
