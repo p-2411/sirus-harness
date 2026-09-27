@@ -5,8 +5,9 @@ import { PERMISSION_MODE_NAMES, type PermissionMode } from '../../agent_runtime/
 
 export interface StatusRowProps {
   permissionMode?: PermissionMode;
-  // What the vendor made of the mode, when it could not honour it: "auto
-  // approve is unavailable on claude-haiku-4-5; the agent is on Manual".
+  // What the vendor made of the mode, when the agent is not on it: "auto
+  // approve is unavailable to @sirus, which is on Manual", or "@sirus
+  // switched to Bypass Permissions; the session is on ask for approval".
   modeNotice?: string | null;
   model?: string;
   thinkingLevel?: string;

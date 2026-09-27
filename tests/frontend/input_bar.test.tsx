@@ -170,7 +170,7 @@ describe('input status', () => {
   });
 
   test('qualifies the mode with what the vendor made of it', () => {
-    const notice = 'auto approve is unavailable on claude-haiku-4-5; the agent is on Manual';
+    const notice = 'auto approve is unavailable to @sirus, which is on Manual';
     const output = stripAnsi(renderToString(
       <SubagentStatusRow permissionMode="auto" modeNotice={notice} />,
       { columns: 120 },

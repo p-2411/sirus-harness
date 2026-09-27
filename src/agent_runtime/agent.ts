@@ -332,7 +332,7 @@ export class SessionAgent {
     const runtime = this.runtime;
     if (!runtime) return;
     void runtime.setPermissionMode(mode)
-      .then(settled => this.noteMode(mode, settled))
+      .then(settled => this.noteMode(mode, settled, false))
       .catch(() => { /* the vendor keeps its mode; the notice, if any, stands */ });
   }
 
@@ -490,19 +490,27 @@ export class SessionAgent {
           this.context = update.usage;
           break;
         case 'mode':
-          this.noteMode(this.host.permissionMode(), update);
+          this.noteMode(this.host.permissionMode(), update, true);
           break;
       }
       onUpdate?.();
     };
   }
 
-  private noteMode(requested: PermissionMode, settled: { modeId: string; kind: ModeKind | null }): void {
+  // Says when the agent's mode is not the session's: either the vendor could
+  // not take the one asked for (the model lacks it, or the user's settings
+  // switch it off), or the agent moved on its own, as Claude does to the
+  // mode picked when a plan is approved.
+  private noteMode(
+    requested: PermissionMode,
+    settled: { modeId: string; kind: ModeKind | null },
+    byVendor: boolean,
+  ): void {
     const honoured = settled.kind === null || settled.kind === MODE_KINDS[requested];
-    const mode = this.runtime?.modes.find(candidate => candidate.id === settled.modeId);
-    this.modeNotice = honoured
-      ? null
-      : `${PERMISSION_MODE_NAMES[requested]} is unavailable on ${this.model}; the agent is on ${mode?.name ?? settled.modeId}`;
+    const mode = this.runtime?.modes.find(candidate => candidate.id === settled.modeId)?.name ?? settled.modeId;
+    if (honoured) this.modeNotice = null;
+    else if (byVendor) this.modeNotice = `@${this.name} switched to ${mode}; the session is on ${PERMISSION_MODE_NAMES[requested]}`;
+    else this.modeNotice = `${PERMISSION_MODE_NAMES[requested]} is unavailable to @${this.name}, which is on ${mode}`;
   }
 
   // Workers this agent has spawned. It can only see and steer its own.
