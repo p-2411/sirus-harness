@@ -1,10 +1,19 @@
-// Every fact about the models and vendors Sirus can talk to, as data. This
-// module imports nothing from the rest of the app: it is the leaf that the
-// launch specs, the credential store, the login flows and the UI all read
-// from.
+import path from 'path';
+import { dataDirectory } from '../../dataDirectory';
+import { readJson, writeJson } from '../../persistence/atomicJson';
+
+// Every fact about the models and vendors Sirus can talk to. This module
+// imports nothing from the rest of the app but where its one file lives: it
+// is the leaf that the launch specs, the credential store, the login flows
+// and the UI all read from.
 //
-// Adding a model is one row in MODELS. Adding a vendor is one row in
-// VENDOR_TABLE plus a launch spec in src/agent_runtime/runtime/launch.ts.
+// Which models there are is the vendors' to say: each runtime reports the
+// models its harness offers, and `/model` lists those (see "What the vendors
+// offer" below), so a model Claude Code or Codex adds is there without a
+// change here. MODELS is what Sirus knows about a model beyond its name,
+// which is what Jev routes by. Profiling a model is one row in MODELS.
+// Adding a vendor is one row in VENDOR_TABLE plus a launch spec in
+// src/agent_runtime/runtime/launch.ts.
 
 // What Jev is told about a model when it routes. Four kinds of evidence, kept
 // apart because they answer different questions: what the model is for, what
@@ -262,15 +271,25 @@ export function modelInfo(id: string): ModelInfo | undefined {
   return BY_ID.get(id);
 }
 
+// A model Sirus can run: one it has a profile for, or one a vendor lists.
 export function isKnownModel(id: string): boolean {
-  return BY_ID.has(id);
+  return BY_ID.has(id) || listedVendorOf(id) !== undefined;
 }
 
 export function modelIds(): string[] {
-  return MODELS.map(model => model.id);
+  const listed = VENDORS.flatMap(vendor => (listedModels()[vendor] ?? []).map(model => model.id));
+  return [...new Set([...MODELS.map(model => model.id), ...listed])];
 }
 
+// The models a vendor offers, as it last listed them; the profiled ones
+// until it has.
 export function modelsOf(vendor: Vendor): string[] {
+  const listed = listedModels()[vendor];
+  return listed && listed.length > 0 ? listed.map(model => model.id) : profiledModelsOf(vendor);
+}
+
+// The vendor's models that have a profile, in the table's order.
+export function profiledModelsOf(vendor: Vendor): string[] {
   return MODELS.filter(model => model.vendor === vendor).map(model => model.id);
 }
 
@@ -281,10 +300,78 @@ export function workerModelsOf(vendor: Vendor): ModelInfo[] {
 }
 
 export function vendorOf(id: string): Vendor | undefined {
-  return modelInfo(id)?.vendor;
+  return modelInfo(id)?.vendor ?? listedVendorOf(id);
 }
 
 // The vendor's newest model, or undefined for a vendor that marks none.
 export function latestModelOf(vendor: Vendor): ModelInfo | undefined {
   return MODELS.find(model => model.vendor === vendor && model.latest);
+}
+
+// ── What the vendors offer ──────────────────────────────────────────────
+// Each runtime reports the models its harness offers when its session opens:
+// Claude Code's aliases (`sonnet`, `opus[1m]`), which always name that line's
+// newest model, and Codex's ids. The last list per vendor is kept, on disk
+// too, so the menu is right before any runtime has started. A model only a
+// vendor lists can be chosen and run; Jev routes among MODELS alone, since
+// it needs a profile to judge a model by.
+
+export interface ListedModel {
+  id: string;
+  // The vendor's own description, for the menu.
+  description: string;
+}
+
+const LISTED_FILE_VERSION = 1;
+
+// Read once per data directory, which the test suite moves between files.
+let listed: { file: string; byVendor: Partial<Record<Vendor, ListedModel[]>> } | null = null;
+
+function listedFile(): string {
+  return path.join(dataDirectory(), 'listed-models.json');
+}
+
+function isListedModel(value: unknown): value is ListedModel {
+  if (typeof value !== 'object' || value === null) return false;
+  const model = value as Record<string, unknown>;
+  return typeof model.id === 'string' && model.id.length > 0 && typeof model.description === 'string';
+}
+
+function listedModels(): Partial<Record<Vendor, ListedModel[]>> {
+  const file = listedFile();
+  if (listed?.file === file) return listed.byVendor;
+  const read = readJson(file) as { version?: unknown; vendors?: Record<string, unknown> } | null;
+  const byVendor: Partial<Record<Vendor, ListedModel[]>> = {};
+  if (read?.version === LISTED_FILE_VERSION && read.vendors) {
+    for (const vendor of VENDORS) {
+      const models = read.vendors[vendor];
+      if (Array.isArray(models)) byVendor[vendor] = models.filter(isListedModel);
+    }
+  }
+  listed = { file, byVendor };
+  return byVendor;
+}
+
+function listedVendorOf(id: string): Vendor | undefined {
+  const byVendor = listedModels();
+  return VENDORS.find(vendor => byVendor[vendor]?.some(model => model.id === id));
+}
+
+// The vendor's words for a model it lists, or undefined.
+export function listedDescription(id: string): string | undefined {
+  const byVendor = listedModels();
+  for (const vendor of VENDORS) {
+    const model = byVendor[vendor]?.find(candidate => candidate.id === id);
+    if (model) return model.description;
+  }
+  return undefined;
+}
+
+// Keeps what a vendor's runtime just said it offers.
+export function rememberListedModels(vendor: Vendor, models: readonly ListedModel[]): void {
+  const current = listedModels();
+  if (JSON.stringify(current[vendor] ?? []) === JSON.stringify(models)) return;
+  const byVendor = { ...current, [vendor]: [...models] };
+  listed = { file: listedFile(), byVendor };
+  writeJson(listed.file, { version: LISTED_FILE_VERSION, vendors: byVendor });
 }

@@ -8,7 +8,7 @@ import { abortReason, isAbortError, throwIfAborted, TurnCancelledError } from '.
 import type { Requester } from './permissions/approvals';
 import { PERMISSION_MODE_NAMES, type PermissionMode } from './permissions/policy';
 import { providerFor } from './providers';
-import { DEFAULT_MODEL, VENDOR_INFO, vendorOf, type Vendor } from './providers/catalog';
+import { DEFAULT_MODEL, rememberListedModels, VENDOR_INFO, vendorOf, type Vendor } from './providers/catalog';
 import { sourceEnvironment } from './providers/profiles';
 import { maskApiKey, type Source } from './providers/sources';
 import { routeWorker, vendorAllowance, workerCandidates } from './router';
@@ -403,6 +403,12 @@ export class SessionAgent {
     if (update.type === 'commands') {
       const vendor = vendorOf(this.model);
       if (vendor && !this.subagentId) rememberNativeCommands(vendor, this.host.directory, update.commands);
+      return;
+    }
+    // So are its models, which `/model` lists.
+    if (update.type === 'models') {
+      const vendor = vendorOf(this.model);
+      if (vendor) rememberListedModels(vendor, update.models);
       return;
     }
     this.record?.(update);

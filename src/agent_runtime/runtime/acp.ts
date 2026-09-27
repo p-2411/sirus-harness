@@ -19,7 +19,7 @@ import { abortable, abortReason, throwIfAborted } from '../../abort';
 import { imageData } from '../../images';
 import { SIRUS_VERSION } from '../../version';
 import type { PermissionMode } from '../permissions/policy';
-import type { Vendor } from '../providers/catalog';
+import type { ListedModel, Vendor } from '../providers/catalog';
 import { THINKING_LEVELS, type ThinkingLevel, type ToolCallBlock } from '../types';
 import type { ContextUsage } from '../usage';
 import { nativeCommandFrom } from './commands';
@@ -89,6 +89,18 @@ type SelectOption = Extract<SessionConfigOption, { type: 'select' }>;
 function selectOption(options: readonly SessionConfigOption[], id: string): SelectOption | null {
   const option = options.find(candidate => candidate.id === id);
   return option?.type === 'select' ? option : null;
+}
+
+// The models the vendor offers, from its model option: the value is what
+// Sirus names the model by. `default` is left out: it names whatever the
+// vendor recommends, and Sirus's own `default` means something else.
+function listedModelsIn(options: readonly SessionConfigOption[]): ListedModel[] {
+  const option = selectOption(options, 'model');
+  if (!option) return [];
+  return option.options
+    .flatMap(item => ('options' in item ? item.options : [item]))
+    .filter(choice => choice.value !== 'default')
+    .map(choice => ({ id: choice.value, description: choice.description || choice.name }));
 }
 
 function selectValues(option: SelectOption): string[] {
@@ -694,6 +706,8 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
     state.modes = session.modes?.availableModes ?? [];
     state.currentModeId = session.modes?.currentModeId ?? '';
     state.configOptions = session.configOptions ?? [];
+    const models = listedModelsIn(state.configOptions);
+    if (models.length > 0) options.onUpdate({ type: 'models', models });
     await configure(state, launch.mode, options.model, options.thinkingLevel);
     return runtimeFor(state, disposeProcess);
   } catch (error) {

@@ -9,7 +9,7 @@ import type {
   ToolCallUpdate,
 } from '@agentclientprotocol/sdk';
 import type { PermissionMode } from '../permissions/policy';
-import type { Vendor } from '../providers/catalog';
+import type { ListedModel, Vendor } from '../providers/catalog';
 import type {
   ImageBlock,
   PlanEntry,
@@ -76,6 +76,8 @@ export type RuntimeUpdate =
   | { type: 'mode'; modeId: string; kind: ModeKind | null }
   // The slash commands the vendor's harness offers now, the whole list.
   | { type: 'commands'; commands: NativeCommand[] }
+  // The models the vendor's harness offers, as its session opened.
+  | { type: 'models'; models: ListedModel[] }
   // The agent's plan, the whole of it: Claude's todo list, Codex's plan.
   | { type: 'plan'; entries: PlanEntry[] };
 

@@ -46,6 +46,7 @@
     "start": "bun run src/cli.ts",
     "test": "bun test tests",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "update-harnesses": "bun run scripts/update-harnesses.ts",
     "release:check": "bun test && bun run typecheck && npm pack --dry-run",
     "release": "bun run release:check && bun pm version patch && bun publish",
     "prepublishOnly": "bun test && bun run typecheck"
@@ -58,10 +59,10 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "@agentclientprotocol/claude-agent-acp": "0.79.0",
-    "@agentclientprotocol/codex-acp": "1.12.0",
-    "@agentclientprotocol/sdk": "1.4.0",
-    "@anthropic-ai/claude-agent-sdk": "0.3.274",
+    "@agentclientprotocol/claude-agent-acp": "0.81.2",
+    "@agentclientprotocol/codex-acp": "1.13.1",
+    "@agentclientprotocol/sdk": "1.5.0",
+    "@anthropic-ai/claude-agent-sdk": "0.3.280",
     "@huggingface/transformers": "^4.2.0",
     "@modelcontextprotocol/sdk": "^1.29",
     "@typesafe-ai/sdk": "0.6.0",

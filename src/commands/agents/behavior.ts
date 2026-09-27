@@ -1,5 +1,5 @@
 import { saveSirusModelPreference } from '../../persistence';
-import { modelIds, modelsOf, VENDOR_INFO, VENDORS } from '../../agent_runtime/providers/catalog';
+import { listedDescription, modelIds, modelsOf, VENDOR_INFO, VENDORS } from '../../agent_runtime/providers/catalog';
 import type { SubagentRun } from '../../agent_runtime/tools/subagents';
 import { renderTranscript } from '../../agent_runtime/tools/subagents/report';
 import {
@@ -73,12 +73,16 @@ export function modelMenuItems(args: readonly string[] = []): CommandMenuEntry[]
       key: `${vendor}-models`,
       label: VENDOR_INFO[vendor].displayName,
     },
-    ...modelsOf(vendor).map(model => ({
-      type: 'item' as const,
-      key: model,
-      label: model,
-      command: participant ? `/model @${participant} ${model}` : `/model ${model}`,
-    })),
+    ...modelsOf(vendor).map(model => {
+      const description = listedDescription(model);
+      return {
+        type: 'item' as const,
+        key: model,
+        label: model,
+        ...(description ? { description } : {}),
+        command: participant ? `/model @${participant} ${model}` : `/model ${model}`,
+      };
+    }),
   ]);
 }
 

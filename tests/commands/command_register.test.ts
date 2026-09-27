@@ -501,6 +501,21 @@ describe('compact command', () => {
 });
 
 describe('subagent model command', () => {
+  // Models resolve against what the vendors last listed, which lives in the
+  // data directory; an empty one leaves the catalog's.
+  let directory: string;
+  let previousDirectory: string | undefined;
+  beforeEach(() => {
+    directory = mkdtempSync(join(tmpdir(), 'sirus-subagent-model-'));
+    previousDirectory = process.env.SIRUS_DATA_DIR;
+    process.env.SIRUS_DATA_DIR = directory;
+  });
+  afterEach(() => {
+    if (previousDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
+    else process.env.SIRUS_DATA_DIR = previousDirectory;
+    rmSync(directory, { recursive: true, force: true });
+  });
+
   test('sets, shows and clears the model spawned subagents run on', () => {
     const session = new Session();
     expect(runCommand('model', ['subagent'], session))

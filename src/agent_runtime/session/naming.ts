@@ -1,5 +1,5 @@
 import { allProviders, providerFor } from '../providers';
-import { modelsOf, vendorOf } from '../providers/catalog';
+import { profiledModelsOf, vendorOf } from '../providers/catalog';
 import { sourceEnvironment } from '../providers/profiles';
 import { boundRuntimes, createRuntime } from '../runtime/runtime';
 
@@ -14,7 +14,7 @@ export function sessionNamingModel(preferredModel: string): string | null {
   const preferredVendor = vendorOf(preferredModel);
   if (preferredVendor && providerFor(preferredVendor).sources.list().length > 0) return preferredModel;
   const provider = allProviders().find(candidate => candidate.sources.list().length > 0);
-  return provider ? modelsOf(provider.vendor.id)[0] ?? null : null;
+  return provider ? profiledModelsOf(provider.vendor.id)[0] ?? null : null;
 }
 
 function normalizeSessionName(answer: string): string | null {
