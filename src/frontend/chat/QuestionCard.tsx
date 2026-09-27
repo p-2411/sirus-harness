@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'rea
 import { Box, Text, useBoxMetrics, useInput, usePaste, useStdout, type DOMElement } from 'ink';
 import { theme } from '../styles/theme';
 import { FramedCard } from './FramedCard';
-import { applyInputEdit, type InputEdit, type InputState } from './editor';
+import { applyInputEdit, inputEditForKey, type InputEdit, type InputState } from './editor';
 import { useClickable } from '../interaction/clickable';
 import { isMouseInput } from '../interaction/mouse';
 import { isFocusInput } from '../terminal/window-focus';
@@ -222,8 +222,14 @@ export function QuestionCard({ request, waiting, onAnswer }: {
     if (typing && !reviewing) edit({ type: 'insert', text: text.replace(/\r\n?|\n/g, ' ') });
   });
   useInput((input, key) => {
-    if (isMouseInput(input) || isFocusInput(input) || key.escape || sent.current
+    if (key.eventType === 'release' || (key.ctrl && input === 'c')) return;
+    if (isMouseInput(input) || isFocusInput(input) || sent.current
       || (key.meta && (key.upArrow || key.downArrow))) return;
+    if (key.escape) {
+      sent.current = true;
+      onAnswer({ action: 'decline' });
+      return;
+    }
     if (key.tab && key.shift) {
       if (index > 0) goTo(index - 1);
       else if (draft.typingOther) updateDraft({ typingOther: false });
@@ -235,14 +241,9 @@ export function QuestionCard({ request, waiting, onAnswer }: {
       else if (!key.ctrl && !key.meta && /^[1-9]$/.test(input) && Number(input) <= request.fields.length) goTo(Number(input) - 1);
       return;
     }
-    const isBackspace = key.backspace || key.delete;
     if (typing) {
       if (key.return || key.tab) submitEntry();
-      else if (key.ctrl && input === 'u') edit({ type: 'clear' });
-      else if ((key.ctrl && input === 'w') || (key.meta && isBackspace)) edit({ type: 'delete-word-backward' });
-      else if (isBackspace) edit({ type: 'backspace' });
-      else if (key.leftArrow || key.rightArrow) edit({ type: key.leftArrow ? 'left' : 'right' });
-      else if (key.home || key.end) updateDraft({ editor: { ...draft.editor, cursor: key.home ? 0 : draft.editor.text.length } });
+      else if (inputEditForKey(input, key)) edit(inputEditForKey(input, key)!);
       else if (!key.ctrl && !key.meta && !key.upArrow && !key.downArrow && !key.pageUp && !key.pageDown) edit({ type: 'insert', text: input });
       return;
     }
@@ -259,10 +260,10 @@ export function QuestionCard({ request, waiting, onAnswer }: {
   const { question, label } = reviewing ? { question: 'Review your answers', label: undefined } : questionText(request, field);
   const right = [request.fields.length > 1 ? reviewing ? 'Review' : `${index + 1} of ${request.fields.length}` : '', waiting > 0 ? `${waiting} more` : ''].filter(Boolean).join(' · ');
   const next = request.fields.length === 1 ? 'submit' : index === request.fields.length - 1 ? 'review' : 'next';
-  const footer = reviewing ? '↑↓ edit · enter select · esc cancels'
-    : typing ? `enter ${!field.required && !draft.typingOther && !draft.editor.text.trim() ? 'skip' : next} · shift+tab back · esc cancels`
-      : multiple ? '↑↓ move · space toggle · tab continue · esc cancels'
-        : '↑↓ move · enter select · esc cancels';
+  const footer = reviewing ? '↑↓ edit · enter select · esc declines'
+    : typing ? `enter ${!field.required && !draft.typingOther && !draft.editor.text.trim() ? 'skip' : next} · shift+tab back · esc declines`
+      : multiple ? '↑↓ move · space toggle · tab continue · esc declines'
+        : '↑↓ move · enter select · esc declines';
   const secret = field?.kind === 'text' && field.secret;
   const displayText = (text: string) => secret ? '•'.repeat([...text].length) : text;
 

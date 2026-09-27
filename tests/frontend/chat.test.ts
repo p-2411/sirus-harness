@@ -174,7 +174,7 @@ test('help and usage stay scrollable above the editor in an 80 by 24 terminal', 
   }));
   try {
     await flush();
-    await type('\u001b[H');
+    await type('\u001b[1;5H');
     expect(output).toContain('Conversation remains available.');
     await type('/help');
     await type('\r');
@@ -187,11 +187,11 @@ test('help and usage stay scrollable above the editor in an 80 by 24 terminal', 
     expectEditor();
     await type('\u001b[5~');
     expect(output).toBe(firstPage);
-    await type('\u001b[F');
-    expect(output).toContain('ctrl+u');
-    expect(output).toContain('delete the previous word');
+    await type('\u001b[1;5F');
+    expect(output).toContain('ctrl+k / u');
+    expect(output).toContain('kill previous / next word');
     expectEditor();
-    await type('\u001b[H');
+    await type('\u001b[1;5H');
     expect(output).toBe(firstPage);
     await type('\u001b');
     expect(output).toContain('Conversation remains available.');
@@ -205,7 +205,7 @@ test('help and usage stay scrollable above the editor in an 80 by 24 terminal', 
     expect(output).toContain('session · 100 in · 20 out');
     expect(output).toContain('enter ↵');
     expect(output).not.toContain('esc closes');
-    await type('\u001b[F');
+    await type('\u001b[1;5F');
     // End scrolls the history behind the pinned output.
     expect(output).toContain('Conversation row 23.');
     expect(output).toContain('session · 100 in · 20 out');
@@ -266,6 +266,51 @@ function renderChat(session: Session) {
     },
   };
 }
+
+test('local commands run during a turn and a reserved command drains after editing finishes', async () => {
+  const model = 'test-chat-command-queue';
+  let release!: () => void;
+  let started!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const ready = new Promise<void>(resolve => { started = resolve; });
+  bindScriptedRuntime(model, async (_input, emit) => {
+    started();
+    await gate;
+    emit({ type: 'text', text: 'Finished.' });
+  });
+  const session = new Session({ model });
+  const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Work' }] });
+  const chat = renderChat(session);
+  try {
+    await ready;
+    await chat.flush();
+    await chat.type('/help');
+    await chat.type('\r');
+    expect(chat.output()).toContain('list commands and keys');
+    expect(session.getStatus()).toBe('working');
+    await chat.type('\u001b');
+    expect(session.getStatus()).toBe('working');
+    session.queueMessage('/help');
+    await chat.flush();
+    await chat.type('\u001b[A');
+    expect(session.getQueuedMessages()[0].editing).toBe(true);
+    release();
+    await turn;
+    await chat.flush();
+    expect(session.getQueuedMessageCount()).toBe(1);
+    expect(chat.output()).not.toContain('list commands and keys');
+    await chat.type('\r');
+    await chat.flush();
+    expect(session.getQueuedMessageCount()).toBe(0);
+    expect(chat.output()).toContain('list commands and keys');
+  } finally {
+    release();
+    await turn;
+    await chat.close();
+    await session.dispose();
+    unbindRuntime(model);
+  }
+});
 
 describe('pinned plans', () => {
   const entries: PlanEntry[] = [

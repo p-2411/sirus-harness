@@ -5,6 +5,7 @@ import { useState, useSyncExternalStore } from 'react';
 import stripAnsi from 'strip-ansi';
 import { InputBar } from '../../src/frontend/chat/InputBar';
 import { ApprovalPrompt, approvalChoices } from '../../src/frontend/chat/ApprovalPrompt';
+import { PromptBar, type PromptMode } from '../../src/frontend/chat/PromptBar';
 import { QuestionCard } from '../../src/frontend/chat/QuestionCard';
 import { EntryInput, InputFeedback, QueuedRow } from '../../src/frontend/chat/InputRows';
 import { SubagentStatusRow } from '../../src/frontend/chat/StatusRow';
@@ -21,13 +22,14 @@ import type { CommandMenuEntry, CommandMenuItem } from '../../src/commands/regis
 import type { Feedback } from '../../src/commands/feedback';
 import { Session } from '../../src/agent_runtime/session';
 import Sidebar from '../../src/frontend/Sidebar';
-import type { ApprovalRequest } from '../../src/agent_runtime/permissions/approvals';
+import { lastDecision, pendingApprovals, requestPermission, resolveApproval, type ApprovalDecision, type ApprovalRequest } from '../../src/agent_runtime/permissions/approvals';
 import type { QuestionAnswer, QuestionField, QuestionRequest } from '../../src/agent_runtime/permissions/questions';
 import type { PermissionOption } from '@agentclientprotocol/sdk';
 import { notifySubagents, type SubagentRun } from '../../src/agent_runtime/tools/subagents';
 import type { ToolCallBlock } from '../../src/agent_runtime/types';
 import { pressAt, releaseAt } from '../../src/frontend/interaction/clickable';
 import stringWidth from 'string-width';
+import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
 
 describe('session input drafts', () => {
   test('edits and restores drafts when switching session panes with Option+arrows', async () => {
@@ -301,7 +303,7 @@ describe('approval prompt', () => {
     for (const option of OPTIONS) expect(output).toContain(option.name);
   });
 
-  test('offers only what the vendor offered', () => {
+  test('keeps vendor options and adds rejection with feedback', () => {
     const output = render(approval({
       type: 'tool_call',
       id: 'call-2',
@@ -323,14 +325,16 @@ describe('approval prompt', () => {
       status: 'pending', locations: [], content: [],
     };
     expect(approvalChoices(approval(call)).map(choice => `${choice.key}:${JSON.stringify(choice.decision)}`))
-      .toEqual(['y:{"optionId":"allow"}', 'a:{"optionId":"always"}', 'n:{"optionId":"reject"}', 'd:{"optionId":"never"}']);
+      .toEqual(['y:{"optionId":"allow"}', 'a:{"optionId":"always"}', 'n:{"optionId":"reject"}', 'd:{"optionId":"never"}', 'tab:"deny"']);
     // Two options of one kind are both offered, numbered.
     expect(approvalChoices(approval(call, [
       { optionId: 'once', name: 'Yes, proceed', kind: 'allow_once' },
       { optionId: 'decline', name: 'No, continue without running it', kind: 'reject_once' },
       { optionId: 'cancel', name: 'No, and tell Codex what to do differently', kind: 'reject_once' },
     ])).map(choice => `${choice.key}:${choice.label}`))
-      .toEqual(['1:Yes, proceed', '2:No, continue without running it', '3:No, and tell Codex what to do differently']);
+      .toEqual(['1:Yes, proceed', '2:No, continue without running it', '3:No, and tell Codex what to do differently', 'tab:No, and tell it what to do instead']);
+    expect(output).toContain('No, and tell it what to do instead');
+    expect(output).toContain('esc decline');
   });
 
   test('cuts an unrecognised input down to a readable line', () => {
@@ -348,6 +352,74 @@ describe('approval prompt', () => {
     expect(output).toContain('@sirus wants to tool sirus - SaveMemory');
     expect(output).toContain('…');
     expect(output).not.toContain('x'.repeat(300));
+  });
+
+  test.each(['escape', 'feedback', 'feedback-escape', 'selection'] as const)('answers a worker approval through %s across streaming updates', async action => {
+    const request = approval({
+      type: 'tool_call', id: 'worker-call', kind: 'execute', title: 'bun test',
+      status: 'pending', locations: [], content: [],
+    });
+    request.requester = { subagent: 'sub-worker-id' };
+    const decisions: { decision: ApprovalDecision; feedback?: string }[] = [];
+    const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {}, ref() {}, unref() {} });
+    const stdout = Object.assign(new PassThrough(), { columns: 100, rows: 35 });
+    let output = '';
+    stdout.on('data', chunk => { const frame = stripAnsi(chunk.toString()); if (frame.trim()) output = frame; });
+    const view = () => {
+      const mode: PromptMode = {
+        type: 'approval', request, waiting: 0, requesterName: 'Reader',
+        onDecide: (decision, feedback) => decisions.push({ decision, feedback }),
+      };
+      return <PromptBar mode={mode} feedback={null} queuedMessages={[]} workers={[]} status={{}} />;
+    };
+    const app = renderInk(view(), {
+      stdin: stdin as unknown as NodeJS.ReadStream, stdout: stdout as unknown as NodeJS.WriteStream,
+      debug: true, patchConsole: false, exitOnCtrlC: false,
+    });
+    const flush = async () => { await new Promise(resolve => setImmediate(resolve)); await app.waitUntilRenderFlush(); };
+    const type = async (input: string) => {
+      stdin.write(input);
+      if (input === '\u001b') await new Promise(resolve => setTimeout(resolve, 60));
+      await flush();
+    };
+    try {
+      await flush();
+      expect(output).toContain('Reader wants to run bun test');
+      expect(output).not.toContain('sub-worker-id');
+      if (action === 'feedback' || action === 'feedback-escape') {
+        await type('\t');
+        await type('Read it');
+        app.rerender(view());
+        await flush();
+        expect(output).toContain('Read it▌');
+        await type(' first');
+      } else if (action === 'selection') {
+        await type('\u001b[B');
+        app.rerender(view());
+        await flush();
+      }
+      await type(action === 'feedback' || action === 'selection' ? '\r' : '\u001b');
+      expect(decisions).toEqual([{
+        decision: action === 'selection' ? { optionId: 'always' } : 'deny',
+        feedback: action === 'feedback' ? 'Read it first' : undefined,
+      }]);
+      await type('\u001b');
+      expect(decisions).toHaveLength(1);
+    } finally {
+      app.unmount(); await app.waitUntilExit(); app.cleanup(); stdin.destroy(); stdout.destroy();
+    }
+  });
+
+  test.each(['allow_once', 'reject_always'] as const)('denial cancels only the request when the vendor offers only %s', async kind => {
+    const sessionId = 'approval-without-reject';
+    const response = requestPermission({ sessionId, requester: { participant: 'sirus' } }, {
+      sessionId: 'runtime', toolCall: { toolCallId: 'allow-only-call', title: 'Write file' },
+      options: [{ optionId: 'only-option', name: 'Only option', kind }],
+    });
+    const [request] = pendingApprovals(sessionId);
+    expect(resolveApproval(request.id, 'deny')).toBe(true);
+    expect(await response).toEqual({ outcome: { outcome: 'cancelled' } });
+    expect(lastDecision('allow-only-call', sessionId)).toBe('deny');
   });
 });
 
@@ -431,6 +503,23 @@ describe('question card', () => {
       },
     };
   }
+
+  test('Escape declines a partially answered form once without submitting its answers', async () => {
+    const view = card([choice(), { kind: 'text', key: 'note', title: 'What else?', required: true, secret: false }]);
+    try {
+      await view.flush();
+      await view.type('2');
+      await view.type('An unfinished note');
+      await view.type('\u001b');
+      await new Promise(resolve => setTimeout(resolve, 60));
+      await view.flush();
+      expect(view.answers).toEqual([{ action: 'decline' }]);
+      await view.type('\r');
+      expect(view.answers).toHaveLength(1);
+    } finally {
+      await view.close();
+    }
+  });
 
   test('numbers the choices and immediately submits a clicked single answer', async () => {
     const view = card([choice()]);
@@ -633,7 +722,7 @@ describe('question card', () => {
       expect(view.output()).not.toContain('Choice 20');
       // Hidden rows still have layout boxes below the viewport, where the
       // frame and Back sit. Those boxes must not remain mouse targets.
-      const footer = view.cellOf('esc cancels');
+      const footer = view.cellOf('esc declines');
       expect(pressAt(footer)).toBe(false);
       expect(releaseAt(footer)).toBe(false);
       await view.click('Back');
@@ -906,6 +995,247 @@ describe('walking the worker strip from the input bar', () => {
       await app.waitUntilExit();
       stdin.destroy();
       stdout.destroy();
+    }
+  });
+});
+
+
+function renderQueueInput(session: Session, history: readonly string[] = []) {
+  const events: string[] = [];
+  let interrupt = false;
+  let output = '';
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {}, ref() {}, unref() {} });
+  const stdout = Object.assign(new PassThrough(), { columns: 100, rows: 35 });
+  stdout.on('data', chunk => { const frame = stripAnsi(chunk.toString()); if (frame.trim()) output = frame; });
+  function Harness() {
+    useSyncExternalStore(listener => session.subscribe(listener), () => session.getVersion());
+    return <InputBar
+      inputContent={session.getInputContent()}
+      setInputContent={text => session.setInputContent(text)}
+      send={text => events.push(`send:${text}`)}
+      disabled={session.getStatus() === 'working'}
+      feedback={null}
+      participants={[]}
+      history={history}
+      queuedMessages={session.getQueuedMessages()}
+      onBeginQueuedEdit={id => { session.beginQueuedMessageEdit(id); }}
+      onCancelQueuedEdit={id => session.cancelQueuedMessageEdit(id)}
+      onUpdateQueued={(id, text) => session.commitQueuedMessageEdit(id, text)}
+      onEscape={() => events.push('escape')}
+      onRewind={() => events.push('rewind')}
+      onInterrupt={() => { if (interrupt) events.push('interrupt'); return interrupt; }}
+      onExit={() => events.push('exit')}
+      onExitHint={() => events.push('exit-hint')}
+    />;
+  }
+  const app = renderInk(<Harness />, {
+    stdin: stdin as unknown as NodeJS.ReadStream, stdout: stdout as unknown as NodeJS.WriteStream,
+    debug: true, patchConsole: false, exitOnCtrlC: false,
+  });
+  const flush = async () => { await new Promise(resolve => setImmediate(resolve)); await app.waitUntilRenderFlush(); };
+  return {
+    events,
+    get output() { return output; },
+    set interrupt(value: boolean) { interrupt = value; },
+    flush,
+    async press(input: string) {
+      stdin.write(input);
+      if (input === '\u001b') await new Promise(resolve => setTimeout(resolve, 60));
+      await flush();
+    },
+    unmount() { app.unmount(); stdin.destroy(); stdout.destroy(); },
+  };
+}
+
+describe('input queue and interrupt precedence', () => {
+  test('keeps queue edits private until Enter and restores the original on Escape', async () => {
+    const session = new Session({ name: 'Queue input' });
+    session.setInputContent('saved draft');
+    // Commands remain queued when the editor releases them in an idle session.
+    session.queueMessage('/first');
+    session.queueMessage('/second');
+    const ids = session.getQueuedMessages().map(item => item.id);
+    const bar = renderQueueInput(session);
+    try {
+      await bar.flush();
+      await bar.press('\u001b[A');
+      await bar.press(' unfinished');
+      expect(bar.output).toContain('/second unfinished▌');
+      expect(session.getQueuedMessages().map(item => item.text)).toEqual(['/first', '/second']);
+      expect(session.getQueuedMessages()[1]!.editing).toBe(true);
+      expect(session.getInputContent()).toBe('saved draft');
+      await bar.press('\u001b');
+      expect(session.getQueuedMessages().map(item => item.id)).toEqual(ids);
+      expect(session.getQueuedMessages()[1]!.editing).toBeUndefined();
+      expect(bar.output).toContain('saved draft▌');
+      expect(bar.events).toEqual([]);
+      await bar.press('\u001b[A');
+      await bar.press(' completed');
+      await bar.press('\r');
+      expect(session.getQueuedMessages().map(item => item.text)).toEqual(['/first', '/second completed']);
+      expect(session.getQueuedMessages()[1]!.editing).toBeUndefined();
+      expect(bar.output).toContain('saved draft▌');
+      expect(bar.events).toEqual([]);
+    } finally {
+      bar.unmount();
+      await session.dispose();
+    }
+  });
+
+  test('walks from the queue into prompt history and restores the draft', async () => {
+    const session = new Session({ name: 'Queue history' });
+    session.setInputContent('draft');
+    session.queueMessage('/first');
+    session.queueMessage('/second');
+    const bar = renderQueueInput(session, ['older prompt', 'recent prompt']);
+    try {
+      await bar.flush();
+      await bar.press('\u001b[A');
+      expect(bar.output).toContain('/second▌');
+      await bar.press('\u001b[A');
+      expect(bar.output).toContain('/first▌');
+      expect(session.getQueuedMessages()[1]!.editing).toBeUndefined();
+      await bar.press('\u001b[A');
+      expect(session.getInputContent()).toBe('recent prompt');
+      expect(session.getQueuedMessages().every(item => !item.editing)).toBe(true);
+      await bar.press('\u001b[A');
+      expect(session.getInputContent()).toBe('older prompt');
+      await bar.press('\u001b[B');
+      expect(session.getInputContent()).toBe('recent prompt');
+      await bar.press('\u001b[B');
+      expect(session.getInputContent()).toBe('draft');
+    } finally {
+      bar.unmount();
+      await session.dispose();
+    }
+  });
+
+  test('never drains the visible half-written queue item when a real session turn ends', async () => {
+    const model = 'test-input-queue-reservation';
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const binding = bindScriptedRuntime(model, async () => { await gate; });
+    const session = new Session({ name: 'Reserved prompt', model });
+    const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Start' }] });
+    session.queueMessage('Other queued prompt');
+    session.queueMessage('Original');
+    const bar = renderQueueInput(session);
+    try {
+      await bar.flush();
+      await bar.press('\u001b[A');
+      await bar.press(' half');
+      release();
+      await turn;
+      const deadline = Date.now() + 2000;
+      while (session.getStatus() !== 'idle' && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+      await bar.flush();
+      expect(session.getStatus()).toBe('idle');
+      expect(binding.runtimes[0]!.prompts.map(prompt => prompt.text)).toEqual(['Start', 'Other queued prompt']);
+      expect(session.getQueuedMessages()).toHaveLength(1);
+      expect(session.getQueuedMessages()[0]!.text).toBe('Original');
+      expect(session.getQueuedMessages()[0]!.editing).toBe(true);
+      expect(bar.output).toContain('Original half▌');
+      await bar.press(' finished');
+      await bar.press('\r');
+      const commitDeadline = Date.now() + 2000;
+      while (session.getStatus() !== 'idle' && Date.now() < commitDeadline) await new Promise(resolve => setTimeout(resolve, 5));
+      expect(binding.runtimes[0]!.prompts.map(prompt => prompt.text)).toEqual(['Start', 'Other queued prompt', 'Original half finished']);
+      expect(session.getQueuedMessages()).toHaveLength(0);
+    } finally {
+      release();
+      bar.unmount();
+      await turn.catch(() => {});
+      await session.dispose();
+      unbindRuntime(model);
+    }
+  });
+
+  test('Escape dismisses a command menu before invoking the chat fallback', async () => {
+    const session = new Session({ name: 'Menu Escape' });
+    const bar = renderQueueInput(session);
+    try {
+      await bar.flush();
+      await bar.press('/help');
+      await bar.press('\u001b');
+      expect(bar.events).toEqual([]);
+      expect(session.getInputContent()).toBe('/help');
+      await bar.press('\u001b');
+      expect(bar.events).toEqual(['escape']);
+      expect(session.getInputContent()).toBe('/help');
+    } finally {
+      bar.unmount();
+      await session.dispose();
+    }
+  });
+
+  test('double Escape clears a recallable draft and opens rewind when empty', async () => {
+    const session = new Session({ name: 'Double Escape' });
+    const bar = renderQueueInput(session);
+    try {
+      await bar.flush();
+      await bar.press('keep this draft');
+      await bar.press('\u001b');
+      expect(session.getInputContent()).toBe('keep this draft');
+      await bar.press('\u001b');
+      expect(session.getInputContent()).toBe('');
+      expect(bar.events).toEqual(['escape']);
+      await bar.press('\u001b[A');
+      expect(session.getInputContent()).toBe('keep this draft');
+      await bar.press('\u0015');
+      await bar.press('\u001b');
+      await bar.press('\u001b');
+      expect(bar.events).toEqual(['escape', 'escape', 'rewind']);
+    } finally {
+      bar.unmount();
+      await session.dispose();
+    }
+  });
+
+  test('keeps cleared drafts before prompts sent later in recall history', async () => {
+    const session = new Session({ name: 'Recall order' });
+    const history: string[] = [];
+    const bar = renderQueueInput(session, history);
+    try {
+      await bar.flush();
+      await bar.press('cleared draft');
+      await bar.press('\u0003');
+      await bar.press('later prompt');
+      history.push('later prompt');
+      await bar.press('\r');
+      session.setInputContent('');
+      await bar.flush();
+      await bar.press('\u001b[A');
+      expect(session.getInputContent()).toBe('later prompt');
+      await bar.press('\u001b[A');
+      expect(session.getInputContent()).toBe('cleared draft');
+    } finally {
+      bar.unmount();
+      await session.dispose();
+    }
+  });
+
+  test('Ctrl+C interrupts first, then clears for recall, and only a consecutive empty press exits', async () => {
+    const session = new Session({ name: 'Control C' });
+    const bar = renderQueueInput(session);
+    try {
+      await bar.flush();
+      await bar.press('keep this draft');
+      bar.interrupt = true;
+      await bar.press('\u0003');
+      expect(bar.events).toEqual(['interrupt']);
+      expect(session.getInputContent()).toBe('keep this draft');
+      bar.interrupt = false;
+      await bar.press('\u0003');
+      expect(session.getInputContent()).toBe('');
+      expect(bar.events).toEqual(['interrupt', 'exit-hint']);
+      await bar.press('\u001b[A');
+      expect(session.getInputContent()).toBe('keep this draft');
+      await bar.press('\u0003');
+      await bar.press('\u0003');
+      expect(bar.events).toEqual(['interrupt', 'exit-hint', 'exit-hint', 'exit']);
+    } finally {
+      bar.unmount();
+      await session.dispose();
     }
   });
 });

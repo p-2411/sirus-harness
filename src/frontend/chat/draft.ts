@@ -112,5 +112,10 @@ export function useDraftImages({ attachments, text, getDraft, setDraft }: {
     if (next.text !== draft.text || next.cursor !== draft.cursor) setDraft(next);
   }, [attachments]);
 
-  return { imageFor, placedImages, trailingImages };
+  return {
+    imageFor,
+    isKnownPlaceholder: (placeholder: string) => placeholderPaths.current.has(placeholder),
+    placedImages,
+    trailingImages,
+  };
 }

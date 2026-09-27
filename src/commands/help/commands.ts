@@ -2,21 +2,29 @@ import type { CommandSpec } from '../types';
 
 // Every key the app answers to, in the words the status hints use.
 export const KEY_BINDINGS: ReadonlyArray<readonly [keys: string, action: string]> = [
-  ['enter', 'send · queues while the agents are busy'],
-  ['shift+enter · \\ + enter', 'new line'],
-  ['↑ / ↓', 'previous / next prompt · select a queued message'],
+  ['enter / tab', 'send or steer / queue for after the turn'],
+  ['shift+enter · alt+enter · \\ + enter', 'new line'],
+  ['↑ / ↓', 'queued messages, then prompt history'],
+  ['enter / esc in queue edit', 'save / restore the original'],
   ['option+↑ / ↓', 'switch session'],
   ['ctrl+n', 'new session'],
-  ['ctrl+k', 'collapse the sidebar'],
+  ['ctrl+b', 'collapse the sidebar'],
   ['ctrl+t', 'show / hide tasks'],
   ['ctrl+v', 'attach a clipboard image'],
   ['@ · ↑ / ↓ · tab / enter', 'find and mention a project file'],
   ['backspace over an image', 'remove it'],
-  ['shift+tab', 'cycle the permission mode'],
-  ['esc', 'close menus · cancel the turn'],
-  ['pgup / pgdn · home / end', 'scroll the history'],
-  ['y / a / n / d', 'allow once · allow for this session · deny · deny for this session'],
-  ['ctrl+u · ctrl+w', 'clear the line · delete the previous word'],
+  ['shift+tab', 'switch ask / auto; choose bypass through /permissions'],
+  ['esc', 'close menu · restore queue edit · decline card · cancel turn'],
+  ['esc twice', 'clear draft (↑ recalls) · empty draft opens /rewind'],
+  ['ctrl+c', 'interrupt · clear draft · press again within 1s to exit'],
+  ['pgup / pgdn · ctrl+home / end', 'scroll the history'],
+  ['y / a / n / d', 'answer approval options · tab adds rejection feedback'],
+  ['home / end · ctrl+a / e', 'move to start / end of line'],
+  ['alt+b / f · alt+← / →', 'move one word'],
+  ['delete · ctrl+d', 'delete the next character'],
+  ['ctrl+k / u', 'kill to end / start of line'],
+  ['ctrl+w · alt+backspace / d', 'kill previous / next word'],
+  ['ctrl+y · ctrl+_', 'yank killed text / undo an edit'],
 ];
 
 export function helpText(commands: readonly CommandSpec[]): string {

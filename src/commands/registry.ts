@@ -6,7 +6,7 @@ import {
 } from './authentication/commands';
 import { helpCommand } from './help/commands';
 import { memoryCommandSpec } from './memory/commands';
-import { clearCommand, compactCommandSpec, exitCommand, permissionsCommandSpec, renameCommand } from './session/commands';
+import { clearCommand, compactCommandSpec, exitCommand, quitCommand, permissionsCommandSpec, renameCommand } from './session/commands';
 import { updateCommandSpec, versionCommandSpec } from './update/commands';
 import { rewindCommandSpec, undoCommandSpec } from './checkpoints/commands';
 import { imageCommandSpec } from './images/commands';
@@ -52,6 +52,7 @@ export const commandRegistry: readonly CommandSpec[] = [
   renameCommand,
   helpCommand(() => commandRegistry),
   exitCommand,
+  quitCommand,
 ];
 
 // Typed (or menu-composed) command text into its name and arguments:

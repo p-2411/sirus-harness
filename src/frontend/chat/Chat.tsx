@@ -199,9 +199,9 @@ function CommandFeedbackPanel({ feedback, participantColors, sidebarWidth }: {
       setOffset(Math.max(0, visibleOffset - pageSize));
     } else if (key.pageDown) {
       setOffset(Math.min(maxScroll, visibleOffset + pageSize));
-    } else if (key.home) {
+    } else if (key.ctrl && key.home) {
       setOffset(0);
-    } else if (key.end) {
+    } else if (key.ctrl && key.end) {
       setOffset(maxScroll);
     }
   });
@@ -214,7 +214,7 @@ function CommandFeedbackPanel({ feedback, participantColors, sidebarWidth }: {
         </Box>
       </Box>
       <Box paddingX={3} height={1} flexShrink={0}>
-        <Text color={theme.textSubtle}>pgup / pgdn · home / end · esc closes</Text>
+        <Text color={theme.textSubtle}>pgup / pgdn · ctrl+home / end · esc closes</Text>
       </Box>
     </Box>
   );
@@ -302,9 +302,8 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     replaceAttachments(attachmentsRef.current.filter(item => item.path !== image.path));
   };
   const [commandStartedAt, setCommandStartedAt] = useState<number | null>(null);
-  // Whether the worker strip under the input has the keyboard right now.
-  const workerFocus = useRef(false);
   const queued = currSession.getQueuedMessageCount();
+  const nextQueuedId = currSession.getQueuedMessages().find(message => !message.editing)?.id;
   const history = promptHistory(messages);
   // A tool call of this session (or of a subagent it spawned) waiting on the
   // user takes over the input bar until it is answered or the turn is cancelled.
@@ -319,7 +318,20 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         type: 'approval',
         request: approvals[0],
         waiting: approvals.length - 1 + questions.length,
-        onDecide: decision => { resolveApproval(approvals[0].id, decision); },
+        requesterName: 'subagent' in approvals[0].requester
+          ? currSession.getWorkers().find(worker => worker.id === (approvals[0].requester as { subagent: string }).subagent)?.name
+          : undefined,
+        onDecide: (decision, guidance) => {
+          const request = approvals[0];
+          resolveApproval(request.id, decision);
+          if (!guidance) return;
+          void Promise.resolve().then(async () => {
+            if ('subagent' in request.requester) await currSession.messageWorker(request.requester.subagent, guidance);
+            else await currSession.sendMessage({ role: 'user', to: [request.requester.participant], content: [{ type: 'text', text: guidance }] });
+          }).catch((caught: unknown) => {
+            setFeedback({ kind: 'error', text: caught instanceof Error ? caught.message : 'Could not deliver feedback.' });
+          });
+        },
       }
       : questions.length > 0
         ? {
@@ -377,19 +389,6 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       if (plans.length > 0) setShowTasks(shown => !shown);
       return;
     }
-    if (key.escape) {
-      // Escape with the worker strip focused only hands the keyboard back to
-      // the draft; the input bar does that itself.
-      if (workerFocus.current) return;
-      setInputMode({ type: 'text' });
-      setFeedback(null);
-      // The turn only: the session's workers keep going in the background and
-      // are stopped from /agents. Queued messages stay, and the next one goes
-      // out once the turn has stopped.
-      currSession.cancel();
-      commandAbort.current?.abort(new TurnCancelledError());
-      return;
-    }
     if (panelFeedback) return;
     const wheel = parseMouseWheel(input);
     if (wheel && wheel.column > sidebarWidth) {
@@ -401,9 +400,9 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       setScrollOffset(current => Math.min(maxScroll, current + pageSize));
     } else if (key.pageDown) {
       setScrollOffset(current => Math.max(0, current - pageSize));
-    } else if (key.home && effectiveInputMode.type !== 'question') {
+    } else if (key.ctrl && key.home) {
       setScrollOffset(maxScroll);
-    } else if (key.end && effectiveInputMode.type !== 'question') {
+    } else if (key.ctrl && key.end) {
       setScrollOffset(0);
     }
   });
@@ -521,7 +520,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       const turn = currSession.sendMessage(msg);
       // Validation can reject a turn before its user message is appended.
       // Keep those images available so the user can correct the prompt.
-      if (currSession.getMessages().length > previousLength && images.length > 0) {
+      if ((currSession.getMessages().length > previousLength || currSession.getQueuedMessages().some(item => item.images?.some(image => images.some(sent => sent.path === image.path)))) && images.length > 0) {
         const sentPaths = new Set(images.map(image => image.path));
         replaceAttachments(attachmentsRef.current.filter(image => !sentPaths.has(image.path)));
       }
@@ -540,14 +539,48 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     }
   }
 
+  const queue = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[]) => {
+    currSession.queueMessage(text, images, content);
+    const paths = new Set(images.map(image => image.path));
+    replaceAttachments(attachmentsRef.current.filter(image => !paths.has(image.path)));
+  };
+  const interrupt = (): boolean => {
+    if (currSession.getStatus() !== 'working' && !commandAbort.current) return false;
+    currSession.cancel();
+    commandAbort.current?.abort(new TurnCancelledError());
+    return true;
+  };
+  const escape = () => {
+    setFeedback(null);
+    if (panelFeedback) {
+      setFeedback(null);
+      return;
+    }
+    // Recover the waiting prompt before cancellation can drain the queue.
+    const waiting = currSession.takeQueuedMessage();
+    if (waiting) {
+      currSession.setInputContent(waiting.text);
+      replaceAttachments([...attachmentsRef.current, ...(waiting.images ?? [])]);
+    }
+    interrupt();
+  };
+
   // Queued messages live on the session so they survive switching away and
   // back. Send one at a time as soon as that session is free again.
   useEffect(() => {
     if (isLoading || currSession.getStatus() === 'working'
       || queued === 0 || effectiveInputMode.type !== 'text') return;
-    const next = currSession.shiftQueuedMessage();
-    if (next !== undefined) send(next);
-  }, [currSession, isLoading, queued, effectiveInputMode.type]);
+    const next = currSession.shiftQueuedPrompt();
+    if (next !== undefined) {
+      if (next.to?.length) {
+        void currSession.sendMessage({ role: 'user', to: [...next.to],
+          content: next.content ? [...next.content] : [{ type: 'text', text: next.text }, ...(next.images ?? [])],
+        }).catch((caught: unknown) => {
+          setFeedback({ kind: 'error', text: caught instanceof Error ? caught.message : 'Could not send queued message.' });
+        });
+      } else send(next.text, next.images, next.content ? [...next.content] : undefined);
+    }
+  }, [currSession, isLoading, queued, nextQueuedId, effectiveInputMode.type]);
 
   historyContent.current = (
     <>
@@ -656,7 +689,14 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         permissionMode={currSession.getPermissionMode()}
         modeNotice={currSession.getModeNotice()}
         onCyclePermissionMode={cyclePermissionMode}
-        onWorkerFocusChange={focused => { workerFocus.current = focused; }}
+        onEscape={escape}
+        onRewind={() => send('/rewind')}
+        onInterrupt={interrupt}
+        onExit={() => exit()}
+        onExitHint={() => {
+          setInputMode({ type: 'text' });
+          setFeedback({ kind: 'info', text: 'ctrl+c again to exit' });
+        }}
         attachments={attachments}
         onPasteImage={pasteImage}
         onRemoveAttachment={removeAttachment}
@@ -664,8 +704,10 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         thinkingLevel={currSession.getThinkingLevel()}
         history={history}
         queuedMessages={currSession.getQueuedMessages()}
-        onQueue={text => currSession.queueMessage(text)}
-        onUpdateQueued={(id, text) => currSession.updateQueuedMessage(id, text)}
+        onQueue={queue}
+        onBeginQueuedEdit={id => currSession.beginQueuedMessageEdit(id)}
+        onCancelQueuedEdit={id => currSession.cancelQueuedMessageEdit(id)}
+        onUpdateQueued={(id, text) => currSession.commitQueuedMessageEdit(id, text)}
         contextUsage={currSession.getContextUsage()}
         nativeCommands={() => currSession.getNativeCommands()}
         tasksVisible={plans.length > 0 ? showTasks : undefined}

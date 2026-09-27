@@ -11,6 +11,7 @@ import {
   type CommandMenuItem,
   type CommandSession,
 } from '../../src/commands/registry';
+import { nextPermissionMode } from '../../src/agent_runtime/permissions/policy';
 import { loginMenuItems } from '../../src/commands/authentication/behavior';
 import { Session } from '../../src/agent_runtime/session';
 import { providerFor } from '../../src/agent_runtime/providers';
@@ -699,4 +700,20 @@ describe('/agents', () => {
 test('removed routing command is absent from help and suggestions', () => {
   expect(matchCommands('/jev')).toEqual([]);
   expect((runCommand('help', []) as Feedback).text).not.toContain('/jev');
+});
+
+
+test('permission cycling never enables bypass, which remains an explicit menu choice', () => {
+  expect(nextPermissionMode('ask')).toBe('auto');
+  expect(nextPermissionMode('auto')).toBe('ask');
+  expect(nextPermissionMode('bypass')).toBe('ask');
+  expect(menuItems('permissions', []).some(item => item.command === '/permissions bypass')).toBe(true);
+});
+
+test('/quit calls the app exit capability and rejects arguments', () => {
+  let exited = false;
+  executeCommand('quit', [], { session: new Session(), notify: () => {},
+    signal: new AbortController().signal, exit: () => { exited = true; } });
+  expect(exited).toBe(true);
+  expect(() => runCommand('quit', ['extra'])).toThrow('Usage: /quit');
 });

@@ -2,12 +2,13 @@
 // collecting a message. It answers with a decision, a menu choice or one
 // typed value and then hands the bar back; the draft the user was typing
 // waits untouched in the session, so nothing here knows about it.
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput, usePaste } from 'ink';
 import { theme } from '../styles/theme';
 import { moveSelection, SelectMenu } from './SelectMenu';
 import { ApprovalPrompt, approvalChoices } from './ApprovalPrompt';
 import { QuestionCard } from './QuestionCard';
+import { applyInputEdit, inputEditForKey, type InputEdit, type InputState } from './editor';
 import { EntryInput, InputFeedback, QueuedRow } from './InputRows';
 import { SubagentStatusRow, type StatusRowProps } from './StatusRow';
 import { WorkerStrip } from './WorkerStrip';
@@ -26,7 +27,8 @@ export type PromptMode =
     request: ApprovalRequest;
     // further prompts queued behind this one for the same session
     waiting: number;
-    onDecide: (decision: ApprovalDecision) => void;
+    requesterName?: string;
+    onDecide: (decision: ApprovalDecision, feedback?: string) => void;
   }
   | {
     type: 'question';
@@ -60,16 +62,25 @@ export function PromptBar({ mode, feedback, participantColors, queuedMessages, w
 }) {
   const [selected, setSelected] = useState(0);
   const [entry, setEntry] = useState('');
+  const [approvalFeedback, setApprovalFeedback] = useState<InputState | null>(null);
+  const decided = useRef(false);
+  const promptIdentity = mode.type === 'approval' || mode.type === 'question' ? mode.request.id : mode;
   useEffect(() => {
     setSelected(0);
     setEntry('');
-  }, [mode]);
+    setApprovalFeedback(null);
+    decided.current = false;
+  }, [promptIdentity]);
+
+  const editFeedback = (edit: InputEdit) => setApprovalFeedback(current => current && applyInputEdit(current, edit));
 
   usePaste(text => {
     if (mode.type === 'entry') setEntry(current => current + text.trim());
+    else if (mode.type === 'approval' && approvalFeedback) editFeedback({ type: 'insert', text: text.replace(/\r\n?|\n/g, ' ') });
   });
 
   useInput((enteredInput, key) => {
+    if (key.eventType === 'release' || (key.ctrl && enteredInput === 'c')) return;
     // Mouse and window-focus reports are not typing.
     if (isMouseInput(enteredInput) || isFocusInput(enteredInput)) return;
     // Session switching belongs to the sidebar in every input mode.
@@ -78,14 +89,33 @@ export function PromptBar({ mode, feedback, participantColors, queuedMessages, w
     if (mode.type === 'question') return;
 
     if (mode.type === 'approval') {
-      // escape is the turn's cancel, handled by the chat; it withdraws the prompt
+      if (decided.current) return;
+      const decide = (decision: ApprovalDecision, feedback?: string) => {
+        decided.current = true;
+        mode.onDecide(decision, feedback);
+      };
+      if (key.escape) { decide('deny'); return; }
+      if (approvalFeedback) {
+        if (key.return) decide('deny', approvalFeedback.text.trim() || undefined);
+        else if (inputEditForKey(enteredInput, key)) editFeedback(inputEditForKey(enteredInput, key)!);
+        else if (!key.ctrl && !key.meta && !key.tab && !key.upArrow && !key.downArrow && !key.pageUp && !key.pageDown) {
+          editFeedback({ type: 'insert', text: enteredInput.replace(/[\u0000-\u001f\u007f-\u009f]/g, '') });
+        }
+        return;
+      }
+      if (key.ctrl || key.meta) return;
       const choices = approvalChoices(mode.request);
-      if (key.upArrow) setSelected(current => moveSelection(current, -1, choices.length));
+      const choose = (choice: typeof choices[number]) => {
+        if (choice.feedback) setApprovalFeedback({ text: '', cursor: 0 });
+        else decide(choice.decision);
+      };
+      if (key.tab) setApprovalFeedback({ text: '', cursor: 0 });
+      else if (key.upArrow) setSelected(current => moveSelection(current, -1, choices.length));
       else if (key.downArrow) setSelected(current => moveSelection(current, 1, choices.length));
-      else if (key.return && choices[selected]) mode.onDecide(choices[selected].decision);
+      else if (key.return && choices[selected]) choose(choices[selected]);
       else {
         const choice = choices.find(candidate => candidate.key === enteredInput);
-        if (choice) mode.onDecide(choice.decision);
+        if (choice) choose(choice);
       }
       return;
     }
@@ -120,7 +150,7 @@ export function PromptBar({ mode, feedback, participantColors, queuedMessages, w
         <InputFeedback feedback={feedback} participantColors={participantColors} />
         <QueuedRow messages={queuedMessages} participantColors={participantColors} />
         {mode.type === 'approval'
-          ? <ApprovalPrompt request={mode.request} waiting={mode.waiting} selected={selected} />
+          ? <ApprovalPrompt request={mode.request} waiting={mode.waiting} selected={selected} requesterName={mode.requesterName} feedback={approvalFeedback ?? undefined} />
           : <QuestionCard key={mode.request.id} request={mode.request} waiting={mode.waiting} onAnswer={mode.onAnswer} />}
         <WorkerStrip workers={workers} />
         <SubagentStatusRow {...status} />

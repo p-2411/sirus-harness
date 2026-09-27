@@ -34,6 +34,15 @@ export const exitCommand: CommandSpec = {
   },
 };
 
+export const quitCommand: CommandSpec = {
+  ...exitCommand,
+  name: 'quit',
+  run: (args, context) => {
+    if (args.length > 0) throw new Error('Usage: /quit');
+    return exitCommand.run(args, context);
+  },
+};
+
 export const permissionsCommandSpec: CommandSpec = {
   name: 'permissions',
   args: '[ask|auto|bypass]',

@@ -27,7 +27,7 @@ export function parsePermissionMode(value: unknown): PermissionMode | null {
 }
 
 export function nextPermissionMode(mode: PermissionMode): PermissionMode {
-  return PERMISSION_MODES[(PERMISSION_MODES.indexOf(mode) + 1) % PERMISSION_MODES.length];
+  return mode === 'ask' ? 'auto' : 'ask';
 }
 
 // Who is asking, for which Sirus session: stamped on every escalation a

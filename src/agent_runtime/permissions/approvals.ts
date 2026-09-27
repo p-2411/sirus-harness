@@ -112,7 +112,7 @@ export function resolveApproval(id: string, decision: ApprovalDecision): boolean
 const OPTION_KINDS: Record<Exclude<ApprovalDecision, object>, readonly PermissionOptionKind[]> = {
   allow: ['allow_once', 'allow_always'],
   'allow-session': ['allow_always', 'allow_once'],
-  deny: ['reject_once', 'reject_always'],
+  deny: ['reject_once'],
 };
 
 function chosenOption(decision: ApprovalDecision, options: readonly PermissionOption[]): PermissionOption | undefined {
@@ -121,8 +121,8 @@ function chosenOption(decision: ApprovalDecision, options: readonly PermissionOp
     const option = options.find(candidate => candidate.kind === kind);
     if (option) return option;
   }
-  // No kind matched: vendors list allows first and rejects last.
-  return decision === 'deny' ? options[options.length - 1] : options[0];
+  // Without a reject option, cancel the request rather than selecting an allow.
+  return decision === 'deny' ? undefined : options[0];
 }
 
 const CANCELLED: RequestPermissionResponse = { outcome: { outcome: 'cancelled' } };
@@ -157,7 +157,7 @@ export function requestPermission(
       settle: decision => {
         signal?.removeEventListener('abort', onAbort);
         const option = chosenOption(decision, approval.options);
-        // Only an empty option list leaves nothing to select.
+        // With no matching rejection option, cancel this request alone.
         resolve(option ? { outcome: { outcome: 'selected', optionId: option.optionId } } : CANCELLED);
       },
     });

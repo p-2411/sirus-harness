@@ -25,7 +25,7 @@ const app = render(
   {
     alternateScreen: true,
     kittyKeyboard: { mode: 'auto' },
-    // App handles decoded Ctrl+C for both legacy and Kitty input. Ink's
+    // The input bar handles decoded Ctrl+C for both legacy and Kitty input. Ink's
     // built-in handler only exits on the legacy byte and swallows Kitty Ctrl+C.
     exitOnCtrlC: false,
   },

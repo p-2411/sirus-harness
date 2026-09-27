@@ -1,4 +1,4 @@
-import { isAbortError } from '../../abort';
+import { isAbortError, TurnCancelledError } from '../../abort';
 import type { SessionAgent, TurnInput } from '../agent';
 import { vendorOf } from '../providers/catalog';
 import { nativePrompt } from '../runtime/commands';
@@ -18,6 +18,7 @@ export interface Invocation {
 export interface TurnRunnerOptions {
   timeline: Timeline;
   roster: ParticipantRoster;
+  onPause(): void;
 }
 
 // What a participant is prompted with: the user's own words on the first
@@ -38,19 +39,61 @@ function promptFor(invocation: Invocation): TurnInput {
   }
   return {
     text: invocation.entries
-      .map(entry => `@${entry.participant ?? 'sirus'} wrote:\n${textOf(entry)}`)
+      .map(entry => `${entry.role === 'user' ? 'The user' : `@${entry.participant ?? 'sirus'}`} wrote:\n${textOf(entry)}`)
       .join('\n\n'),
+    images: invocation.entries.flatMap(entry => entry.role === 'user'
+      ? entry.content.filter((block): block is ImageBlock => block.type === 'image') : []),
   };
 }
 
 // The round loop: run every invocation of a round in parallel, deliver what
 // they produced to whoever they mentioned, then run those in the next round.
 export class TurnRunner {
+  private rounds = 0;
+  private generation = 0;
+  private paused: Invocation[] = [];
+  private readonly running = new Map<SessionAgent, Promise<void>>();
+
   constructor(private readonly options: TurnRunnerOptions) {}
+
+  // A user message gives the participants another eight rounds. Handoffs
+  // paused at the limit are delivered with the next prompt, not lost.
+  userMessage(): Invocation[] {
+    this.rounds = 0;
+    return this.paused.splice(0);
+  }
+
+  cancel(): void {
+    this.generation++;
+    this.paused = [];
+    this.rounds = 0;
+  }
+
+  private async respond(invocation: Invocation, options: Parameters<SessionAgent['respond']>[1], generation: number): Promise<void> {
+    const previous = this.running.get(invocation.participant);
+    const current = (async () => {
+      if (previous) await previous.catch(() => {});
+      if (generation !== this.generation) throw new TurnCancelledError();
+      await invocation.participant.respond(promptFor(invocation), options);
+    })();
+    this.running.set(invocation.participant, current);
+    try {
+      await current;
+    } finally {
+      if (this.running.get(invocation.participant) === current) this.running.delete(invocation.participant);
+    }
+  }
 
   async run(initial: readonly Invocation[], signal?: AbortSignal): Promise<void> {
     const { timeline, roster } = this.options;
-    let pending = [...initial];
+    const generation = this.generation;
+    const combined = new Map<SessionAgent, Invocation>();
+    for (const invocation of initial) {
+      const existing = combined.get(invocation.participant);
+      if (existing) existing.entries.push(...invocation.entries);
+      else combined.set(invocation.participant, { ...invocation, entries: [...invocation.entries] });
+    }
+    let pending = [...combined.values()];
     let firstFailure: unknown;
     let hasFailure = false;
 
@@ -58,6 +101,13 @@ export class TurnRunner {
     // one invocation carrying all their messages. Participants remain free to
     // invoke one another again in later rounds for a back-and-forth exchange.
     while (pending.length > 0) {
+      if (generation !== this.generation) throw new TurnCancelledError();
+      if (this.rounds >= 8) {
+        this.paused.push(...pending);
+        this.options.onPause();
+        break;
+      }
+      this.rounds++;
       const round = timeline.openRound(pending.map(({ participant }) => ({
         name: participant.name,
         model: participant.model,
@@ -67,12 +117,12 @@ export class TurnRunner {
       const settled = await Promise.allSettled(pending.map(async (invocation, index) => {
         const entry = round.entries[index];
         try {
-          await invocation.participant.respond(promptFor(invocation), {
+          await this.respond(invocation, {
             entry,
             carried: invocation.entries,
             onUpdate: () => round.update(index),
             ...(signal ? { signal } : {}),
-          });
+          }, generation);
           round.settle(index);
           return entry;
         } catch (error) {

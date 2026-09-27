@@ -34,7 +34,7 @@ describe('app workspace startup', () => {
     ['Kitty', '\u001b[99;5u'],
     ['Kitty press', '\u001b[99;5:1u'],
     ['Kitty repeat', '\u001b[99;5:2u'],
-  ])('%s Ctrl+C exits the app', async (_name, sequence) => {
+  ])('%s Ctrl+C exits only on the second press', async (_name, sequence) => {
     const update = spyOn(updater, 'checkSirusUpdate').mockResolvedValue({
       updateAvailable: false, currentVersion: '1.0.0', latestVersion: '1.0.0',
     });
@@ -62,6 +62,9 @@ describe('app workspace startup', () => {
         await flush();
         expect(exited).toBe(false);
       }
+      stdin.write(sequence);
+      await flush();
+      expect(exited).toBe(false);
       stdin.write(sequence);
       await flush();
       expect(exited).toBe(true);
@@ -99,7 +102,7 @@ describe('app workspace startup', () => {
     }
   });
 
-  test('menus keep pane widths fixed and Ctrl+K leaves the dots in place', async () => {
+  test('menus keep pane widths fixed and Ctrl+B leaves the dots in place', async () => {
     const sessions = ['First', 'Second'].map(name => {
       const session = new Session({ name, directory: `/projects/${name}`, autoNamePending: true });
       session.append({ role: 'user', content: [{ type: 'text', text: 'Existing history' }] });
@@ -161,7 +164,7 @@ describe('app workspace startup', () => {
       }
       await type('/model');
       await type('\r');
-      await type('\u000b'); // Ctrl+K, including while a menu is open.
+      await type('\u0002'); // Ctrl+B, including while a menu is open.
       expectPanes(4);
       expect(dots()).toEqual(originalDots);
       for (const { row } of originalDots) {
@@ -173,7 +176,7 @@ describe('app workspace startup', () => {
       expect(output).not.toContain('new session');
       await type('\u001b');
       await type('unfinished draft');
-      await type('\u000b');
+      await type('\u0002');
       expectPanes(26);
       expect(dots()).toEqual(originalDots);
       expect(output).toContain('unfinished draft');
@@ -181,7 +184,7 @@ describe('app workspace startup', () => {
       stdout.emit('resize');
       await flush();
       expectPanes(26);
-      await type('\u000b');
+      await type('\u0002');
       expectPanes(4);
       expect(dots()).toEqual(originalDots);
       // The sidebar remains interactive when collapsed.

@@ -20,10 +20,10 @@ import {
 import { INTERRUPTED_REASON, workerReport } from '../tools/subagents/report';
 import { cancelSubagent, messageSubagent } from '../tools/subagents/run';
 import type { SubagentHost } from '../tools/types';
-import { textOf, type Message, type NoticeBlock, type ThinkingLevel, type ToolCallBlock } from '../types';
+import { textOf, type ImageBlock, type MessageBlock, type Message, type NoticeBlock, type ThinkingLevel, type ToolCallBlock } from '../types';
 import type { ContextUsage } from '../usage';
 import { parseFileMentions, resolveFileMentions } from '../../fileMentions';
-import { isAbortError } from '../../abort';
+import { isAbortError, TurnCancelledError } from '../../abort';
 import { ChangeFeed } from './changeFeed';
 import {
   CheckpointLog,
@@ -196,6 +196,8 @@ export class Session {
   private readonly pendingReports: SubagentRun[] = [];
 
   private activeSends = 0;
+  private sendGeneration = 0;
+  private readonly starting = new Map<SessionAgent, Promise<void>>();
   private status: SessionStatus = 'idle';
   private turnFailed = false;
   private lastTurnCancelled = false;
@@ -228,7 +230,11 @@ export class Session {
     this.restore(resolved.messages);
     this.restoreWorkers(resolved.workers);
     this.checkpoints = new CheckpointLog(this.directory, resolved.checkpoints, this.changes);
-    this.turns = new TurnRunner({ timeline: this.timeline, roster: this.roster });
+    this.turns = new TurnRunner({
+      timeline: this.timeline,
+      roster: this.roster,
+      onPause: () => this.showNotice('Agent exchange paused after 8 rounds. Send a message to continue.'),
+    });
     registerToolSession(this.id, {
       directory: this.directory,
       memoryEnabled: isMemoryAccessEnabled,
@@ -370,6 +376,7 @@ export class Session {
     this.checkpoints.beginTurn();
     this.setStatus('working');
     let accepted = false;
+    const generation = this.sendGeneration;
     try {
       const messageText = textOf(message);
       // File mentions share the @ sigil with participants. Blank them out,
@@ -378,16 +385,19 @@ export class Session {
       for (const file of parseFileMentions(messageText, this.directory).reverse()) {
         routingText = routingText.slice(0, file.start) + ' '.repeat(file.end - file.start) + routingText.slice(file.end);
       }
-      const mentions = this.roster.readMentions(routingText);
+      const mentions = message.to?.length ? [] : this.roster.readMentions(routingText);
       // Resolve every attachment before creating participants or adding history.
       // Keep this synchronous so the input can observe acceptance immediately.
       const resolved = resolveFileMentions(message, this.directory);
-      const targets = this.roster.resolveMentions(mentions);
+      const targets = message.to?.length
+        ? [...new Set(message.to.map(name => this.roster.require(name)))]
+        : this.roster.resolveMentions(mentions);
 
       // A model following a newly introduced @name is host routing metadata,
       // not part of the conversation. Strip it before either the UI history or
       // any runtime sees the turn.
       const stored = stripCreationModels(resolved, mentions);
+      const queued = stripCreationModels(message, mentions);
       if (this.timeline.isEmpty() && this.autoNamePending) {
         // Name from the user's text, not the contents of resolved attachments.
         this.startNaming(textOf(stripCreationModels(message, mentions)));
@@ -395,17 +405,63 @@ export class Session {
       if (this.activeSends === 1) this.timeline.startConversationIfNeeded(Date.now());
       accepted = true;
       this.appendRestoredReports();
-      // The prompt enters the transcript of every participant it addresses,
-      // and nothing else's.
+      const busy = targets.filter(target => target.busy || this.starting.has(target));
+      const images = stored.content.filter((block): block is ImageBlock => block.type === 'image');
+      const idle = targets.filter(target => !busy.includes(target));
+      const queueBusy = images.length > 0 || messageText.startsWith('/');
+      if (busy.length > 0 && queueBusy) {
+        this.queue.push(textOf(queued), images, queued.content, busy.map(target => target.name));
+        if (images.length > 0) this.showNotice('Images cannot be steered into a running turn. Message queued.');
+        else this.changes.notify();
+        if (idle.length === 0) return this.timeline.entries();
+      }
+
+      const paused = this.turns.userMessage();
+      let releaseStart!: () => void;
+      const started = new Promise<void>(resolve => { releaseStart = resolve; });
+      for (const target of idle) this.starting.set(target, started);
+      const finishStarting = () => {
+        for (const target of idle) {
+          if (this.starting.get(target) === started) this.starting.delete(target);
+        }
+        releaseStart();
+      };
+      // Only confirmed deliveries enter the transcript. A refused steer is
+      // queued for that participant alone, without re-sending to its peers.
       const entry = this.timeline.add(
-        { ...stored, to: targets.map(target => target.name) },
-        targets.map(target => target.transcript),
+        { ...stored, to: idle.map(target => target.name) },
+        idle.map(target => target.transcript),
         false,
       );
-      // The runtimes run their tools themselves and cannot wait on a barrier,
-      // so the pre-turn snapshot is taken before any of them is prompted.
-      await this.checkpoints.capture(entry.seq, messageText || '[image]');
-      await this.turns.run(targets.map(participant => ({ participant, entries: [entry] })));
+      const steering = (queueBusy ? [] : busy).map(async target => {
+        try {
+          await this.starting.get(target);
+          if (generation !== this.sendGeneration) throw new TurnCancelledError();
+          await target.steer(textOf(stored));
+          this.timeline.deliver(entry, [{ name: target.name, transcript: target.transcript }]);
+        } catch (error) {
+          if (isAbortError(error)) throw error;
+          this.queue.push(textOf(queued), images, queued.content, [target.name]);
+          this.showNotice(`@${target.name} could not accept steering. Message queued.`, target.name);
+        }
+      });
+      const responding = async () => {
+        if (idle.length === 0 && paused.length === 0) return;
+        // Capture before starting any new runtime prompt; steering continues
+        // the existing turn and uses that turn's checkpoint.
+        try {
+          await this.checkpoints.capture(entry.seq, messageText || '[image]');
+          if (generation !== this.sendGeneration) throw new TurnCancelledError();
+          const turn = this.turns.run([...paused, ...idle.map(participant => ({ participant, entries: [entry] }))]);
+          finishStarting();
+          await turn;
+        } finally {
+          finishStarting();
+        }
+      };
+      const delivered = await Promise.allSettled([...steering, responding()]);
+      const failed = delivered.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+      if (failed) throw failed.reason;
       return this.timeline.entries();
     } catch (error) {
       if (isAbortError(error)) this.lastTurnCancelled = true;
@@ -563,7 +619,10 @@ export class Session {
   // Stops this session's turns. Workers are background tasks and keep
   // working: `cancelWorker`, CancelAgent and `dispose` stop those.
   cancel(): boolean {
-    return this.roster.cancel();
+    this.sendGeneration++;
+    this.turns.cancel();
+    const cancelled = this.roster.cancel();
+    return cancelled || this.activeSends > 0;
   }
 
   // Asks the default participant's runtime to fold its own conversation now:
@@ -613,6 +672,7 @@ export class Session {
     if (this.activeSends > 0 || this.rewinding) throw new Error('Wait for the current operation to finish before clearing the session.');
     if (this.timeline.isEmpty()) return;
     this.stopNaming();
+    this.turns.cancel();
     this.timeline.clear();
     this.checkpoints.clear();
     this.roster.resetRuntimes();
@@ -651,6 +711,7 @@ export class Session {
         if (found.checkpoint.seq === 0) this.stopNaming();
         // Every participant loses what came from that seq on, and every
         // runtime is rebuilt from what is left.
+        this.turns.cancel();
         droppedMessages = this.timeline.truncateFrom(found.checkpoint.seq);
         this.checkpoints.dropFrom(found.index);
         this.roster.resetRuntimes();
@@ -699,15 +760,48 @@ export class Session {
     this.changes.notify();
   }
 
-  queueMessage(message: string): void {
-    this.queue.push(message);
+  private showNotice(title: string, participant: string = this.roster.default.name): void {
+    this.notice = { participant, notice: { type: 'notice', severity: 'info', title } };
+    this.changes.notify();
+  }
+
+  queueMessage(message: string, images?: readonly ImageBlock[], content?: readonly MessageBlock[]): void {
+    this.queue.push(message, images, content);
     this.changes.notify();
   }
 
   shiftQueuedMessage(): string | undefined {
-    const text = this.queue.shift();
-    if (text !== undefined) this.changes.notify();
-    return text;
+    return this.shiftQueuedPrompt()?.text;
+  }
+
+  shiftQueuedPrompt(): QueuedMessage | undefined {
+    const next = this.queue.shift();
+    if (next) this.changes.notify();
+    return next;
+  }
+
+  takeQueuedMessage(): QueuedMessage | undefined {
+    const next = this.queue.take();
+    if (next) this.changes.notify();
+    return next;
+  }
+
+  beginQueuedMessageEdit(id: string): QueuedMessage | undefined {
+    const original = this.queue.beginEdit(id);
+    if (original) this.changes.notify();
+    return original;
+  }
+
+  commitQueuedMessageEdit(id: string, text: string, images?: readonly ImageBlock[], content?: readonly MessageBlock[]): void {
+    if (!this.queue.finishEdit(id, text, images, content)) return;
+    this.changes.notify();
+    this.sendNextQueuedPrompt();
+  }
+
+  cancelQueuedMessageEdit(id: string): void {
+    if (!this.queue.finishEdit(id)) return;
+    this.changes.notify();
+    this.sendNextQueuedPrompt();
   }
 
   // What is waiting behind the turn that just ended, when nothing about it
@@ -722,7 +816,8 @@ export class Session {
     }
     const next = this.queue.shiftAutoSendable();
     if (next === undefined) return;
-    void this.sendMessage({ role: 'user', content: [{ type: 'text', text: next }] })
+    void this.sendMessage({ role: 'user', ...(next.to ? { to: [...next.to] } : {}),
+      content: next.content ? [...next.content] : [{ type: 'text', text: next.text }, ...(next.images ?? [])] })
       .catch(() => { /* sendMessage records the failure in the session status. */ });
   }
 

@@ -4,6 +4,7 @@ import { PassThrough } from 'node:stream';
 import { useState } from 'react';
 import stripAnsi from 'strip-ansi';
 import { InputBar } from '../../src/frontend/chat/InputBar';
+import { applyInputEdit, createInputHistory, inputEditForKey } from '../../src/frontend/chat/editor';
 import type { ImageBlock, MessageBlock } from '../../src/agent_runtime/types';
 
 interface SentDraft {
@@ -170,6 +171,147 @@ describe('positional image drafts', () => {
       expect(draft.sent).toHaveLength(1);
       expect(draft.sent[0].input).toBe('/help');
       expect(draft.sent[0].images).toEqual([image(1)]);
+    } finally {
+      draft.unmount();
+    }
+  });
+});
+
+
+describe('readline draft editing', () => {
+  test('maps the readline keys without consuming chat scroll chords', () => {
+    for (const [input, type] of Object.entries({
+      a: 'home', e: 'end', d: 'delete', k: 'kill-line-end',
+      u: 'kill-line-start', w: 'delete-word-backward', y: 'yank', _: 'undo',
+    } as const)) expect(inputEditForKey(input, { ctrl: true })).toEqual({ type });
+    for (const [input, type] of Object.entries({ b: 'word-left', f: 'word-right', d: 'delete-word-forward' } as const)) {
+      expect(inputEditForKey(input, { meta: true })).toEqual({ type });
+    }
+    expect(inputEditForKey('', { home: true })).toEqual({ type: 'home' });
+    expect(inputEditForKey('', { end: true })).toEqual({ type: 'end' });
+    expect(inputEditForKey('', { leftArrow: true, meta: true })).toEqual({ type: 'word-left' });
+    expect(inputEditForKey('', { rightArrow: true, meta: true })).toEqual({ type: 'word-right' });
+    expect(inputEditForKey('', { home: true, ctrl: true })).toBeNull();
+    expect(inputEditForKey('', { end: true, ctrl: true })).toBeNull();
+    expect(inputEditForKey('\u001f', {})).toEqual({ type: 'undo' });
+  });
+
+  test('distinguishes raw DEL, meta DEL and forward Delete', () => {
+    expect(inputEditForKey('', { delete: true }, '\u007f')).toEqual({ type: 'backspace' });
+    expect(inputEditForKey('', { delete: true, meta: true }, '\u001b\u007f')).toEqual({ type: 'delete-word-backward' });
+    expect(inputEditForKey('', { delete: true }, '\u001b[3~')).toEqual({ type: 'delete' });
+    expect(inputEditForKey('', { backspace: true })).toEqual({ type: 'backspace' });
+    expect(inputEditForKey('', { delete: true })).toEqual({ type: 'delete' });
+    const state = { text: 'a🐎b', cursor: 1 };
+    expect(applyInputEdit(state, { type: 'delete' })).toEqual({ text: 'ab', cursor: 1 });
+    expect(applyInputEdit(state, { type: 'backspace' })).toEqual({ text: '🐎b', cursor: 0 });
+  });
+
+  test('moves to the current line edges and kills only that line', () => {
+    const state = { text: 'first\nsecond\nlast', cursor: 9 };
+    expect(applyInputEdit(state, { type: 'home' }).cursor).toBe(6);
+    expect(applyInputEdit(state, { type: 'end' }).cursor).toBe(12);
+    expect(applyInputEdit(state, { type: 'kill-line-start' })).toEqual({ text: 'first\nond\nlast', cursor: 6 });
+    expect(applyInputEdit(state, { type: 'kill-line-end' })).toEqual({ text: 'first\nsec\nlast', cursor: 9 });
+    expect(applyInputEdit({ ...state, cursor: 12 }, { type: 'kill-line-end' })).toEqual({ text: 'first\nsecondlast', cursor: 12 });
+  });
+
+  test('moves over punctuation and Unicode words without splitting characters', () => {
+    let state = { text: '🐎 café.next tail', cursor: 0 };
+    state = applyInputEdit(state, { type: 'word-right' });
+    expect(state.cursor).toBe(7);
+    state = applyInputEdit(state, { type: 'word-right' });
+    expect(state.cursor).toBe(12);
+    state = applyInputEdit(state, { type: 'word-left' });
+    expect(state.cursor).toBe(8);
+    expect(applyInputEdit(state, { type: 'delete-word-forward' })).toEqual({ text: '🐎 café. tail', cursor: 8 });
+    expect(applyInputEdit({ text: 'one two  ', cursor: 9 }, { type: 'delete-word-backward' })).toEqual({ text: 'one ', cursor: 4 });
+  });
+
+  test('yanks consecutive kills in their original order and undoes text edits', () => {
+    const history = createInputHistory();
+    let state = { text: 'one two three', cursor: 13 };
+    state = applyInputEdit(state, { type: 'delete-word-backward' }, history);
+    state = applyInputEdit(state, { type: 'delete-word-backward' }, history);
+    expect(state).toEqual({ text: 'one ', cursor: 4 });
+    expect(history.killed).toBe('two three');
+    state = applyInputEdit(state, { type: 'home' }, history);
+    state = applyInputEdit(state, { type: 'yank' }, history);
+    expect(state).toEqual({ text: 'two threeone ', cursor: 9 });
+    state = applyInputEdit(state, { type: 'undo' }, history);
+    expect(state).toEqual({ text: 'one ', cursor: 0 });
+    state = applyInputEdit(state, { type: 'undo' }, history);
+    expect(state).toEqual({ text: 'one two ', cursor: 8 });
+    state = applyInputEdit(state, { type: 'undo' }, history);
+    expect(state).toEqual({ text: 'one two three', cursor: 13 });
+    expect(applyInputEdit(state, { type: 'undo' }, history)).toEqual(state);
+  });
+
+  test('filters control bytes, normalizes pasted lines and skips empty undo entries', () => {
+    const history = createInputHistory();
+    let state = { text: '', cursor: 0 };
+    state = applyInputEdit(state, { type: 'insert', text: 'a\u0000\u0003\u001f\u007f\u0085b\r\nc\rd\t' }, history);
+    expect(state).toEqual({ text: 'ab\nc\nd\t', cursor: 7 });
+    state = applyInputEdit(state, { type: 'insert', text: '\u001f' }, history);
+    expect(history.undo).toHaveLength(1);
+    expect(applyInputEdit(state, { type: 'undo' }, history)).toEqual({ text: '', cursor: 0 });
+  });
+});
+
+
+describe('readline keys through Ink', () => {
+  test('edits at Home and End and distinguishes Delete from Backspace', async () => {
+    const draft = renderDraft();
+    try {
+      await draft.flush();
+      await draft.press('abc');
+      await draft.press('\u001b[H');
+      await draft.press('X');
+      expect(draft.input).toBe('Xabc');
+      await draft.press('\u001b[3~');
+      expect(draft.input).toBe('Xbc');
+      await draft.press('\u007f');
+      expect(draft.input).toBe('bc');
+      await draft.press('\u001b[F');
+      await draft.press('!');
+      expect(draft.input).toBe('bc!');
+      await draft.press('\u0001');
+      await draft.press('\u0004');
+      expect(draft.input).toBe('c!');
+      await draft.press('\u0005');
+      await draft.press('?');
+      expect(draft.input).toBe('c!?');
+    } finally {
+      draft.unmount();
+    }
+  });
+
+  test('moves by word, kills and yanks text, and undoes without inserting a control byte', async () => {
+    const draft = renderDraft();
+    try {
+      await draft.flush();
+      await draft.press('one two three');
+      await draft.press('\u001bb');
+      await draft.press('\u000b');
+      expect(draft.input).toBe('one two ');
+      await draft.press('\u001f');
+      expect(draft.input).toBe('one two three');
+      await draft.press('\u001b[1;3D');
+      await draft.press('\u001bd');
+      expect(draft.input).toBe('one  three');
+      await draft.press('\u001f');
+      await draft.press('\u001b[1;3C');
+      await draft.press('\u001bf');
+      await draft.press('\u0017');
+      expect(draft.input).toBe('one two ');
+      await draft.press('\u0019');
+      expect(draft.input).toBe('one two three');
+      await draft.press('\u0015');
+      expect(draft.input).toBe('');
+      await draft.press('\u0019');
+      expect(draft.input).toBe('one two three');
+      await draft.press('\r');
+      expect(draft.sent[0].input).toBe('one two three');
     } finally {
       draft.unmount();
     }

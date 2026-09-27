@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { textOf, type ImageBlock } from '../../src/agent_runtime/types';
 import { Session } from '../../src/agent_runtime/session';
 import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
 
@@ -117,4 +118,222 @@ describe('Session rounds', () => {
     });
     expect(messages.some(message => message.participant === 'breaker')).toBe(false);
   });
+
+  test('steers addressed busy participants and prompts idle peers without duplicating delivery', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const busy = bindScriptedRuntime(streamingModel, async (_input, emit) => {
+      emit({ type: 'text', text: 'Working' });
+      await gate;
+    });
+    const idle = bindScriptedRuntime(failingModel, (_input, emit) => {
+      emit({ type: 'text', text: 'Idle peer replied' });
+    });
+    const session = new Session({ name: 'Steering', model: streamingModel });
+    session.addParticipant('peer', failingModel);
+    const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Start' }] });
+    try {
+      await waitFor(() => busy.runtimes[0]?.prompts.length === 1);
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: '@sirus @peer focus here' }] });
+      expect(busy.runtimes[0]!.steers).toEqual(['@sirus @peer focus here']);
+      expect(busy.runtimes[0]!.prompts.length).toBe(1);
+      expect(idle.runtimes[0]!.prompts[0]!.text).toBe('@sirus @peer focus here');
+      const delivered = session.getMessages().filter(entry => textOf(entry) === '@sirus @peer focus here');
+      expect(delivered.length).toBe(1);
+      expect(delivered[0]!.to?.slice().sort()).toEqual(['peer', 'sirus']);
+      expect(session.getStatus()).toBe('working');
+      expect(session.getQueuedMessageCount()).toBe(0);
+    } finally {
+      release();
+      await turn;
+      await session.dispose();
+    }
+  });
+
+  test('a prompt sent before the initial runtime starts is steered into that turn', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const binding = bindScriptedRuntime(streamingModel, async (_input, emit) => {
+      emit({ type: 'text', text: 'Working' });
+      await gate;
+    });
+    const session = new Session({ name: 'Early steering', model: streamingModel });
+    const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Start' }] });
+    try {
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Actually focus here' }] });
+      expect(binding.runtimes[0]!.prompts).toHaveLength(1);
+      expect(binding.runtimes[0]!.steers).toEqual(['Actually focus here']);
+      expect(session.getQueuedMessageCount()).toBe(0);
+    } finally {
+      release();
+      await turn;
+      await session.dispose();
+    }
+  });
+
+  test('explicit feedback recipients override mentions and refused steering queues only for that recipient', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const binding = bindScriptedRuntime(streamingModel, async (_input, emit, _options, _signal, runtime) => {
+      runtime.onSteer = () => { throw new Error('unsupported'); };
+      emit({ type: 'text', text: 'Working' });
+      await gate;
+    });
+    const session = new Session({ name: 'Refused steering', model: streamingModel });
+    session.addParticipant('peer', streamingModel);
+    const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Start' }] });
+    try {
+      await waitFor(() => binding.runtimes[0]?.prompts.length === 1);
+      await session.sendMessage({ role: 'user', to: ['sirus'], content: [{ type: 'text', text: 'Ask @peer later' }] });
+      expect(session.getQueuedMessages()[0]!.to).toEqual(['sirus']);
+      expect(session.getNotice()?.notice.title).toContain('Message queued');
+      expect(session.getMessages().filter(entry => textOf(entry) === 'Ask @peer later')).toHaveLength(0);
+      release();
+      await turn;
+      await waitFor(() => session.getStatus() === 'idle');
+      expect(binding.runtimes[0]!.prompts.map(prompt => prompt.text)).toEqual(['Start', 'Ask @peer later']);
+      expect(session.getMessages().filter(entry => textOf(entry) === 'Ask @peer later')).toHaveLength(1);
+    } finally {
+      release();
+      await turn;
+      await session.dispose();
+    }
+  });
+
+  test('queues images and vendor commands during a turn without attempting steering', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const binding = bindScriptedRuntime(streamingModel, async (_input, emit) => {
+      emit({ type: 'text', text: 'Working' });
+      await gate;
+    });
+    const image: ImageBlock = { type: 'image', path: '/tmp/test-image.png', mediaType: 'image/png', bytes: 12 };
+    const session = new Session({ name: 'Images', model: streamingModel });
+    const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Start' }] });
+    try {
+      await waitFor(() => binding.runtimes[0]?.prompts.length === 1);
+      await session.sendMessage({ role: 'user', content: [image, { type: 'text', text: 'Inspect this' }] });
+      expect(session.getNotice()?.notice.title).toContain('Images cannot be steered');
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: '/vendor-command' }] });
+      expect(binding.runtimes[0]!.steers).toEqual([]);
+      expect(session.getQueuedMessages().map(item => item.text)).toEqual(['Inspect this', '/vendor-command']);
+      release();
+      await turn;
+      await waitFor(() => session.getStatus() === 'idle');
+      expect(binding.runtimes[0]!.prompts[1]!.images).toEqual([image]);
+      expect(session.getMessages().find(entry => textOf(entry) === 'Inspect this')!.content).toEqual([
+        image, { type: 'text', text: 'Inspect this' },
+      ]);
+      expect(session.shiftQueuedMessage()).toBe('/vendor-command');
+    } finally {
+      release();
+      await turn;
+      await session.dispose();
+    }
+  });
+
+  test('an image addressed to busy and idle participants starts the idle peer immediately', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const busy = bindScriptedRuntime(streamingModel, async (_input, emit) => {
+      emit({ type: 'text', text: 'Working' });
+      await gate;
+    });
+    const idle = bindScriptedRuntime(failingModel, (_input, emit) => { emit({ type: 'text', text: 'Saw image' }); });
+    const image: ImageBlock = { type: 'image', path: '/tmp/test-image.png', mediaType: 'image/png', bytes: 12 };
+    const session = new Session({ name: 'Mixed image recipients', model: streamingModel });
+    session.addParticipant('peer', failingModel);
+    const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Start' }] });
+    try {
+      await waitFor(() => busy.runtimes[0]?.prompts.length === 1);
+      await session.sendMessage({ role: 'user', to: ['sirus', 'peer'], content: [image, { type: 'text', text: 'Inspect' }] });
+      expect(idle.runtimes[0]!.prompts[0]!.images).toEqual([image]);
+      expect(session.getQueuedMessages()[0]!.to).toEqual(['sirus']);
+      release();
+      await turn;
+      await waitFor(() => session.getStatus() === 'idle');
+      expect(idle.runtimes[0]!.prompts).toHaveLength(1);
+      expect(busy.runtimes[0]!.prompts[1]!.images).toEqual([image]);
+    } finally {
+      release();
+      await turn;
+      await session.dispose();
+    }
+  });
+
+  test.each(['commit', 'cancel'] as const)('queue editing reserves the original until %s and lets other slots drain', async action => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const binding = bindScriptedRuntime(streamingModel, async (_input, emit) => {
+      emit({ type: 'text', text: 'Done' });
+      await gate;
+    });
+    const session = new Session({ name: 'Queue editing', model: streamingModel });
+    const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Start' }] });
+    try {
+      session.queueMessage('Original');
+      session.queueMessage('Later slot');
+      const original = session.getQueuedMessages()[0]!;
+      expect(session.beginQueuedMessageEdit(original.id)?.text).toBe('Original');
+      session.updateQueuedMessage(original.id, 'Half typed');
+      expect(session.getQueuedMessages()[0]!.text).toBe('Original');
+      expect(session.getQueuedMessages()[0]!.editing).toBe(true);
+      release();
+      await turn;
+      await waitFor(() => session.getStatus() === 'idle');
+      expect(binding.runtimes[0]!.prompts.map(prompt => prompt.text)).toEqual(['Start', 'Later slot']);
+      expect(session.getQueuedMessages()[0]!.id).toBe(original.id);
+      if (action === 'commit') session.commitQueuedMessageEdit(original.id, 'Completed edit');
+      else session.cancelQueuedMessageEdit(original.id);
+      await waitFor(() => session.getStatus() === 'idle');
+      expect(binding.runtimes[0]!.prompts[2]!.text).toBe(action === 'commit' ? 'Completed edit' : 'Original');
+    } finally {
+      release();
+      await turn;
+      await session.dispose();
+    }
+  });
+
+  test('takes the newest unreserved queued draft with its positioned image', async () => {
+    const session = new Session({ name: 'Queue draft', model: streamingModel });
+    const image: ImageBlock = { type: 'image', path: '/tmp/test-image.png', mediaType: 'image/png', bytes: 12 };
+    session.queueMessage('First');
+    session.queueMessage('Image', [image], [image, { type: 'text', text: 'Image' }]);
+    session.queueMessage('Being edited');
+    const edited = session.getQueuedMessages()[2]!;
+    session.beginQueuedMessageEdit(edited.id);
+    expect(session.takeQueuedMessage()).toMatchObject({ text: 'Image', images: [image], content: [image, { type: 'text', text: 'Image' }] });
+    expect(session.getQueuedMessages().map(item => item.text)).toEqual(['First', 'Being edited']);
+    await session.dispose();
+  });
+
+  test('pauses an autonomous exchange after eight rounds and resumes pending handoffs on user input', async () => {
+    let calls = 0;
+    bindScriptedRuntime(streamingModel, (_input, emit) => {
+      calls++;
+      emit({ type: 'text', text: '@peer continue' });
+    });
+    bindScriptedRuntime(failingModel, (_input, emit) => {
+      calls++;
+      emit({ type: 'text', text: '@sirus continue' });
+    });
+    const session = new Session({ name: 'Round limit', model: streamingModel });
+    session.addParticipant('peer', failingModel);
+    try {
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Start' }] });
+      expect(calls).toBe(8);
+      expect(session.getStatus()).toBe('idle');
+      expect(session.getNotice()?.notice.title).toContain('paused after 8 rounds');
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Continue' }] });
+      expect(calls).toBe(16);
+      expect(session.getStatus()).toBe('idle');
+      session.clear();
+      calls = 0;
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Fresh start' }] });
+      expect(calls).toBe(8);
+    } finally {
+      await session.dispose();
+    }
+  });
+
 });
