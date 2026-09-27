@@ -1,6 +1,7 @@
 import { Box, Text } from 'ink';
 import { modelIds } from '../../agent_runtime/providers/catalog';
-import { NAME_PATTERN_SOURCE, type Participant } from '../../agent_runtime/session';
+import type { Participant } from '../../agent_runtime/agent';
+import { NAME_PATTERN_SOURCE } from '../../agent_runtime/session/roster';
 import { theme } from '../styles/theme';
 import { MentionText, participantColorMap } from '../MentionText';
 

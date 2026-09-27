@@ -45,13 +45,3 @@ export function visibleTools(
 export function availableTools(audience: ToolAudience = {}): Tool[] {
   return visibleTools(toolRegistry, audience, isMemoryAccessEnabled);
 }
-
-export type {
-  SubagentHandle,
-  SubagentHost,
-  SubagentSpawnCall,
-  Tool,
-  ToolArgumentSchema,
-  ToolAudience,
-  ToolContext,
-} from './types';

@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { SessionAgent, type RuntimeHost } from '../agent';
+import { SessionAgent, type Participant, type RuntimeHost } from '../agent';
 import { isMemoryAccessEnabled } from '../memory-access';
 import { requestPermission } from '../permissions/approvals';
 import { requestAnswers } from '../permissions/questions';
@@ -33,31 +33,14 @@ import {
 import type { ContextUsage } from '../usage';
 import { parseFileMentions, resolveFileMentions } from '../../fileMentions';
 import { isAbortError, throwIfAborted, TurnCancelledError } from '../../abort';
+import type { Checkpoint } from '../../checkpoints';
 import { ChangeFeed } from './changeFeed';
-import {
-  CheckpointLog,
-  defaultDirectoryActivity,
-  type Checkpoint,
-  type RewindOptions,
-  type RewindResult,
-} from './checkpointLog';
-import { MessageQueue, isAutoSendable, type QueuedMessage } from './messageQueue';
+import { CheckpointLog, type RewindOptions, type RewindResult } from './checkpointLog';
+import { MessageQueue, type QueuedMessage } from './messageQueue';
 import { generateSessionName } from './naming';
-import { keyOf, NAME_PATTERN_SOURCE, ParticipantRoster, stripCreationModels, type Participant } from './roster';
+import { keyOf, ParticipantRoster, stripCreationModels } from './roster';
 import { Timeline, type Draft } from './timeline';
 import { TurnRunner } from './turnRunner';
-
-// The default model is a catalog fact, named here because that is where
-// callers have always found it.
-export { DEFAULT_MODEL, NAME_PATTERN_SOURCE, defaultDirectoryActivity, isAutoSendable };
-export type {
-  Checkpoint,
-  Draft,
-  Participant,
-  QueuedMessage,
-  RewindOptions,
-  RewindResult,
-};
 
 export type SessionStatus = 'idle' | 'working' | 'error';
 

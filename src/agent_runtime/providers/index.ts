@@ -1,7 +1,6 @@
 import { boundRuntimes } from '../runtime/runtime';
 import { VENDOR_INFO, VENDORS, isKnownModel, modelIds, type Vendor } from './catalog';
 import { createProvider, type Provider } from './provider';
-import { onProviderSourceChange } from './sources';
 
 // The two providers, and the handful of questions that span them. The
 // catalog (`catalog.ts`), the credential list (`sources.ts`) and one
@@ -37,5 +36,3 @@ export function requireKnownModel(model: string): void {
     throw new Error(`Unknown model "${model}". Try: ${servableModelIds().join(', ')}`);
   }
 }
-
-export const onProviderChange = onProviderSourceChange;

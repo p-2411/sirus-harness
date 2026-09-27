@@ -6,8 +6,6 @@ import type { SubagentRun } from '../tools/subagents';
 import type { ChangeFeed } from './changeFeed';
 import type { Transcript } from './transcript';
 
-export type { Participant };
-
 // A participant named in a user prompt. New participants carry the model
 // that introduces them and the span of prompt text that named it.
 export interface Mention {

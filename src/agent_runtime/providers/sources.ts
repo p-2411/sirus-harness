@@ -47,12 +47,12 @@ export function maskKeys(text: string, sources: readonly (Source | null)[]): str
 // removed for any vendor, or a request settling on a different source.
 const listeners = new Set<() => void>();
 
-export function onProviderSourceChange(listener: () => void): () => void {
+export function onProviderChange(listener: () => void): () => void {
   listeners.add(listener);
   return () => { listeners.delete(listener); };
 }
 
-export function notifyProviderSourceChange(): void {
+export function notifyProviderChange(): void {
   for (const listener of listeners) listener();
 }
 
@@ -114,7 +114,7 @@ export function createSourceStore(vendor: VendorInfo): SourceStore {
     // Owners first: they drop their per-runtime bookkeeping before any
     // observer asks what the active source now is.
     for (const listener of own) listener();
-    notifyProviderSourceChange();
+    notifyProviderChange();
   };
 
   return {

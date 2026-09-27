@@ -1,5 +1,6 @@
 import { describe, expect, mock, test } from 'bun:test';
-import type { Checkpoint, Session } from '../../src/agent_runtime/session';
+import type { Session } from '../../src/agent_runtime/session';
+import type { Checkpoint } from '../../src/checkpoints';
 import { rewindCommand, rewindMenuItems, undoCommand, undoMenuItems } from '../../src/commands/checkpoints/behavior';
 import { undoCommandSpec } from '../../src/commands/checkpoints/commands';
 import type { CommandContext } from '../../src/commands/types';

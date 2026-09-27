@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Box, Text } from 'ink';
 import stringWidth from 'string-width';
-import type { Participant } from '../../agent_runtime/session';
+import type { Participant } from '../../agent_runtime/agent';
 import { formatFileMention } from '../../fileMentions';
 import { MentionText, participantColorMap } from '../MentionText';
 import { theme } from '../styles/theme';

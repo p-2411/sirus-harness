@@ -32,8 +32,8 @@ const {
 const { closeAllMemoryStores } = await import('../../src/memory/store');
 const { saveMemoryAccessPreference } = await import('../../src/persistence');
 
-type SubagentHost = import('../../src/agent_runtime/tools').SubagentHost;
-type SubagentSpawnCall = import('../../src/agent_runtime/tools').SubagentSpawnCall;
+type SubagentHost = import('../../src/agent_runtime/tools/types').SubagentHost;
+type SubagentSpawnCall = import('../../src/agent_runtime/tools/types').SubagentSpawnCall;
 type WorkerContext = import('../../src/agent_runtime/types').WorkerContext;
 
 const MEMORY_TOOLS = ['SaveMemory', 'GetMemory', 'SearchMemories', 'DeleteMemory'];

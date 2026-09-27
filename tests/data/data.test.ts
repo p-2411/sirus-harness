@@ -7,7 +7,7 @@ import * as naming from '../../src/agent_runtime/session/naming';
 import * as router from '../../src/agent_runtime/router';
 import * as acp from '../../src/agent_runtime/runtime/acp';
 import { invalidateAllRuntimes, type RuntimeOptions } from '../../src/agent_runtime/runtime/runtime';
-import type { Draft } from '../../src/agent_runtime/session';
+import type { Draft } from '../../src/agent_runtime/session/timeline';
 import { Session } from '../../src/agent_runtime/session';
 import { sirusMcpServerEntry } from '../../src/agent_runtime/tools/server';
 import { findSubagent } from '../../src/agent_runtime/tools/subagents';

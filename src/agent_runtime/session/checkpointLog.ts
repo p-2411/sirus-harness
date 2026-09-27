@@ -9,8 +9,6 @@ import {
 import { activeSubagentCount } from '../tools/subagents';
 import type { ChangeFeed } from './changeFeed';
 
-export type { Checkpoint };
-
 // What a rewind is asked to put back.
 export interface RewindOptions {
   files: boolean;

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import type { ImageBlock, Message, MessageBlock, ToolCallBlock } from '../../agent_runtime/types';
 import { saveJevKeyRequested } from '../../persistence';
-import { isAutoSendable, Session } from '../../agent_runtime/session';
+import { Session } from '../../agent_runtime/session';
+import { isAutoSendable } from '../../agent_runtime/session/messageQueue';
 import { attachClipboardImage, describeImage, removeStoredImage } from '../../images';
 import { Box, Text, measureElement, renderToString, useApp, useBoxMetrics, useInput, useStdout, type DOMElement } from 'ink';
 import { theme } from '../styles/theme';

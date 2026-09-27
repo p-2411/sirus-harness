@@ -1,5 +1,6 @@
 import { Text } from 'ink';
-import { NAME_PATTERN_SOURCE, type Participant } from '../agent_runtime/session';
+import type { Participant } from '../agent_runtime/agent';
+import { NAME_PATTERN_SOURCE } from '../agent_runtime/session/roster';
 import { theme } from './styles/theme';
 import { parseFileMentions } from '../fileMentions';
 

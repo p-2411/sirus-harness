@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { isValidElement, type ReactElement } from 'react';
 import { renderToString } from 'ink';
 import stripAnsi from 'strip-ansi';
-import type { Participant } from '../../src/agent_runtime/session';
+import type { Participant } from '../../src/agent_runtime/agent';
 import { MentionText, participantColorMap } from '../../src/frontend/MentionText';
 import { MentionMenu, mentionMenuItems } from '../../src/frontend/chat/MentionMenu';
 

@@ -1,4 +1,5 @@
-import { defaultDirectoryActivity, type Checkpoint, type RewindResult } from '../../agent_runtime/session';
+import { defaultDirectoryActivity, type RewindResult } from '../../agent_runtime/session/checkpointLog';
+import type { Checkpoint } from '../../checkpoints';
 import { checkpointFailure, checkpointsEnabled } from '../../checkpoints';
 import type { Feedback } from '../feedback';
 import type { CommandMenuEntry, CommandSession } from '../types';
