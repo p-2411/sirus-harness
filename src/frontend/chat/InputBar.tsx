@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } fro
 import { Box, Text, useInput, usePaste } from 'ink';
 import { theme } from '../styles/theme';
 import { CommandMenu, useCommandMenu } from './CommandMenu';
-import { isNativeCommand } from '../../commands/registry';
+import { isSirusCommand } from '../../commands/registry';
 import { MentionMenu, useFileSuggestions, useMentionMenu } from './MentionMenu';
 import { DraftText, TrailingImages } from './DraftText';
 import { InputFeedback, QueuedRow } from './InputRows';
@@ -201,14 +201,14 @@ export function InputBar({
   const commands = useCommandMenu(input, mode.type === 'text' && !selectedQueued && !menusDismissed, nativeList);
   // A Sirus command takes no @mentions; a vendor command's arguments are a
   // prompt and do, once its name is complete.
-  const commandText = input.startsWith('/') && !(input.includes(' ') && isNativeCommand(input, nativeList));
+  const sirusCommand = isSirusCommand(input, nativeList);
   const fileSuggestions = useFileSuggestions(
-    mode.type === 'text' && !menusDismissed && !commandText ? directory : undefined,
+    mode.type === 'text' && !menusDismissed && !sirusCommand ? directory : undefined,
     input,
     editor.cursor,
   );
   const mentionActive = mode.type === 'text' && !menusDismissed
-    && !commandText && fileSuggestions.mention !== null;
+    && !sirusCommand && fileSuggestions.mention !== null;
   const mentions = useMentionMenu({
     active: mentionActive,
     input,

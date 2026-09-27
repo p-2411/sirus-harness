@@ -88,9 +88,16 @@ export function invocableNativeCommands(commands: readonly NativeCommand[]): Nat
 
 // Text that calls one of those commands: sent to the agent as a prompt rather
 // than run here.
-export function isNativeCommand(text: string, commands: readonly NativeCommand[]): boolean {
+function isNativeCommand(text: string, commands: readonly NativeCommand[]): boolean {
   const name = /^\/(\S+)/.exec(text)?.[1];
   return name !== undefined && invocableNativeCommands(commands).some(command => command.name === name);
+}
+
+// Text the chat runs as one of Sirus's commands: any `/` line but one that
+// calls a vendor command. The chat's send and the input bar's menus both go
+// by this one test.
+export function isSirusCommand(text: string, nativeCommands: readonly NativeCommand[]): boolean {
+  return text.startsWith('/') && !isNativeCommand(text, nativeCommands);
 }
 
 // Prefix matches while a command name is being typed ('/' alone matches

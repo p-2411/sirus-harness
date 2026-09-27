@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { DEFAULT_PARTICIPANT, type ImageBlock, type Message, type MessageBlock, type ToolCallBlock } from '../../agent_runtime/types';
 import { saveJevKeyRequested } from '../../persistence';
-import { isAutoSendable, Session } from '../../agent_runtime/session';
+import { Session } from '../../agent_runtime/session';
 import { attachClipboardImage, describeImage, removeStoredImage } from '../../images';
 import { Box, Text, measureElement, renderToString, useApp, useBoxMetrics, useInput, useStdout, type DOMElement } from 'ink';
 import { theme } from '../styles/theme';
@@ -14,7 +14,7 @@ import { InputFeedback } from './InputRows';
 import {
   commandMenu,
   executeCommand,
-  isNativeCommand,
+  isSirusCommand,
   parseCommandLine,
   type CommandMenuEntry,
   type CommandMenuItem,
@@ -485,7 +485,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   const send = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[]) => {
     // A `/name` for one of the agent's own commands is a prompt: the agent's
     // harness runs it.
-    if (!isAutoSendable(text) && !isNativeCommand(text, currSession.getNativeCommands())) {
+    if (isSirusCommand(text, currSession.getNativeCommands())) {
       const { name, args, rest } = parseCommandLine(text);
       runCommand(name, args, rest);
     } else {
