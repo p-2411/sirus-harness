@@ -534,20 +534,39 @@ describe('subagent model command', () => {
   });
 
   test('sets, shows and clears the model spawned subagents run on', () => {
-    const session = new Session();
-    expect(runCommand('model', ['subagent'], session))
-      .toEqual({ kind: 'info', text: 'Subagents run on each participant\'s own model.' });
-    expect(runCommand('model', ['subagent', 'haiku'], session))
-      .toEqual({ kind: 'success', text: 'Subagents run on claude-haiku-4-5.' });
-    expect(session.getSubagentModel()).toBe('claude-haiku-4-5');
-    expect(session.getModel()).toBe('gpt-5.6-luna');
-    expect(runCommand('model', ['subagent'], session))
-      .toEqual({ kind: 'info', text: 'Subagents run on claude-haiku-4-5.' });
-    expect(runCommand('model', ['subagent', 'default'], session))
-      .toEqual({ kind: 'success', text: 'Subagents run on each participant\'s own model.' });
-    expect(session.getSubagentModel()).toBeNull();
-    expect(() => runCommand('model', ['subagent', 'nope'], session)).toThrow(/unknown model/i);
-    expect(() => runCommand('model', ['subagent', 'haiku', 'extra'], session)).toThrow('Usage: /model subagent');
+    // No Jev key, in the environment or stored.
+    const previousKey = process.env.JEV_API;
+    const previousDirectory = process.env.SIRUS_DATA_DIR;
+    const directory = mkdtempSync(join(tmpdir(), 'sirus-subagent-model-'));
+    delete process.env.JEV_API;
+    process.env.SIRUS_DATA_DIR = directory;
+    try {
+      const session = new Session();
+      expect(runCommand('model', ['subagent'], session))
+        .toEqual({ kind: 'info', text: 'Subagents run on each participant\'s own model.' });
+      // With a key, Jev picks a worker's model when none is set.
+      process.env.JEV_API = 'ts-subagent-model';
+      expect(runCommand('model', ['subagent'], session))
+        .toEqual({ kind: 'info', text: 'Subagents run on the model Jev picks for each task.' });
+      delete process.env.JEV_API;
+      expect(runCommand('model', ['subagent', 'haiku'], session))
+        .toEqual({ kind: 'success', text: 'Subagents run on claude-haiku-4-5.' });
+      expect(session.getSubagentModel()).toBe('claude-haiku-4-5');
+      expect(session.getModel()).toBe('gpt-5.6-luna');
+      expect(runCommand('model', ['subagent'], session))
+        .toEqual({ kind: 'info', text: 'Subagents run on claude-haiku-4-5.' });
+      expect(runCommand('model', ['subagent', 'default'], session))
+        .toEqual({ kind: 'success', text: 'Subagents run on each participant\'s own model.' });
+      expect(session.getSubagentModel()).toBeNull();
+      expect(() => runCommand('model', ['subagent', 'nope'], session)).toThrow(/unknown model/i);
+      expect(() => runCommand('model', ['subagent', 'haiku', 'extra'], session)).toThrow('Usage: /model subagent');
+    } finally {
+      if (previousKey === undefined) delete process.env.JEV_API;
+      else process.env.JEV_API = previousKey;
+      if (previousDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
+      else process.env.SIRUS_DATA_DIR = previousDirectory;
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });
 

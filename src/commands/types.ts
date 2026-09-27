@@ -51,8 +51,8 @@ export interface CommandSession {
   setName(name: string): void;
   setPermissionMode(mode: PermissionMode): void;
   setThinkingLevel(level: ThinkingLevel, participantName?: string): void;
-  // The model spawned subagents run on; null means the spawning
-  // participant's own.
+  // The model spawned subagents run on; null leaves it to Jev's pick for
+  // the task, or to the spawning participant's own model without a key.
   getSubagentModel(): string | null;
   setSubagentModel(model: string | null): void;
   // The session's workers, oldest first, and what the user can do to one.

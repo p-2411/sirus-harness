@@ -2,6 +2,7 @@ import { saveSirusModelPreference } from '../../persistence';
 import { listedDescription, modelIds, modelsOf, VENDOR_INFO, VENDORS } from '../../agent_runtime/providers/catalog';
 import type { SubagentRun } from '../../agent_runtime/tools/subagents';
 import { renderTranscript } from '../../agent_runtime/tools/subagents/report';
+import { jevApiKey } from '../../agent_runtime/router';
 import {
   DEFAULT_PARTICIPANT,
   THINKING_LEVEL_DESCRIPTIONS,
@@ -112,10 +113,12 @@ export function changeModel(
 }
 
 // `/model subagent` reads or sets the model spawned subagents run on, a
-// setting of the session. `default` returns them to the spawning
-// participant's own model.
+// setting of the session. `default` clears it: then Jev picks each worker's
+// model for its task when there is a key, and without one a worker runs on
+// the model of the participant that spawned it.
 export function subagentModelCommand(args: readonly string[], session: CommandSession): Feedback {
-  const describe = (model: string | null) => `Subagents run on ${model ?? 'each participant\'s own model'}.`;
+  const unset = jevApiKey() ? 'the model Jev picks for each task' : 'each participant\'s own model';
+  const describe = (model: string | null) => `Subagents run on ${model ?? unset}.`;
   if (args.length === 0) return { kind: 'info', text: describe(session.getSubagentModel()) };
   if (args.length > 1) throw new Error('Usage: /model subagent [<model>|default]');
   const model = args[0] === 'default' ? null : resolveModelReference(args[0]);
