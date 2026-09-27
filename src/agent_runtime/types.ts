@@ -184,11 +184,11 @@ export function parseThinkingLevel(value: unknown): ThinkingLevel | null {
     : null;
 }
 
-// The lists below are the permission policy's, the subagents' and the
-// subscription allowance's vocabulary. They are declared, and imported from,
-// here because the files under persistence validate against them and
-// persistence imports nothing else of the runtime, so a value added to one is
-// a value the file can read back.
+// What follows is the permission policy's, the subagents' and the
+// subscriptions' vocabulary. It is declared, and imported from, here because
+// the files under persistence validate against it and persistence imports
+// nothing else of the runtime, so a value added to one is a value the file
+// can read back.
 
 // Sirus's three permission modes, in the order the mode switch cycles them;
 // `permissions/policy.ts` says what each one does.
@@ -214,6 +214,10 @@ export type SubagentStatus = typeof SUBAGENT_STATUSES[number];
 export const LIMIT_PERIODS = ['5-hour', '7-day'] as const;
 
 export type LimitPeriod = typeof LIMIT_PERIODS[number];
+
+// What a subscription profile may be called. The name becomes a directory
+// under the data directory, so it holds nothing that could lead out of it.
+export const PROFILE_NAME_PATTERN = /^[a-zA-Z0-9_-]+$/;
 
 // The participant every session starts with, and the one a message that names
 // no participant belongs to.

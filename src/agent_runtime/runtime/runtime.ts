@@ -51,7 +51,7 @@ export interface RuntimeOptions {
   // included. The launch spec decides how the vendor receives it.
   systemPrompt: string;
   // The environment of the agent process: the credential and the profile
-  // directory, built by `subscriptionEnvironment` or from an API key.
+  // directory, built by `sourceEnvironment`.
   env: NodeJS.ProcessEnv;
   // The Sirus MCP server this session lists in `session/new`, with the
   // per-session token and the participant name in its headers. Null for a

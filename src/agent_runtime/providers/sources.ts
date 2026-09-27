@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { openSettings, type StoredProviderSource, type StoredProviderSources } from '../../persistence/settings';
 import { clearSubscriptionLimitCache } from '../../persistence/subscriptionLimits';
+import { PROFILE_NAME_PATTERN } from '../types';
 import type { VendorInfo } from './catalog';
 
 // The single source of truth for one vendor's credentials: an ordered list of
@@ -129,7 +130,7 @@ export function createSourceStore(vendor: VendorInfo): SourceStore {
       return source;
     },
     addSubscription: (profile, label) => {
-      if (!/^[a-zA-Z0-9_-]+$/.test(profile)) throw new Error('Invalid subscription profile');
+      if (!PROFILE_NAME_PATTERN.test(profile)) throw new Error('Invalid subscription profile');
       const current = stored();
       const existing = current.find(source => source.kind === 'subscription' && source.profile === profile);
       const source: SubscriptionSource = {

@@ -2,6 +2,7 @@ import { existsSync } from 'fs';
 import path from 'path';
 import { z } from 'zod';
 import { dataDirectory } from '../dataDirectory';
+import { PROFILE_NAME_PATTERN } from '../agent_runtime/types';
 import { readJson, setAside, writeJson } from './atomicJson';
 
 // One settings file for the whole app, read through on every access so a test
@@ -9,7 +10,7 @@ import { readJson, setAside, writeJson } from './atomicJson';
 
 const providerSourceSchema = z.discriminatedUnion('type', [
   z.object({ id: z.string().min(1), type: z.literal('api'), key: z.string().min(1) }),
-  z.object({ id: z.string().min(1), type: z.literal('subscription'), profile: z.string().regex(/^(default|[a-zA-Z0-9_-]+)$/), label: z.string().optional() }),
+  z.object({ id: z.string().min(1), type: z.literal('subscription'), profile: z.string().regex(PROFILE_NAME_PATTERN), label: z.string().optional() }),
 ]);
 export type StoredProviderSource = z.infer<typeof providerSourceSchema>;
 export type StoredProviderSources = Partial<Record<'claude' | 'gpt', StoredProviderSource[]>>;
