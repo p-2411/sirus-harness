@@ -5,6 +5,7 @@ import path from 'path';
 import type { McpServer } from '@agentclientprotocol/sdk';
 import { dataDirectory } from '../../dataDirectory';
 import { VENDOR_INFO, type Vendor } from '../providers/catalog';
+import { codexBinaryPath } from '../providers/openai/codex-account';
 import type { PermissionMode } from '../types';
 import type { RuntimeOptions } from './runtime';
 
@@ -160,33 +161,6 @@ const CODEX_MODES: Record<PermissionMode, string> = {
   bypass: 'agent-full-access',
 };
 
-const CODEX_TARGET_TRIPLES: Record<string, string> = {
-  'darwin-arm64': 'aarch64-apple-darwin',
-  'darwin-x64': 'x86_64-apple-darwin',
-  'linux-arm64': 'aarch64-unknown-linux-musl',
-  'linux-x64': 'x86_64-unknown-linux-musl',
-  'win32-arm64': 'aarch64-pc-windows-msvc',
-  'win32-x64': 'x86_64-pc-windows-msvc',
-};
-
-// The Codex binary from the pinned per-platform package, or null to let the
-// adapter run the one its own dependency ships.
-function codexBinaryPath(): string | null {
-  const key = `${process.platform}-${process.arch}`;
-  const triple = CODEX_TARGET_TRIPLES[key];
-  if (!triple) return null;
-  try {
-    const packageJson = require.resolve(`@openai/codex-${key}/package.json`);
-    const binary = path.join(
-      path.dirname(packageJson), 'vendor', triple, 'bin',
-      process.platform === 'win32' ? 'codex.exe' : 'codex',
-    );
-    return existsSync(binary) ? binary : null;
-  } catch {
-    return null;
-  }
-}
-
 const LINK_TYPE = process.platform === 'win32' ? 'junction' : 'dir';
 
 // The skills in one folder by name: its subfolders that hold a SKILL.md.
@@ -207,11 +181,11 @@ function skillsIn(folder: string): Map<string, string> {
 }
 
 // Codex finds the user's skills in `~/.codex/skills`. A credential with a
-// profile of its own points CODEX_HOME elsewhere, so the user's skills are
+// profile of its own points Codex's home elsewhere, so the user's skills are
 // linked in there one by one, since Codex writes its built-in skills into the
 // same folder; a link to a skill the user has since removed goes.
 function linkCodexSkills(profileHome: string | undefined): void {
-  const userHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+  const userHome = process.env[VENDOR_INFO.gpt.profileDirEnv] || path.join(os.homedir(), '.codex');
   if (!profileHome || path.resolve(profileHome) === path.resolve(userHome)) return;
   const source = path.join(userHome, 'skills');
   const target = path.join(profileHome, 'skills');
@@ -265,6 +239,8 @@ function codexLaunch(options: RuntimeOptions, mode: PermissionMode): Launch {
       INITIAL_AGENT_MODE: CODEX_MODES[mode],
       // A login page must never open from under the TUI.
       NO_BROWSER: '1',
+      // The pinned binary when it is installed; otherwise the adapter runs
+      // the one its own dependency ships.
       ...(codex ? { CODEX_PATH: codex } : {}),
     },
     mode,

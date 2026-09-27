@@ -34,25 +34,25 @@ const TARGET_TRIPLES: Record<string, string> = {
 };
 
 // The Codex binary arrives through the ACP adapter's dependency on
-// @openai/codex, which ships it in a per-platform package; fall back to
-// whatever `codex` is on PATH.
-export function codexBinaryPath(): string {
+// @openai/codex, which ships it in a per-platform package. Null when that
+// package is not installed for this platform: the account requests below
+// then run whatever `codex` is on PATH, and the launch lets the adapter
+// find its own.
+export function codexBinaryPath(): string | null {
   const key = `${process.platform}-${process.arch}`;
   const triple = TARGET_TRIPLES[key];
-  if (triple) {
-    try {
-      const require = createRequire(import.meta.url);
-      const packageJson = require.resolve(`@openai/codex-${key}/package.json`);
-      const binary = path.join(
-        path.dirname(packageJson), 'vendor', triple, 'bin',
-        process.platform === 'win32' ? 'codex.exe' : 'codex',
-      );
-      if (existsSync(binary)) return binary;
-    } catch {
-      // not installed for this platform; use PATH below
-    }
+  if (!triple) return null;
+  try {
+    const require = createRequire(import.meta.url);
+    const packageJson = require.resolve(`@openai/codex-${key}/package.json`);
+    const binary = path.join(
+      path.dirname(packageJson), 'vendor', triple, 'bin',
+      process.platform === 'win32' ? 'codex.exe' : 'codex',
+    );
+    return existsSync(binary) ? binary : null;
+  } catch {
+    return null;
   }
-  return 'codex';
 }
 
 // Newline-delimited JSON-RPC: client requests with ids, server notifications
@@ -107,7 +107,7 @@ export class CodexRpc {
     throwIfAborted(signal);
     const args = ['app-server', '--listen', 'stdio://'];
     if (profile !== 'default') args.push('-c', 'cli_auth_credentials_store="file"');
-    const child = spawn(codexBinaryPath(), args, {
+    const child = spawn(codexBinaryPath() ?? 'codex', args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: subscriptionEnvironment('gpt', profile),
     });
