@@ -34,7 +34,7 @@ afterEach(() => {
 });
 
 describe('session persistence', () => {
-  test('round-trips image attachments, checkpoints, tool activity, compaction and naming metadata together', () => {
+  test('round-trips images, checkpoints, tools, notices, compaction and naming metadata together', () => {
     const image = { type: 'image' as const, path: path.join(directory, 'images', 'screenshot.png'), mediaType: 'image/png' as const, bytes: 123 };
     const checkpoint = { id: 'b'.repeat(40), seq: 0, summary: '[image]', createdAt: Date.now() };
     const session = new Session({
@@ -46,8 +46,10 @@ describe('session persistence', () => {
         { role: 'user', to: ['sirus'], content: [image, { type: 'text', text: 'Explain this screenshot' }] },
         { role: 'assistant', participant: 'sirus', model: 'gpt-5.6-luna', content: [
           { type: 'thought', text: 'Looking at it.' },
+          { type: 'notice', severity: 'warning', title: 'Model fallback', description: 'Using another model.' },
           { type: 'tool_call', id: 'call-1', title: 'ls', kind: 'execute', status: 'completed', locations: [], content: [{ type: 'text', text: 'a.png' }], input: { command: 'ls' }, output: 'a.png' },
           { type: 'text', text: 'Explanation' },
+          { type: 'notice', severity: 'vendor-hint', title: 'Finished' },
           { type: 'compaction', summary: 'The screenshot was explained.' },
         ] },
       ],
@@ -62,6 +64,39 @@ describe('session persistence', () => {
     const restored = loadSessionSnapshots(directory);
     expect(restored.selectedSessionId).toBe(session.getId());
     expect(restored.snapshots[0]).toEqual(session.toSnapshot());
+  });
+
+  test('drops unknown block kinds without dropping messages or other sessions', () => {
+    writeFileSync(path.join(directory, 'sessions.json'), JSON.stringify({
+      version: 1,
+      selectedSessionId: 'future',
+      sessions: [{
+        id: 'future', name: 'Future blocks', model: 'gpt-5.6-luna', messages: [
+          { role: 'user', content: [{ type: 'text', text: 'Keep this prompt' }] },
+          { role: 'assistant', content: [
+            { type: 'future-block', payload: { text: 'Ignore this' } },
+            { type: 'text', text: 'Keep this answer' },
+            { type: 'notice', severity: 'info', title: 'Keep this notice' },
+            { type: 'tool_call', id: 'read', title: 'README', kind: 'read', status: 'completed', locations: [], content: [
+              { type: 'future-tool-content', text: 'Ignore this too' },
+              { type: 'text', text: 'Keep this result' },
+            ] },
+          ] },
+        ],
+      }, {
+        id: 'ordinary', name: 'Ordinary', model: 'gpt-5.6-luna',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'Keep this session' }] }],
+      }],
+    }));
+    const restored = loadSessionSnapshots(directory);
+    expect(restored.selectedSessionId).toBe('future');
+    expect(restored.snapshots.map(snapshot => snapshot.id)).toEqual(['future', 'ordinary']);
+    expect(restored.snapshots[0].messages).toHaveLength(2);
+    expect(restored.snapshots[0].messages[1].content).toEqual([
+      { type: 'text', text: 'Keep this answer' },
+      { type: 'notice', severity: 'info', title: 'Keep this notice' },
+      { type: 'tool_call', id: 'read', title: 'README', kind: 'read', status: 'completed', locations: [], content: [{ type: 'text', text: 'Keep this result' }] },
+    ]);
   });
 
   test('restores sessions, selected session, models, and complete message history', () => {
@@ -122,6 +157,7 @@ describe('session persistence', () => {
       transcript: [
         { seq: 0, role: 'user', content: [{ type: 'text', text: 'Rewrite the parser' }] },
         { seq: 1, role: 'assistant', participant: 'sub-1a2b3c4d', model: 'claude-sonnet-5', content: [
+          { type: 'notice', severity: 'info', title: 'Model rerouted' },
           { type: 'tool_call', id: 'edit-1', title: 'parser.ts', kind: 'edit', status: 'completed', locations: [{ path: 'parser.ts' }], content: [] },
           { type: 'text', text: 'Rewritten.' },
         ] },
@@ -142,6 +178,9 @@ describe('session persistence', () => {
     });
     expect(session.toSnapshot().workers).toEqual([worker]);
     expect(saveSessionSnapshots([session.toSnapshot()], session.getId(), directory)).toBe(true);
+    const raw = JSON.parse(readFileSync(path.join(directory, 'sessions.json'), 'utf8'));
+    raw.sessions[0].workers[0].transcript[1].content.push({ type: 'future-worker-block' });
+    writeFileSync(path.join(directory, 'sessions.json'), JSON.stringify(raw));
     await session.dispose();
 
     const [stored] = loadSessionSnapshots(directory).snapshots;

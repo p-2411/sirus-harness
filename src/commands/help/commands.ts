@@ -8,6 +8,7 @@ export const KEY_BINDINGS: ReadonlyArray<readonly [keys: string, action: string]
   ['option+↑ / ↓', 'switch session'],
   ['ctrl+n', 'new session'],
   ['ctrl+k', 'collapse the sidebar'],
+  ['ctrl+t', 'show / hide tasks'],
   ['ctrl+v', 'attach a clipboard image'],
   ['@ · ↑ / ↓ · tab / enter', 'find and mention a project file'],
   ['backspace over an image', 'remove it'],

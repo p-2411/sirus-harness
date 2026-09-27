@@ -6,6 +6,7 @@ import {
 	type ImageBlock,
 	type Message,
 	type MessageBlock,
+	type NoticeBlock,
 	type PlanEntry,
 	type ToolCallBlock,
 	type ToolCallDiff,
@@ -170,7 +171,7 @@ interface ToolRun {
 	calls: ToolCallBlock[];
 }
 
-// An agent's plan, shown open as a checklist rather than as a call.
+// An agent's plan, with its checklist behind a compact update row.
 interface PlanSegment {
 	type: 'plan';
 	call: ToolCallBlock;
@@ -181,9 +182,10 @@ export type MessageSegment = MessageBlock | ToolRun | PlanSegment;
 // A call that is part of a run of ordinary tool calls, which a group folds
 // away behind "Ran N commands". A SpawnAgent call is not: its row is a
 // worker's anchor, showing the run's status and carrying its report, so it
-// keeps a row of its own however many calls sit beside it.
+// keeps a row of its own however many calls sit beside it. Plan updates
+// also stand alone so each checklist can be opened where it happened.
 function groupable(block: MessageBlock): block is ToolCallBlock {
-	return block.type === 'tool_call' && !isSpawnAgent(block);
+	return block.type === 'tool_call' && !isSpawnAgent(block) && !isPlanCall(block);
 }
 
 // A thought shows only while it is what the model is doing now: the last
@@ -226,27 +228,60 @@ const PLAN_MARKS: Record<PlanEntry['status'], { mark: string; color: string }> =
 	pending: { mark: '○', color: theme.textSubtle },
 };
 
-// The plan as the agent last set it: how far along it is, then every step
-// with its state, the step in hand picked out.
-function PlanRow({ call }: { call: ToolCallBlock }) {
-	const entries = planEntriesOf(call);
-	const done = entries.filter(entry => entry.status === 'completed').length;
+// Every step with its state, the step in hand picked out, shared by the
+// pinned plan and the checklist a transcript row reveals.
+export function PlanChecklist({ entries }: { entries: readonly PlanEntry[] }) {
 	return (
-		<Box flexDirection="column" paddingX={1} paddingY={1}>
-			<Text color={theme.textMuted}>  Plan · {done} of {entries.length} done</Text>
+		<Box flexDirection="column">
 			{entries.map((entry, index) => (
-				<Box key={index} marginLeft={4}>
+				<Box key={index}>
 					<Box width={2} flexShrink={0}>
 						<Text color={PLAN_MARKS[entry.status].color}>{PLAN_MARKS[entry.status].mark}</Text>
 					</Box>
 					<Text
 						color={entry.status === 'in_progress' ? theme.text : theme.textMuted}
+						bold={entry.status === 'in_progress'}
 						strikethrough={entry.status === 'completed'}
 					>
 						{entry.content}
 					</Text>
 				</Box>
 			))}
+		</Box>
+	);
+}
+
+function PlanRow({ call }: { call: ToolCallBlock }) {
+	const [expanded, setExpanded] = useState(false);
+	const toggle = useCallback(() => setExpanded(current => !current), []);
+	const ref = useRef<DOMElement>(null);
+	const hovered = useClickable(ref, toggle);
+	const entries = planEntriesOf(call);
+	const done = entries.filter(entry => entry.status === 'completed').length;
+	return (
+		<Box flexDirection="column" paddingX={1} paddingY={1}>
+			<Box ref={ref}>
+				<Text color={hovered ? theme.accentSoft : theme.textMuted} wrap="truncate-end">
+					{'  '}Updated plan · {done} of {entries.length} done
+				</Text>
+			</Box>
+			{expanded && (
+				<Box marginLeft={4}>
+					<PlanChecklist entries={entries} />
+				</Box>
+			)}
+		</Box>
+	);
+}
+
+function NoticeRow({ block }: { block: NoticeBlock }) {
+	const color = block.severity === 'warning' ? theme.pending
+		: block.severity === 'error' ? theme.danger : theme.textMuted;
+	return (
+		<Box paddingX={1} paddingY={1}>
+			<Text color={color} dimColor wrap="truncate-end">
+				{'  '}{singleLine(block.title)}{block.description ? ` · ${singleLine(block.description)}` : ''}
+			</Text>
 		</Box>
 	);
 }
@@ -557,6 +592,8 @@ export function ChatMessage({
 						return <ThoughtRow key={index} text={block.text} />;
 					case 'plan':
 						return <PlanRow key={index} call={block.call} />;
+					case 'notice':
+						return <NoticeRow key={index} block={block} />;
 					case 'compaction':
 						return <CompactionRule key={index} block={block} participantColors={participantColors} />;
 					case 'tool_run':

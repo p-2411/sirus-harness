@@ -42,10 +42,26 @@ const compactionBlockSchema = z.object({
   summary: z.string().optional(),
 });
 
+const noticeBlockSchema = z.object({
+  type: z.literal('notice'),
+  severity: z.string(),
+  title: z.string(),
+  description: z.string().optional(),
+});
+
+// Future block kinds can be left out without losing the rest of a record.
+// Known kinds still go through their schemas so malformed data is rejected.
+function knownBlocks(value: unknown, types: ReadonlySet<string>): unknown {
+  if (!Array.isArray(value)) return value;
+  return value.filter(block => !block || typeof block !== 'object'
+    || typeof block.type !== 'string' || types.has(block.type));
+}
+
 const toolCallContentSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('diff'), path: z.string(), oldText: z.string().nullable(), newText: z.string() }),
   z.object({ type: z.literal('text'), text: z.string() }),
 ]);
+const toolCallContentTypes = new Set(toolCallContentSchema.options.map(schema => schema.shape.type.value));
 
 const toolCallBlockSchema = z.object({
   type: z.literal('tool_call'),
@@ -54,7 +70,7 @@ const toolCallBlockSchema = z.object({
   kind: z.enum(TOOL_KINDS),
   status: z.enum(TOOL_CALL_STATUSES),
   locations: z.array(z.object({ path: z.string(), line: z.number().int().optional() })),
-  content: z.array(toolCallContentSchema),
+  content: z.preprocess(value => knownBlocks(value, toolCallContentTypes), z.array(toolCallContentSchema)),
   input: z.unknown().optional(),
   output: z.unknown().optional(),
 });
@@ -80,16 +96,18 @@ const blockSchema = z.union([
   imageBlockSchema,
   thoughtBlockSchema,
   compactionBlockSchema,
+  noticeBlockSchema,
   toolCallBlockSchema,
   legacyToolCallBlockSchema,
   legacyToolResultBlockSchema,
 ]);
+const blockTypes = new Set(blockSchema.options.map(schema => schema.shape.type.value));
 
 type StoredBlock = z.infer<typeof blockSchema>;
 
 const messageSchema = z.object({
   role: z.enum(['user', 'assistant']),
-  content: z.array(blockSchema),
+  content: z.preprocess(value => knownBlocks(value, blockTypes), z.array(blockSchema)),
   // Absent in files written before per-participant transcripts: the entry's
   // position stands in for its seq.
   seq: z.number().int().nonnegative().optional(),

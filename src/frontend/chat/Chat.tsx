@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
-import type { ImageBlock, Message, MessageBlock, ToolCallBlock } from '../../agent_runtime/types';
+import { isPlanCall, planEntriesOf, type ImageBlock, type Message, type MessageBlock, type PlanEntry, type ToolCallBlock } from '../../agent_runtime/types';
 import { saveJevKeyRequested } from '../../persistence';
 import { isAutoSendable, Session } from '../../agent_runtime/session';
 import { attachClipboardImage, describeImage, removeStoredImage } from '../../images';
 import { Box, Text, measureElement, renderToString, useApp, useBoxMetrics, useInput, useStdout, type DOMElement } from 'ink';
 import { theme } from '../styles/theme';
 import { HORSE } from '../branding/horse';
-import { ChatMessage, toolLine } from './ChatMessage';
+import { ChatMessage, PlanChecklist, toolLine } from './ChatMessage';
 import { Spinner } from './Spinner';
 import { InputBar, type InputMode } from './InputBar';
 import { InputFeedback } from './InputRows';
@@ -78,6 +78,32 @@ export function promptHistory(messages: readonly Message[]): string[] {
     if (text && prompts[prompts.length - 1] !== text) prompts.push(text);
   }
   return prompts;
+}
+
+// The latest plan replaces the previous one, including when it clears the
+// list. Reading the record also makes restored sessions and rewinds agree.
+export function currentPlans(
+  messages: readonly Message[],
+  participants: readonly { name: string }[],
+): { participant: string; entries: PlanEntry[] }[] {
+  const latest = new Map<string, PlanEntry[]>();
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message.role !== 'assistant') continue;
+    const name = (message.participant ?? 'sirus').toLocaleLowerCase();
+    if (latest.has(name)) continue;
+    for (let blockIndex = message.content.length - 1; blockIndex >= 0; blockIndex--) {
+      const block = message.content[blockIndex];
+      if (block.type !== 'tool_call' || !isPlanCall(block)) continue;
+      latest.set(name, planEntriesOf(block));
+      break;
+    }
+  }
+  return participants.flatMap(({ name }) => {
+    const entries = latest.get(name.toLocaleLowerCase());
+    // Unfinished tasks stay between turns; finishing the list hides it now.
+    return entries?.some(entry => entry.status !== 'completed') ? [{ participant: name, entries }] : [];
+  });
 }
 
 // Room for a tool title in the status line before it is cut.
@@ -218,10 +244,21 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   const participants = currSession.getParticipants();
   const participantColors = participantColorMap(participants);
 
+  const [showTasks, setShowTasks] = useState(true);
+  const plans = currentPlans(messages, participants);
   const [commandIsLoading, setCommandIsLoading] = useState(false);
   const [imageIsLoading, setImageIsLoading] = useState(false);
   const isLoading = commandIsLoading || imageIsLoading || currSession.getStatus() === 'working';
   const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const notice = currSession.getNotice();
+  useEffect(() => {
+    if (!notice) return;
+    const { severity, title, description } = notice.notice;
+    setFeedback({
+      kind: severity === 'error' || severity === 'warning' ? severity : 'info',
+      text: `@${notice.participant}: ${[title, description].filter(Boolean).join(' · ').replace(/\s+/g, ' ').trim()}`,
+    });
+  }, [notice]);
   const panelFeedback = feedback?.panel ? feedback : null;
   const [inputMode, setInputMode] = useState<InputMode>({ type: 'text' });
   // Images attached to the message being composed, until it is sent.
@@ -341,6 +378,10 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   }, [contentHeight, maxScroll, panelFeedback, viewportHeight]);
 
   useInput((input, key) => {
+    if (key.ctrl && input === 't') {
+      if (plans.length > 0) setShowTasks(shown => !shown);
+      return;
+    }
     if (key.escape) {
       // Escape with the worker strip focused only hands the keyboard back to
       // the draft; the input bar does that itself.
@@ -619,6 +660,16 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
           {historyContent.current}
         </Box>
       </Box>
+      {showTasks && plans.length > 0 && (
+        <Box paddingX={3} marginBottom={1} flexDirection="column" flexShrink={0}>
+          {plans.map(plan => (
+            <Box key={plan.participant} flexDirection="column">
+              {plans.length > 1 && <Text color={participantColors.get(plan.participant.toLocaleLowerCase())}>@{plan.participant}</Text>}
+              <PlanChecklist entries={plan.entries} />
+            </Box>
+          ))}
+        </Box>
+      )}
       <InputBar
         send={send}
         inputContent={currSession.getInputContent()}
@@ -644,6 +695,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         onUpdateQueued={(id, text) => currSession.updateQueuedMessage(id, text)}
         contextUsage={currSession.getContextUsage()}
         nativeCommands={() => currSession.getNativeCommands()}
+        tasksVisible={plans.length > 0 ? showTasks : undefined}
       />
     </Box>
   );

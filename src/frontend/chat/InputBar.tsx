@@ -69,6 +69,7 @@ interface InputBarProps {
   // The vendor's own commands `/name` reaches, read while a slash command is
   // being typed.
   nativeCommands?: () => readonly NativeCommand[];
+  tasksVisible?: boolean;
 }
 
 const TEXT_MODE: InputMode = { type: 'text' };
@@ -103,9 +104,10 @@ export function InputBar({
   onUpdateQueued,
   contextUsage,
   nativeCommands,
+  tasksVisible,
 }: InputBarProps) {
   const participantColors = participantColorMap(participants);
-  const status: StatusRowProps = { permissionMode, modeNotice, model, thinkingLevel, contextUsage };
+  const status: StatusRowProps = { permissionMode, modeNotice, model, thinkingLevel, contextUsage, tasksVisible };
 
   // ── The draft, and the waiting message standing in front of it ──────────
   // Identity survives edits and earlier messages draining from the queue.

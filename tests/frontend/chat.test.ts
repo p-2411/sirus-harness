@@ -9,8 +9,8 @@ import { Box, render } from 'ink';
 import { PassThrough } from 'node:stream';
 import stripAnsi from 'strip-ansi';
 import { Session } from '../../src/agent_runtime/session';
-import type { Message, ToolCallBlock } from '../../src/agent_runtime/types';
-import Chat, { formatElapsed, promptHistory, turnPhase } from '../../src/frontend/chat/Chat';
+import { planCall, type Message, type PlanEntry, type ToolCallBlock } from '../../src/agent_runtime/types';
+import Chat, { currentPlans, formatElapsed, promptHistory, turnPhase } from '../../src/frontend/chat/Chat';
 import { usageCommandSpec } from '../../src/commands/authentication/commands';
 import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
 
@@ -298,6 +298,219 @@ test('help and usage stay scrollable above the editor in an 80 by 24 terminal', 
     stdin.destroy();
     stdout.destroy();
     session.dispose();
+    unbindRuntime(model);
+  }
+});
+
+// A full chat with its real input handler, so pinned rows and their shortcuts
+// are exercised together with the draft and transcript.
+function renderChat(session: Session) {
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {}, ref() {}, unref() {} });
+  const stdout = Object.assign(new PassThrough(), { columns: 140, rows: 48 });
+  let output = '';
+  stdout.on('data', chunk => {
+    const frame = stripAnsi(chunk.toString());
+    if (frame.trim()) output = frame;
+  });
+  const app = render(createElement(Box, { height: 48, width: 140 }, createElement(Chat, { currSession: session })), {
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    debug: true, patchConsole: false, exitOnCtrlC: false,
+  });
+  const flush = async () => {
+    await new Promise(resolve => setImmediate(resolve));
+    await app.waitUntilRenderFlush();
+  };
+  return {
+    output: () => output,
+    flush,
+    async type(input: string) {
+      stdin.write(input);
+      if (input === '\u001b') await new Promise(resolve => setTimeout(resolve, 100));
+      await flush();
+    },
+    async waitFor(text: string) {
+      const deadline = Date.now() + 2000;
+      while (!output.includes(text) && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 5));
+        await flush();
+      }
+      expect(output).toContain(text);
+    },
+    async close() {
+      app.unmount();
+      await app.waitUntilExit();
+      app.cleanup();
+      stdin.destroy();
+      stdout.destroy();
+    },
+  };
+}
+
+describe('pinned plans', () => {
+  const entries: PlanEntry[] = [
+    { content: 'Read the source', status: 'completed' },
+    { content: 'Update the source', status: 'in_progress' },
+    { content: 'Check the result', status: 'pending' },
+  ];
+
+  test('reads the latest plan per current participant, in roster order', () => {
+    const reviewer: PlanEntry[] = [{ content: 'Review the change', status: 'pending' }];
+    const messages: Message[] = [
+      { seq: 0, role: 'assistant', content: [planCall([{ content: 'Old task', status: 'pending' }])] },
+      { seq: 1, role: 'assistant', participant: 'reviewer', content: [planCall(reviewer)] },
+      { seq: 2, role: 'assistant', participant: 'Sirus', content: [planCall([]), planCall(entries)] },
+      { seq: 3, role: 'assistant', participant: 'sirus', content: [{ type: 'text', text: 'Continuing.' }] },
+      { seq: 4, role: 'user', content: [planCall([])] },
+      { seq: 5, role: 'assistant', participant: 'removed', content: [planCall(entries)] },
+    ];
+    expect(currentPlans(messages, [{ name: 'sirus' }, { name: 'Reviewer' }])).toEqual([
+      { participant: 'sirus', entries },
+      { participant: 'Reviewer', entries: reviewer },
+    ]);
+  });
+
+  test('an empty or completed replacement clears a participant’s previous plan', () => {
+    const messages: Message[] = [
+      { seq: 0, role: 'assistant', content: [planCall(entries)] },
+      { seq: 1, role: 'assistant', participant: 'reviewer', content: [planCall(entries)] },
+      { seq: 2, role: 'assistant', content: [planCall([])] },
+      { seq: 3, role: 'assistant', participant: 'reviewer', content: [
+        planCall(entries.map(entry => ({ ...entry, status: 'completed' }))),
+      ] },
+    ];
+    expect(currentPlans(messages, [{ name: 'sirus' }, { name: 'reviewer' }])).toEqual([]);
+    // Rewinding to before the replacements makes those earlier lists current.
+    expect(currentPlans(messages.slice(0, 2), [{ name: 'sirus' }, { name: 'reviewer' }])).toHaveLength(2);
+  });
+
+  test('restores each participant’s list, naming the lists only when more than one remains', async () => {
+    const original = new Session({ name: 'Restored plans' });
+    original.addParticipant('reviewer', 'gpt-5.6-luna');
+    original.append({ role: 'assistant', participant: 'sirus', content: [planCall(entries)] });
+    original.append({ role: 'assistant', participant: 'reviewer', content: [
+      planCall([{ content: 'Review the change', status: 'pending' }]),
+    ] });
+    const session = Session.fromSnapshot(original.toSnapshot());
+    const chat = renderChat(session);
+    try {
+      await chat.flush();
+      expect(chat.output()).toContain('▸ Update the source');
+      expect(chat.output()).toContain('○ Review the change');
+      expect(chat.output()).toContain('@sirus');
+      expect(chat.output()).toContain('@reviewer');
+      expect(chat.output()).toContain('ctrl+t to hide tasks');
+
+      session.append({ role: 'assistant', participant: 'reviewer', content: [planCall([])] });
+      await chat.flush();
+      expect(chat.output()).toContain('▸ Update the source');
+      expect(chat.output()).not.toContain('Review the change');
+      expect(chat.output()).not.toContain('@sirus');
+      expect(chat.output()).not.toContain('@reviewer');
+
+      session.append({ role: 'assistant', participant: 'sirus', content: [planCall([])] });
+      await chat.flush();
+      expect(chat.output()).not.toContain('Update the source');
+      expect(chat.output()).not.toContain('ctrl+t');
+    } finally {
+      await chat.close();
+      await session.dispose();
+      await original.dispose();
+    }
+  });
+
+  test('toggles without changing the draft, keeps unfinished tasks at idle, and hides completed tasks during a turn', async () => {
+    const model = 'test-chat-pinned-plan';
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+    const secondGate = new Promise<void>(resolve => { releaseSecond = resolve; });
+    let turnNumber = 0;
+    bindScriptedRuntime(model, async (_input, emit) => {
+      turnNumber++;
+      if (turnNumber === 1) {
+        emit({ type: 'plan', entries });
+        await firstGate;
+      } else {
+        emit({ type: 'plan', entries: entries.map(entry => ({ ...entry, status: 'completed' })) });
+        await secondGate;
+      }
+    });
+    const session = new Session({ name: 'Live plan', model });
+    const chat = renderChat(session);
+    let turn = Promise.resolve<Message[]>([]);
+    try {
+      turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Start' }] });
+      await chat.waitFor('▸ Update the source');
+      expect(session.getStatus()).toBe('working');
+      expect(chat.output()).toContain('Updated plan · 1 of 3 done');
+      expect(chat.output()).toContain('ctrl+t to hide tasks');
+      expect(chat.output()).not.toContain('@sirus');
+      await chat.type('Continue after checking');
+      await chat.type('\u0014');
+      expect(chat.output()).not.toContain('Update the source');
+      expect(chat.output()).toContain('ctrl+t to show tasks');
+      expect(session.getInputContent()).toBe('Continue after checking');
+      await chat.type('\u0014');
+      expect(chat.output()).toContain('▸ Update the source');
+      expect(chat.output()).toContain('ctrl+t to hide tasks');
+      expect(session.getInputContent()).toBe('Continue after checking');
+
+      releaseFirst();
+      await turn;
+      await chat.flush();
+      expect(session.getStatus()).not.toBe('working');
+      expect(chat.output()).toContain('▸ Update the source');
+      expect(chat.output()).toContain('ctrl+t to hide tasks');
+
+      turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Finish' }] });
+      await chat.waitFor('Updated plan · 3 of 3 done');
+      expect(session.getStatus()).toBe('working');
+      expect(chat.output()).not.toContain('Update the source');
+      expect(chat.output()).not.toContain('ctrl+t');
+      await chat.type('\u0014');
+      expect(chat.output()).not.toContain('Update the source');
+      releaseSecond();
+      await turn;
+      await chat.flush();
+      expect(chat.output()).not.toContain('Update the source');
+      expect(chat.output()).not.toContain('ctrl+t');
+    } finally {
+      releaseFirst();
+      releaseSecond();
+      await turn.catch(() => {});
+      await chat.close();
+      await session.dispose();
+      unbindRuntime(model);
+    }
+  });
+});
+
+test('notices between turns appear as input feedback without adding transcript entries', async () => {
+  const model = 'test-chat-idle-notice';
+  const binding = bindScriptedRuntime(model, (_input, emit) => { emit({ type: 'text', text: 'Ready.' }); });
+  const session = new Session({ name: 'Idle notice', model });
+  await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Inspect' }] });
+  const before = structuredClone(session.getMessages());
+  const chat = renderChat(session);
+  try {
+    await chat.flush();
+    for (const severity of ['warning', 'error', 'vendor-info']) {
+      binding.starts[0].onUpdate({
+        type: 'notice', severity, title: 'Configuration\nchanged', description: 'A vendor\tdetail.',
+      });
+      await chat.flush();
+      expect(chat.output()).toContain(`${severity === 'vendor-info' ? '→' : '!'} @sirus: Configuration changed · A vendor detail.`);
+      expect(session.getMessages()).toEqual(before);
+      await chat.type('\u001b');
+      expect(chat.output()).not.toContain('Configuration changed');
+    }
+    await chat.type('A draft after the notice');
+    expect(chat.output()).not.toContain('Configuration changed');
+    expect(session.getMessages()).toEqual(before);
+  } finally {
+    await chat.close();
+    await session.dispose();
     unbindRuntime(model);
   }
 });

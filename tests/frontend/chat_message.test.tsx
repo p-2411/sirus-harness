@@ -15,7 +15,7 @@ import {
   unregisterSubagent,
   type SubagentRun,
 } from '../../src/agent_runtime/tools/subagents';
-import type { MessageBlock, ToolCallBlock } from '../../src/agent_runtime/types';
+import { planCall, type MessageBlock, type PlanEntry, type ToolCallBlock } from '../../src/agent_runtime/types';
 
 // Everything ACP guarantees on a tool call, so each case writes only the
 // fields it is about.
@@ -458,6 +458,99 @@ describe('thinking', () => {
       app.unmount();
       await app.waitUntilExit();
     }
+  });
+});
+
+describe('plan updates', () => {
+  const entries: PlanEntry[] = [
+    { content: 'Read the code', status: 'completed' },
+    { content: 'Make the change', status: 'in_progress' },
+    { content: 'Run the tests', status: 'pending' },
+  ];
+  const message = {
+    seq: 4,
+    role: 'assistant' as const,
+    content: [planCall(entries)],
+  };
+
+  test('keeps each plan update out of the tool groups around it', () => {
+    const content = [calls[0], calls[1], message.content[0], calls[0], calls[1], planCall([])];
+    expect(messageSegments(content).map(segment => segment.type))
+      .toEqual(['tool_run', 'plan', 'tool_run', 'plan']);
+    const output = stripAnsi(renderToString(
+      <ChatMessage message={{ ...message, content }} />, { columns: 120 },
+    ));
+    expect(output).toContain('Updated plan · 1 of 3 done');
+    expect(output).toContain('Updated plan · 0 of 0 done');
+    for (const entry of entries) expect(output).not.toContain(entry.content);
+  });
+
+  test('reveals the checklist on a click and collapses it on the next', async () => {
+    const stdout = Object.assign(new PassThrough(), { columns: 120 }) as unknown as NodeJS.WriteStream;
+    const frames: string[] = [];
+    stdout.on('data', data => frames.push(stripAnsi(data.toString())));
+    const app = render(<ChatMessage message={message} />, {
+      stdout, debug: true, patchConsole: false, exitOnCtrlC: false,
+    });
+    try {
+      await app.waitUntilRenderFlush();
+      expect(frames.at(-1)).toContain('Updated plan · 1 of 3 done');
+      expect(frames.at(-1)).not.toContain('Read the code');
+      await new Promise<void>(resolve => setImmediate(resolve));
+      const row = cellOf(frames.at(-1)!, 'Updated plan');
+      expect(pressAt(row)).toBe(true);
+      expect(releaseAt(row)).toBe(true);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      await app.waitUntilRenderFlush();
+      expect(frames.at(-1)).toContain('✔ Read the code');
+      expect(frames.at(-1)).toContain('▸ Make the change');
+      expect(frames.at(-1)).toContain('○ Run the tests');
+
+      expect(pressAt(row)).toBe(true);
+      expect(releaseAt(row)).toBe(true);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      await app.waitUntilRenderFlush();
+      expect(frames.at(-1)).toContain('Updated plan · 1 of 3 done');
+      for (const entry of entries) expect(frames.at(-1)).not.toContain(entry.content);
+    } finally {
+      app.unmount();
+      await app.waitUntilExit();
+    }
+  });
+});
+
+describe('vendor notices', () => {
+  test('shows the title and description on one line, in their place in the reply', () => {
+    const content: MessageBlock[] = [
+      calls[0],
+      { type: 'notice', severity: 'warning', title: 'Model\nfallback', description: 'Using\tthe available model.' },
+      calls[1],
+      { type: 'notice', severity: 'error', title: 'Task stopped' },
+      { type: 'notice', severity: 'vendor-specific', title: 'Hook finished' },
+    ];
+    expect(messageSegments(content).map(segment => segment.type))
+      .toEqual(['tool_call', 'notice', 'tool_call', 'notice', 'notice']);
+    const output = stripAnsi(renderToString(
+      <ChatMessage message={{ seq: 5, role: 'assistant', content }} />, { columns: 120 },
+    ));
+    expect(output).toContain('Model fallback · Using the available model.');
+    expect(output.indexOf('one.ts')).toBeLessThan(output.indexOf('Model fallback'));
+    expect(output.indexOf('Model fallback')).toBeLessThan(output.indexOf('bun test'));
+    expect(output).toContain('Task stopped');
+    expect(output).toContain('Hook finished');
+  });
+
+  test('truncates a long notice instead of wrapping its description', () => {
+    const output = stripAnsi(renderToString(
+      <ChatMessage message={{ seq: 6, role: 'assistant', content: [{
+        type: 'notice', severity: 'info', title: 'Notice',
+        description: 'A vendor update with a long description that must stay on one line.',
+      }] }} />, { columns: 40 },
+    ));
+    const lines = output.split('\n').filter(line => line.trim());
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toContain('Notice · A vendor update');
+    expect(output).not.toContain('must stay on one line.');
   });
 });
 

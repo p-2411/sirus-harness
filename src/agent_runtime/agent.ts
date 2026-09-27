@@ -35,6 +35,7 @@ import {
   planCall,
   type ImageBlock,
   type Message,
+  type NoticeBlock,
   type ThinkingLevel,
   type ToolCallBlock,
 } from './types';
@@ -62,6 +63,8 @@ export interface RuntimeHost {
   permissionMode(): PermissionMode;
   requestPermission(agent: SessionAgent, request: RequestPermissionRequest, signal: AbortSignal): Promise<RequestPermissionResponse>;
   requestAnswers(agent: SessionAgent, request: CreateElicitationRequest, signal: AbortSignal): Promise<CreateElicitationResponse>;
+  // A notice received between turns has no transcript entry to sit in.
+  notice(agent: SessionAgent, notice: NoticeBlock): void;
   // The user’s subagent model pin; null leaves the choice to the caller.
   subagentModel(): string | null;
   // The host a worker of this session runs under: its own worktree, the
@@ -430,6 +433,10 @@ export class SessionAgent {
       if (vendor) rememberListedModels(vendor, update.models);
       return;
     }
+    if (update.type === 'notice' && !this.record) {
+      this.host.notice(this, update);
+      return;
+    }
     this.record?.(update);
   }
 
@@ -482,6 +489,9 @@ export class SessionAgent {
           else entry.content.push({ type: 'thought', text: update.text });
           break;
         }
+        case 'notice':
+          entry.content.push(update);
+          break;
         case 'tool_call': {
           const run = this.listSubagents().find(run => run.callId === update.call.id && run.status !== 'working');
           if (run) update.call.output = workerReport(run);

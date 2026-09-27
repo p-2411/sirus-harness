@@ -8,6 +8,7 @@ import type { Feedback } from '../../commands/feedback';
 const FEEDBACK_ICONS = {
   info: '→',
   success: '✓',
+  warning: '!',
   error: '!',
 } as const;
 
@@ -18,12 +19,13 @@ export function InputFeedback({ feedback, participantColors }: {
   if (!feedback) return null;
   const iconColor = feedback.kind === 'success'
     ? theme.success
-    : feedback.kind === 'error' ? theme.danger : theme.accentSoft;
+    : feedback.kind === 'error' ? theme.danger
+      : feedback.kind === 'warning' ? theme.pending : theme.accentSoft;
   const showIcon = feedback.showIcon !== false;
   return (
     <Box paddingX={3} flexShrink={0}>
       {showIcon && <Text color={iconColor}>{FEEDBACK_ICONS[feedback.kind]}</Text>}
-      <Text color={feedback.kind === 'error' ? theme.danger : theme.textMuted}>
+      <Text color={feedback.kind === 'error' ? theme.danger : feedback.kind === 'warning' ? theme.pending : theme.textMuted}>
         {showIcon ? ' ' : ''}<MentionText colors={participantColors}>{feedback.text}</MentionText>
       </Text>
     </Box>

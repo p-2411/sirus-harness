@@ -21,7 +21,7 @@ import {
 import { INTERRUPTED_REASON, workerReport } from '../tools/subagents/report';
 import { cancelSubagent, messageSubagent } from '../tools/subagents/run';
 import type { SubagentHost } from '../tools/types';
-import { textOf, type Message, type ThinkingLevel, type ToolCallBlock } from '../types';
+import { textOf, type Message, type NoticeBlock, type ThinkingLevel, type ToolCallBlock } from '../types';
 import type { ContextUsage } from '../usage';
 import { parseFileMentions, resolveFileMentions } from '../../fileMentions';
 import { isAbortError } from '../../abort';
@@ -190,6 +190,7 @@ export class Session {
   private name: string;
   private permissionMode: PermissionMode;
   private subagentModel: string | null;
+  private notice: { participant: string; notice: NoticeBlock } | null = null;
   // Drafts typed while a turn is active belong to the session, so switching
   // away and back does not discard them.
   private inputContent: string;
@@ -282,6 +283,10 @@ export class Session {
         requestPermission({ sessionId: this.id, requester: agent.requester }, request, signal),
       requestAnswers: (agent, request, signal) =>
         requestAnswers({ sessionId: this.id, requester: agent.requester }, request, signal),
+      notice: (agent, notice) => {
+        this.notice = { participant: agent.subagentId ?? agent.name, notice };
+        this.changes.notify();
+      },
       subagentModel: () => this.subagentModel,
       forWorker: (id, directory) => ({
         ...host,
@@ -791,6 +796,10 @@ export class Session {
     return this.roster.default.modeNotice
       ?? this.roster.all().find(agent => agent.modeNotice)?.modeNotice
       ?? null;
+  }
+
+  getNotice(): { participant: string; notice: NoticeBlock } | null {
+    return this.notice;
   }
 
   getMessages(): Message[] {

@@ -89,6 +89,7 @@ export function transcriptText(entries: readonly Message[]): string {
   for (const entry of entries.slice(from)) {
     const speaker = entry.role === 'user' ? 'User' : `@${entry.participant ?? 'sirus'}`;
     for (const block of entry.content) {
+      if (block.type === 'notice') continue;
       if (block.type === 'text') {
         if (block.text) lines.push(`${speaker}: ${block.text}`);
       } else if (block.type === 'image') {

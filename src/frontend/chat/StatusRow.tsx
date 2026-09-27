@@ -12,6 +12,7 @@ export interface StatusRowProps {
   model?: string;
   thinkingLevel?: string;
   contextUsage?: ContextUsage | null;
+  tasksVisible?: boolean;
 }
 
 // The context gauge: how much of the model's window the last response used.
@@ -38,6 +39,7 @@ export function SubagentStatusRow({
   model,
   thinkingLevel,
   contextUsage,
+  tasksVisible,
 }: StatusRowProps) {
   return (
     <Box paddingX={3} height={1} flexShrink={0} justifyContent="space-between">
@@ -48,6 +50,9 @@ export function SubagentStatusRow({
             {modeNotice && <Text color={theme.textSubtle} dimColor> · {modeNotice}</Text>}
             <Text color={theme.textSubtle}> · shift+tab</Text>
           </Text>
+        )}
+        {tasksVisible !== undefined && (
+          <Text color={theme.textSubtle}>{permissionMode ? ' · ' : ''}ctrl+t to {tasksVisible ? 'hide' : 'show'} tasks</Text>
         )}
       </Box>
       <Box>

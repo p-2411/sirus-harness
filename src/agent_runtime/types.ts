@@ -35,6 +35,15 @@ export interface CompactionBlock {
   summary?: string;
 }
 
+// Advisory information from the vendor, shown to the user but never sent
+// back to a runtime as conversation or used to address another participant.
+export interface NoticeBlock {
+  type: 'notice';
+  severity: string;
+  title: string;
+  description?: string;
+}
+
 // ACP's vocabulary for what a tool call does. The kind picks the verb and the
 // icon; the title is the line.
 export const TOOL_KINDS = ['read', 'edit', 'delete', 'move', 'search', 'execute', 'think', 'fetch', 'switch_mode', 'other'] as const;
@@ -81,7 +90,7 @@ export interface ToolCallBlock {
   output?: unknown;
 }
 
-export type MessageBlock = TextBlock | ImageBlock | ThoughtBlock | CompactionBlock | ToolCallBlock;
+export type MessageBlock = TextBlock | ImageBlock | ThoughtBlock | CompactionBlock | NoticeBlock | ToolCallBlock;
 
 // One step of an agent's plan: Claude's todo list and Codex's plan both
 // arrive as a list of these, the whole plan each time.

@@ -55,12 +55,12 @@ const KILL_GRACE_MS = 2_000;
 // as stuck. The adapter normally answers within a second or two.
 const CANCEL_GRACE_MS = 30_000;
 
-// Sirus advertises compaction and form elicitation and nothing else: no fs,
+// Sirus advertises compaction, notices and form elicitation: no fs,
 // terminal, plan or subagents, so the agents run their tools on disk
 // themselves and nothing pulls execution back into this process. Forms are
 // how both adapters put a question to the user; codex-acp still sends its
 // tool approvals as permission requests either way.
-const CLIENT_CAPABILITIES: ClientCapabilities = { session: { compaction: {} }, elicitation: { form: {} } };
+const CLIENT_CAPABILITIES: ClientCapabilities = { session: { compaction: {}, notices: {} }, elicitation: { form: {} } };
 
 const DECLINED: CreateElicitationResponse = { action: 'decline' };
 const CANCELLED_ELICITATION: CreateElicitationResponse = { action: 'cancel' };
@@ -239,6 +239,9 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
   // The live sessions by id, which is also the routing table: a session is
   // in here exactly while updates for it should reach a caller.
   const sessions = new Map<string, SessionState>();
+  // A new session can send a notice before its response gives us its id.
+  const openingNotices = new Map<string, SessionUpdate[]>();
+  let openingSessions = 0;
   // What the adapter said it can do, read from the initialize response.
   let canFork = false;
   let canSteer = false;
@@ -263,7 +266,22 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
       stuck: false,
     };
     sessions.set(id, state);
+    for (const notice of openingNotices.get(id) ?? []) receive(id, notice);
+    openingNotices.delete(id);
     return state;
+  }
+
+  async function openSession<T extends { sessionId: string }>(
+    request: () => Promise<T>, directory: string, hooks: SessionHooks, model: string,
+  ): Promise<{ opened: T; state: SessionState }> {
+    openingSessions++;
+    try {
+      const opened = await request();
+      return { opened, state: register(opened.sessionId, directory, hooks, model) };
+    } finally {
+      openingSessions--;
+      if (openingSessions === 0) openingNotices.clear();
+    }
   }
 
   // The error a call on a session that can no longer answer rejects with.
@@ -291,6 +309,13 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
         return update.content.type === 'text' ? { type: 'text', text: update.content.text } : null;
       case 'agent_thought_chunk':
         return update.content.type === 'text' ? { type: 'thought', text: update.content.text } : null;
+      case 'notice':
+        return {
+          type: 'notice',
+          severity: update.severity,
+          title: update.title,
+          ...(update.description != null ? { description: update.description } : {}),
+        };
       case 'tool_call':
       case 'tool_call_update': {
         // codex-acp reports its own compaction as a tool call tagged in
@@ -376,7 +401,14 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
       return;
     }
     const state = sessions.get(sessionId);
-    if (!state) return;
+    if (!state) {
+      if (openingSessions > 0 && update.sessionUpdate === 'notice') {
+        const notices = openingNotices.get(sessionId) ?? [];
+        notices.push(update);
+        openingNotices.set(sessionId, notices);
+      }
+      return;
+    }
     const reduced = reduce(state, update);
     if (!reduced) return;
     try {
@@ -625,21 +657,21 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
     });
     const extras = { mcpServers: params.mcpServers, ...(params.meta ? { _meta: params.meta } : {}) };
     let created;
+    let state: SessionState;
     try {
-      created = await connection.agent.request(methods.agent.session.fork, {
+      ({ opened: created, state } = await openSession(() => connection.agent.request(methods.agent.session.fork, {
         sessionId: parent.id,
         // Where the adapter finds the session being forked when the fork only
         // copies its transcript, and where the new session runs when it does
         // not; the launch spec says which this vendor does.
         cwd: options.vendor === 'claude' ? parent.directory : forked.directory,
         ...extras,
-      });
+      }), forked.directory, forked, parent.model));
     } catch (error) {
       throw settled(error);
     }
     // Registered before the resume, since the adapter starts pushing updates
     // for the new session the moment it opens it.
-    const state = register(created.sessionId, forked.directory, forked, parent.model);
     try {
       const opened = launch.forkNeedsResume
         ? await connection.agent.request(methods.agent.session.resume, {
@@ -699,12 +731,11 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
       mcpServer: options.mcpServer,
       tools: options.tools,
     });
-    const session = await connection.agent.request(methods.agent.session.new, {
+    const { opened: session, state } = await openSession(() => connection.agent.request(methods.agent.session.new, {
       cwd: options.directory,
       mcpServers: params.mcpServers,
       ...(params.meta ? { _meta: params.meta } : {}),
-    });
-    const state = register(session.sessionId, options.directory, options, options.model);
+    }), options.directory, options, options.model);
     state.modes = session.modes?.availableModes ?? [];
     state.currentModeId = session.modes?.currentModeId ?? '';
     state.configOptions = session.configOptions ?? [];

@@ -4,7 +4,9 @@ import os from 'os';
 import path from 'path';
 import * as naming from '../../src/agent_runtime/session/naming';
 import * as router from '../../src/agent_runtime/router';
-import type { RuntimeOptions } from '../../src/agent_runtime/runtime/runtime';
+import * as launch from '../../src/agent_runtime/runtime/launch';
+import { startAcpRuntime } from '../../src/agent_runtime/runtime/acp';
+import type { Runtime, RuntimeOptions, RuntimeUpdate } from '../../src/agent_runtime/runtime/runtime';
 import type { Draft } from '../../src/agent_runtime/session';
 import { Session } from '../../src/agent_runtime/session';
 import { textOf } from '../../src/agent_runtime/types';
@@ -32,6 +34,68 @@ afterEach(() => {
   unbindRuntime(testModel);
   unbindRuntime(secondTestModel);
   unbindRuntime(thirdTestModel);
+});
+
+test('ACP opts into notices and routes early notices to the session being opened', async () => {
+  const adapter = `
+    import { createInterface } from 'node:readline';
+    const send = value => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\\n');
+    const update = (sessionId, update) => send({ method: 'session/update', params: { sessionId, update } });
+    for await (const line of createInterface({ input: process.stdin })) {
+      const request = JSON.parse(line);
+      const reply = result => send({ id: request.id, result });
+      if (request.method === 'initialize') {
+        if (!request.params.clientCapabilities.session.notices) throw new Error('Notices were not advertised');
+        reply({ protocolVersion: 1, agentCapabilities: { sessionCapabilities: { fork: {} } } });
+      } else if (request.method === 'session/new' || request.method === 'session/fork') {
+        const sessionId = request.method === 'session/new' ? 'owner' : 'worker';
+        update(sessionId, { sessionUpdate: 'notice', severity: 'info', title: sessionId + ' opening' });
+        reply({ sessionId });
+      } else if (request.method === 'session/prompt') {
+        const sessionId = request.params.sessionId;
+        update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Before' } });
+        update(sessionId, { sessionUpdate: 'notice', severity: 'warning', title: 'Warning', description: null });
+        update(sessionId, { sessionUpdate: 'notice', severity: 'vendor-hint', title: 'Hint', description: 'Details' });
+        update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'After' } });
+        reply({ stopReason: 'end_turn' });
+      } else if (request.id !== undefined) reply({});
+    }
+  `;
+  const spec = spyOn(launch, 'launchFor').mockImplementation(options => ({
+    command: process.execPath,
+    args: ['-e', adapter],
+    env: options.env,
+    mode: options.permissionMode,
+    session: () => ({ mcpServers: [] }),
+    forkNeedsResume: false,
+  }));
+  const updates: RuntimeUpdate[] = [];
+  const workerUpdates: RuntimeUpdate[] = [];
+  const options: RuntimeOptions = {
+    vendor: 'gpt', model: 'gpt-5.6-luna', thinkingLevel: 'high', directory: process.cwd(),
+    systemPrompt: '', env: { ...process.env }, mcpServer: null, permissionMode: 'auto',
+    onPermission: async () => ({ outcome: { outcome: 'cancelled' } }),
+    onUpdate: update => { updates.push(update); },
+  };
+  let runtime: Runtime | undefined;
+  try {
+    runtime = await startAcpRuntime(options);
+    expect(updates).toEqual([{ type: 'notice', severity: 'info', title: 'owner opening' }]);
+    const worker = await runtime.fork({ ...options, onUpdate: update => { workerUpdates.push(update); } });
+    expect(workerUpdates).toEqual([{ type: 'notice', severity: 'info', title: 'worker opening' }]);
+    expect(updates).toHaveLength(1);
+    await worker.prompt({ text: 'Inspect', images: [] }, new AbortController().signal);
+    expect(workerUpdates.slice(1)).toEqual([
+      { type: 'text', text: 'Before' },
+      { type: 'notice', severity: 'warning', title: 'Warning' },
+      { type: 'notice', severity: 'vendor-hint', title: 'Hint', description: 'Details' },
+      { type: 'text', text: 'After' },
+    ]);
+    expect(updates).toHaveLength(1);
+  } finally {
+    runtime?.dispose();
+    spec.mockRestore();
+  }
 });
 
 describe('Session model', () => {
@@ -324,13 +388,15 @@ describe('Session model', () => {
     expect(session.getContextUsage()).toEqual({ tokens: 128, window: 400_000 });
   });
 
-  test('records tool calls, thoughts and compaction as the runtime reports them', async () => {
+  test('records tool calls, thoughts, notices and compaction in their original order', async () => {
     bindScriptedRuntime(testModel, (_input, emit) => {
       emit({ type: 'thought', text: 'Let me look.' });
       emit({ type: 'tool_call', call: { type: 'tool_call', id: 'call-1', title: 'cat file.txt', kind: 'execute', status: 'pending', locations: [], content: [] } });
       emit({ type: 'tool_call', call: { type: 'tool_call', id: 'call-1', title: 'cat file.txt', kind: 'execute', status: 'completed', locations: [], content: [{ type: 'text', text: 'hi' }], output: 'hi' } });
       emit({ type: 'compaction', status: 'in_progress' });
       emit({ type: 'compaction', status: 'completed', summary: 'Read the file.' });
+      emit({ type: 'text', text: 'Read it.' });
+      emit({ type: 'notice', severity: 'warning', title: 'Model fallback', description: 'Using the available model.' });
       emit({ type: 'text', text: 'It says hi.' });
     });
     const session = new Session({ id: 'tools', name: 'Tools', model: testModel });
@@ -339,8 +405,62 @@ describe('Session model', () => {
       { type: 'thought', text: 'Let me look.' },
       { type: 'tool_call', id: 'call-1', title: 'cat file.txt', kind: 'execute', status: 'completed', locations: [], content: [{ type: 'text', text: 'hi' }], output: 'hi' },
       { type: 'compaction', summary: 'Read the file.' },
+      { type: 'text', text: 'Read it.' },
+      { type: 'notice', severity: 'warning', title: 'Model fallback', description: 'Using the available model.' },
       { type: 'text', text: 'It says hi.' },
     ]);
+  });
+
+  test('keeps notices out of mention routing, peer prompts and rebuilt runtime history', async () => {
+    const writer = bindScriptedRuntime(testModel, (_input, emit) => {
+      emit({ type: 'text', text: 'Before' });
+      emit({ type: 'notice', severity: 'vendor-hint', title: 'Notice for @observer', description: 'Vendor detail for @uninvited' });
+      emit({ type: 'text', text: 'After @reviewer' });
+    });
+    const reviewer = bindScriptedRuntime(secondTestModel, textTurn('Reviewed'));
+    const observer = bindScriptedRuntime(thirdTestModel, textTurn('Observed'));
+    const session = new Session({ name: 'Notices', model: testModel });
+    session.addParticipant('reviewer', secondTestModel);
+    session.addParticipant('observer', thirdTestModel);
+    let restored: Session | undefined;
+    try {
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Inspect' }] });
+      expect(observer.starts).toHaveLength(0);
+      expect(reviewer.runtimes[0].prompts[0].text).toBe('@sirus wrote:\nBefore\nAfter @reviewer');
+      expect(session.getParticipants().map(participant => participant.name)).toEqual(['sirus', 'reviewer', 'observer']);
+      restored = Session.fromSnapshot(session.toSnapshot());
+      await restored.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Again' }] });
+      const seed = writer.runtimes[1].prompts[0].text;
+      expect(seed).toContain('@sirus: Before');
+      expect(seed).toContain('@sirus: After @reviewer');
+      expect(seed).not.toContain('Notice for');
+      expect(seed).not.toContain('Vendor detail');
+      expect(observer.starts).toHaveLength(0);
+    } finally {
+      await session.dispose();
+      await restored?.dispose();
+    }
+  });
+
+  test('surfaces notices between turns through the session without changing the transcript', async () => {
+    const binding = bindScriptedRuntime(testModel, textTurn('Done'));
+    const session = new Session({ name: 'Idle notice', model: testModel });
+    try {
+      expect(session.getNotice()).toBeNull();
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Inspect' }] });
+      const before = session.toSnapshot().messages;
+      let changes = 0;
+      const unsubscribe = session.subscribe(() => { changes++; });
+      const notice = { type: 'notice' as const, severity: 'error', title: 'Configuration changed' };
+      binding.starts[0].onUpdate(notice);
+      unsubscribe();
+      expect(session.getNotice()).toEqual({ participant: 'sirus', notice });
+      expect(changes).toBe(1);
+      expect(session.getMessages()).toEqual(before);
+      expect(session.toSnapshot()).not.toHaveProperty('notice');
+    } finally {
+      await session.dispose();
+    }
   });
 
   test('/compact sends the slash command to the default participant and records the boundary', async () => {

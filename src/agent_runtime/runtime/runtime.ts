@@ -12,6 +12,7 @@ import type { PermissionMode } from '../permissions/policy';
 import type { ListedModel, Vendor } from '../providers/catalog';
 import type {
   ImageBlock,
+  NoticeBlock,
   PlanEntry,
   ThinkingLevel,
   ToolCallBlock,
@@ -69,6 +70,7 @@ export interface RuntimeOptions {
 export type RuntimeUpdate =
   | { type: 'text'; text: string }
   | { type: 'thought'; text: string }
+  | NoticeBlock
   // A new call, or an update to one already reported: merge by id.
   | { type: 'tool_call'; call: ToolCallBlock }
   | { type: 'context'; usage: ContextUsage }
