@@ -22,6 +22,7 @@ import {
   type RuntimeOptions,
   type RuntimeUpdate,
 } from './runtime/runtime';
+import { rememberNativeCommands } from './runtime/commands';
 import { Transcript, transcriptText } from './session/transcript';
 import { notifySubagents, type SubagentRun } from './tools/subagents';
 import { describeSubagents } from './tools/subagents/report';
@@ -30,6 +31,8 @@ import type { SubagentHandle, SubagentHost, WorkerContext } from './tools/types'
 import {
   DEFAULT_THINKING_LEVEL,
   failOpenToolCalls,
+  isPlanCall,
+  planCall,
   type ImageBlock,
   type Message,
   type ThinkingLevel,
@@ -395,6 +398,13 @@ export class SessionAgent {
 
   private hear(update: RuntimeUpdate): void {
     this.heardAt = Date.now();
+    // The vendor's commands are the menu's, whether or not a turn is running.
+    // A worker's are its worktree's, which the menu never asks about.
+    if (update.type === 'commands') {
+      const vendor = vendorOf(this.model);
+      if (vendor && !this.subagentId) rememberNativeCommands(vendor, this.host.directory, update.commands);
+      return;
+    }
     this.record?.(update);
   }
 
@@ -453,6 +463,15 @@ export class SessionAgent {
           );
           if (index === -1) entry.content.push(update.call);
           else entry.content[index] = update.call;
+          break;
+        }
+        case 'plan': {
+          // Each change shows where the turn is now, as the vendors' own
+          // terminals show it, unless nothing came since the last one.
+          const last = entry.content.length - 1;
+          const previous = entry.content[last];
+          if (previous?.type === 'tool_call' && isPlanCall(previous)) entry.content[last] = planCall(update.entries, previous.id);
+          else entry.content.push(planCall(update.entries));
           break;
         }
         case 'compaction': {

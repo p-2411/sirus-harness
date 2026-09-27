@@ -248,7 +248,7 @@ describe('Session model', () => {
     expect(options.directory).toBe('/projects/test');
     expect(options.thinkingLevel).toBe('medium');
     expect(options.permissionMode).toBe('auto');
-    expect(options.systemPrompt).toContain('You are Sirus');
+    expect(options.systemPrompt).toContain('You are running inside Sirus');
     expect(options.mcpServer).toMatchObject({ name: 'sirus', url: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\//) });
     expect(options.mcpServer?.headers.map(header => header.name)).toEqual(['Authorization', 'X-Sirus-Requester']);
     expect(options.mcpServer?.headers[1].value).toBe('sirus');
@@ -989,7 +989,7 @@ describe('Session model', () => {
       { name: 'Reviewer', model: testModel },
     ]);
     expect(binding.starts).toHaveLength(1);
-    expect(binding.starts[0].systemPrompt).toContain('You are @Reviewer');
+    expect(binding.starts[0].systemPrompt).toContain('the participant @Reviewer');
     expect(binding.starts[0].mcpServer?.headers[1].value).toBe('Reviewer');
     expect(binding.starts[0].directory).toBe(process.cwd());
     expect(binding.runtimes[0].prompts.map(prompt => prompt.text))

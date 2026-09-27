@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { Box, Text, useInput, usePaste } from 'ink';
 import { theme } from '../styles/theme';
 import { CommandMenu, useCommandMenu } from './CommandMenu';
-import { isSkillCommand } from '../../commands/registry';
+import { isNativeCommand } from '../../commands/registry';
 import { MentionMenu, useMentionMenu } from './MentionMenu';
 import { useFileSuggestions } from './FileMenu';
 import { DraftText, TrailingImages } from './DraftText';
@@ -22,7 +22,7 @@ import type { ImageBlock, MessageBlock } from '../../agent_runtime/types';
 import type { SubagentRun } from '../../agent_runtime/tools/subagents';
 import type { ContextUsage } from '../../agent_runtime/usage';
 import type { PermissionMode } from '../../agent_runtime/permissions/policy';
-import type { SkillCommand } from '../../agent_runtime/runtime/skills';
+import type { NativeCommand } from '../../agent_runtime/runtime/commands';
 
 // What the input bar is collecting: a message, or one of the prompts that
 // take the bar over for a moment.
@@ -66,8 +66,9 @@ interface InputBarProps {
   // Edits a waiting message in place; empty text removes it.
   onUpdateQueued?: (id: string, text: string) => void;
   contextUsage?: ContextUsage | null;
-  // The skills `/name` reaches, read while a slash command is being typed.
-  skills?: () => readonly SkillCommand[];
+  // The vendor's own commands `/name` reaches, read while a slash command is
+  // being typed.
+  nativeCommands?: () => readonly NativeCommand[];
 }
 
 const TEXT_MODE: InputMode = { type: 'text' };
@@ -75,7 +76,7 @@ const NO_WORKERS: readonly SubagentRun[] = [];
 const NO_ATTACHMENTS: readonly ImageBlock[] = [];
 const NO_HISTORY: readonly string[] = [];
 const NO_QUEUE: readonly QueuedMessage[] = [];
-const NO_SKILLS: readonly SkillCommand[] = [];
+const NO_NATIVE_COMMANDS: readonly NativeCommand[] = [];
 
 export function InputBar({
   send,
@@ -101,7 +102,7 @@ export function InputBar({
   onQueue,
   onUpdateQueued,
   contextUsage,
-  skills,
+  nativeCommands,
 }: InputBarProps) {
   const participantColors = participantColorMap(participants);
   const status: StatusRowProps = { permissionMode, modeNotice, model, thinkingLevel, contextUsage };
@@ -177,11 +178,11 @@ export function InputBar({
   useEffect(() => {
     setMenusDismissed(false);
   }, [input]);
-  const skillList = input.startsWith('/') ? skills?.() ?? NO_SKILLS : NO_SKILLS;
-  const commands = useCommandMenu(input, mode.type === 'text' && !selectedQueued && !menusDismissed, skillList);
-  // A Sirus command takes no @mentions; a skill's arguments are a prompt and
-  // do, once its name is complete.
-  const commandText = input.startsWith('/') && !(input.includes(' ') && isSkillCommand(input, skillList));
+  const nativeList = input.startsWith('/') ? nativeCommands?.() ?? NO_NATIVE_COMMANDS : NO_NATIVE_COMMANDS;
+  const commands = useCommandMenu(input, mode.type === 'text' && !selectedQueued && !menusDismissed, nativeList);
+  // A Sirus command takes no @mentions; a vendor command's arguments are a
+  // prompt and do, once its name is complete.
+  const commandText = input.startsWith('/') && !(input.includes(' ') && isNativeCommand(input, nativeList));
   const fileSuggestions = useFileSuggestions(
     mode.type === 'text' && !menusDismissed && !commandText ? directory : undefined,
     input,
@@ -469,7 +470,7 @@ export function InputBar({
         input={input}
         selected={commands.selected}
         offset={commands.offset}
-        skills={skillList}
+        nativeCommands={nativeList}
       />}
       {mentionActive && <MentionMenu
         items={mentions.items}

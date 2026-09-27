@@ -12,8 +12,8 @@ import type { PermissionContext } from './policy';
 // The prompts the user is looking at and what they decided. One process-wide
 // store, because the UI subscribes to it once and every runtime's escalations
 // land here, whatever session they belong to. Nothing is kept as an
-// allowance: "allow for this session" answers the vendor's allow-always
-// option, and the vendor remembers that itself.
+// allowance: an option that says "don't ask again" is the vendor's, and the
+// vendor remembers it itself.
 
 export type Requester = { participant: string } | { subagent: string };
 
@@ -21,7 +21,10 @@ export function describeRequester(requester: Requester): string {
   return 'participant' in requester ? `@${requester.participant}` : `subagent ${requester.subagent}`;
 }
 
-export type ApprovalDecision = 'allow' | 'allow-session' | 'deny';
+// What the user picked: one of the vendor's options by id, as the prompt
+// offers them, or the kind of answer wanted, for a caller with no prompt in
+// front of it.
+export type ApprovalDecision = 'allow' | 'allow-session' | 'deny' | { optionId: string };
 
 export interface ApprovalRequest {
   id: string;
@@ -73,9 +76,10 @@ export function isAwaitingApproval(callId: string, sessionId?: string): boolean 
 // user" after the vendor has moved on. Per session and capped: a session can
 // run for days, and the vendor never asks about an old call again.
 const DECISIONS_PER_SESSION = 256;
-const decisions = new Map<string, Map<string, ApprovalDecision>>();
+type Outcome = 'allow' | 'deny';
+const decisions = new Map<string, Map<string, Outcome>>();
 
-function rememberDecision(sessionId: string, callId: string, decision: ApprovalDecision): void {
+function rememberDecision(sessionId: string, callId: string, decision: Outcome): void {
   let remembered = decisions.get(sessionId);
   if (!remembered) {
     remembered = new Map();
@@ -87,7 +91,7 @@ function rememberDecision(sessionId: string, callId: string, decision: ApprovalD
   if (remembered.size > DECISIONS_PER_SESSION) remembered.delete(remembered.keys().next().value!);
 }
 
-export function lastDecision(callId: string, sessionId: string): ApprovalDecision | undefined {
+export function lastDecision(callId: string, sessionId: string): Outcome | undefined {
   return decisions.get(sessionId)?.get(callId);
 }
 
@@ -95,21 +99,24 @@ export function resolveApproval(id: string, decision: ApprovalDecision): boolean
   const index = pending.findIndex(entry => entry.request.id === id);
   if (index === -1) return false;
   const [entry] = pending.splice(index, 1);
-  rememberDecision(entry.request.sessionId, entry.request.toolCall.id, decision);
+  const option = chosenOption(decision, entry.request.options);
+  const denied = option ? option.kind.startsWith('reject') : decision === 'deny';
+  rememberDecision(entry.request.sessionId, entry.request.toolCall.id, denied ? 'deny' : 'allow');
   notifyListeners();
   entry.settle(decision);
   return true;
 }
 
-// The option kinds each decision prefers, best first. Both adapters offer all
-// four, but only the kinds are trusted, never the order or the ids.
-const OPTION_KINDS: Record<ApprovalDecision, readonly PermissionOptionKind[]> = {
+// The option kinds each kind of answer prefers, best first. Only the kinds
+// are trusted, never the order or the ids.
+const OPTION_KINDS: Record<Exclude<ApprovalDecision, object>, readonly PermissionOptionKind[]> = {
   allow: ['allow_once', 'allow_always'],
   'allow-session': ['allow_always', 'allow_once'],
   deny: ['reject_once', 'reject_always'],
 };
 
-function optionFor(decision: ApprovalDecision, options: readonly PermissionOption[]): PermissionOption | undefined {
+function chosenOption(decision: ApprovalDecision, options: readonly PermissionOption[]): PermissionOption | undefined {
+  if (typeof decision === 'object') return options.find(option => option.optionId === decision.optionId);
   for (const kind of OPTION_KINDS[decision]) {
     const option = options.find(candidate => candidate.kind === kind);
     if (option) return option;
@@ -149,7 +156,7 @@ export function requestPermission(
       request: approval,
       settle: decision => {
         signal?.removeEventListener('abort', onAbort);
-        const option = optionFor(decision, approval.options);
+        const option = chosenOption(decision, approval.options);
         // Only an empty option list leaves nothing to select.
         resolve(option ? { outcome: { outcome: 'selected', optionId: option.optionId } } : CANCELLED);
       },

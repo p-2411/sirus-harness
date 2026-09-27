@@ -12,7 +12,7 @@ import { updateCommandSpec, versionCommandSpec } from './update/commands';
 import { rewindCommandSpec, undoCommandSpec } from './checkpoints/commands';
 import { imageCommandSpec } from './images/commands';
 import { notifyCommandSpec } from './notifications/commands';
-import type { SkillCommand } from '../agent_runtime/runtime/skills';
+import type { NativeCommand } from '../agent_runtime/runtime/commands';
 import type {
   CommandCapabilities,
   CommandContext,
@@ -65,42 +65,42 @@ export function parseCommandLine(text: string): { name: string; args: string[] }
   return { name: words[0].slice(1), args: words.slice(1).filter(Boolean) };
 }
 
-// One line of the `/` menu: a Sirus command, or a skill of the participant
-// the prompt goes to.
+// One line of the `/` menu: a Sirus command, or one of the vendor's own
+// commands of the participant the prompt goes to.
 export interface CommandMatch {
   name: string;
   args?: string;
   description: string;
 }
 
-// The skills `/name` reaches. A Sirus command of the same name wins, as a
-// vendor's own commands win over its skills.
-export function invocableSkills(skills: readonly SkillCommand[]): SkillCommand[] {
-  return skills.filter(skill => !commandRegistry.some(spec => spec.name === skill.name));
+// The vendor commands `/name` reaches. A Sirus command of the same name wins:
+// `/model`, `/rename` and `/logout` are Sirus's in both vendors' lists.
+export function invocableNativeCommands(commands: readonly NativeCommand[]): NativeCommand[] {
+  return commands.filter(command => !commandRegistry.some(spec => spec.name === command.name));
 }
 
-// Text that calls one of those skills: sent to the agent as a prompt rather
+// Text that calls one of those commands: sent to the agent as a prompt rather
 // than run here.
-export function isSkillCommand(text: string, skills: readonly SkillCommand[]): boolean {
+export function isNativeCommand(text: string, commands: readonly NativeCommand[]): boolean {
   const name = /^\/(\S+)/.exec(text)?.[1];
-  return name !== undefined && invocableSkills(skills).some(skill => skill.name === name);
+  return name !== undefined && invocableNativeCommands(commands).some(command => command.name === name);
 }
 
 // Prefix matches while a command name is being typed ('/' alone matches
 // everything); none once args have begun or the text isn't a command at all.
-// Sirus's commands come first, then the skills.
-export function matchCommands(input: string, skills: readonly SkillCommand[] = []): CommandMatch[] {
+// Sirus's commands come first, then the vendor's.
+export function matchCommands(input: string, commands: readonly NativeCommand[] = []): CommandMatch[] {
   if (!input.startsWith('/')) return [];
   const typed = input.slice(1);
   if (typed.includes(' ')) return [];
   return [
     ...commandRegistry.filter(spec => spec.name.startsWith(typed)),
-    ...invocableSkills(skills)
-      .filter(skill => skill.name.startsWith(typed))
-      .map(skill => ({
-        name: skill.name,
-        ...(skill.argumentHint ? { args: skill.argumentHint } : {}),
-        description: [skill.description, `(${skill.scope} skill)`].filter(Boolean).join(' '),
+    ...invocableNativeCommands(commands)
+      .filter(command => command.name.startsWith(typed))
+      .map(command => ({
+        name: command.name,
+        ...(command.argumentHint ? { args: command.argumentHint } : {}),
+        description: command.description,
       })),
   ];
 }

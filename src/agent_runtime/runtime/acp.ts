@@ -22,6 +22,7 @@ import type { PermissionMode } from '../permissions/policy';
 import type { Vendor } from '../providers/catalog';
 import { THINKING_LEVELS, type ThinkingLevel, type ToolCallBlock } from '../types';
 import type { ContextUsage } from '../usage';
+import { nativeCommandFrom } from './commands';
 import { launchFor, type SessionParams } from './launch';
 import {
   modeKindOf,
@@ -92,6 +93,23 @@ function selectOption(options: readonly SessionConfigOption[], id: string): Sele
 
 function selectValues(option: SelectOption): string[] {
   return option.options.flatMap(item => ('options' in item ? item.options : [item]).map(choice => choice.value));
+}
+
+// The Agent call a vendor's subagent request came from, as Claude tags it.
+function parentToolUseIdOf(value: unknown): string | null {
+  const meta = (value as { _meta?: { claudeCode?: { parentToolUseId?: unknown } } } | null | undefined)?._meta;
+  const id = meta?.claudeCode?.parentToolUseId;
+  return typeof id === 'string' ? id : null;
+}
+
+// The session a vendor opened for one of its own subagents, when the update
+// announces one. Both adapters send this only to a client that advertises
+// subagent sessions; it is not in the protocol's own list of updates.
+function announcedSubagent(update: SessionUpdate): string | null {
+  const announcement = update as { sessionUpdate: string; subagentSessionId?: unknown };
+  return announcement.sessionUpdate === 'subagent_spawned' && typeof announcement.subagentSessionId === 'string'
+    ? announcement.subagentSessionId
+    : null;
 }
 
 function textOf(blocks: readonly ContentBlock[]): string {
@@ -300,16 +318,51 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
       case 'config_option_update':
         state.configOptions = update.configOptions;
         return null;
+      case 'available_commands_update':
+        return { type: 'commands', commands: update.availableCommands.flatMap(command => nativeCommandFrom(command) ?? []) };
+      case 'plan':
+        return {
+          type: 'plan',
+          entries: update.entries.map(entry => ({
+            content: entry.content,
+            status: entry.status === 'in_progress' || entry.status === 'completed' ? entry.status : 'pending',
+          })),
+        };
       default:
-        // User message echoes, plans, available commands and session info
-        // carry nothing the transcript records.
+        // User message echoes and session info carry nothing the transcript
+        // records.
         return null;
     }
   }
 
+  // The sessions the vendor opened on its own for a subagent of one of ours,
+  // by id, and the session each works for. Sirus advertises no subagent
+  // sessions, so neither adapter should announce one; if one does, what it
+  // asks still reaches the user.
+  const subagentOwners = new Map<string, SessionState>();
+
+  // Who answers a request naming a session this client never opened: the
+  // session whose subagent it is, known from its announcement or from the
+  // Agent call Claude says it came from. A request from a fork already
+  // closed matches neither and is cancelled, as before.
+  function answeringSession(sessionId: string, request: unknown): SessionState | undefined {
+    const own = sessions.get(sessionId) ?? subagentOwners.get(sessionId);
+    if (own) return own;
+    const parentCall = parentToolUseIdOf(request);
+    return parentCall ? [...sessions.values()].find(state => state.toolCalls.has(parentCall)) : undefined;
+  }
+
   // An update for a session nobody is listening to any more — a fork closed
-  // while the vendor was still streaming — is dropped.
+  // while the vendor was still streaming — is dropped, and so is anything a
+  // vendor's own subagent streams: only its announcement is kept, so its
+  // requests can be routed.
   function receive(sessionId: string, update: SessionUpdate): void {
+    const announced = announcedSubagent(update);
+    if (announced) {
+      const owner = sessions.get(sessionId) ?? subagentOwners.get(sessionId);
+      if (owner) subagentOwners.set(announced, owner);
+      return;
+    }
     const state = sessions.get(sessionId);
     if (!state) return;
     const reduced = reduce(state, update);
@@ -322,7 +375,7 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
   }
 
   async function permission(request: RequestPermissionRequest): Promise<RequestPermissionResponse> {
-    const state = sessions.get(request.sessionId);
+    const state = answeringSession(request.sessionId, request.toolCall);
     const signal = state?.turn?.signal;
     if (!state || !signal || signal.aborted) return CANCELLED;
     try {
@@ -337,7 +390,7 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
   // adapter is still starting up), has nobody to answer it.
   async function elicitation(request: CreateElicitationRequest): Promise<CreateElicitationResponse> {
     const sessionId = 'sessionId' in request && typeof request.sessionId === 'string' ? request.sessionId : null;
-    const state = sessionId ? sessions.get(sessionId) : undefined;
+    const state = sessionId ? answeringSession(sessionId, request) : undefined;
     const signal = state?.turn?.signal;
     if (!state || !signal || signal.aborted) return CANCELLED_ELICITATION;
     if (!state.hooks.onElicitation) return DECLINED;
@@ -379,7 +432,6 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
       force.unref();
       child.once('exit', () => clearTimeout(force));
     }
-    launch.cleanup();
   }
 
   // Ends one forked session: stop routing to it and tell the adapter to drop

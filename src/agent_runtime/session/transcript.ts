@@ -1,5 +1,5 @@
 import path from 'path';
-import { textOf, type Message, type ToolCallBlock } from '../types';
+import { isPlanCall, textOf, type Message, type ToolCallBlock } from '../types';
 
 export { textOf };
 
@@ -93,6 +93,9 @@ export function transcriptText(entries: readonly Message[]): string {
         if (block.text) lines.push(`${speaker}: ${block.text}`);
       } else if (block.type === 'image') {
         lines.push(`${speaker}: [attached image ${path.basename(block.path)}]`);
+      } else if (block.type === 'tool_call' && isPlanCall(block)) {
+        const checklist = block.content.flatMap(item => item.type === 'text' ? [item.text] : []).join('\n');
+        lines.push(`${speaker} plan:`, checklist);
       } else if (block.type === 'tool_call') {
         const outcome = block.status === 'failed' ? ' (failed)' : block.status === 'completed' ? '' : ` (${block.status})`;
         lines.push(`${speaker} ${VERBS[block.kind]}: ${block.title}${outcome}`);

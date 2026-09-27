@@ -12,6 +12,7 @@ import type { PermissionMode } from '../permissions/policy';
 import type { Vendor } from '../providers/catalog';
 import type {
   ImageBlock,
+  PlanEntry,
   ThinkingLevel,
   ToolCallBlock,
   ToolCallContent,
@@ -20,6 +21,7 @@ import type {
 } from '../types';
 import type { ContextUsage } from '../usage';
 import { startAcpRuntime } from './acp';
+import type { NativeCommand } from './commands';
 
 // A runtime is one agent process plus one ACP session inside it: the vendor's
 // own harness running the vendor's own tools, reached through the protocol.
@@ -71,7 +73,11 @@ export type RuntimeUpdate =
   | { type: 'compaction'; status: 'in_progress' | 'completed' | 'failed' | 'cancelled'; summary?: string }
   // The vendor changed the session's mode, on request or on its own. Kind is
   // null when the vendor did not tag the mode.
-  | { type: 'mode'; modeId: string; kind: ModeKind | null };
+  | { type: 'mode'; modeId: string; kind: ModeKind | null }
+  // The slash commands the vendor's harness offers now, the whole list.
+  | { type: 'commands'; commands: NativeCommand[] }
+  // The agent's plan, the whole of it: Claude's todo list, Codex's plan.
+  | { type: 'plan'; entries: PlanEntry[] };
 
 export interface PromptInput {
   text: string;

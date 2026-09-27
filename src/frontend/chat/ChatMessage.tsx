@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import type {
-	CompactionBlock,
-	ImageBlock,
-	Message,
-	MessageBlock,
-	ToolCallBlock,
-	ToolCallDiff,
-	ToolCallStatus,
-	ToolKind,
+import {
+	isPlanCall,
+	planEntriesOf,
+	type CompactionBlock,
+	type ImageBlock,
+	type Message,
+	type MessageBlock,
+	type PlanEntry,
+	type ToolCallBlock,
+	type ToolCallDiff,
+	type ToolCallStatus,
+	type ToolKind,
 } from '../../agent_runtime/types';
 import { Box, Text, type DOMElement } from 'ink';
 import { theme } from '../styles/theme';
@@ -167,7 +170,13 @@ interface ToolRun {
 	calls: ToolCallBlock[];
 }
 
-export type MessageSegment = MessageBlock | ToolRun;
+// An agent's plan, shown open as a checklist rather than as a call.
+interface PlanSegment {
+	type: 'plan';
+	call: ToolCallBlock;
+}
+
+export type MessageSegment = MessageBlock | ToolRun | PlanSegment;
 
 // A call that is part of a run of ordinary tool calls, which a group folds
 // away behind "Ran N commands". A SpawnAgent call is not: its row is a
@@ -182,6 +191,11 @@ export function messageSegments(content: readonly MessageBlock[]): MessageSegmen
 	const segments: MessageSegment[] = [];
 	for (let index = 0; index < content.length;) {
 		const block = content[index];
+		if (block.type === 'tool_call' && isPlanCall(block)) {
+			segments.push({ type: 'plan', call: block });
+			index++;
+			continue;
+		}
 		if (!groupable(block)) {
 			segments.push(block);
 			index++;
@@ -196,6 +210,37 @@ export function messageSegments(content: readonly MessageBlock[]): MessageSegmen
 		else segments.push(...calls);
 	}
 	return segments;
+}
+
+const PLAN_MARKS: Record<PlanEntry['status'], { mark: string; color: string }> = {
+	completed: { mark: '✔', color: theme.success },
+	in_progress: { mark: '▸', color: theme.accent },
+	pending: { mark: '○', color: theme.textSubtle },
+};
+
+// The plan as the agent last set it: how far along it is, then every step
+// with its state, the step in hand picked out.
+function PlanRow({ call }: { call: ToolCallBlock }) {
+	const entries = planEntriesOf(call);
+	const done = entries.filter(entry => entry.status === 'completed').length;
+	return (
+		<Box flexDirection="column" paddingX={1} paddingY={1}>
+			<Text color={theme.textMuted}>  Plan · {done} of {entries.length} done</Text>
+			{entries.map((entry, index) => (
+				<Box key={index} marginLeft={4}>
+					<Box width={2} flexShrink={0}>
+						<Text color={PLAN_MARKS[entry.status].color}>{PLAN_MARKS[entry.status].mark}</Text>
+					</Box>
+					<Text
+						color={entry.status === 'in_progress' ? theme.text : theme.textMuted}
+						strikethrough={entry.status === 'completed'}
+					>
+						{entry.content}
+					</Text>
+				</Box>
+			))}
+		</Box>
+	);
 }
 
 function finished(call: ToolCallBlock): boolean {
@@ -479,6 +524,8 @@ export function ChatMessage({
 						return <ImageLine key={index} image={block} />;
 					case 'thought':
 						return <ThoughtRow key={index} text={block.text} />;
+					case 'plan':
+						return <PlanRow key={index} call={block.call} />;
 					case 'compaction':
 						return <CompactionRule key={index} block={block} participantColors={participantColors} />;
 					case 'tool_run':

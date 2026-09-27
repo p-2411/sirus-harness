@@ -4,11 +4,11 @@ import { isMemoryAccessEnabled } from '../memory-access';
 import { requestPermission } from '../permissions/approvals';
 import { requestAnswers } from '../permissions/questions';
 import { DEFAULT_PERMISSION_MODE, type PermissionMode } from '../permissions/policy';
-import { getSystemPrompt, systemPromptFor } from '../prompt';
+import { sirusPrompt } from '../prompt';
 import { jevApiKey, routeSessionModel, routingCandidates } from '../router';
 import { servableModelIds, servesModel } from '../providers';
 import { DEFAULT_MODEL, vendorOf } from '../providers/catalog';
-import { skillCommands, type SkillCommand } from '../runtime/skills';
+import { nativeCommands, type NativeCommand } from '../runtime/commands';
 import { registerToolSession, sirusMcpServerEntry, unregisterToolSession } from '../tools/server';
 import {
   notifySubagents,
@@ -274,7 +274,7 @@ export class Session {
     const host: RuntimeHost = {
       sessionId: this.id,
       directory: this.directory,
-      systemPrompt: agent => systemPromptFor(this.directory, agent.name, false),
+      systemPrompt: agent => sirusPrompt(agent.name),
       mcpServer: agent => sirusMcpServerEntry(this.id, agent.name),
       permissionMode: () => this.permissionMode,
       requestPermission: (agent, request, signal) =>
@@ -285,7 +285,7 @@ export class Session {
       forWorker: (id, directory) => ({
         ...host,
         directory,
-        systemPrompt: () => getSystemPrompt(directory, 'sirus', true),
+        systemPrompt: () => sirusPrompt('sirus', true),
         mcpServer: () => sirusMcpServerEntry(this.id, `subagent:${id}`),
         forWorker: () => { throw new Error('A subagent cannot spawn a subagent'); },
       }),
@@ -795,12 +795,13 @@ export class Session {
     return this.directory;
   }
 
-  // The skills the user can call by name: those of the participant a prompt
-  // with no mention goes to, since that is who `/name` reaches.
-  getSkills(): SkillCommand[] {
+  // The vendor's own commands the user can call by name: those of the
+  // participant a prompt with no mention goes to, since that is who `/name`
+  // reaches.
+  getNativeCommands(): NativeCommand[] {
     const agent = this.roster.default;
     const vendor = vendorOf(agent.model);
-    return vendor ? skillCommands(vendor, agent.directory) : [];
+    return vendor ? nativeCommands(vendor, agent.directory) : [];
   }
 
   getParticipants(): Participant[] {

@@ -1,7 +1,7 @@
 import { isAbortError } from '../../abort';
 import type { SessionAgent, TurnInput } from '../agent';
 import { vendorOf } from '../providers/catalog';
-import { skillPrompt } from '../runtime/skills';
+import { nativePrompt } from '../runtime/commands';
 import { textOf, type ImageBlock, type Message } from '../types';
 import { keyOf, type ParticipantRoster } from './roster';
 import type { Timeline } from './timeline';
@@ -21,7 +21,7 @@ export interface TurnRunnerOptions {
 }
 
 // What a participant is prompted with: the user's own words on the first
-// round, with a `/skill` the user typed put in the participant's vendor's
+// round, with a `/command` the user typed put in the participant's vendor's
 // words, and the whole message of each peer that mentioned it afterwards,
 // attributed. Only the mentioning paragraph would save tokens but drop
 // context the sender assumed was shared.
@@ -32,7 +32,7 @@ function promptFor(invocation: Invocation): TurnInput {
     const vendor = vendorOf(participant.model);
     const text = textOf(first);
     return {
-      text: vendor ? skillPrompt(text, vendor, participant.directory) : text,
+      text: vendor ? nativePrompt(text, vendor, participant.directory) : text,
       images: first.content.filter((block): block is ImageBlock => block.type === 'image'),
     };
   }

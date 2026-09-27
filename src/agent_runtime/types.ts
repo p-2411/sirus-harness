@@ -1,3 +1,5 @@
+import crypto from 'crypto';
+
 export interface TextBlock {
   type: 'text';
   text: string;
@@ -80,6 +82,47 @@ export interface ToolCallBlock {
 }
 
 export type MessageBlock = TextBlock | ImageBlock | ThoughtBlock | CompactionBlock | ToolCallBlock;
+
+// One step of an agent's plan: Claude's todo list and Codex's plan both
+// arrive as a list of these, the whole plan each time.
+export interface PlanEntry {
+  content: string;
+  status: 'pending' | 'in_progress' | 'completed';
+}
+
+// A plan is recorded as a call of its own, the way both vendors' terminals
+// show a plan update in the flow of the turn: its entries as the input, and
+// a checklist as text for anything that reads calls as text. Ids are
+// Sirus's, so they never meet a vendor's.
+const PLAN_CALL_PREFIX = 'sirus-plan-';
+const PLAN_MARKS: Record<PlanEntry['status'], string> = { pending: '[ ]', in_progress: '[~]', completed: '[x]' };
+
+export function planCall(entries: readonly PlanEntry[], id: string = `${PLAN_CALL_PREFIX}${crypto.randomUUID()}`): ToolCallBlock {
+  return {
+    type: 'tool_call',
+    id,
+    title: 'Plan',
+    kind: 'think',
+    status: 'completed',
+    locations: [],
+    content: [{ type: 'text', text: entries.map(entry => `${PLAN_MARKS[entry.status]} ${entry.content}`).join('\n') }],
+    input: { entries },
+  };
+}
+
+export function isPlanCall(call: ToolCallBlock): boolean {
+  return call.id.startsWith(PLAN_CALL_PREFIX);
+}
+
+// The entries a plan call records; empty for anything else.
+export function planEntriesOf(call: ToolCallBlock): PlanEntry[] {
+  if (!isPlanCall(call)) return [];
+  const input = call.input as { entries?: unknown } | undefined;
+  if (!Array.isArray(input?.entries)) return [];
+  return input.entries.filter((entry): entry is PlanEntry => typeof entry === 'object' && entry !== null
+    && typeof (entry as PlanEntry).content === 'string'
+    && ['pending', 'in_progress', 'completed'].includes((entry as PlanEntry).status));
+}
 
 // Marks every tool call still pending or running as failed, for a turn that
 // will report nothing more about them. True if any was.

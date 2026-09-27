@@ -294,9 +294,7 @@ describe('approval prompt', () => {
     expect(output).toContain('src/app.ts');
     expect(output).toContain('- old');
     expect(output).toContain('+ new');
-    for (const label of ['Allow once', 'Allow for this session', 'Deny', 'Deny for this session']) {
-      expect(output).toContain(label);
-    }
+    for (const option of OPTIONS) expect(output).toContain(option.name);
   });
 
   test('offers only what the vendor offered', () => {
@@ -313,13 +311,22 @@ describe('approval prompt', () => {
 
     expect(output).toContain('@sirus wants to run bun test');
     expect(output).toContain('$ bun test --coverage');
-    expect(output).not.toContain('Allow for this session');
-    // Keys and decisions follow the option kinds, in the vendor's order.
-    expect(approvalChoices(approval({
+    expect(output).not.toContain('Yes, and don’t ask again');
+    // Keys follow the option kinds, in the vendor's order, and each choice
+    // answers with its own option.
+    const call: ToolCallBlock = {
       type: 'tool_call', id: 'call-2', kind: 'execute', title: 'bun test',
       status: 'pending', locations: [], content: [],
-    })).map(choice => `${choice.key}:${choice.decision}`))
-      .toEqual(['y:allow', 'a:allow-session', 'n:deny', 'd:deny']);
+    };
+    expect(approvalChoices(approval(call)).map(choice => `${choice.key}:${JSON.stringify(choice.decision)}`))
+      .toEqual(['y:{"optionId":"allow"}', 'a:{"optionId":"always"}', 'n:{"optionId":"reject"}', 'd:{"optionId":"never"}']);
+    // Two options of one kind are both offered, numbered.
+    expect(approvalChoices(approval(call, [
+      { optionId: 'once', name: 'Yes, proceed', kind: 'allow_once' },
+      { optionId: 'decline', name: 'No, continue without running it', kind: 'reject_once' },
+      { optionId: 'cancel', name: 'No, and tell Codex what to do differently', kind: 'reject_once' },
+    ])).map(choice => `${choice.key}:${choice.label}`))
+      .toEqual(['1:Yes, proceed', '2:No, continue without running it', '3:No, and tell Codex what to do differently']);
   });
 
   test('cuts an unrecognised input down to a readable line', () => {
