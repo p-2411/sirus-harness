@@ -17,6 +17,7 @@ import {
   MODE_KINDS,
   runtimeGeneration,
   trackRuntime,
+  type ForkOptions,
   type ModeKind,
   type Runtime,
   type RuntimeOptions,
@@ -284,17 +285,7 @@ export class SessionAgent {
     const source = owner.runtime;
     if (!source || this.runtime) return false;
     try {
-      const forked = await source.fork({
-        directory: this.host.directory,
-        model: this.model,
-        thinkingLevel: this.thinkingLevel,
-        systemPrompt: this.host.systemPrompt(this),
-        permissionMode: this.host.permissionMode(),
-        mcpServer: await this.host.mcpServer(this),
-        onPermission: (request, promptSignal) => this.askPermission(request, promptSignal),
-        onElicitation: (request, promptSignal) => this.askUser(request, promptSignal),
-        onUpdate: update => this.hear(update),
-      });
+      const forked = await source.fork(await this.runtimeOptions());
       this.runtime = trackRuntime(forked);
       this.generation = runtimeGeneration();
       // The fork runs on the credential the owner's process was started on,
@@ -385,19 +376,7 @@ export class SessionAgent {
     if (this.runtime) return { runtime: this.runtime, fresh: false };
     const env = source && vendorOf(this.model) ? sourceEnvironment(this.vendor, source) : { ...process.env };
     const generation = runtimeGeneration();
-    const runtime = await createRuntime({
-      vendor: this.vendor,
-      model: this.model,
-      thinkingLevel: this.thinkingLevel,
-      directory: this.host.directory,
-      systemPrompt: this.host.systemPrompt(this),
-      env,
-      mcpServer: await this.host.mcpServer(this),
-      permissionMode: this.host.permissionMode(),
-      onPermission: (request, promptSignal) => this.askPermission(request, promptSignal),
-      onElicitation: (request, promptSignal) => this.askUser(request, promptSignal),
-      onUpdate: update => this.hear(update),
-    }, signal);
+    const runtime = await createRuntime({ ...await this.runtimeOptions(), vendor: this.vendor, env }, signal);
     if (signal.aborted) {
       runtime.dispose();
       throw abortReason(signal);
@@ -408,6 +387,23 @@ export class SessionAgent {
     this.context = runtime.context;
     if (source) this.provider?.markActive(this.runtimeId, source);
     return { runtime, fresh: true };
+  }
+
+  // What every runtime of this agent is opened with, started fresh or forked:
+  // where and on what it runs, the session's prompt, mode and tools, and the
+  // callbacks that bring what it reports and escalates back to this agent.
+  private async runtimeOptions(): Promise<ForkOptions> {
+    return {
+      directory: this.host.directory,
+      model: this.model,
+      thinkingLevel: this.thinkingLevel,
+      systemPrompt: this.host.systemPrompt(this),
+      permissionMode: this.host.permissionMode(),
+      mcpServer: await this.host.mcpServer(this),
+      onPermission: (request, promptSignal) => this.askPermission(request, promptSignal),
+      onElicitation: (request, promptSignal) => this.askUser(request, promptSignal),
+      onUpdate: update => this.hear(update),
+    };
   }
 
   private hear(update: RuntimeUpdate): void {
