@@ -35,3 +35,16 @@ export function writeJson(filePath: string, value: unknown): boolean {
     }
   }
 }
+
+// A file that is there but that this build cannot read, a hand edit that broke
+// the JSON or a version it does not know, is renamed beside itself before
+// anything is written over it, so what it held can still be recovered. True
+// once nothing is left at the path; a caller that gets `false` must not write.
+export function setAside(filePath: string): boolean {
+  try {
+    renameSync(filePath, `${filePath}.unreadable-${Date.now()}`);
+    return true;
+  } catch {
+    return !existsSync(filePath);
+  }
+}

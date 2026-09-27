@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { Session } from '../../src/agent_runtime/session';
@@ -19,6 +19,7 @@ import {
   saveNotificationPreference,
   loadJevApiKey,
   loadJevKeyRequested,
+  openSettings,
   saveJevApiKey,
   saveJevKeyRequested,
 } from '../../src/persistence';
@@ -381,6 +382,59 @@ describe('subscription preference persistence', () => {
       subscriptions: { claude: 'yes', gpt: false },
     }));
     expect(loadSubscriptionPreferences(directory)).toEqual({ claude: false, gpt: false });
+  });
+
+  test('a section this build cannot read falls back alone and survives saves to the others', () => {
+    const file = path.join(directory, 'settings.json');
+    const sources = { claude: [{ id: 'work', type: 'api' as const, key: 'sk-ant-work' }] };
+    writeFileSync(file, JSON.stringify({
+      version: 1,
+      subscriptions: { claude: true, gpt: false },
+      providerSources: sources,
+      apiKeys: { gpt: 'sk-openai-test' },
+      // A value a newer build added to the enum.
+      notifications: 'mentions',
+      futureSetting: { kept: true },
+    }));
+    expect(loadNotificationPreference(directory)).toBe('background');
+    expect(loadApiKeys(directory)).toEqual({ gpt: 'sk-openai-test' });
+    expect(loadSubscriptionPreferences(directory)).toEqual({ claude: true, gpt: false });
+    expect(openSettings(directory).get('providerSources')).toEqual(sources);
+
+    expect(saveMemoryAccessPreference(false, directory)).toBe(true);
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({
+      version: 1,
+      subscriptions: { claude: true, gpt: false },
+      providerSources: sources,
+      apiKeys: { gpt: 'sk-openai-test' },
+      notifications: 'mentions',
+      futureSetting: { kept: true },
+      memory: { enabled: false },
+      jev: { keyRequested: false },
+    });
+
+    // Changing the setting itself replaces what this build could not read.
+    expect(saveNotificationPreference('always', directory)).toBe(true);
+    expect(loadNotificationPreference(directory)).toBe('always');
+    expect(loadApiKeys(directory)).toEqual({ gpt: 'sk-openai-test' });
+  });
+
+  test('sets a settings file it cannot read aside before writing over it', () => {
+    for (const unreadable of [
+      '{ "version": 1, "apiKeys": { "claude": "sk-ant-kept" }, }',
+      JSON.stringify({ version: 2, apiKeys: { claude: 'sk-ant-kept' } }),
+    ]) {
+      rmSync(directory, { recursive: true, force: true });
+      mkdirSync(directory);
+      writeFileSync(path.join(directory, 'settings.json'), unreadable);
+      expect(loadApiKeys(directory)).toEqual({});
+
+      expect(saveNotificationPreference('always', directory)).toBe(true);
+      expect(loadNotificationPreference(directory)).toBe('always');
+      const aside = readdirSync(directory).filter(name => name.startsWith('settings.json.unreadable-'));
+      expect(aside).toHaveLength(1);
+      expect(readFileSync(path.join(directory, aside[0]!), 'utf8')).toBe(unreadable);
+    }
   });
 });
 
