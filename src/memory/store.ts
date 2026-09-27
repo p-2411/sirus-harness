@@ -131,15 +131,32 @@ class SqliteMemoryStore implements MemoryStore {
     this.database.close();
   }
 
+  // Whether the name already exists is settled by the write itself, not before
+  // the embedding is awaited, since a save or delete of the same name may run
+  // in between. Any vector already under the id goes first: the old one on an
+  // update, or on an insert one an older build left behind for a deleted
+  // memory whose id is now reused.
   async save(target: MemoryTarget, input: MemoryInput): Promise<Memory> {
     const scoped = memoryTarget(target.scope, target.directory);
-    const existing = this.get(scoped, input.name);
     const memory = validateMemoryInput(scoped.scope, input);
     await this.index.ensure();
     const embedding = await this.embed(memoryEmbeddingText(memory.name, memory.content, memory.links));
-    return existing
-      ? this.update(scoped, existing.id, memory, embedding)
-      : this.add(scoped, memory, embedding);
+    const scopeId = this.scopeId(scoped, true)!;
+    const write = this.database.transaction(() => {
+      const { id } = this.database.query<{ id: number }, [number, string, string, string, string]>(`
+        INSERT INTO memories (scope_id, name, content, links_json, embedding_model)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(scope_id, name) DO UPDATE
+        SET content = excluded.content, links_json = excluded.links_json,
+            embedding_model = excluded.embedding_model,
+            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        RETURNING id
+      `).get(scopeId, memory.name, memory.content, JSON.stringify(memory.links), this.embedder.model)!;
+      this.index.remove(id);
+      this.index.insert(id, embedding, scopeId);
+      return id;
+    });
+    return this.memoryById(write.immediate())!;
   }
 
   get(target: MemoryTarget, name: string): Memory | undefined {
@@ -189,41 +206,6 @@ class SqliteMemoryStore implements MemoryStore {
         distance: row.distance,
         similarity: 1 - row.distance,
       }));
-  }
-
-  private add(target: MemoryTarget, input: ValidMemoryInput, embedding: Float32Array): Memory {
-    const scopeId = this.scopeId(target, true)!;
-    const insert = this.database.transaction(() => {
-      const result = this.database.query(`
-        INSERT INTO memories (scope_id, name, content, links_json, embedding_model)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(scopeId, input.name, input.content, JSON.stringify(input.links), this.embedder.model);
-      const id = Number(result.lastInsertRowid);
-      this.index.insert(id, embedding, scopeId);
-      return id;
-    });
-    return this.memoryById(insert.immediate())!;
-  }
-
-  private update(
-    target: MemoryTarget,
-    id: number,
-    input: ValidMemoryInput,
-    embedding: Float32Array,
-  ): Memory {
-    const scopeId = this.scopeId(target, false)!;
-    const update = this.database.transaction(() => {
-      this.database.query(`
-        UPDATE memories
-        SET content = ?, links_json = ?, embedding_model = ?,
-            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-        WHERE id = ?
-      `).run(input.content, JSON.stringify(input.links), this.embedder.model, id);
-      this.index.remove(id);
-      this.index.insert(id, embedding, scopeId);
-    });
-    update.immediate();
-    return this.memoryById(id)!;
   }
 
   private visibleScopeIds(scope: MemorySearchScope, directory: string): number[] {

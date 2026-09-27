@@ -93,7 +93,15 @@ export class VectorIndex {
       const insertVector = this.database.query(
         'INSERT INTO memory_vectors(rowid, embedding, scope_id) VALUES (?, ?, ?)',
       );
-      for (const vector of vectors) insertVector.run(vector.id, vector.embedding, vector.scopeId);
+      // A delete does not wait for the rebuild, so a memory may be gone by
+      // now. A vector put back for it would take a place among the nearest
+      // results with no memory behind it.
+      const remaining = new Set(
+        this.database.query<{ id: number }, []>('SELECT id FROM memories').all().map(row => row.id),
+      );
+      for (const vector of vectors) {
+        if (remaining.has(vector.id)) insertVector.run(vector.id, vector.embedding, vector.scopeId);
+      }
     });
     rebuild.immediate();
     this.needsReindex = false;

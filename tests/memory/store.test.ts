@@ -203,6 +203,52 @@ describe('MemoryStore', () => {
     raw.close();
   });
 
+  test('settles whether a name exists when it writes, not before it embeds', async () => {
+    const store = openMemoryStore({ databasePath, embedder: new TestEmbeddingProvider() });
+    const [first, second] = await Promise.all([
+      store.save(target('project', projectA), { name: 'overlap', content: 'A cat memory.' }),
+      store.save(target('project', projectA), { name: 'overlap', content: 'A dog memory.' }),
+    ]);
+    expect(second.id).toBe(first.id);
+    expect(store.get(target('project', projectA), 'overlap')?.content).toBe('A dog memory.');
+
+    // A save of an existing name that its delete overtakes writes it anew.
+    const saving = store.save(target('project', projectA), { name: 'overlap', content: 'A new cat memory.' });
+    expect(store.delete(target('project', projectA), 'overlap')).toBe(true);
+    expect(await saving).toMatchObject({ name: 'overlap', content: 'A new cat memory.' });
+    await store.save(target('project', projectA), { name: 'later', content: 'A dog memory.' });
+    expect((await store.search('project', projectA, 'pets', 5)).map(memory => memory.name).sort())
+      .toEqual(['later', 'overlap']);
+    store.close();
+  });
+
+  test('leaves a memory deleted during a reindex out of the rebuilt index', async () => {
+    const original = openMemoryStore({ databasePath, embedder: new TestEmbeddingProvider() });
+    await original.save(target('global', projectA), { name: 'kept', content: 'A cat memory.' });
+    await original.save(target('global', projectA), { name: 'deleted', content: 'A dog memory.' });
+    original.close();
+
+    const replacement: EmbeddingProvider = {
+      model: 'test-embedding-v2',
+      dimensions: 2,
+      embed: async text => text.toLowerCase().includes('cat')
+        ? new Float32Array([1, 0])
+        : new Float32Array([0, 1]),
+    };
+    const migrated = openMemoryStore({ databasePath, embedder: replacement });
+    // The search starts the reindex, which reads every memory before it
+    // embeds them; the delete lands while it embeds. A vector left for the
+    // deleted memory would be the nearest one and hide the memory that is left.
+    const searching = migrated.search('global', projectA, 'dog', 1);
+    expect(migrated.delete(target('global', projectA), 'deleted')).toBe(true);
+    expect((await searching).map(memory => memory.name)).toEqual(['kept']);
+
+    // The deleted memory held the highest id, which the next one reuses.
+    const fresh = await migrated.save(target('global', projectA), { name: 'fresh', content: 'A new dog memory.' });
+    expect((await migrated.search('global', projectA, 'dog', 1))[0].id).toBe(fresh.id);
+    migrated.close();
+  });
+
   test('reindexes all scopes when the embedding configuration changes', async () => {
     const original = openMemoryStore({ databasePath, embedder: new TestEmbeddingProvider() });
     await original.save(target('global', projectA), {
