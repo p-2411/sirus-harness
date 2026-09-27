@@ -9,15 +9,16 @@ import type {
   ToolCallUpdate,
 } from '@agentclientprotocol/sdk';
 import { vendorOf, type ListedModel, type Vendor } from '../providers/catalog';
-import type {
-  ImageBlock,
-  PermissionMode,
-  PlanEntry,
-  ThinkingLevel,
-  ToolCallBlock,
-  ToolCallContent,
-  ToolCallLocation,
-  ToolKind,
+import {
+  TOOL_KINDS,
+  type ImageBlock,
+  type PermissionMode,
+  type PlanEntry,
+  type ThinkingLevel,
+  type ToolCallBlock,
+  type ToolCallContent,
+  type ToolCallLocation,
+  type ToolKind,
 } from '../types';
 import type { ContextUsage } from '../usage';
 import { startAcpRuntime } from './acp';
@@ -29,9 +30,16 @@ import type { NativeCommand } from './commands';
 // is a launch spec (`./launch`) and the ACP client (`./acp`) is the only code
 // that speaks the wire protocol.
 
-// The tag both adapters put on a session mode's `_meta.kind`, and what
+// The tags both adapters put on a session mode's `_meta.kind`, and what
 // Sirus's own modes map onto.
-export type ModeKind = 'standard' | 'auto_review' | 'full_access';
+const VENDOR_MODE_KINDS = ['standard', 'auto_review', 'full_access'] as const;
+
+export type ModeKind = typeof VENDOR_MODE_KINDS[number];
+
+// Where a compaction the runtime reports stands.
+export const COMPACTION_STATUSES = ['in_progress', 'completed', 'failed', 'cancelled'] as const;
+
+export type CompactionStatus = typeof COMPACTION_STATUSES[number];
 
 export interface RuntimeOptions {
   vendor: Vendor;
@@ -70,7 +78,7 @@ export type RuntimeUpdate =
   // A new call, or an update to one already reported: merge by id.
   | { type: 'tool_call'; call: ToolCallBlock }
   | { type: 'context'; usage: ContextUsage }
-  | { type: 'compaction'; status: 'in_progress' | 'completed' | 'failed' | 'cancelled'; summary?: string }
+  | { type: 'compaction'; status: CompactionStatus; summary?: string }
   // The vendor changed the session's mode, on request or on its own. Kind is
   // null when the vendor did not tag the mode.
   | { type: 'mode'; modeId: string; kind: ModeKind | null }
@@ -208,19 +216,22 @@ export async function createRuntime(options: RuntimeOptions, signal?: AbortSigna
   return trackRuntime(runtime);
 }
 
-// The first vendor mode of the kind Sirus's mode maps onto, in the vendor's
-// order; null when the vendor offers none of that kind.
+// The kind of vendor mode each of Sirus's modes maps onto.
 export const MODE_KINDS: Record<PermissionMode, ModeKind> = {
   ask: 'standard',
   auto: 'auto_review',
   bypass: 'full_access',
 };
 
+// The kind a vendor tagged its mode with; null for an untagged mode or a tag
+// Sirus has no mode for.
 export function modeKindOf(mode: SessionMode): ModeKind | null {
   const kind = mode._meta?.kind;
-  return kind === 'standard' || kind === 'auto_review' || kind === 'full_access' ? kind : null;
+  return (VENDOR_MODE_KINDS as readonly unknown[]).includes(kind) ? kind as ModeKind : null;
 }
 
+// The first vendor mode of the kind Sirus's mode maps onto, in the vendor's
+// order; null when the vendor offers none of that kind.
 export function vendorModeFor(mode: PermissionMode, available: readonly SessionMode[]): SessionMode | null {
   return available.find(candidate => modeKindOf(candidate) === MODE_KINDS[mode]) ?? null;
 }
@@ -230,13 +241,7 @@ export function vendorModeFor(mode: PermissionMode, available: readonly SessionM
 // the block always shows the latest of each field the updates carried.
 
 function toolKind(kind: unknown): ToolKind {
-  switch (kind) {
-    case 'read': case 'edit': case 'delete': case 'move': case 'search':
-    case 'execute': case 'think': case 'fetch': case 'switch_mode':
-      return kind;
-    default:
-      return 'other';
-  }
+  return (TOOL_KINDS as readonly unknown[]).includes(kind) ? kind as ToolKind : 'other';
 }
 
 function toolContent(content: ToolCall['content'] | ToolCallUpdate['content']): ToolCallContent[] | undefined {

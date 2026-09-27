@@ -83,11 +83,13 @@ export interface ToolCallBlock {
 
 export type MessageBlock = TextBlock | ImageBlock | ThoughtBlock | CompactionBlock | ToolCallBlock;
 
+export const PLAN_ENTRY_STATUSES = ['pending', 'in_progress', 'completed'] as const;
+
 // One step of an agent's plan: Claude's todo list and Codex's plan both
 // arrive as a list of these, the whole plan each time.
 export interface PlanEntry {
   content: string;
-  status: 'pending' | 'in_progress' | 'completed';
+  status: typeof PLAN_ENTRY_STATUSES[number];
 }
 
 // A plan is recorded as a call of its own, the way both vendors' terminals
@@ -121,7 +123,7 @@ export function planEntriesOf(call: ToolCallBlock): PlanEntry[] {
   if (!Array.isArray(input?.entries)) return [];
   return input.entries.filter((entry): entry is PlanEntry => typeof entry === 'object' && entry !== null
     && typeof (entry as PlanEntry).content === 'string'
-    && ['pending', 'in_progress', 'completed'].includes((entry as PlanEntry).status));
+    && PLAN_ENTRY_STATUSES.includes((entry as PlanEntry).status));
 }
 
 // Marks every tool call still pending or running as failed, for a turn that

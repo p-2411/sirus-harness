@@ -19,14 +19,16 @@ import { abortable, abortReason, throwIfAborted } from '../../abort';
 import { imageData } from '../../images';
 import { SIRUS_VERSION } from '../../version';
 import type { ListedModel, Vendor } from '../providers/catalog';
-import { THINKING_LEVELS, type PermissionMode, type ThinkingLevel, type ToolCallBlock } from '../types';
+import { PLAN_ENTRY_STATUSES, THINKING_LEVELS, type PermissionMode, type ThinkingLevel, type ToolCallBlock } from '../types';
 import type { ContextUsage } from '../usage';
 import { nativeCommandFrom } from './commands';
 import { launchFor, type Launch, type SessionParams } from './launch';
 import {
+  COMPACTION_STATUSES,
   modeKindOf,
   toolCallBlockFrom,
   vendorModeFor,
+  type CompactionStatus,
   type ForkOptions,
   type ModeKind,
   type PromptInput,
@@ -140,12 +142,8 @@ const TURN_CONTENT = new Set<SessionUpdate['sessionUpdate']>([
   'compaction_update',
 ]);
 
-type CompactionStatus = 'in_progress' | 'completed' | 'failed' | 'cancelled';
-
 function compactionStatus(status: string): CompactionStatus | null {
-  return status === 'in_progress' || status === 'completed' || status === 'failed' || status === 'cancelled'
-    ? status
-    : null;
+  return (COMPACTION_STATUSES as readonly string[]).includes(status) ? status as CompactionStatus : null;
 }
 
 // What a failed request actually said. Both adapters answer a refusal that
@@ -359,7 +357,7 @@ export async function startAcpRuntime(
           type: 'plan',
           entries: update.entries.map(entry => ({
             content: entry.content,
-            status: entry.status === 'in_progress' || entry.status === 'completed' ? entry.status : 'pending',
+            status: PLAN_ENTRY_STATUSES.includes(entry.status) ? entry.status : 'pending',
           })),
         };
       default:
