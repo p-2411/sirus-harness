@@ -20,7 +20,7 @@ Run `sirus` on its own to open the current directory. The npm package includes t
 Inside Sirus:
 
 1. Type `/login` and choose Claude or ChatGPT, then sign in with an existing subscription or enter an API key through the masked input. Repeat `/login` to connect more accounts—as many as you want.
-2. Optionally type `/model` and pick a model. Left alone, a new session asks Jev, TypeSafe AI's routing model, which of your connected vendors' latest models fits the task in your first prompt; see "A model picked for the task" below.
+2. Optionally type `/model` and pick a model. New sessions use your saved model preference, or `gpt-5.6-luna` by default.
 3. Give Sirus a task:
 
 ```text
@@ -71,14 +71,6 @@ Then address that participant by name:
 
 Each participant keeps its own conversation. It reads the prompts you address to it, and whatever another participant says in a message that mentions it, attributed to the sender. A prompt that mentions nobody goes to `@sirus`. Set a participant's model with `/model @reviewer <model>` and reasoning depth with `/thinking @reviewer high`. Use `/model` to see the model names supported by your installation.
 
-### A model picked for the task
-
-With a TypeSafe AI key, a new session does not start on a fixed model. Sirus asks for the key once, on the first launch without one; `/jev` shows whether Jev is on and sets or removes the key later, and a `JEV_API` variable in the environment is used as it is. Without a key nothing is routed and every model stays on its default. With one, a new session does not start on a fixed model. Its first prompt goes to Jev, a fast decision model from TypeSafe AI, which chooses between the latest model of each vendor you have connected and that still has allowance: today `claude-fable-5-1` and `gpt-6-astra`. Jev sees the prompt, the names of files it mentions and the project's name, and the profile Sirus's catalog keeps of each model: what it is good at, its published benchmark results, what people report from using it, and what it costs, alongside how much of that vendor's allowance is left. Until the pick lands the model label under the input stays empty; it shows the pick like any model, or your own choice as soon as you make one.
-
-Jev also picks for subagents, unless `/model subagent` has pinned one. Each spawn asks it for the model and the reasoning depth that fit that task, choosing among every model the catalog offers for delegated work rather than only the latest ones, so routine work goes somewhere cheap and quick and the hard cases somewhere capable.
-
-Your own choice comes first: `/model <model>` before the first prompt pins the session to it and Jev is not asked. Anything short of a confident pick keeps the model in hand: no key, no answer in time, an error, or an answer Jev is unsure of leaves a new session on the saved `/model` default or `gpt-5.6-luna` as before, and a subagent on its owner's model and depth. With one usable vendor there is nothing to choose and the session takes that vendor's latest model. A vendor whose subscription allowance the sidebar shows at 0% is left out of the choice.
-
 ### Delegate work, follow the results
 
 For work that can be split into independent tasks, Sirus can spawn subagents that work in the background. Each receives a focused assignment, and the agent that spawned it carries on at once. When a subagent ends, its report appears under the SpawnAgent row that started it, saying what it did, what it changed, and where its work is; the row opens itself so you do not have to go looking. The agent that spawned it is told the same thing, and that report starts its next turn. If the session is busy the report waits for the turn to finish, and goes ahead of whatever you queued behind it.
@@ -89,7 +81,7 @@ Named participants are collaborators you can address and follow in the chat; sub
 
 You can follow them yourself. The strip above the status row shows one line, for the subagent that changed last: its id, its model, how long it has been running, its latest tool call, and its branch, with a counter such as `1/3` when others are behind it. Press `↓` from the input bar to step onto the strip; the order is fixed as you arrive, `↑`/`↓` walk it, `enter` opens that subagent's actions, and `↑` past the first line or `Esc` hands the keyboard back to your draft. A subagent that ends keeps its line for a second, dimmed, saying how it ended, and is then off the strip. `/agents` lists the session's subagents and offers to show one's record, send it a message, cancel it, or dismiss its line. Runs are saved with the session: one still working when you quit comes back marked interrupted, with its record, and its report reaches its owner on your next prompt. Nothing restarts on its own.
 
-A subagent runs on the model and reasoning depth Jev picks for its task. Use `/model subagent <model>` to put every subagent in the session on one model instead, `/model subagent` to see which, and `/model subagent default` to hand the choice back.
+A subagent inherits its owner's model and reasoning depth unless the spawning agent selects another. Use `/model subagent <model>` to fix the subagent model for the session, `/model subagent` to see it, and `/model subagent default` to restore the default behavior.
 
 ### Explore with an undo button
 
@@ -195,7 +187,6 @@ Use `/usage` to see reported subscription allowance and how full each participan
 | `/rename <name>` | Give the current session a useful name. |
 | `/thinking` | Show or change reasoning depth. |
 | `/agents` | Watch, message, cancel, or clear the session's subagents. |
-| `/jev` | Set or remove the TypeSafe AI key Jev picks models with. |
 | `/undo` / `/rewind` | Choose what to restore from a checkpoint. |
 | `/notify` | Configure desktop notifications. |
 | `/update` | Install the latest release. |

@@ -11,16 +11,11 @@ import { readJson, writeJson } from '../../persistence/atomicJson';
 // models its harness offers, and `/model` lists those (see "What the vendors
 // offer" below), so a model Claude Code or Codex adds is there without a
 // change here. MODELS is what Sirus knows about a model beyond its name,
-// which is what Jev routes by. Profiling a model is one row in MODELS.
+// including the strengths agents see when choosing a model for delegated work.
 // Adding a vendor is one row in VENDOR_TABLE plus a launch spec in
 // src/agent_runtime/runtime/launch.ts.
 
-// What Jev is told about a model when it routes. Four kinds of evidence, kept
-// apart because they answer different questions: what the model is for, what
-// it measurably does, what living with it is like, and what it costs.
-// Researched, and the owner's to correct; it decides the routing more than
-// anything else. A model's remaining allowance is not here: that is live, and
-// the router adds it per candidate.
+// Researched model strengths, benchmarks, user reports, and pricing.
 export interface ModelProfile {
   // What the model is good at and what it is wasted on, in prose.
   strengths: string;
@@ -41,9 +36,6 @@ export interface ModelProfile {
 export interface ModelInfo {
   id: string;
   vendor: Vendor;
-  // The vendor's newest model: what Jev chooses between when it picks a new
-  // session's model. One per vendor.
-  latest?: true;
   profile: ModelProfile;
 }
 
@@ -225,7 +217,6 @@ export const MODELS: readonly ModelInfo[] = [
   {
     id: 'gpt-6-astra',
     vendor: 'gpt',
-    latest: true,
     profile: {
       strengths: 'OpenAI’s strongest tier for demanding software engineering, scientific research, browsing and computer use. Use it when correctness and sustained reasoning justify the higher cost.',
       benchmarks: [
@@ -305,7 +296,6 @@ export const MODELS: readonly ModelInfo[] = [
   {
     id: 'claude-opus-5-5',
     vendor: 'claude',
-    latest: true,
     profile: {
       strengths: 'Large code migrations, audits, difficult debugging and long-running agent tasks that need frontier reasoning.',
       benchmarks: [
@@ -358,18 +348,12 @@ export function vendorOf(id: string): Vendor | undefined {
   return modelInfo(id)?.vendor ?? listedVendorOf(id);
 }
 
-// The vendor's newest model, or undefined for a vendor that marks none.
-export function latestModelOf(vendor: Vendor): ModelInfo | undefined {
-  return MODELS.find(model => model.vendor === vendor && model.latest);
-}
-
 // ── What the vendors offer ──────────────────────────────────────────────
 // Each runtime reports the models its harness offers when its session opens:
 // Claude Code's aliases (`sonnet`, `opus[1m]`), which always name that line's
 // newest model, and Codex's ids. The last list per vendor is kept, on disk
 // too, so the menu is right before any runtime has started. A model only a
-// vendor lists can be chosen and run; Jev routes among MODELS alone, since
-// it needs a profile to judge a model by.
+// vendor lists can be chosen and run without a catalog profile.
 
 export interface ListedModel {
   id: string;

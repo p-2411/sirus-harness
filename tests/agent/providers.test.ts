@@ -3,20 +3,12 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import os from 'os';
 import path from 'path';
 import { providerFor, servableModelIds, servesModel } from '../../src/agent_runtime/providers';
-import { MODELS, modelInfo, VENDOR_INFO, type Vendor } from '../../src/agent_runtime/providers/catalog';
+import { modelInfo, VENDOR_INFO } from '../../src/agent_runtime/providers/catalog';
 import { sourceEnvironment } from '../../src/agent_runtime/providers/profiles';
 import { maskApiKey, type Source } from '../../src/agent_runtime/providers/sources';
 import { launchFor } from '../../src/agent_runtime/runtime/launch';
 import { claudeSkillPlugins, codexSkillDirectories } from '../../src/agent_runtime/runtime/skills';
 import type { RuntimeOptions } from '../../src/agent_runtime/runtime/runtime';
-import {
-  routeSessionModel,
-  vendorAllowance,
-  routingCandidates,
-  type RoutingCandidate,
-  type RoutingClient,
-} from '../../src/agent_runtime/router';
-import { loadSubscriptionLimitCache, saveSubscriptionLimitCache } from '../../src/persistence';
 import { bindScriptedRuntime, textTurn, unbindRuntime } from '../support/runtime';
 
 test('maps a model id to its vendor', () => {
@@ -210,155 +202,6 @@ describe('credential environments', () => {
   test('rejects a profile name that could escape the profile directory', () => {
     expect(() => sourceEnvironment('claude', { id: 'bad', kind: 'subscription', profile: '../escape' }))
       .toThrow(/profile/i);
-  });
-});
-
-// What Jev may choose for a session, and each vendor’s remaining allowance.
-describe('session candidates and allowance', () => {
-  let directory: string;
-  let previous: Record<string, string | undefined>;
-
-  beforeEach(() => {
-    directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-worker-routing-'));
-    previous = {
-      SIRUS_DATA_DIR: process.env.SIRUS_DATA_DIR,
-      ANTHROPIC_API: process.env.ANTHROPIC_API,
-      OPENAI_SECRET: process.env.OPENAI_SECRET,
-    };
-    process.env.SIRUS_DATA_DIR = directory;
-    delete process.env.ANTHROPIC_API;
-    delete process.env.OPENAI_SECRET;
-  });
-
-  afterEach(() => {
-    for (const [name, value] of Object.entries(previous)) {
-      if (value === undefined) delete process.env[name];
-      else process.env[name] = value;
-    }
-    rmSync(directory, { recursive: true, force: true });
-  });
-
-  // A signed-in subscription whose window the sidebar has already read.
-  const subscribe = (vendor: Vendor, profile: string, remaining: number): void => {
-    providerFor(vendor).sources.addSubscription(profile);
-    saveSubscriptionLimitCache([...loadSubscriptionLimitCache(), {
-      vendor, profile, period: VENDOR_INFO[vendor].limitPeriod, remaining, checkedAt: Date.now(), resetsAt: null,
-    }]);
-  };
-  const candidateIds = (): string[] => routingCandidates().map(candidate => candidate.model).sort();
-
-  test('offers every model of a vendor with allowance except the ones kept off the list', () => {
-    subscribe('claude', 'default', 80);
-    subscribe('gpt', 'default', 60);
-    expect(candidateIds()).toEqual(MODELS.filter(model => model.latest).map(model => model.id).sort());
-    expect(candidateIds()).not.toContain('claude-haiku-4-5');
-    // Every candidate arrives with a whole profile and the vendor whose
-    // allowance is rendered alongside it.
-    expect(routingCandidates().every(candidate => candidate.vendor === modelInfo(candidate.model)?.vendor
-      && candidate.profile.strengths.length > 0
-      && candidate.profile.benchmarks.length > 0
-      && candidate.profile.reviews.length > 0
-      && candidate.profile.cost.input > 0 && candidate.profile.cost.output > 0)).toBe(true);
-  });
-
-  test('drops a vendor whose window is spent and keeps one holding an API key', () => {
-    subscribe('claude', 'default', 0);
-    process.env.OPENAI_SECRET = 'sk-proj-worker-1234';
-    expect(candidateIds()).not.toContain('claude-opus-5-5');
-    expect(candidateIds()).toContain('gpt-6-astra');
-    providerFor('claude').sources.addApiKey('sk-ant-worker-abcd');
-    expect(candidateIds()).toContain('claude-opus-5-5');
-  });
-
-  test('a subscription the sidebar has not read yet is available, and no credential offers nothing', () => {
-    expect(routingCandidates()).toEqual([]);
-    expect(vendorAllowance()).toEqual([]);
-    providerFor('gpt').sources.addSubscription('default');
-    expect(candidateIds()).toContain('gpt-6-astra');
-    expect(vendorAllowance()).toEqual([{ vendor: 'gpt', remaining: null }]);
-  });
-
-  test('reports the most generous window per vendor, and nothing for an API key', () => {
-    subscribe('claude', 'default', 12);
-    subscribe('claude', 'work', 63);
-    process.env.OPENAI_SECRET = 'sk-proj-worker-1234';
-    expect(vendorAllowance()).toEqual([
-      { vendor: 'claude', remaining: 63 },
-      { vendor: 'gpt', remaining: null },
-    ]);
-  });
-});
-
-describe('session routing profiles', () => {
-  const project = path.resolve(import.meta.dir, '../..');
-  const input = { task: 'Rename `count` to `total` in @src/agent_runtime/router.ts', directory: project };
-  const candidates: RoutingCandidate[] = [
-    {
-      model: 'claude-sonnet-5',
-      vendor: 'claude',
-      profile: {
-        strengths: 'Speed and intelligence in balance.',
-        benchmarks: ['SWE-bench Pro 63.2 (June 2026)', 'Arena creative writing Elo 1437 (Sept 2026)'],
-        reviews: 'Over-thinks a small edit.',
-        cost: { input: 3, output: 15 },
-      },
-    },
-    {
-      model: 'claude-fable-5-1',
-      vendor: 'claude',
-      profile: {
-        strengths: 'The most demanding reasoning.',
-        benchmarks: ['SWE-bench Pro 81.2 (Sept 2026)'],
-        reviews: 'Asks before it decides.',
-        cost: { input: 10, output: 50, note: 'cache reads $0.25' },
-      },
-    },
-    {
-      model: 'gpt-5.6-luna',
-      vendor: 'gpt',
-      profile: {
-        strengths: 'Cheap and fast for routine work.',
-        benchmarks: ['MRCR v2 long-context recall 41.3% (July 2026)'],
-        reviews: 'Comes apart on open-ended reasoning.',
-        cost: { input: 0.2, output: 1.2 },
-      },
-    },
-  ];
-  const allowance = [
-    { vendor: 'claude' as const, remaining: 47 },
-    { vendor: 'gpt' as const, remaining: null },
-  ];
-
-  type Ask = Parameters<RoutingClient['systemOne']>[0];
-  const fakeClient = (answers: Record<string, { choice: string; confidence: number }>) => {
-    const asked: Ask[] = [];
-    const client: RoutingClient = {
-      systemOne: async request => {
-        asked.push(request);
-        return { answers };
-      },
-    };
-    return { client, asked };
-  };
-
-  test('the session router asks one question over the same rendered profiles', async () => {
-    const { client, asked } = fakeClient({ model: { choice: 'claude-fable-5-1', confidence: 0.77 } });
-    const prompt = 'Work out why @src/agent_runtime/router.ts drops the pick';
-    expect(await routeSessionModel({ prompt, directory: project }, candidates, { client, allowance }))
-      .toEqual({ model: 'claude-fable-5-1', confidence: 0.77 });
-    expect(Object.keys(asked[0].questions)).toEqual(['model']);
-    expect(asked[0].state).toEqual({
-      request: prompt,
-      mentionedFiles: ['src/agent_runtime/router.ts'],
-      project: path.basename(project),
-    });
-    expect(asked[0].questions.model.criteria['claude-fable-5-1']).toBe([
-      'Strengths: The most demanding reasoning.',
-      'Benchmarks: SWE-bench Pro 81.2 (Sept 2026).',
-      'In practice: Asks before it decides.',
-      'Cost: $10 per million input tokens, $50 per million output (cache reads $0.25).',
-      'Allowance: Anthropic has 47% of the 5-hour window remaining.',
-    ].join('\n'));
   });
 });
 

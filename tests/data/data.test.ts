@@ -3,7 +3,6 @@ import { mkdtempSync, rmSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import * as naming from '../../src/agent_runtime/session/naming';
-import * as router from '../../src/agent_runtime/router';
 import * as launch from '../../src/agent_runtime/runtime/launch';
 import { startAcpRuntime } from '../../src/agent_runtime/runtime/acp';
 import type { Runtime, RuntimeOptions, RuntimeUpdate } from '../../src/agent_runtime/runtime/runtime';
@@ -181,77 +180,6 @@ describe('Session model', () => {
     expect(session.getContextUsage()).toEqual({ tokens: 300, window: 200_000 });
     // Nothing of it survives a restore: the gauge waits for the runtime.
     expect(Session.fromSnapshot(session.toSnapshot()).getContextUsage()).toBeNull();
-  });
-
-  test('asks Jev for a draft\'s model on its first prompt unless the user picked one', async () => {
-    const binding = bindScriptedRuntime(testModel, textTurn('Done'));
-    const alternative = bindScriptedRuntime(secondTestModel, textTurn('Done'));
-    const route = spyOn(router, 'routeSessionModel').mockResolvedValue({ model: secondTestModel, confidence: 0.9 });
-    try {
-      const routed = new Session({ name: 'Routed', directory: process.cwd(), model: testModel, routePending: true });
-      await routed.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Review the auth module carefully' }] });
-      expect(route).toHaveBeenCalledTimes(1);
-      expect(route.mock.calls[0]?.[0]).toEqual({ prompt: 'Review the auth module carefully', directory: process.cwd() });
-      expect(routed.getModel()).toBe(secondTestModel);
-      expect(alternative.starts).toHaveLength(1);
-      expect(binding.starts).toHaveLength(0);
-      // The pick was made: a later prompt does not ask again.
-      await routed.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Again' }] });
-      expect(route).toHaveBeenCalledTimes(1);
-
-      // The user's own /model pick settles the draft's model instead.
-      const pinned = new Session({ name: 'Pinned', model: secondTestModel, routePending: true });
-      pinned.changeParticipantModel('sirus', testModel);
-      await pinned.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Go' }] });
-      expect(route).toHaveBeenCalledTimes(1);
-      expect(pinned.getModel()).toBe(testModel);
-
-      // No confident answer leaves the draft on the model it started with.
-      route.mockResolvedValue(null);
-      const unsure = new Session({ name: 'Unsure', model: testModel, routePending: true });
-      await unsure.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Go' }] });
-      expect(route).toHaveBeenCalledTimes(2);
-      expect(unsure.getModel()).toBe(testModel);
-
-      // A prompt the session rejects never reaches Jev.
-      const rejected = new Session({ name: 'Rejected', model: testModel, routePending: true });
-      await expect(rejected.sendMessage({ role: 'user', content: [{ type: 'text', text: '@nobody help' }] })).rejects.toThrow();
-      expect(route).toHaveBeenCalledTimes(2);
-    } finally {
-      route.mockRestore();
-    }
-  });
-
-  test('a draft\'s model is pending only while Jev is configured to pick one', async () => {
-    // Jev's key can also live in the settings, so the test gets a data
-    // directory of its own rather than reading the machine's.
-    const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-pending-'));
-    const previousDirectory = process.env.SIRUS_DATA_DIR;
-    const previousKey = process.env.JEV_API;
-    bindScriptedRuntime(testModel, textTurn('Done'));
-    const route = spyOn(router, 'routeSessionModel').mockResolvedValue(null);
-    try {
-      process.env.SIRUS_DATA_DIR = directory;
-      delete process.env.JEV_API;
-      expect(new Session({ model: testModel, routePending: true }).isModelPending()).toBe(false);
-      process.env.JEV_API = 'ts-live-key-pending';
-      const draft = new Session({ model: testModel, routePending: true });
-      expect(draft.isModelPending()).toBe(true);
-      expect(new Session({ model: testModel }).isModelPending()).toBe(false);
-      await draft.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Go' }] });
-      // Asked and answered, even with nothing chosen, the fallback is now the model.
-      expect(draft.isModelPending()).toBe(false);
-      const pinned = new Session({ model: testModel, routePending: true });
-      pinned.changeParticipantModel('sirus', testModel);
-      expect(pinned.isModelPending()).toBe(false);
-    } finally {
-      route.mockRestore();
-      if (previousDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
-      else process.env.SIRUS_DATA_DIR = previousDirectory;
-      if (previousKey === undefined) delete process.env.JEV_API;
-      else process.env.JEV_API = previousKey;
-      rmSync(directory, { recursive: true, force: true });
-    }
   });
 
   test('changing a participant model changes it for that session only', () => {
@@ -1492,7 +1420,7 @@ describe('session-owned workers', () => {
       const [firstWorker] = first.getWorkers();
       const [secondWorker] = second.getWorkers();
       expect(first.getStatus()).toBe('idle');
-      // The session's fixed subagent model wins over anything Jev would say.
+      // The session's fixed subagent model wins over the owner's model.
       expect(firstWorker).toMatchObject({ model: secondTestModel, sessionId: 'owned-first' });
       expect(first.getWorkers().map(run => run.id)).toEqual([firstWorker.id]);
 

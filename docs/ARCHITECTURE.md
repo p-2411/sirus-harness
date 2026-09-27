@@ -223,26 +223,6 @@ To add a model: one row in `MODELS`. To add a vendor: a `VENDOR_TABLE` row, a la
 `persistence/subscriptionLimits.ts`. Every one of those is a compile error until it is done,
 so nothing fails silently.
 
-## Routing
-
-`router.ts` is the only code that talks to Jev, TypeSafe AI's System One model, through
-`@typesafe-ai/sdk` on a key from `JEV_API` in the environment or, failing that, the one
-`/jev` stored in the settings; `shouldRequestJevKey` is the one-time first-launch question
-`app.tsx` asks through the chat's entry prompt. Two routers of one shape: a set of candidate
-models, each judged on its catalog profile (what it is good at, published benchmark results
-under the metric's own name, what users report of it, its list price) together with what its
-vendor has left of its allowance, which is the one part the catalog cannot know; then a
-typed `choice` question, answered in one call with a two-second timeout and no retries.
-`routeSessionModel` picks a new session's model from the latest model of each vendor that
-can still run, and `Session` awaits it on the first prompt of a draft started with
-`routePending`. `routeWorker` picks a worker's model and thinking level, from every model
-the catalog does not keep off the worker list, in one call with two questions.
-`usableVendor` and `vendorAllowance` read the figures the sidebar has cached; a vendor
-nobody has read yet counts as available rather than making a turn wait on a live read.
-Anything short of a confident answer returns null and the caller keeps the model it had, so
-nothing here can fail or hold up a turn. The `client` option is the seam: the suite passes a
-`RoutingClient` of its own, and null stands for no key.
-
 ## Tools and permissions
 
 The vendors run their own file, shell, search and web tools, so what is left in

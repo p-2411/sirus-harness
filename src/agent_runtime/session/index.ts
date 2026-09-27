@@ -5,7 +5,6 @@ import { requestPermission } from '../permissions/approvals';
 import { requestAnswers } from '../permissions/questions';
 import { DEFAULT_PERMISSION_MODE, type PermissionMode } from '../permissions/policy';
 import { sirusPrompt } from '../prompt';
-import { jevApiKey, routeSessionModel, routingCandidates } from '../router';
 import { servableModelIds, servesModel } from '../providers';
 import { DEFAULT_MODEL, vendorOf } from '../providers/catalog';
 import { nativeCommands, type NativeCommand } from '../runtime/commands';
@@ -90,9 +89,6 @@ export interface SessionOptions {
   inputContent?: string;
   // A newly-created session may still take its name from its first prompt.
   autoNamePending?: boolean;
-  // A newly-created session whose model nobody chose: its first prompt asks
-  // Jev which model fits, unless /model picks one first.
-  routePending?: boolean;
   timing?: SessionTiming;
 }
 
@@ -137,7 +133,6 @@ interface ResolvedSessionOptions {
   workers: readonly WorkerRecord[];
   inputContent: string;
   autoNamePending: boolean;
-  routePending: boolean;
   updatedAt: number;
   conversationStartedAt: number;
   lastResponseFinishedAt: number | null;
@@ -161,7 +156,6 @@ function resolveSessionOptions(options: SessionOptions = {}): ResolvedSessionOpt
     workers: options.workers ?? [],
     inputContent: options.inputContent ?? '',
     autoNamePending: options.autoNamePending ?? false,
-    routePending: options.routePending ?? false,
     updatedAt,
     conversationStartedAt: timing.conversationStartedAt ?? updatedAt,
     // A session restored with history has already had a response, even when
@@ -195,7 +189,6 @@ export class Session {
   // away and back does not discard them.
   private inputContent: string;
   private autoNamePending: boolean;
-  private routePending: boolean;
   private namingController: AbortController | null = null;
 
   // Workers that ended while the session was busy, oldest first. Their
@@ -220,7 +213,6 @@ export class Session {
     this.subagentModel = resolved.subagentModel;
     this.inputContent = resolved.inputContent;
     this.autoNamePending = resolved.autoNamePending;
-    this.routePending = resolved.routePending;
     this.roster = new ParticipantRoster(this.changes, {
       sessionId: this.id,
       model: resolved.model,
@@ -396,16 +388,6 @@ export class Session {
       // not part of the conversation. Strip it before either the UI history or
       // any runtime sees the turn.
       const stored = stripCreationModels(resolved, mentions);
-      // Jev reads the user's own words, like the naming does, and its pick
-      // must land before any runtime starts: the turn waits for it.
-      if (this.routePending) {
-        this.routePending = false;
-        const pick = await routeSessionModel(
-          { prompt: textOf(stripCreationModels(message, mentions)), directory: this.directory },
-          routingCandidates(),
-        );
-        if (pick && pick.model !== this.roster.default.model) this.roster.changeModel(this.roster.default.name, pick.model);
-      }
       if (this.timeline.isEmpty() && this.autoNamePending) {
         // Name from the user's text, not the contents of resolved attachments.
         this.startNaming(textOf(stripCreationModels(message, mentions)));
@@ -844,14 +826,6 @@ export class Session {
     return this.roster.default.model;
   }
 
-  // A draft whose model nobody has chosen yet, with Jev configured to choose
-  // one on the first prompt: the model it holds is the fallback, not a
-  // choice, so the status row shows none until the pick lands or /model
-  // makes one.
-  isModelPending(): boolean {
-    return this.routePending && jevApiKey() !== null;
-  }
-
   getThinkingLevel(participantName?: string): ThinkingLevel {
     return this.roster.thinkingLevel(participantName);
   }
@@ -860,11 +834,8 @@ export class Session {
     this.roster.setThinkingLevel(level, participantName);
   }
 
-  // The user's own pick for the default participant settles the draft's
-  // model: Jev is not asked.
   changeParticipantModel(participantName: string, newModel: string): void {
     this.roster.changeModel(participantName, newModel);
-    if (keyOf(participantName.replace(/^@/, '')) === keyOf(this.roster.default.name)) this.routePending = false;
   }
 
   getSubagentModel(): string | null {

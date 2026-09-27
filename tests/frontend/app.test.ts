@@ -8,7 +8,10 @@ import * as updater from '../../src/updater';
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { Session } from '../../src/agent_runtime/session';
+import { DEFAULT_MODEL, Session } from '../../src/agent_runtime/session';
+import * as naming from '../../src/agent_runtime/session/naming';
+import { providerFor } from '../../src/agent_runtime/providers';
+import { bindScriptedRuntime, textTurn, unbindRuntime } from '../support/runtime';
 import App, { createWorkspace, nextSessionName, startSession } from '../../src/frontend/app';
 import { changeModel } from '../../src/commands/agents/behavior';
 import { loadSessionSnapshots, saveSessionSnapshots } from '../../src/persistence';
@@ -26,6 +29,31 @@ describe('app workspace startup', () => {
     else process.env.SIRUS_DATA_DIR = previousDirectory;
     rmSync(settingsDirectory, { recursive: true, force: true });
   });
+  test('new sessions keep the saved or default model through the first prompt', async () => {
+    const name = spyOn(naming, 'generateSessionName').mockResolvedValue(null);
+    const preferred = 'claude-fable-5-1';
+    providerFor('gpt').sources.addApiKey('test-openai-key');
+    providerFor('claude').sources.addApiKey('test-anthropic-key');
+    const fallbackRuntime = bindScriptedRuntime(DEFAULT_MODEL, textTurn('Done'));
+    const preferredRuntime = bindScriptedRuntime(preferred, textTurn('Done'));
+    try {
+      for (const preference of [null, preferred]) {
+        const { draftSession } = createWorkspace({ sessions: [], selectedSessionId: null }, settingsDirectory, preference);
+        const model = preference ?? DEFAULT_MODEL;
+        expect(draftSession.getModel()).toBe(model);
+        await draftSession.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Review this project' }] });
+        expect(draftSession.getModel()).toBe(model);
+        expect(draftSession.toSnapshot().defaultModel.model).toBe(model);
+      }
+      expect(fallbackRuntime.starts).toHaveLength(1);
+      expect(preferredRuntime.starts).toHaveLength(1);
+    } finally {
+      name.mockRestore();
+      unbindRuntime(DEFAULT_MODEL);
+      unbindRuntime(preferred);
+    }
+  });
+
   test('menus keep pane widths fixed and Ctrl+K leaves the dots in place', async () => {
     const sessions = ['First', 'Second'].map(name => {
       const session = new Session({ name, directory: `/projects/${name}`, autoNamePending: true });

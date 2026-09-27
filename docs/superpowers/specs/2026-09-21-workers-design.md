@@ -1,5 +1,7 @@
 # Workers: background, isolated, steerable, persisted, routed by Jev
 
+Historical design: Jev routing has been removed. Sessions use the saved model preference or the default model; subagents use the current model-selection rules.
+
 Status: approved 2026-09-21. Scope: sub-project 2 of the Jev work, delivered as
 one PR. Follows `2026-09-21-jev-session-routing-design.md`.
 
