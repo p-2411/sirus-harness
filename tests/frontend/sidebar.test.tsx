@@ -13,6 +13,9 @@ import {
   SessionItem,
 } from '../../src/frontend/Sidebar';
 import Sidebar from '../../src/frontend/Sidebar';
+import ResumePicker from '../../src/frontend/ResumePicker';
+import { requestPermission } from '../../src/agent_runtime/permissions/approvals';
+import { requestAnswers } from '../../src/agent_runtime/permissions/questions';
 import { theme } from '../../src/frontend/styles/theme';
 import { pressAt, releaseAt } from '../../src/frontend/interaction/clickable';
 import { lineToRow } from '../../src/frontend/terminal/screen';
@@ -22,13 +25,16 @@ const noOp = () => {};
 function mountSidebar() {
   let sessions = Array.from({ length: 30 }, (_, index) => new Session({
     id: `scroll-${index}`, name: `Session ${String(index).padStart(2, '0')}`,
-    timing: { conversationStartedAt: 30 - index },
+    timing: { conversationStartedAt: 30 - index, updatedAt: 30 - index },
   }));
   const allSessions = sessions;
   let selected = sessions[0]!;
   let height = 14;
   let collapsed = false;
   let added = 0;
+  const deleted: Session[] = [];
+  const archived: Session[] = [];
+  let focused = false;
   const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {}, ref() {}, unref() {} });
   const stdout = Object.assign(new PassThrough(), { columns: 40, rows: 30 });
   let frame = '';
@@ -37,7 +43,9 @@ function mountSidebar() {
     <Sidebar sessions={sessions} currSession={selected} selectSession={session => {
       selected = session;
       app.rerender(view());
-    }} addSession={() => { added++; }} deleteSession={noOp} collapsed={collapsed} />
+    }} addSession={() => { added++; }} deleteSession={session => { deleted.push(session); sessions = sessions.filter(item => item !== session); app.rerender(view()); }}
+      onArchive={session => { archived.push(session); sessions = sessions.filter(item => item !== session); app.rerender(view()); }}
+      onFocusChange={value => { focused = value; }} collapsed={collapsed} />
   </Box>;
   const app = renderApp(view(), {
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -48,12 +56,19 @@ function mountSidebar() {
     await new Promise(resolve => setImmediate(resolve));
     await app.waitUntilRenderFlush();
   };
-  const type = async (input: string) => { stdin.write(input); await flush(); };
+  const type = async (input: string) => { stdin.write(input); if (input === '\x1b') await new Promise(resolve => setTimeout(resolve, 60)); await flush(); };
   return {
     flush, type,
     frame: () => frame,
     selected: () => selected,
     added: () => added,
+    deleted: () => deleted,
+    archived: () => archived,
+    focused: () => focused,
+    async manage() {
+      const row = frame.split('\n').findIndex(line => line.includes('filter / manage'));
+      pressAt({ col: 3, line: row }); releaseAt({ col: 3, line: row }); await flush();
+    },
     async wheel(direction: 'up' | 'down', column = 3, line = 4) {
       await type(`\x1b[<${direction === 'up' ? 64 : 65};${column};${lineToRow(line)}M`);
     },
@@ -220,11 +235,11 @@ describe('sidebar session metadata', () => {
     expect(formatRelativeTime(0, now)).toBe('');
   });
 
-  test('sorts by conversation start rather than latest activity without mutating the source list', () => {
+  test('sorts by latest activity without mutating the source list', () => {
     const older = Session.fromSnapshot({ ...new Session({ name: 'Older' }).toSnapshot(), updatedAt: 9_000, conversationStartedAt: 1_000 });
     const newer = Session.fromSnapshot({ ...new Session({ name: 'Newer' }).toSnapshot(), updatedAt: 2_000, conversationStartedAt: 2_000 });
     const source = [older, newer];
-    expect(sessionsByRecency(source)).toEqual([newer, older]);
+    expect(sessionsByRecency(source)).toEqual([older, newer]);
     expect(source).toEqual([older, newer]);
   });
 
@@ -252,7 +267,8 @@ describe('sidebar session status', () => {
     expect(SESSION_STATUS_APPEARANCE).toEqual({
       idle: { symbol: '○', color: theme.textSubtle },
       unread: { symbol: '●', color: theme.textSubtle },
-      working: { symbol: '○', color: theme.pending },
+      working: { symbol: '⠋', color: theme.pending },
+      attention: { symbol: '!', color: theme.pending },
       error: { symbol: '●', color: theme.danger },
     });
   });
@@ -270,7 +286,7 @@ describe('sidebar session status', () => {
     expect(render(new Session({ name: 'Idle' }))).toContain('○ Idle');
   });
 
-  test('shows a hollow circle while working and a filled circle after an error', async () => {
+  test('shows a spinner while working and a filled circle after an error', async () => {
     const model = 'sidebar-status-model';
     let finish!: () => void;
     let started!: () => void;
@@ -285,7 +301,7 @@ describe('sidebar session status', () => {
 
     const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Go' }] });
     await running;
-    expect(render(session)).toContain('○ Active');
+    expect(render(session)).toContain('⠋ Active');
 
     finish();
     await expect(turn).rejects.toThrow('refused or could not complete');
@@ -293,5 +309,107 @@ describe('sidebar session status', () => {
 
     session.dispose();
     unbindRuntime(model);
+  });
+});
+
+
+describe('sidebar management', () => {
+  test('filters by typing, renames, archives, and requires confirmation to delete', async () => {
+    const app = mountSidebar();
+    try {
+      await app.flush();
+      await app.manage();
+      expect(app.focused()).toBe(true);
+      await app.type('Session 12');
+      expect(app.frame()).toContain('Session 12');
+      expect(app.frame()).not.toContain('Session 00');
+      await app.type('\x04');
+      expect(app.frame()).toContain('Delete session?');
+      expect(app.deleted()).toHaveLength(0);
+      await app.type('\r');
+      expect(app.deleted()).toHaveLength(0);
+      await app.type('\x12');
+      await app.type('\x15');
+      await app.type('Changed name');
+      await app.type('\r');
+      await app.type('\x15');
+      await app.type('Changed name');
+      expect(app.frame()).toContain('Changed name');
+      await app.type('\x01');
+      expect(app.archived().map(session => session.getName())).toEqual(['Changed name']);
+      await app.type('\x15');
+      await app.type('Session 10');
+      await app.type('\x04');
+      await app.type('y');
+      expect(app.deleted().map(session => session.getName())).toEqual(['Session 10']);
+      await app.type('\x1b');
+      expect(app.focused()).toBe(false);
+    } finally { await app.close(); }
+  });
+
+  test('groups the current project first and orders each project by activity', () => {
+    const current = new Session({ directory: '/project', timing: { updatedAt: 20 } });
+    const recentCurrent = new Session({ directory: '/project', timing: { updatedAt: 30 } });
+    const other = new Session({ directory: '/other', timing: { updatedAt: 40 } });
+    expect(sessionsByRecency([other, current, recentCurrent], '/project')).toEqual([recentCurrent, current, other]);
+  });
+
+  test('marks approvals and questions as needing the user', async () => {
+    const session = new Session({ id: 'needs-user', name: 'Waiting' });
+    const context = { sessionId: session.getId(), requester: { participant: 'sirus' } };
+    const approvalController = new AbortController();
+    const approval = requestPermission(context, {
+      sessionId: session.getId(), toolCall: { toolCallId: 'call', title: 'Edit file', kind: 'edit', status: 'pending' },
+      options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+    }, approvalController.signal);
+    expect(render(session)).toContain('! Waiting');
+    expect(render(session)).toContain('needs you');
+    approvalController.abort();
+    await approval;
+    const questionController = new AbortController();
+    const question = requestAnswers(context, {
+      sessionId: session.getId(), mode: 'form', message: 'Which?', requestedSchema: { type: 'object', properties: { answer: { type: 'string' } } },
+    }, questionController.signal);
+    expect(render(session)).toContain('needs you');
+    questionController.abort();
+    await question;
+    expect(render(session)).toContain('○ Waiting');
+    await session.dispose();
+  });
+});
+
+describe('resume picker', () => {
+  test('defaults to this project and searches by name or id, with an all-project toggle', async () => {
+    const local = new Session({ id: 'local-id', name: 'Local history', directory: '/project' });
+    const other = new Session({ id: 'remote-id', name: 'Other history', directory: '/other', archived: true });
+    let selected: Session | undefined;
+    let closed = false;
+    const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {}, ref() {}, unref() {} });
+    const stdout = Object.assign(new PassThrough(), { columns: 90, rows: 24 });
+    let frame = '';
+    stdout.on('data', chunk => { if (chunk.toString().trim()) frame = stripAnsi(chunk.toString()); });
+    const app = renderApp(<ResumePicker sessions={[local, other]} directory="/project"
+      onSelect={session => { selected = session; }} onClose={() => { closed = true; }} />, {
+      stdin: stdin as unknown as NodeJS.ReadStream, stdout: stdout as unknown as NodeJS.WriteStream,
+      debug: true, patchConsole: false, exitOnCtrlC: false,
+    });
+    const flush = async () => { await new Promise(resolve => setImmediate(resolve)); await app.waitUntilRenderFlush(); };
+    const type = async (input: string) => { stdin.write(input); if (input === '\x1b') await new Promise(resolve => setTimeout(resolve, 60)); await flush(); };
+    try {
+      await flush();
+      expect(frame).toContain('Local history');
+      expect(frame).not.toContain('Other history');
+      await type('\t');
+      expect(frame).toContain('Other history [archived]');
+      await type('remote-id');
+      expect(frame).not.toContain('Local history');
+      await type('\r');
+      expect(selected).toBe(other);
+      await type('\x1b');
+      expect(closed).toBe(true);
+    } finally {
+      app.unmount(); await app.waitUntilExit(); stdin.destroy(); stdout.destroy();
+      await local.dispose(); await other.dispose();
+    }
   });
 });

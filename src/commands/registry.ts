@@ -7,7 +7,7 @@ import {
 } from './authentication/commands';
 import { helpCommand } from './help/commands';
 import { memoryCommandSpec } from './memory/commands';
-import { clearCommand, compactCommandSpec, exitCommand, quitCommand, permissionsCommandSpec, renameCommand } from './session/commands';
+import { newCommand, resumeCommand, archiveCommand, deleteCommand, forkCommand, exportCommand, copyCommand, clearCommand, compactCommandSpec, exitCommand, quitCommand, permissionsCommandSpec, renameCommand } from './session/commands';
 import { updateCommandSpec, versionCommandSpec } from './update/commands';
 import { rewindCommandSpec, undoCommandSpec } from './checkpoints/commands';
 import { imageCommandSpec } from './images/commands';
@@ -52,6 +52,14 @@ export const commandRegistry: readonly CommandSpec[] = [
   imageCommandSpec,
   notifyCommandSpec,
   renameCommand,
+  newCommand,
+  resumeCommand,
+  archiveCommand,
+  deleteCommand,
+  forkCommand,
+  exportCommand,
+  copyCommand,
+
   helpCommand(() => commandRegistry),
   exitCommand,
   quitCommand,
@@ -62,7 +70,7 @@ export const commandRegistry: readonly CommandSpec[] = [
 // that splits command text, so the input bar and the secret-menu path can't
 // drift apart in how they parse it.
 export function parseCommandLine(text: string): { name: string; args: string[] } {
-  const words = text.split(' ');
+  const words = text.trim().split(/\s+/);
   return { name: words[0].slice(1), args: words.slice(1).filter(Boolean) };
 }
 

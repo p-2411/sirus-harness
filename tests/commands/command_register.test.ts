@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, rmSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, beforeEach } from 'bun:test';
@@ -210,28 +210,53 @@ describe('executeCommand', () => {
     expect(commandMenu('model', ['gpt-5.6-sol'], new Session())).toBeNull();
   });
 
-  test('clear command empties only the current session history', () => {
-    const current = new Session({ name: 'Current' });
-    const other = new Session({ name: 'Other' });
-    current.append({ role: 'user', content: [{ type: 'text', text: 'clear me' }] });
-    other.append({ role: 'user', content: [{ type: 'text', text: 'keep me' }] });
-
-    expect(runCommand('clear', [], current)).toEqual({
-      kind: 'success',
-      text: 'History cleared.',
+  test('/clear and /new request a fresh session and preserve the conversation', () => {
+    const session = new Session({ name: 'Current' });
+    session.append({ role: 'user', content: [{ type: 'text', text: 'keep me' }] });
+    let fresh = 0;
+    for (const command of ['clear', 'new']) executeCommand(command, [], {
+      session, signal: new AbortController().signal, notify() {}, newSession() { fresh++; },
     });
-    expect(current.getMessages()).toEqual([]);
-    expect(other.getMessages()).toHaveLength(1);
+    expect(fresh).toBe(2);
+    expect(session.getMessages()).toHaveLength(1);
   });
 
-  test('rename command updates the current session and rejects an empty name', () => {
+  test('rename accepts a title or derives one from content', async () => {
     const session = new Session({ name: 'Session 1' });
-    expect(runCommand('rename', ['UX', 'work'], session)).toEqual({
-      kind: 'success',
-      text: 'Renamed to UX work.',
-    });
-    expect(session.getName()).toBe('UX work');
-    expect(() => runCommand('rename', [], session)).toThrow('Usage: /rename <name>');
+    expect(runCommand('rename', ['UX', 'work'], session)).toEqual({ kind: 'success', text: 'Renamed to UX work.' });
+    await expect(runCommand('rename', [], session)).rejects.toThrow('Send a message first');
+    session.append({ role: 'user', content: [{ type: 'text', text: 'Fix session storage' }] });
+    await runCommand('rename', [], session);
+    expect(session.getName()).toBe('Fix session storage');
+  });
+
+  test('export, copy, and fork preserve the source conversation', async () => {
+    const session = new Session({ name: 'Source', directory: settingsDirectory });
+    session.append({ role: 'user', content: [{ type: 'text', text: 'Hello' }] });
+    session.append({ role: 'assistant', content: [{ type: 'text', text: 'The reply.' }] });
+    runCommand('export', ['chat.md'], session);
+    expect(readFileSync(join(settingsDirectory, 'chat.md'), 'utf8')).toContain('## You\n\nHello\n\n## Assistant\n\nThe reply.');
+    let copied = '';
+    let fork: ReturnType<Session['fork']> | undefined;
+    const context = { session, signal: new AbortController().signal, notify() {}, copy(text: string) { copied = text; }, openSession(snapshot: ReturnType<Session['fork']>) { fork = snapshot; } };
+    executeCommand('copy', [], context);
+    executeCommand('fork', [], context);
+    expect(copied).toBe('The reply.');
+    expect(fork!.id).not.toBe(session.getId());
+    expect(fork!.messages).toEqual(session.getMessages());
+    fork!.messages[0].content = [];
+    expect(session.getMessages()[0].content).toHaveLength(1);
+  });
+
+  test('/delete requires confirmation', async () => {
+    let removed = 0;
+    for (const accepted of [false, true]) {
+      await executeCommand('delete', [], {
+        session: new Session(), signal: new AbortController().signal, notify() {},
+        confirm: async () => accepted, deleteSession() { removed++; },
+      });
+      expect(removed).toBe(accepted ? 1 : 0);
+    }
   });
 
   test('help command lists commands and keyboard shortcuts', () => {
@@ -239,7 +264,7 @@ describe('executeCommand', () => {
     expect(result.kind).toBe('info');
     expect(result.showIcon).toBe(false);
     expect(result.text).toContain('/help');
-    expect(result.text).toContain('/rename <name>');
+    expect(result.text).toContain('/rename [name]');
     expect(result.text).toContain('/undo');
     expect(result.text).toContain('/rewind');
     expect(result.text).toContain('/image [path]');

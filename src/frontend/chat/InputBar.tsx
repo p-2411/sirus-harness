@@ -29,7 +29,7 @@ import type { NativeCommand } from '../../agent_runtime/runtime/commands';
 export type InputMode = { type: 'text' } | PromptMode;
 
 interface InputBarProps {
-  send: (input: string, attachments?: readonly ImageBlock[], content?: MessageBlock[]) => void;
+  send: (input: string, attachments?: readonly ImageBlock[], content?: MessageBlock[]) => unknown;
   inputContent: string;
   setInputContent: (inputContent: string) => void;
   disabled: boolean;
@@ -500,7 +500,7 @@ export function InputBar({
       const trimmed = selectedCommand ? `/${selectedCommand.name}` : draft.text.trim();
       if (!trimmed && draft.images.length === 0) return; // nothing to send
       if (key.tab) onQueue?.(trimmed, draft.images, draft.content);
-      else send(trimmed, draft.images, draft.content);
+      else if (send(trimmed, draft.images, draft.content) === false) return;
       editHistory.current.undo = [];
       setRecall(null);
       setEditor({ text: '', cursor: 0 });

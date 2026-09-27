@@ -1,7 +1,7 @@
 import { defaultDirectoryActivity, type Checkpoint, type RewindResult } from '../../agent_runtime/session';
 import { checkpointFailure, checkpointsEnabled } from '../../checkpoints';
 import type { Feedback } from '../feedback';
-import type { CommandMenuEntry, CommandSession } from '../types';
+import type { CommandCapabilities, CommandMenuEntry, CommandSession } from '../types';
 
 // What a rewind puts back: the directory, the chat, or both.
 export type RewindScope = 'all' | 'files' | 'chat';
@@ -15,9 +15,9 @@ const SCOPE_LABELS: Record<RewindScope, string> = {
 };
 
 const SCOPE_DESCRIPTIONS: Record<RewindScope, string> = {
-  all: 'put the directory back and drop the turn from the history',
-  files: 'put the directory back and keep the conversation',
-  chat: 'drop the turn from the history and keep the files',
+  all: 'preview agent file changes and fork before this turn',
+  files: 'preview agent file changes and keep the conversation',
+  chat: 'fork before this turn and put its prompt in the input',
 };
 
 const LISTED_FILES = 5;
@@ -116,9 +116,10 @@ export function describeRewind(result: RewindResult): Feedback {
     if (restored.length === 0 && removed.length === 0) parts.push('no files had changed');
     if (restored.length > 0) parts.push(`restored ${listFiles(restored)}`);
     if (removed.length > 0) parts.push(`removed ${listFiles(removed)}`);
+    if (result.files.conflicts.length > 0) parts.push(`left conflicts untouched: ${result.files.conflicts.join(', ')}`);
   }
   if (result.droppedMessages > 0) {
-    parts.push(`dropped ${result.droppedMessages} message${result.droppedMessages === 1 ? '' : 's'}`);
+    parts.push(`continued in a fork; original conversation preserved`);
   }
   return {
     kind: 'success',
@@ -126,24 +127,47 @@ export function describeRewind(result: RewindResult): Feedback {
   };
 }
 
-async function rewindTo(checkpoint: Checkpoint, scope: RewindScope, session: CommandSession): Promise<Feedback> {
+async function rewindTo(checkpoint: Checkpoint, scope: RewindScope, session: CommandSession, capabilities: CommandCapabilities): Promise<Feedback> {
   const files = scope !== 'chat';
+  const chat = scope !== 'files';
   if (files && defaultDirectoryActivity.subagentCount(session.getDirectory()) > 0) {
     throw new Error('Workers are still working in this directory. Wait for them or cancel them with /agents, then rewind.');
   }
-  return describeRewind(await session.rewind(checkpoint.id, { files, chat: scope !== 'files' }));
+  if (!capabilities.confirm || (chat && !capabilities.openSession)) {
+    throw new Error('Rewind needs an interactive confirmation and session manager.');
+  }
+  const preview = await session.previewRewind(checkpoint.id, { files, chat });
+  const lines = [`Rewind to before "${checkpoint.summary}"?`];
+  if (preview.files) {
+    for (const file of preview.files.restored) lines.push(`Restore: ${file}`);
+    for (const file of preview.files.removed) lines.push(`Remove agent-created file: ${file}`);
+    for (const file of preview.files.conflicts) lines.push(`Keep conflict: ${file}`);
+    if (!preview.files.restored.length && !preview.files.removed.length) lines.push('No proven agent file changes to restore.');
+  }
+  if (chat) lines.push('Continue in a new conversation with the prompt ready to edit. The original stays available.');
+  if (!await capabilities.confirm(lines.join('\n'))) return { kind: 'info', text: 'Rewind cancelled.' };
+  const result = await session.rewind(checkpoint.id, {
+    files, chat,
+    ...(preview.files ? { approvedFiles: [...preview.files.restored, ...preview.files.removed] } : {}),
+  });
+  // Conflicts excluded from the approved set still belong in the result.
+  if (result.files && preview.files) {
+    result.files.conflicts = [...new Set([...preview.files.conflicts, ...result.files.conflicts])];
+  }
+  if (result.fork) capabilities.openSession!(result.fork);
+  return describeRewind(result);
 }
 
-export function undoCommand(scope: string | undefined, session: CommandSession): Promise<Feedback> {
+export function undoCommand(scope: string | undefined, session: CommandSession, capabilities: CommandCapabilities = {}): Promise<Feedback> {
   const parsed = parseRewindScope(scope ?? 'all');
   if (!parsed) throw new Error('Usage: /undo [all|files|chat]');
   const checkpoints = requireCheckpoints(session);
-  return rewindTo(checkpoints[checkpoints.length - 1], parsed, session);
+  return rewindTo(checkpoints[checkpoints.length - 1], parsed, session, capabilities);
 }
 
-export function rewindCommand(args: readonly string[], session: CommandSession): Promise<Feedback> {
+export function rewindCommand(args: readonly string[], session: CommandSession, capabilities: CommandCapabilities = {}): Promise<Feedback> {
   const target = checkpointNumber(session, args[0]);
   const parsed = parseRewindScope(args[1] ?? 'all');
   if (!parsed || args.length > 2) throw new Error('Usage: /rewind <n> [all|files|chat]');
-  return rewindTo(target, parsed, session);
+  return rewindTo(target, parsed, session, capabilities);
 }

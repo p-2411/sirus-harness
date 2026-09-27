@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { isPlanCall, planEntriesOf, type ImageBlock, type Message, type MessageBlock, type PlanEntry, type ToolCallBlock } from '../../agent_runtime/types';
-import { isAutoSendable, Session } from '../../agent_runtime/session';
+import { isAutoSendable, Session, type SessionSnapshot } from '../../agent_runtime/session';
 import { attachClipboardImage, describeImage, removeStoredImage } from '../../images';
 import { Box, Text, measureElement, renderToString, useApp, useBoxMetrics, useInput, useStdout, type DOMElement } from 'ink';
 import { theme } from '../styles/theme';
@@ -11,6 +11,7 @@ import { InputBar, type InputMode } from './InputBar';
 import { InputFeedback } from './InputRows';
 import {
   commandMenu,
+  commandRegistry,
   executeCommand,
   isNativeCommand,
   parseCommandLine,
@@ -35,6 +36,8 @@ import {
   resolveQuestion,
   subscribeQuestions,
 } from '../../agent_runtime/permissions/questions';
+import { allProviders, onProviderChange } from '../../agent_runtime/providers';
+import { copyToClipboard } from '../terminal/clipboard';
 import { nextPermissionMode } from '../../agent_runtime/permissions/policy';
 import { getSubagentsVersion, subscribeSubagents } from '../../agent_runtime/tools/subagents';
 
@@ -220,8 +223,14 @@ function CommandFeedbackPanel({ feedback, participantColors, sidebarWidth }: {
   );
 }
 
-export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEBAR_WIDTH }: {
+export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEBAR_WIDTH, onNewSession, onOpenSession, onResumeSession, onArchiveSession, onDeleteSession, active = true }: {
   currSession: Session;
+  active?: boolean;
+  onNewSession?: () => void;
+  onOpenSession?: (snapshot: SessionSnapshot) => void;
+  onResumeSession?: (query?: string) => void;
+  onArchiveSession?: () => void;
+  onDeleteSession?: () => void;
   sidebarWidth?: number;
   onStartSession?: (session: Session) => void;
 }) {
@@ -239,6 +248,8 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   const participants = currSession.getParticipants();
   const participantColors = participantColorMap(participants);
 
+  const [hasCredentials, setHasCredentials] = useState(() => allProviders().some(provider => provider.sources.list().length > 0));
+  useEffect(() => onProviderChange(() => setHasCredentials(allProviders().some(provider => provider.sources.list().length > 0))), []);
   const [showTasks, setShowTasks] = useState(true);
   const plans = currentPlans(messages, participants);
   const [commandIsLoading, setCommandIsLoading] = useState(false);
@@ -347,6 +358,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   };
   const [scrollOffset, setScrollOffset] = useState(0);
   const commandAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => { commandAbort.current?.abort(new TurnCancelledError()); }, []);
   const { stdout } = useStdout();
   const { exit } = useApp();
 
@@ -405,7 +417,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     } else if (key.ctrl && key.end) {
       setScrollOffset(0);
     }
-  });
+  }, { isActive: active });
 
   // A command with choices (like /login) turns the input bar into a
   // picker; the chosen item runs as if the user had typed it. An item that
@@ -463,7 +475,33 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         session: currSession,
         notify: text => setFeedback({ kind: 'info', text }),
         attachImage,
-        exit: () => exit(),
+        exit: () => { currSession.setInputContent(''); exit(); },
+        newSession: onNewSession,
+        openSession: onOpenSession,
+        resumeSession: onResumeSession,
+        archiveSession: onArchiveSession,
+        deleteSession: onDeleteSession,
+        copy: copyToClipboard,
+        confirm: text => new Promise<boolean>(resolve => {
+          setFeedback({ kind: 'warning', text, panel: true });
+          const finish = (accepted: boolean) => {
+            controller.signal.removeEventListener('abort', cancelled);
+            setInputMode({ type: 'text' });
+            setFeedback(null);
+            resolve(accepted);
+          };
+          const cancelled = () => finish(false);
+          controller.signal.addEventListener('abort', cancelled, { once: true });
+          setInputMode({
+            type: 'menu',
+            items: [
+              { type: 'item', key: 'cancel', label: 'Cancel', command: '' },
+              { type: 'item', key: 'confirm', label: 'Confirm', command: '' },
+            ],
+            onSelect: item => finish(item.key === 'confirm'),
+            onCancel: cancelled,
+          });
+        }),
         signal: controller.signal,
       });
     } catch (e) {
@@ -497,11 +535,31 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
 
   // A command leaves any attachments waiting for the next real message.
   // Commands are exactly what the background queue leaves for a mounted Chat.
-  const send = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[]) => {
+  const send = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[], asMessage = false): boolean => {
     // A `/name` for one of the agent's own commands is a prompt: the agent's
     // harness runs it.
-    if (!isAutoSendable(text) && !isNativeCommand(text, currSession.getNativeCommands())) {
+    if (!asMessage && !isAutoSendable(text) && !isNativeCommand(text, currSession.getNativeCommands())) {
       const { name, args } = parseCommandLine(text);
+      if (!commandRegistry.some(command => command.name === name)) {
+        currSession.setInputContent(text);
+        setFeedback({ kind: 'warning', text: `Unknown command: /${name}. Send it as a message?` });
+        setInputMode({
+          type: 'menu',
+          items: [
+            { type: 'item', key: 'edit', label: 'Keep editing', command: '' },
+            { type: 'item', key: 'send', label: 'Send as a message', command: '' },
+          ],
+          onSelect: item => {
+            setInputMode({ type: 'text' });
+            if (item.key === 'send') {
+              currSession.setInputContent('');
+              send(text, images, content, true);
+            }
+          },
+          onCancel: () => setInputMode({ type: 'text' }),
+        });
+        return false;
+      }
       runCommand(name, args);
     } else {
       // Images sit where the draft placed them. The session stamps the
@@ -537,6 +595,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
             : { kind: 'error', text: caught instanceof Error ? caught.message : 'Something went wrong.' });
         });
     }
+    return true;
   }
 
   const queue = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[]) => {
@@ -568,7 +627,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   // Queued messages live on the session so they survive switching away and
   // back. Send one at a time as soon as that session is free again.
   useEffect(() => {
-    if (isLoading || currSession.getStatus() === 'working'
+    if (!active || isLoading || currSession.getStatus() === 'working'
       || queued === 0 || effectiveInputMode.type !== 'text') return;
     const next = currSession.shiftQueuedPrompt();
     if (next !== undefined) {
@@ -580,7 +639,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         });
       } else send(next.text, next.images, next.content ? [...next.content] : undefined);
     }
-  }, [currSession, isLoading, queued, nextQueuedId, effectiveInputMode.type]);
+  }, [currSession, active, isLoading, queued, nextQueuedId, effectiveInputMode.type]);
 
   historyContent.current = (
     <>
@@ -595,7 +654,8 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
               ))}
             </Box>
           }
-          <Text color={theme.textMuted}>What shall we build?</Text>
+          <Text color={theme.textMuted}>{hasCredentials ? 'What shall we build?' : 'Welcome to Sirus.'}</Text>
+          {!hasCredentials && <Text color={theme.textMuted}>Use /login to connect a Claude or ChatGPT subscription, or add an API key.</Text>}
         </Box>
       )}
       <ChatHistory
@@ -667,7 +727,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
           ))}
         </Box>
       )}
-      <InputBar
+      {active && <InputBar
         send={send}
         inputContent={currSession.getInputContent()}
         setInputContent={inputContent => currSession.setInputContent(inputContent)}
@@ -702,7 +762,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         contextUsage={currSession.getContextUsage()}
         nativeCommands={() => currSession.getNativeCommands()}
         tasksVisible={plans.length > 0 ? showTasks : undefined}
-      />
+      />}
     </Box>
   );
 }

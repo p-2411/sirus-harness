@@ -1,3 +1,5 @@
+import crypto from 'crypto';
+import { existsSync, linkSync, mkdirSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import path from 'path';
 import { z } from 'zod';
 import { dataDirectory } from '../dataDirectory';
@@ -15,7 +17,7 @@ import type { SessionSnapshot } from '../agent_runtime/session';
 import type { WorkerRecord } from '../agent_runtime/tools/subagents';
 import { readJson, writeJson } from './atomicJson';
 
-// The session file: the whole conversation graph, validated on the way in and
+// Each session file holds one conversation graph, validated on the way in and
 // normalised to one shape. Storage knows the snapshot record, never the
 // `Session` class — the type import above is erased at build time.
 
@@ -174,6 +176,12 @@ const checkpointSchema = z.object({
   messageIndex: z.number().int().nonnegative().optional(),
   summary: z.string(),
   createdAt: z.number(),
+  changes: z.array(z.object({
+    path: z.string(),
+    before: z.string().nullable(),
+    after: z.string().nullable(),
+    conflict: z.string().optional(),
+  })).optional(),
 }).refine(checkpoint => checkpoint.seq !== undefined || checkpoint.messageIndex !== undefined, {
   message: 'Checkpoint must carry a seq',
 });
@@ -205,6 +213,7 @@ const sessionSchema = z.object({
   conversationStartedAt: z.number().optional(),
   lastResponseFinishedAt: z.number().nullable().optional(),
   autoNamePending: z.boolean().optional(),
+  archived: z.boolean().optional(),
 }).refine(
   session => Boolean(session.model || (session.participants && session.defaultModel)),
   { message: 'Session must contain a model or participant list' },
@@ -213,7 +222,7 @@ const sessionSchema = z.object({
 const sessionFileSchema = z.object({
   version: z.literal(1),
   selectedSessionId: z.string().nullable(),
-  sessions: z.array(sessionSchema),
+  sessions: z.array(z.unknown()),
 });
 
 type StoredSession = z.infer<typeof sessionSchema>;
@@ -225,6 +234,7 @@ const LEGACY_PARTICIPANT_NAME = 'sirus';
 export interface PersistedSessionSnapshots {
   snapshots: SessionSnapshot[];
   selectedSessionId: string | null;
+  notices?: string[];
 }
 
 // Catalog ids that were renamed; a session saved under the old id must still
@@ -325,6 +335,7 @@ function toSnapshot(stored: StoredSession, fallbackSessionDirectory: string): Se
       seq: seq ?? messageIndex ?? 0,
     })),
     autoNamePending: stored.autoNamePending ?? false,
+    ...(stored.archived !== undefined ? { archived: stored.archived } : {}),
     updatedAt: stored.updatedAt ?? 0,
     ...(stored.workers ? { workers: stored.workers.map(toWorkerRecord) } : {}),
     ...(stored.permissionMode ? { permissionMode: stored.permissionMode } : {}),
@@ -334,40 +345,197 @@ function toSnapshot(stored: StoredSession, fallbackSessionDirectory: string): Se
   };
 }
 
-function sessionsPath(directory: string): string {
-  return path.join(directory, 'sessions.json');
+const metadataSchema = z.object({
+  version: z.literal(1),
+  sessionIds: z.array(z.string()),
+  selectedSessionId: z.string().nullable(),
+});
+
+// Refuse later writes through this process after a failed read, including
+// when moving the damaged file aside failed (for example a read-only disk).
+const unreadablePaths = new Set<string>();
+
+function sessionPath(id: string, directory: string): string {
+  return path.join(directory, 'sessions', `session-${encodeURIComponent(id)}.json`);
+}
+
+function quarantine(file: string, directory: string, notices: string[]): void {
+  unreadablePaths.add(file);
+  const destination = path.join(directory, 'invalid', `${path.basename(file)}.${crypto.randomUUID()}`);
+  try {
+    mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+    renameSync(file, destination);
+    notices.push(`Could not load ${path.basename(file)}. The original was preserved at ${destination}.`);
+  } catch {
+    notices.push(`Could not load ${file}. It was left untouched and will not be overwritten.`);
+  }
+}
+
+function readSnapshot(file: string, directory: string, fallback: string, notices: string[]): SessionSnapshot | null {
+  if (!existsSync(file)) return null;
+  const parsed = sessionSchema.safeParse(readJson(file));
+  if (!parsed.success || sessionPath(parsed.data.id, directory) !== file) {
+    quarantine(file, directory, notices);
+    return null;
+  }
+  return toSnapshot(parsed.data, fallback);
+}
+
+// Migration publishes complete files without replacing any session another
+// window has already saved. A hard link is the atomic create-if-absent step.
+function writeMigratedSnapshot(snapshot: SessionSnapshot, directory: string): boolean {
+  const file = sessionPath(snapshot.id, directory);
+  const temporary = `${file}.${crypto.randomUUID()}.tmp`;
+  try {
+    mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    writeFileSync(temporary, `${JSON.stringify(snapshot, null, 2)}\n`, { mode: 0o600 });
+    try {
+      linkSync(temporary, file);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
+    return true;
+  } catch {
+    return false;
+  } finally {
+    try { unlinkSync(temporary); } catch { /* Nothing to clean up after a failed create. */ }
+  }
+}
+
+function migrateSessions(directory: string, fallback: string, notices: string[]): void {
+  const legacy = path.join(directory, 'sessions.json');
+  if (!existsSync(legacy)) return;
+  const parsed = sessionFileSchema.safeParse(readJson(legacy));
+  if (!parsed.success) {
+    quarantine(legacy, directory, notices);
+    return;
+  }
+  const ids: string[] = [];
+  let complete = true;
+  for (const [index, value] of parsed.data.sessions.entries()) {
+    const session = sessionSchema.safeParse(value);
+    if (!session.success) {
+      const id = value && typeof value === 'object' && 'id' in value ? String(value.id) : String(index);
+      const file = path.join(directory, 'invalid', `session-${encodeURIComponent(id)}.${crypto.randomUUID()}.json`);
+      if (writeJson(file, value)) notices.push(`Could not load session ${id}. Its original record was preserved at ${file}.`);
+      else {
+        complete = false;
+        notices.push(`Could not set aside session ${id}; ${legacy} was left untouched.`);
+      }
+      continue;
+    }
+    const snapshot = toSnapshot(session.data, fallback);
+    if (!writeMigratedSnapshot(snapshot, directory)) complete = false;
+    if (snapshot.messages.length > 0) ids.push(snapshot.id);
+  }
+  if (!existsSync(path.join(directory, 'sessions', 'index.json'))) {
+    complete = saveSessionMetadata(ids, parsed.data.selectedSessionId, directory) && complete;
+  }
+  if (!complete) {
+    notices.push(`Session migration is incomplete; ${legacy} was left untouched for recovery.`);
+    return;
+  }
+  try {
+    // Keep an earlier backup too if a legacy file was restored manually.
+    const backup = existsSync(`${legacy}.migrated`) ? `${legacy}.${crypto.randomUUID()}.migrated` : `${legacy}.migrated`;
+    renameSync(legacy, backup);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      notices.push(`Sessions were migrated, but ${legacy} could not be renamed and was left untouched.`);
+    }
+  }
+}
+
+export function loadSessionSnapshot(
+  id: string,
+  directory: string = dataDirectory(),
+  fallbackSessionDirectory: string = process.cwd(),
+  notices: string[] = [],
+): SessionSnapshot | null {
+  migrateSessions(directory, fallbackSessionDirectory, notices);
+  const snapshot = readSnapshot(sessionPath(id, directory), directory, fallbackSessionDirectory, notices);
+  return snapshot && snapshot.messages.length > 0 ? snapshot : null;
 }
 
 export function loadSessionSnapshots(
   directory: string = dataDirectory(),
   fallbackSessionDirectory: string = process.cwd(),
 ): PersistedSessionSnapshots {
-  const parsed = sessionFileSchema.safeParse(readJson(sessionsPath(directory)));
-  if (!parsed.success) return { snapshots: [], selectedSessionId: null };
-  // A session with no history is a draft, not something to restore; files
-  // written before that rule existed still contain them.
-  const snapshots = parsed.data.sessions
-    .map(stored => toSnapshot(stored, fallbackSessionDirectory))
-    .filter(snapshot => snapshot.messages.length > 0);
+  const notices: string[] = [];
+  migrateSessions(directory, fallbackSessionDirectory, notices);
+  const metadata = metadataSchema.safeParse(readJson(path.join(directory, 'sessions', 'index.json')));
+  const snapshots: SessionSnapshot[] = [];
+  try {
+    for (const filename of readdirSync(path.join(directory, 'sessions'))) {
+      if (!filename.endsWith('.json') || filename === 'index.json') continue;
+      const snapshot = readSnapshot(path.join(directory, 'sessions', filename), directory, fallbackSessionDirectory, notices);
+      if (snapshot && snapshot.messages.length > 0) snapshots.push(snapshot);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') notices.push(`Could not read sessions in ${directory}. Existing files were left untouched.`);
+  }
+  const order = new Map((metadata.success ? metadata.data.sessionIds : []).map((id, index) => [id, index]));
+  snapshots.sort((left, right) => (order.get(left.id) ?? Infinity) - (order.get(right.id) ?? Infinity));
+  const selected = metadata.success ? metadata.data.selectedSessionId : null;
   return {
     snapshots,
-    selectedSessionId: snapshots.some(snapshot => snapshot.id === parsed.data.selectedSessionId)
-      ? parsed.data.selectedSessionId
-      : null,
+    selectedSessionId: snapshots.some(snapshot => snapshot.id === selected) ? selected : null,
+    ...(notices.length ? { notices } : {}),
   };
 }
 
+export function loadSessionRevision(id: string, directory: string = dataDirectory()): string | null {
+  try {
+    const stat = statSync(sessionPath(id, directory), { bigint: true });
+    return `${stat.ino}:${stat.mtimeNs}:${stat.size}`;
+  } catch {
+    return null;
+  }
+}
+
+export function saveSessionSnapshot(snapshot: SessionSnapshot, directory: string = dataDirectory()): boolean {
+  const file = sessionPath(snapshot.id, directory);
+  if (unreadablePaths.has(file) || !sessionSchema.safeParse(snapshot).success) return false;
+  if (existsSync(file) && !readSnapshot(file, directory, snapshot.directory, [])) return false;
+  if (snapshot.messages.length === 0) return true;
+  return writeJson(file, snapshot);
+}
+
+export function deleteSessionSnapshot(id: string, directory: string = dataDirectory()): boolean {
+  const file = sessionPath(id, directory);
+  if (unreadablePaths.has(file)) return false;
+  if (existsSync(file) && !readSnapshot(file, directory, process.cwd(), [])) return false;
+  try {
+    unlinkSync(file);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT';
+  }
+}
+
+export function saveSessionMetadata(
+  sessionIds: readonly string[],
+  selectedSessionId: string | null,
+  directory: string = dataDirectory(),
+): boolean {
+  const file = path.join(directory, 'sessions', 'index.json');
+  const previous = metadataSchema.safeParse(readJson(file));
+  const ids = [...new Set([...sessionIds, ...(previous.success ? previous.data.sessionIds : [])])];
+  return writeJson(file, {
+    version: 1,
+    sessionIds: ids,
+    selectedSessionId: selectedSessionId && existsSync(sessionPath(selectedSessionId, directory)) ? selectedSessionId : null,
+  });
+}
+
+// Bulk import remains useful to callers seeding a workspace. It never removes
+// sessions absent from its input; normal app subscriptions save one snapshot.
 export function saveSessionSnapshots(
   snapshots: readonly SessionSnapshot[],
   selectedSessionId: string | null,
   directory: string = dataDirectory(),
 ): boolean {
-  return writeJson(sessionsPath(directory), {
-    version: 1,
-    // A selection that was not written is no selection at all.
-    selectedSessionId: snapshots.some(snapshot => snapshot.id === selectedSessionId)
-      ? selectedSessionId
-      : null,
-    sessions: snapshots,
-  });
+  let saved = true;
+  for (const snapshot of snapshots) saved = saveSessionSnapshot(snapshot, directory) && saved;
+  return saveSessionMetadata(snapshots.map(snapshot => snapshot.id), selectedSessionId, directory) && saved;
 }

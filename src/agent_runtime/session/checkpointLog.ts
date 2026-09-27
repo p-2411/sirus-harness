@@ -1,13 +1,21 @@
 import path from 'path';
+import { realpathSync } from 'fs';
 import {
   captureCheckpoint,
   checkpointSummary,
+  checkpointPath,
+  contentFingerprint,
+  fileFingerprint,
+  previewCheckpoint,
+  type AgentFileChange,
   restoreCheckpoint,
   type Checkpoint,
   type RestoredFiles,
 } from '../../checkpoints';
-import { activeSubagentCount } from '../tools/subagents';
+import { activeSubagentCount, type WorkerRecord } from '../tools/subagents';
 import type { ChangeFeed } from './changeFeed';
+import type { Message } from '../types';
+import type { SessionSnapshot } from './index';
 
 export type { Checkpoint };
 
@@ -15,14 +23,19 @@ export type { Checkpoint };
 export interface RewindOptions {
   files: boolean;
   chat: boolean;
+  approvedFiles?: readonly string[];
 }
 
-export interface RewindResult {
+export interface RewindPreview {
   checkpoint: Checkpoint;
   // Null when files were not restored.
   files: RestoredFiles | null;
-  // How many messages the chat lost; zero when the chat was kept.
+  // Messages omitted from the fork; the original conversation is preserved.
   droppedMessages: number;
+}
+
+export interface RewindResult extends RewindPreview {
+  fork: SessionSnapshot | null;
 }
 
 // Sessions can share a working directory. A file rewind must not overlap
@@ -92,6 +105,7 @@ export const defaultDirectoryActivity: DirectoryActivity = new ProcessDirectoryA
 // concurrent work in the same directory out of a file restore.
 export class CheckpointLog {
   private checkpoints: Checkpoint[];
+  private readonly observed = new Set<string>();
 
   constructor(
     private readonly directory: string,
@@ -128,14 +142,69 @@ export class CheckpointLog {
     return index === -1 ? undefined : { checkpoint: this.checkpoints[index], index };
   }
 
-  // Restoring the chat drops that checkpoint and every later one; restoring
-  // only files keeps them all.
-  dropFrom(index: number): void {
-    this.checkpoints = this.checkpoints.slice(0, index);
+  // Tool updates reach the same change feed as the transcript. Only an
+  // explicit before/after diff proves ownership; locations without a diff
+  // cannot separate an agent edit from user activity during the tool call.
+  observe(messages: readonly Message[], restoring: boolean = false, worker?: WorkerRecord): void {
+    if (worker) {
+      try {
+        if (realpathSync(worker.directory) !== realpathSync(this.directory)) return;
+      } catch { return; }
+    }
+    const checkpoint = worker
+      ? [...this.checkpoints].reverse().find(candidate => candidate.createdAt <= worker.startedAt)
+      : this.checkpoints.at(-1);
+    if (!checkpoint) return;
+    for (const message of messages) {
+      if ((!worker && message.seq < checkpoint.seq) || message.role !== 'assistant') continue;
+      for (const call of message.content) {
+        if (call.type !== 'tool_call') continue;
+        const diffs = call.content.filter(content => content.type === 'diff');
+        if (!diffs.length && !['edit', 'delete', 'move'].includes(call.kind)) continue;
+        const paths = new Set([...call.locations.map(location => location.path), ...diffs.map(diff => diff.path)]);
+        for (const toolPath of paths) {
+          const file = checkpointPath(this.directory, toolPath);
+          if (!file) continue;
+          const key = `${worker?.id ?? 'session'}:${message.seq}:${call.id}:${file}`;
+          if (this.observed.has(key)) continue;
+          if (call.status === 'pending' || call.status === 'in_progress') continue;
+          this.observed.add(key);
+          if (restoring) continue;
+          const changes: AgentFileChange[] = [];
+          const fileDiffs = diffs.filter(diff => checkpointPath(this.directory, diff.path) === file);
+          if (call.status === 'completed' && fileDiffs.length) {
+            for (const diff of fileDiffs) changes.push({
+              path: file,
+              before: diff.oldText === null ? null : contentFingerprint(diff.oldText),
+              after: call.kind === 'delete' ? null : contentFingerprint(diff.newText),
+            });
+          } else {
+            let after: string | null = null;
+            let conflict: string | undefined;
+            try { after = fileFingerprint(this.directory, file); } catch { conflict = 'Unsafe file path'; }
+            conflict ??= 'No explicit before/after diff';
+            changes.push({ path: file, before: null, after, conflict });
+          }
+          checkpoint.changes ??= [];
+          checkpoint.changes.push(...changes);
+        }
+      }
+    }
   }
 
-  restoreFiles(checkpointId: string): Promise<RestoredFiles> {
-    return restoreCheckpoint(this.directory, checkpointId);
+  private changesSince(checkpointId: string): AgentFileChange[] {
+    const found = this.find(checkpointId);
+    return found ? this.checkpoints.slice(found.index).flatMap(checkpoint => checkpoint.changes ?? []) : [];
+  }
+
+  previewFiles(checkpointId: string): Promise<RestoredFiles> {
+    return previewCheckpoint(this.directory, checkpointId, this.changesSince(checkpointId));
+  }
+
+  restoreFiles(checkpointId: string, approvedFiles?: readonly string[]): Promise<RestoredFiles> {
+    const changes = this.changesSince(checkpointId);
+    return restoreCheckpoint(this.directory, checkpointId, approvedFiles
+      ? changes.filter(change => approvedFiles.includes(change.path)) : changes);
   }
 
   beginTurn(): void {

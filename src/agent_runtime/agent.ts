@@ -267,7 +267,7 @@ export class SessionAgent {
       }
       const vendor = this.vendor;
       if (!failure) {
-        throw new Error(`No ${VENDOR_INFO[vendor].displayName} API key. Run /login to sign in or paste a key.`);
+        throw new Error(`No ${VENDOR_INFO[vendor].displayName} credentials. Run /login to connect a Claude or ChatGPT subscription, or add an API key.`);
       }
       throw new Error(failure.message);
     } catch (error) {

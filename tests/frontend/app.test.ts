@@ -14,7 +14,7 @@ import { providerFor } from '../../src/agent_runtime/providers';
 import { bindScriptedRuntime, textTurn, unbindRuntime } from '../support/runtime';
 import App, { createWorkspace, nextSessionName, startSession } from '../../src/frontend/app';
 import { changeModel } from '../../src/commands/agents/behavior';
-import { loadSessionSnapshots, saveSessionSnapshots } from '../../src/persistence';
+import { deleteSessionSnapshot, loadSessionRevision, loadSessionSnapshot, loadSessionSnapshots, saveSessionSnapshot, saveSessionSnapshots } from '../../src/persistence';
 
 describe('app workspace startup', () => {
   let settingsDirectory: string;
@@ -191,8 +191,10 @@ describe('app workspace startup', () => {
       await type('\u001b[1;3B'); // Option+Down switches to a saved session.
       expect(output).toContain('Existing history');
       expectPanes(4);
-      await type('\u000e'); // Ctrl+N still creates a session.
-      expect(dots()).toHaveLength(3);
+      await type('\u000e'); // Ctrl+N focuses the existing draft.
+      expect(dots()).toHaveLength(2);
+      await type('\u000e');
+      expect(dots()).toHaveLength(2);
       expectPanes(4);
     } finally {
       app.unmount();
@@ -201,6 +203,124 @@ describe('app workspace startup', () => {
       update.mockRestore();
     }
   });
+  test('reloads inactive sessions, preserves other files, and never resurrects an external deletion', async () => {
+    const first = new Session({ id: 'external-first', name: 'Original title', directory: settingsDirectory,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'First history' }] }] }).toSnapshot();
+    const second = { ...first, id: 'external-second', name: 'Untouched title' };
+    saveSessionSnapshots([first, second], null);
+    const revision = loadSessionRevision(second.id);
+    const update = spyOn(updater, 'checkSirusUpdate').mockResolvedValue({
+      updateAvailable: false, currentVersion: '1.0.0', latestVersion: '1.0.0',
+    });
+    const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {}, ref() {}, unref() {} });
+    const stdout = Object.assign(new PassThrough(), { columns: 100, rows: 40 });
+    let output = '';
+    stdout.on('data', chunk => { const frame = stripAnsi(chunk.toString()); if (frame.trim()) output = frame; });
+    const app = render(createElement(App, { launchDirectory: settingsDirectory }), {
+      stdin: stdin as unknown as NodeJS.ReadStream, stdout: stdout as unknown as NodeJS.WriteStream,
+      debug: true, patchConsole: false, exitOnCtrlC: false,
+    });
+    const flush = async () => { await new Promise(resolve => setImmediate(resolve)); await app.waitUntilRenderFlush(); };
+    try {
+      await flush();
+      expect(loadSessionRevision(second.id)).toBe(revision);
+      saveSessionSnapshot({ ...first, name: 'External title', inputContent: 'External draft' });
+      await new Promise(resolve => setTimeout(resolve, 1650));
+      await flush();
+      expect(output).toContain('External title');
+      expect(output).not.toContain('Original title');
+      expect(loadSessionRevision(second.id)).toBe(revision);
+      // Switch before another poll, which also exercises the direct disk read.
+      saveSessionSnapshot({ ...first, name: 'Newest title', inputContent: 'Newest draft' });
+      stdin.write('\u001b[1;3B');
+      await flush();
+      expect(output).toContain('Newest draft');
+      expect(deleteSessionSnapshot(first.id)).toBe(true);
+      stdin.write(' additional text');
+      await flush();
+      expect(loadSessionSnapshot(first.id)).toBeNull();
+      stdin.write('\u000e');
+      await flush();
+      await new Promise(resolve => setTimeout(resolve, 1650));
+      await flush();
+      expect(loadSessionSnapshots().snapshots.map(snapshot => snapshot.id)).toEqual([second.id]);
+      expect(loadSessionRevision(second.id)).toBe(revision);
+    } finally {
+      app.unmount(); stdin.destroy(); stdout.destroy(); update.mockRestore();
+    }
+    expect(loadSessionSnapshot(first.id)).toBeNull();
+  });
+
+  test.each(['exit', 'cleanup'])('%s saves a final stream chunk before its throttled notification', async finalSave => {
+    const first = new Session({ id: 'streaming-final', name: 'Streaming', directory: settingsDirectory,
+      model: DEFAULT_MODEL, messages: [{ role: 'user', content: [{ type: 'text', text: 'Existing history' }] }] }).toSnapshot();
+    const second = { ...first, id: 'untouched-final', name: 'Untouched' };
+    saveSessionSnapshots([first, second], null);
+    const untouchedRevision = loadSessionRevision(second.id);
+    const originalRestore = Session.fromSnapshot;
+    let restored!: Session;
+    const restore = spyOn(Session, 'fromSnapshot').mockImplementation(snapshot => {
+      const session = originalRestore(snapshot);
+      if (snapshot.id === first.id) restored = session;
+      return session;
+    });
+    const update = spyOn(updater, 'checkSirusUpdate').mockResolvedValue({
+      updateAvailable: false, currentVersion: '1.0.0', latestVersion: '1.0.0',
+    });
+    providerFor('gpt').sources.addApiKey('test-openai-key');
+    let emitChunk: ((text: string) => void) | undefined;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    bindScriptedRuntime(DEFAULT_MODEL, async (_input, emit) => {
+      emitChunk = text => emit({ type: 'text', text });
+      await gate;
+    });
+    const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {}, ref() {}, unref() {} });
+    const stdout = Object.assign(new PassThrough(), { columns: 100, rows: 30 });
+    stdout.resume();
+    const previousExitListeners = new Set(process.listeners('exit'));
+    const app = render(createElement(App, { launchDirectory: settingsDirectory }), {
+      stdin: stdin as unknown as NodeJS.ReadStream, stdout: stdout as unknown as NodeJS.WriteStream,
+      debug: true, patchConsole: false, exitOnCtrlC: false,
+    });
+    let turn: ReturnType<Session['sendMessage']> | undefined;
+    try {
+      await new Promise(resolve => setImmediate(resolve));
+      await app.waitUntilRenderFlush();
+      turn = restored.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Stream a reply' }] });
+      const deadline = Date.now() + 2000;
+      while (!emitChunk && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+      expect(emitChunk).toBeDefined();
+      emitChunk!('Saved chunk');
+      await new Promise(resolve => setTimeout(resolve, 75));
+      // Force a notification now, then append a chunk inside the 50 ms window.
+      restored.setInputContent('draft');
+      const version = restored.getVersion();
+      emitChunk!(' and final chunk');
+      expect(restored.getVersion()).toBe(version);
+      const text = () => loadSessionSnapshot(first.id)!.messages.flatMap(message =>
+        message.content.flatMap(block => block.type === 'text' ? [block.text] : [])).join('\n');
+      expect(text()).not.toContain('final chunk');
+      if (finalSave === 'exit') {
+        const listener = process.listeners('exit').find(candidate =>
+          !previousExitListeners.has(candidate) && candidate.name === 'persistOnExit');
+        expect(listener).toBeDefined();
+        listener!(0);
+      } else {
+        app.unmount();
+      }
+      expect(text()).toContain('Saved chunk and final chunk');
+      expect(loadSessionRevision(second.id)).toBe(untouchedRevision);
+    } finally {
+      app.unmount();
+      release();
+      await turn;
+      await restored?.dispose();
+      restore.mockRestore(); update.mockRestore(); unbindRuntime(DEFAULT_MODEL);
+      stdin.destroy(); stdout.destroy();
+    }
+  });
+
   test('uses a collision-safe name for the startup draft', () => {
     const existing = new Session({ name: 'Session 2', directory: '/projects/previous', autoNamePending: true });
 

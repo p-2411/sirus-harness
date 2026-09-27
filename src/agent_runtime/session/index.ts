@@ -32,6 +32,7 @@ import {
   type Checkpoint,
   type DirectoryActivity,
   type RewindOptions,
+  type RewindPreview,
   type RewindResult,
 } from './checkpointLog';
 import { MessageQueue, isAutoSendable, type QueuedMessage } from './messageQueue';
@@ -51,6 +52,7 @@ export type {
   Participant,
   QueuedMessage,
   RewindOptions,
+  RewindPreview,
   RewindResult,
 };
 
@@ -72,6 +74,7 @@ export interface SessionTiming {
 export interface SessionOptions {
   id?: string;
   name?: string;
+  archived?: boolean;
   directory?: string;
   // The default participant's model. Ignored when the participant list
   // already contains the default participant.
@@ -94,6 +97,7 @@ export interface SessionOptions {
 }
 
 export interface SessionSnapshot {
+  archived?: boolean;
   id: string;
   name: string;
   directory: string;
@@ -183,6 +187,7 @@ export class Session {
   private readonly id: string;
   private readonly directory: string;
   private name: string;
+  private archived: boolean;
   private permissionMode: PermissionMode;
   private subagentModel: string | null;
   private notice: { participant: string; notice: NoticeBlock } | null = null;
@@ -211,6 +216,7 @@ export class Session {
     const resolved = resolveSessionOptions(options);
     this.id = resolved.id;
     this.name = resolved.name;
+    this.archived = options.archived ?? false;
     this.directory = resolved.directory;
     this.permissionMode = resolved.permissionMode;
     this.subagentModel = resolved.subagentModel;
@@ -231,6 +237,9 @@ export class Session {
     this.restore(resolved.messages);
     this.restoreWorkers(resolved.workers);
     this.checkpoints = new CheckpointLog(this.directory, resolved.checkpoints, this.changes);
+    this.checkpoints.observe(this.timeline.entries(), true);
+    for (const worker of resolved.workers) this.checkpoints.observe(worker.transcript, true, worker);
+    this.changes.subscribe(() => this.checkpoints.observe(this.timeline.entries()));
     this.turns = new TurnRunner({
       timeline: this.timeline,
       roster: this.roster,
@@ -248,6 +257,7 @@ export class Session {
   static fromSnapshot(snapshot: SessionSnapshot): Session {
     return new Session({
       id: snapshot.id,
+      archived: snapshot.archived,
       name: snapshot.name,
       directory: snapshot.directory,
       model: snapshot.defaultModel.model,
@@ -409,7 +419,7 @@ export class Session {
       const busy = targets.filter(target => target.busy || this.starting.has(target));
       const images = stored.content.filter((block): block is ImageBlock => block.type === 'image');
       const idle = targets.filter(target => !busy.includes(target));
-      const queueBusy = images.length > 0 || messageText.startsWith('/');
+      const queueBusy = images.length > 0 || !isAutoSendable(messageText);
       if (busy.length > 0 && queueBusy) {
         this.queue.push(textOf(queued), images, queued.content, busy.map(target => target.name));
         if (images.length > 0) this.showNotice('Images cannot be steered into a running turn. Message queued.');
@@ -495,6 +505,7 @@ export class Session {
   // A result decorates its SpawnAgent row. Background completion is a
   // notification to the owner, steered into a live turn whenever possible.
   private workerFinished(run: SubagentRun): void {
+    this.checkpoints.observe(run.transcript, false, run);
     const owner = this.roster.find(run.owner) ?? this.roster.default;
     const call = run.callId ? this.toolCallOf(owner, run.callId) : null;
     if (call) call.output = workerReport(run);
@@ -684,13 +695,43 @@ export class Session {
     return this.checkpoints.list();
   }
 
-  // Puts the directory, the chat, or both back to a checkpoint. Restoring
-  // the chat drops that checkpoint and every later one, since the entries
-  // they belong to are gone; restoring only files keeps them all.
+  isArchived(): boolean {
+    return this.archived;
+  }
+
+  setArchived(archived: boolean): void {
+    if (this.archived === archived) return;
+    this.archived = archived;
+    this.changes.notify();
+  }
+
+  // A fork carries independent records and starts its own runtimes on demand.
+  // Live workers belong to the original session and must not be registered twice.
+  fork(): SessionSnapshot {
+    const snapshot = structuredClone(this.toSnapshot());
+    delete snapshot.workers;
+    return {
+      ...snapshot, id: crypto.randomUUID(), name: `${this.name} (fork)`,
+      archived: false, updatedAt: Date.now(), autoNamePending: false,
+    };
+  }
+
+  async previewRewind(checkpointId: string, options: RewindOptions): Promise<RewindPreview> {
+    const found = this.checkpoints.find(checkpointId);
+    if (!found) throw new Error('That checkpoint no longer exists in this session.');
+    return {
+      checkpoint: found.checkpoint,
+      files: options.files ? await this.checkpoints.previewFiles(checkpointId) : null,
+      droppedMessages: options.chat ? this.timeline.entries().filter(message => message.seq >= found.checkpoint.seq).length : 0,
+    };
+  }
+
+  // Restoring conversation creates a new session. The source transcript and
+  // its runtime remain usable, including all turns after the selected point.
   async rewind(checkpointId: string, options: RewindOptions): Promise<RewindResult> {
     if (!options.files && !options.chat) throw new Error('Nothing to restore: choose files, chat, or both.');
     if (this.rewinding) throw new Error('Wait for the current rewind to finish.');
-    if (this.activeSends > 0) throw new Error('Wait for the current turn to finish before rewinding.');
+    if (this.activeSends > 0 || this.compacting) throw new Error('Wait for the current turn to finish before rewinding.');
     if (options.chat && this.roster.hasWorkingSubagents()) {
       throw new Error('Wait for this session’s subagents to finish before rewinding its chat.');
     }
@@ -706,19 +747,19 @@ export class Session {
     this.rewinding = true;
     if (options.files) this.checkpoints.beginRestore();
     try {
-      const files = options.files ? await this.checkpoints.restoreFiles(found.checkpoint.id) : null;
+      const files = options.files ? await this.checkpoints.restoreFiles(found.checkpoint.id, options.approvedFiles) : null;
+      let fork: SessionSnapshot | null = null;
       let droppedMessages = 0;
       if (options.chat) {
-        if (found.checkpoint.seq === 0) this.stopNaming();
-        // Every participant loses what came from that seq on, and every
-        // runtime is rebuilt from what is left.
-        this.turns.cancel();
-        droppedMessages = this.timeline.truncateFrom(found.checkpoint.seq);
-        this.checkpoints.dropFrom(found.index);
-        this.roster.resetRuntimes();
+        fork = this.fork();
+        const prompt = fork.messages.find(message => message.seq === found.checkpoint.seq);
+        const retained = fork.messages.filter(message => message.seq < found.checkpoint.seq);
+        droppedMessages = fork.messages.length - retained.length;
+        fork.messages = retained;
+        fork.checkpoints = fork.checkpoints?.slice(0, found.index);
+        fork.inputContent = prompt?.role === 'user' ? textOf(prompt) : '';
       }
-      this.changes.notify();
-      return { checkpoint: found.checkpoint, files, droppedMessages };
+      return { checkpoint: found.checkpoint, files, droppedMessages, fork };
     } finally {
       this.rewinding = false;
       if (options.files) this.checkpoints.endRestore();
@@ -1052,6 +1093,7 @@ export class Session {
     return {
       id: this.id,
       name: this.name,
+      archived: this.archived,
       directory: this.directory,
       participants: this.getParticipants(),
       defaultModel: this.roster.default.toParticipant(),

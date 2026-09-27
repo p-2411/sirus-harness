@@ -1,8 +1,8 @@
 import type { BackgroundTask } from '../agent_runtime/runtime/runtime';
 import type { PermissionMode } from '../agent_runtime/permissions/policy';
-import type { Checkpoint, Participant, RewindOptions, RewindResult } from '../agent_runtime/session';
+import type { Checkpoint, Participant, RewindOptions, RewindResult, RewindPreview, SessionSnapshot } from '../agent_runtime/session';
 import type { SubagentRun } from '../agent_runtime/tools/subagents';
-import type { ImageBlock, ThinkingLevel } from '../agent_runtime/types';
+import type { ImageBlock, ThinkingLevel, Message } from '../agent_runtime/types';
 import type { ContextUsage } from '../agent_runtime/usage';
 import type { Feedback } from './feedback';
 
@@ -38,6 +38,10 @@ export type { Notify } from '../agent_runtime/providers/login';
 export interface CommandSession {
   changeParticipantModel(participantName: string, newModel: string): void;
   clear(): void;
+  getMessages(): Message[];
+  getModel(): string;
+  fork(): SessionSnapshot;
+  previewRewind(checkpointId: string, options: RewindOptions): Promise<RewindPreview>;
   // Sends /compact to the default participant's runtime as a turn. Rejects
   // while the session is busy.
   compact(signal?: AbortSignal): Promise<void>;
@@ -87,7 +91,15 @@ export interface QuitsApp {
 // Capabilities beyond the conversation are opt-in: a caller that cannot
 // attach images or quit simply leaves them out, and the one command that
 // needs each says so.
-export type CommandCapabilities = Partial<AttachesImages & QuitsApp>;
+export type CommandCapabilities = Partial<AttachesImages & QuitsApp & {
+  newSession(): void;
+  openSession(snapshot: SessionSnapshot): void;
+  resumeSession(query?: string): void;
+  archiveSession(): void;
+  deleteSession(): void;
+  confirm(text: string): Promise<boolean>;
+  copy(text: string): void;
+}>;
 
 export interface CommandSpec {
   name: string;

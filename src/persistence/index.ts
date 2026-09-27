@@ -24,7 +24,7 @@ export type {
   StoredProviderSources,
   SubscriptionPreferences,
 } from './settings';
-export { loadSessionSnapshots, saveSessionSnapshots } from './sessions';
+export { loadSessionRevision, loadSessionSnapshot, loadSessionSnapshots, saveSessionSnapshot, saveSessionSnapshots, deleteSessionSnapshot, saveSessionMetadata } from './sessions';
 export type { PersistedSessionSnapshots } from './sessions';
 
 // The `Session`-shaped view of a loaded workspace, for callers (`app.tsx`)

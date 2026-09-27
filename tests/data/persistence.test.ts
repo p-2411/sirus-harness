@@ -1,11 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { Session } from '../../src/agent_runtime/session';
 import type { WorkerRecord } from '../../src/agent_runtime/tools/subagents';
 import {
   loadApiKeys,
+  loadSessionSnapshot,
+  loadSessionRevision,
+  saveSessionSnapshot,
+  deleteSessionSnapshot,
   loadSessionSnapshots,
   loadMemoryAccessPreference,
   loadSirusModelPreference,
@@ -32,7 +36,15 @@ afterEach(() => {
 describe('session persistence', () => {
   test('round-trips images, checkpoints, tools, notices, compaction and naming metadata together', () => {
     const image = { type: 'image' as const, path: path.join(directory, 'images', 'screenshot.png'), mediaType: 'image/png' as const, bytes: 123 };
-    const checkpoint = { id: 'b'.repeat(40), seq: 0, summary: '[image]', createdAt: Date.now() };
+    const checkpoint = {
+      id: 'b'.repeat(40), seq: 0, summary: '[image]', createdAt: Date.now(),
+      changes: [
+        { path: 'edited.txt', before: 'original\n', after: 'agent edit\n' },
+        { path: 'created.txt', before: null, after: 'created by agent\n' },
+        { path: 'deleted.txt', before: 'removed by agent\n', after: null },
+        { path: 'conflicted.txt', before: 'original\n', after: 'agent edit\n', conflict: 'User edited this file.' },
+      ],
+    };
     const session = new Session({
       id: 'image-session',
       name: 'With image',
@@ -60,6 +72,22 @@ describe('session persistence', () => {
     const restored = loadSessionSnapshots(directory);
     expect(restored.selectedSessionId).toBe(session.getId());
     expect(restored.snapshots[0]).toEqual(session.toSnapshot());
+    expect(Session.fromSnapshot(restored.snapshots[0]).toSnapshot().checkpoints?.[0].changes).toEqual(checkpoint.changes);
+
+    // Exercise migration on a scratch copy of a realistic old workspace,
+    // including attachments, tools, notices and checkpoints, never real data.
+    const original = JSON.stringify({ version: 1, selectedSessionId: session.getId(), sessions: [session.toSnapshot()] });
+    const fixture = path.join(directory, 'legacy-fixture.json');
+    const copiedDirectory = path.join(directory, 'migration-copy');
+    writeFileSync(fixture, original);
+    mkdirSync(copiedDirectory);
+    copyFileSync(fixture, path.join(copiedDirectory, 'sessions.json'));
+    const migrated = loadSessionSnapshots(copiedDirectory);
+    expect(migrated.snapshots[0]).toEqual(session.toSnapshot());
+    expect(Session.fromSnapshot(migrated.snapshots[0]).toSnapshot().checkpoints?.[0].changes).toEqual(checkpoint.changes);
+    expect(migrated.selectedSessionId).toBe(session.getId());
+    expect(readFileSync(path.join(copiedDirectory, 'sessions.json.migrated'), 'utf8')).toBe(original);
+    expect(readFileSync(fixture, 'utf8')).toBe(original);
   });
 
   test('drops unknown block kinds without dropping messages or other sessions', () => {
@@ -174,9 +202,10 @@ describe('session persistence', () => {
     });
     expect(session.toSnapshot().workers).toEqual([worker]);
     expect(saveSessionSnapshots([session.toSnapshot()], session.getId(), directory)).toBe(true);
-    const raw = JSON.parse(readFileSync(path.join(directory, 'sessions.json'), 'utf8'));
-    raw.sessions[0].workers[0].transcript[1].content.push({ type: 'future-worker-block' });
-    writeFileSync(path.join(directory, 'sessions.json'), JSON.stringify(raw));
+    const file = path.join(directory, 'sessions', 'session-worker-session.json');
+    const raw = JSON.parse(readFileSync(file, 'utf8'));
+    raw.workers[0].transcript[1].content.push({ type: 'future-worker-block' });
+    writeFileSync(file, JSON.stringify(raw));
     await session.dispose();
 
     const [stored] = loadSessionSnapshots(directory).snapshots;
@@ -228,10 +257,10 @@ describe('session persistence', () => {
 
   test('falls back safely when the session file is corrupt or from an unknown version', () => {
     writeFileSync(path.join(directory, 'sessions.json'), '{broken');
-    expect(loadSessionSnapshots(directory)).toEqual({ snapshots: [], selectedSessionId: null });
+    expect(loadSessionSnapshots(directory)).toMatchObject({ snapshots: [], selectedSessionId: null, notices: [expect.stringContaining('preserved')] });
 
     writeFileSync(path.join(directory, 'sessions.json'), JSON.stringify({ version: 999, sessions: [] }));
-    expect(loadSessionSnapshots(directory)).toEqual({ snapshots: [], selectedSessionId: null });
+    expect(loadSessionSnapshots(directory)).toMatchObject({ snapshots: [], selectedSessionId: null, notices: [expect.stringContaining('preserved')] });
   });
 
   test('assigns legacy sessions without a directory to the launch directory', () => {
@@ -275,6 +304,7 @@ describe('session persistence', () => {
     expect(Session.fromSnapshot(restored.snapshots[0]!).toSnapshot()).toEqual({
       id: 'legacy-id',
       name: 'Legacy',
+      archived: false,
       directory: '/projects/current-launch',
       participants: [{ name: 'sirus', model: 'gpt-5.6-luna' }],
       defaultModel: { name: 'sirus', model: 'gpt-5.6-luna' },
@@ -330,15 +360,77 @@ describe('session persistence', () => {
     expect(snapshot.checkpoints).toEqual([{ id: 'c'.repeat(40), seq: 0, summary: 'Read the readme', createdAt: 5 }]);
     // Once saved again, the file carries only the current shape.
     expect(saveSessionSnapshots([snapshot], 'old-id', directory)).toBe(true);
-    const raw = JSON.parse(readFileSync(path.join(directory, 'sessions.json'), 'utf8'));
+    const raw = JSON.parse(readFileSync(path.join(directory, 'sessions', 'session-old-id.json'), 'utf8'));
     expect(JSON.stringify(raw)).not.toContain('tool_result');
     expect(JSON.stringify(raw)).not.toContain('messageIndex');
   });
 
   test('writes valid JSON without leaving temporary files behind', () => {
     expect(saveSessionSnapshots([new Session()].filter(s => !s.isEmpty()).map(s => s.toSnapshot()), null, directory)).toBe(true);
-    expect(() => JSON.parse(readFileSync(path.join(directory, 'sessions.json'), 'utf8'))).not.toThrow();
-    expect(readdirSync(directory)).toEqual(['sessions.json']);
+    expect(() => JSON.parse(readFileSync(path.join(directory, 'sessions', 'index.json'), 'utf8'))).not.toThrow();
+    expect(readdirSync(directory)).toEqual(['sessions']);
+    expect(readdirSync(path.join(directory, 'sessions'))).toEqual(['index.json']);
+  });
+
+  test('migrates each legacy session independently and keeps the exact original file', () => {
+    const original = JSON.stringify({ version: 1, selectedSessionId: 'good', sessions: [
+      { id: 'good', name: 'Readable', model: 'gpt-5.6-luna', messages: [{ role: 'user', content: [{ type: 'text', text: 'Keep me' }] }] },
+      { id: 'bad', name: 'Unexpected mode', model: 'gpt-5.6-luna', permissionMode: 'plan', messages: [] },
+    ] }, null, 2);
+    writeFileSync(path.join(directory, 'sessions.json'), original);
+    const result = loadSessionSnapshots(directory, '/projects/legacy');
+    expect(result.snapshots.map(snapshot => snapshot.id)).toEqual(['good']);
+    expect(result.selectedSessionId).toBe('good');
+    expect(result.notices).toEqual([expect.stringContaining('session bad')]);
+    expect(readFileSync(path.join(directory, 'sessions.json.migrated'), 'utf8')).toBe(original);
+    expect(existsSync(path.join(directory, 'sessions.json'))).toBe(false);
+    const invalid = readdirSync(path.join(directory, 'invalid'));
+    expect(invalid).toHaveLength(1);
+    expect(JSON.parse(readFileSync(path.join(directory, 'invalid', invalid[0]), 'utf8')).permissionMode).toBe('plan');
+    expect(loadSessionSnapshots(directory).notices).toBeUndefined();
+  });
+
+  test('quarantines one damaged session and refuses stale writes to it', () => {
+    const first = new Session({ id: 'first', model: 'gpt-5.6-luna', messages: [{ role: 'user', content: [{ type: 'text', text: 'First' }] }] }).toSnapshot();
+    const second = { ...first, id: 'second' };
+    saveSessionSnapshots([first, second], 'first', directory);
+    const damagedFile = path.join(directory, 'sessions', 'session-first.json');
+    writeFileSync(damagedFile, '{broken original');
+    const result = loadSessionSnapshots(directory);
+    expect(result.snapshots.map(snapshot => snapshot.id)).toEqual(['second']);
+    expect(result.notices).toEqual([expect.stringContaining('session-first.json')]);
+    expect(saveSessionSnapshot(first, directory)).toBe(false);
+    expect(existsSync(damagedFile)).toBe(false);
+    expect(readFileSync(path.join(directory, 'invalid', readdirSync(path.join(directory, 'invalid'))[0]), 'utf8')).toBe('{broken original');
+  });
+
+  test('independent windows change only their session and last writer wins for the same session', () => {
+    const first = new Session({ id: 'first', model: 'gpt-5.6-luna', messages: [{ role: 'user', content: [{ type: 'text', text: 'First' }] }] }).toSnapshot();
+    const second = { ...first, id: 'second', name: 'Second' };
+    saveSessionSnapshots([first, second], 'first', directory);
+    const secondRevision = loadSessionRevision('second', directory);
+    const windowA = loadSessionSnapshot('first', directory)!;
+    const windowB = loadSessionSnapshot('second', directory)!;
+    expect(saveSessionSnapshot({ ...windowA, name: 'Edited in A' }, directory)).toBe(true);
+    expect(loadSessionRevision('second', directory)).toBe(secondRevision);
+    expect(saveSessionSnapshot({ ...windowB, name: 'Edited in B' }, directory)).toBe(true);
+    expect(loadSessionSnapshot('first', directory)?.name).toBe('Edited in A');
+    expect(loadSessionSnapshot('second', directory)?.name).toBe('Edited in B');
+    expect(saveSessionSnapshot({ ...windowA, name: 'Final writer' }, directory)).toBe(true);
+    expect(loadSessionSnapshot('first', directory)?.name).toBe('Final writer');
+    expect(deleteSessionSnapshot('first', directory)).toBe(true);
+    expect(loadSessionSnapshots(directory).snapshots.map(snapshot => snapshot.id)).toEqual(['second']);
+  });
+
+  test('migration never replaces a newer per-session file and reserves the metadata filename', () => {
+    const snapshot = new Session({ id: 'index', model: 'gpt-5.6-luna', name: 'Newer edit', messages: [{ role: 'user', content: [{ type: 'text', text: 'Retained' }] }] }).toSnapshot();
+    saveSessionSnapshot(snapshot, directory);
+    writeFileSync(path.join(directory, 'sessions.json'), JSON.stringify({ version: 1, selectedSessionId: 'index', sessions: [{ ...snapshot, name: 'Old name' }] }));
+    const result = loadSessionSnapshots(directory);
+    expect(result.snapshots).toHaveLength(1);
+    expect(result.snapshots[0].name).toBe('Newer edit');
+    expect(result.selectedSessionId).toBe('index');
+    expect(existsSync(path.join(directory, 'sessions.json.migrated'))).toBe(true);
   });
 
   test('does not save or restore empty sessions', () => {
@@ -353,8 +445,8 @@ describe('session persistence', () => {
       empty.getId(),
       directory,
     )).toBe(true);
-    const json = JSON.parse(readFileSync(path.join(directory, 'sessions.json'), 'utf8'));
-    expect(json.sessions.map((session: { id: string }) => session.id)).toEqual([used.getId()]);
+    const json = JSON.parse(readFileSync(path.join(directory, 'sessions', 'index.json'), 'utf8'));
+    expect(json.sessionIds).toEqual([used.getId()]);
     expect(json.selectedSessionId).toBeNull();
 
     const restored = loadSessionSnapshots(directory);

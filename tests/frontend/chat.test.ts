@@ -59,7 +59,8 @@ test('Escape dismisses help, command suggestions, login stages and secret entry'
     await type('\r');
     expect(output).toContain('ChatGPT');
     await type('\u001b');
-    expect(output).not.toContain('ChatGPT');
+    expect(output).not.toContain('› Claude');
+    expect(output).toContain('Welcome to Sirus.');
 
     await type('/login');
     await type('\r');
@@ -522,4 +523,50 @@ describe('turn status', () => {
     expect(formatElapsed(12_400)).toBe('12s');
     expect(formatElapsed(125_000)).toBe('2m 5s');
   });
+});
+
+
+test('slash paths are sent and unknown commands retain their draft until explicitly sent', async () => {
+  const model = 'test-slash-input';
+  const received: string[] = [];
+  bindScriptedRuntime(model, (input, emit) => { received.push(input.text); emit({ type: 'text', text: 'Received.' }); });
+  const session = new Session({ model });
+  const chat = renderChat(session);
+  try {
+    await chat.flush();
+    await chat.type('/tmp/foo.txt what is in this file');
+    await chat.type('\r');
+    await chat.waitFor('Received.');
+    expect(received[0]).toContain('/tmp/foo.txt what is in this file');
+    await chat.type('/not-a-command hello');
+    await chat.type('\r');
+    expect(session.getInputContent()).toBe('/not-a-command hello');
+    expect(chat.output()).toContain('Send as a message');
+    expect(received).toHaveLength(1);
+    await chat.type('\u001b[B');
+    await chat.type('\r');
+    await chat.waitFor('Received.');
+    expect(received).toHaveLength(2);
+    expect(received[1]).toBe('/not-a-command hello');
+    expect(session.getInputContent()).toBe('');
+  } finally {
+    await chat.close();
+    await session.dispose();
+    unbindRuntime(model);
+  }
+});
+
+
+test('/exit clears the command draft before the app exits', async () => {
+  const session = new Session();
+  session.append({ role: 'user', content: [{ type: 'text', text: 'Saved conversation' }] });
+  const chat = renderChat(session);
+  try {
+    await chat.flush();
+    await chat.type('/exit');
+    expect(session.getInputContent()).toBe('/exit');
+    await chat.type('\r');
+    expect(session.toSnapshot().inputContent).toBe('');
+    expect(session.getMessages()).toHaveLength(1);
+  } finally { await chat.close(); await session.dispose(); }
 });

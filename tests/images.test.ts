@@ -104,7 +104,7 @@ describe('image storage', () => {
     const session = new Session({ id: 'image-session', name: 'Screenshot', directory, model: 'gpt-5.6-sol' });
     session.append({ role: 'user', content: [image] });
     expect(saveSessionSnapshots([session].filter(s => !s.isEmpty()).map(s => s.toSnapshot()), session.getId())).toBe(true);
-    const saved = readFileSync(path.join(process.env.SIRUS_DATA_DIR!, 'sessions.json'), 'utf8');
+    const saved = readFileSync(path.join(process.env.SIRUS_DATA_DIR!, 'sessions', `session-${encodeURIComponent(session.getId())}.json`), 'utf8');
     expect(saved).not.toContain(PNG.toString('base64'));
     const restored = loadSessionSnapshots();
     expect(restored.selectedSessionId).toBe(session.getId());

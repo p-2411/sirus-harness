@@ -1,24 +1,34 @@
 import crypto from 'crypto';
 import { execFile } from 'child_process';
-import { existsSync, lstatSync, mkdirSync, unlinkSync, writeFileSync } from 'fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'fs';
 import path from 'path';
 import { dataDirectory } from './dataDirectory';
 
 // A checkpoint is the state of a session's directory just before a turn
 // started, kept in a shadow git repository under the application-state
 // directory: the project's own repository (if any) is never touched. Every
-// file the project would track is captured; ignored files are left alone,
-// both when capturing and when restoring.
+// file the project would track is captured; restoration is limited to files
+// with explicit agent diffs and no conflicting user changes.
 
 export interface Checkpoint {
   // The shadow commit holding the directory's files.
   id: string;
   // The sequence number of the user prompt that started the turn; rewinding
-  // the chat drops every participant's entries from this seq on.
+  // fork keeps every participant's entries before this seq.
   seq: number;
   // The first line of that message, for the picker.
   summary: string;
   createdAt: number;
+  changes?: AgentFileChange[];
+}
+
+// Content fingerprints observed at an agent tool boundary. A missing file
+// has a null fingerprint. Unproven changes are conflicts, never restore targets.
+export interface AgentFileChange {
+  path: string;
+  before: string | null;
+  after: string | null;
+  conflict?: string;
 }
 
 export interface RestoredFiles {
@@ -26,6 +36,7 @@ export interface RestoredFiles {
   restored: string[];
   // Files that did not exist at the checkpoint and were removed.
   removed: string[];
+  conflicts: string[];
 }
 
 const GIT_TIMEOUT_MS = 120_000;
@@ -117,10 +128,14 @@ const REPOSITORY_CONFIG: ReadonlyArray<[string, string]> = [
 
 async function ensureRepository(directory: string): Promise<void> {
   const gitDirectory = checkpointRepository(directory);
-  if (existsSync(path.join(gitDirectory, 'HEAD'))) return;
+  if (existsSync(path.join(gitDirectory, 'HEAD'))) {
+    if (!existsSync(path.join(gitDirectory, 'root'))) writeFileSync(path.join(gitDirectory, 'root'), realpathSync(directory), { mode: 0o600 });
+    return;
+  }
   mkdirSync(gitDirectory, { recursive: true, mode: 0o700 });
   await git(directory, ['init', '-q']);
   for (const [key, value] of REPOSITORY_CONFIG) await git(directory, ['config', key, value]);
+  writeFileSync(path.join(gitDirectory, 'root'), realpathSync(directory), { mode: 0o600 });
   writeFileSync(path.join(gitDirectory, 'directory'), `${path.resolve(directory)}\n`, 'utf8');
 }
 
@@ -206,68 +221,142 @@ export async function captureCheckpoint(
   }
 }
 
-// Status letters of `git diff --name-status -z` from the checkpoint to now.
-function parseNameStatus(output: string): RestoredFiles {
-  const restored: string[] = [];
-  const removed: string[] = [];
-  const fields = output.split('\0');
-  for (let index = 0; index + 1 < fields.length; index += 2) {
-    const status = fields[index];
-    const file = fields[index + 1];
-    if (!status || !file) continue;
-    // Added since the checkpoint means it goes away; anything else is put back.
-    if (status.startsWith('A')) removed.push(file);
-    else restored.push(file);
-  }
-  return { restored, removed };
-}
-
 export function isCheckpointId(id: string): boolean {
   return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(id);
 }
 
-// Git may overwrite ignored files even during a merging read-tree. Check
-// every file outside our freshly captured index, including ignored children
-// of a directory that the target would replace with a regular file.
-async function protectExcludedFiles(directory: string, id: string): Promise<void> {
-  const excluded = (await git(directory, ['ls-files', '--others', '-z']))
-    .split('\0').filter(Boolean).map(file => file.replace(/\/$/, ''));
-  if (excluded.length === 0) return;
-  const protectedFiles = new Set(excluded);
-  const protectedParents = new Set<string>();
-  for (const file of excluded) {
-    let parent = path.posix.dirname(file);
-    while (parent !== '.') {
-      protectedParents.add(parent);
-      parent = path.posix.dirname(parent);
-    }
-  }
-  const targetFiles = (await git(directory, ['ls-tree', '-r', '--name-only', '-z', id]))
-    .split('\0').filter(Boolean);
-  for (const file of targetFiles) {
-    let candidate = file;
-    let conflict = protectedParents.has(file);
-    while (!conflict && candidate !== '.') {
-      conflict = protectedFiles.has(candidate);
-      candidate = path.posix.dirname(candidate);
-    }
-    if (conflict) throw new Error(`Cannot restore ${file}: it would overwrite files excluded from checkpoints.`);
-  }
+export function contentFingerprint(content: string | Buffer): string {
+  return crypto.createHash('sha256').update(content).digest('hex');
 }
 
-// Puts the directory back to the checkpoint. The state being replaced is
-// committed first, so a rewind can itself be recovered from the repository.
-export function restoreCheckpoint(directory: string, id: string): Promise<RestoredFiles> {
+// Tool paths can come from a vendor or a worker. Never follow a symlink or
+// accept a path outside this project, including its Git metadata.
+export function checkpointPath(directory: string, file: string): string | null {
+  const relative = path.relative(path.resolve(directory), path.resolve(directory, file));
+  if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return null;
+  if (relative.split(path.sep).includes('.git')) return null;
+  return relative;
+}
+
+export function fileFingerprint(directory: string, file: string): string | null {
+  const root = path.join(checkpointRepository(directory), 'root');
+  if (lstatSync(directory).isSymbolicLink() || !existsSync(root) || readFileSync(root, 'utf8') !== realpathSync(directory)) {
+    throw new Error('Project directory moved or became a symlink.');
+  }
+  const relative = checkpointPath(directory, file);
+  if (!relative) throw new Error('Path is outside the project.');
+  let current = path.resolve(directory);
+  const parts = relative.split(path.sep);
+  for (let index = 0; index < parts.length; index++) {
+    current = path.join(current, parts[index]);
+    let stat;
+    try { stat = lstatSync(current); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
+    if (stat.isSymbolicLink() || (index < parts.length - 1 ? !stat.isDirectory() : !stat.isFile())) {
+      throw new Error('Path is a symlink or directory.');
+    }
+  }
+  return contentFingerprint(readFileSync(current));
+}
+
+interface RestoreTarget {
+  file: string;
+  expected: string | null;
+  content: Buffer | null;
+  mode: number;
+}
+
+function readBlob(directory: string, id: string): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    execFile('git', ['--git-dir', checkpointRepository(directory), 'cat-file', 'blob', id], {
+      cwd: directory, timeout: GIT_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024,
+      env: gitEnvironment(), encoding: 'buffer',
+    }, (error, stdout) => error ? reject(error) : resolve(stdout));
+  });
+}
+
+async function restorationPlan(directory: string, id: string, changes: readonly AgentFileChange[]): Promise<{
+  result: RestoredFiles; targets: RestoreTarget[];
+}> {
+  const root = path.join(checkpointRepository(directory), 'root');
+  if (changes.length && (!existsSync(root) || readFileSync(root, 'utf8') !== realpathSync(directory) || lstatSync(directory).isSymbolicLink())) {
+    throw new Error('The project directory moved or became a symlink; no files were restored.');
+  }
+  await git(directory, ['rev-parse', '--verify', `${id}^{commit}`]);
+  const tree = new Map<string, { id: string; mode: string }>();
+  for (const entry of (await git(directory, ['ls-tree', '-r', '-z', id])).split('\0')) {
+    const match = /^(\d+) blob ([0-9a-f]+)\t([\s\S]+)$/.exec(entry);
+    if (match) tree.set(match[3], { id: match[2], mode: match[1] });
+  }
+  const byFile = new Map<string, AgentFileChange[]>();
+  for (const change of changes) {
+    const file = checkpointPath(directory, change.path);
+    if (!file) continue;
+    const history = byFile.get(file) ?? [];
+    history.push(change);
+    byFile.set(file, history);
+  }
+  const result: RestoredFiles = { restored: [], removed: [], conflicts: [] };
+  const targets: RestoreTarget[] = [];
+  // Files with no agent evidence are deliberately absent from this plan.
+  for (const [file, history] of byFile) {
+    const original = tree.get(file);
+    const content = original ? await readBlob(directory, original.id) : null;
+    const before = content === null ? null : contentFingerprint(content);
+    let expected = before;
+    let conflict = !!original && !['100644', '100755'].includes(original.mode);
+    for (const change of history) {
+      if (change.conflict || change.before !== expected) conflict = true;
+      expected = change.after;
+    }
+    try {
+      const current = fileFingerprint(directory, file);
+      // Already restored files need no write, even on a repeated rewind.
+      if (current === before) continue;
+      if (current !== expected) conflict = true;
+    } catch { conflict = true; }
+    if (conflict) { result.conflicts.push(file); continue; }
+    (content === null ? result.removed : result.restored).push(file);
+    targets.push({ file, expected, content, mode: original?.mode === '100755' ? 0o755 : 0o644 });
+  }
+  return { result, targets };
+}
+
+export function previewCheckpoint(directory: string, id: string, changes: readonly AgentFileChange[] = []): Promise<RestoredFiles> {
+  if (!isCheckpointId(id)) return Promise.reject(new Error('Invalid checkpoint identifier.'));
+  return withRepository(directory, async () => (await restorationPlan(directory, id, changes)).result);
+}
+
+// Restore only proven agent changes. Recheck each path after all asynchronous
+// Git reads so edits made while the preview was open remain untouched.
+export function restoreCheckpoint(directory: string, id: string, changes: readonly AgentFileChange[] = []): Promise<RestoredFiles> {
   if (!isCheckpointId(id)) return Promise.reject(new Error('Invalid checkpoint identifier.'));
   return withRepository(directory, async () => {
-    await ensureRepository(directory);
-    await git(directory, ['rev-parse', '--verify', `${id}^{commit}`]);
-    await commitDirectory(directory, `before rewinding to ${id.slice(0, 7)}`);
-    await protectExcludedFiles(directory, id);
-    const changes = parseNameStatus(await git(directory, ['diff', '--name-status', '-z', '--no-renames', id, 'HEAD']));
-    // Merge from the freshly captured index so concurrent file edits are
-    // rejected instead of being discarded by an unconditional reset.
-    await git(directory, ['read-tree', '-m', '-u', 'HEAD', id]);
-    return changes;
+    const { result, targets } = await restorationPlan(directory, id, changes);
+    for (const target of targets) {
+      try {
+        if (fileFingerprint(directory, target.file) !== target.expected) throw new Error('File changed.');
+        const filename = path.join(directory, target.file);
+        if (target.content === null) unlinkSync(filename);
+        else {
+          mkdirSync(path.dirname(filename), { recursive: true });
+          const temporary = path.join(path.dirname(filename), `.sirus-rewind-${crypto.randomUUID()}`);
+          try {
+            writeFileSync(temporary, target.content, { flag: 'wx', mode: target.mode });
+            if (fileFingerprint(directory, target.file) !== target.expected) throw new Error('File changed.');
+            renameSync(temporary, filename);
+          } finally {
+            try { unlinkSync(temporary); } catch { /* Rename already consumed it. */ }
+          }
+        }
+      } catch {
+        result.restored = result.restored.filter(file => file !== target.file);
+        result.removed = result.removed.filter(file => file !== target.file);
+        result.conflicts.push(target.file);
+      }
+    }
+    return result;
   });
 }

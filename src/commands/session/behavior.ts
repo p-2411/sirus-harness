@@ -8,11 +8,6 @@ import {
 import type { Feedback } from '../feedback';
 import type { CommandMenuItem, CommandSession } from '../types';
 
-export function clearSession(session: CommandSession): Feedback {
-  session.clear();
-  return { kind: 'success', text: 'History cleared.' };
-}
-
 // /compact asks the default participant's runtime to fold its conversation
 // now. Each runtime also compacts on its own when its window fills; that is
 // the vendor's and has no switch.

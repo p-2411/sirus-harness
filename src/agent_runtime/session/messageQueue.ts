@@ -13,7 +13,7 @@ export interface QueuedMessage {
 // Commands can open pickers or secret entry, so leave them (and anything
 // following them) queued for the visible Chat to handle in order.
 export function isAutoSendable(text: string): boolean {
-  return !text.startsWith('/');
+  return !/^\/[^/\s]+(?:\s|$)/.test(text);
 }
 
 // The original stays in its slot while the input bar edits a private copy.
