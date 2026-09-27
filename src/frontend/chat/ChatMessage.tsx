@@ -18,7 +18,7 @@ import { Box, Text, type DOMElement } from 'ink';
 import { theme } from '../styles/theme';
 import { Markdown } from '../markdown/Markdown';
 import { describeImage } from '../../images';
-import { terminalText } from '../terminal/text';
+import { singleLine, terminalText, truncate } from '../terminal/text';
 import { participantColor, type ParticipantColors } from '../MentionText';
 import { useClickable } from '../interaction/clickable';
 import {
@@ -55,18 +55,13 @@ function toolVerb(kind: ToolKind): string {
 	return TOOL_VERBS[kind];
 }
 
-// A vendor's title or an agent's words, as one line the terminal only prints.
-function singleLine(text: string): string {
-	return terminalText(text).replace(/\s+/g, ' ').trim();
-}
-
 // The whole line as one string, for the callers with no row to truncate it:
 // the approval prompt, the turn status and the desktop notification all name
 // a call the same way the transcript does. `limit` cuts the title where the
 // caller has less room than a row.
 export function toolLine(call: Pick<ToolCallBlock, 'kind' | 'title'>, limit?: number): string {
 	const title = singleLine(call.title);
-	const shown = limit !== undefined && title.length > limit ? `${title.slice(0, limit - 1)}…` : title;
+	const shown = limit !== undefined ? truncate(title, limit) : title;
 	return shown ? `${toolVerb(call.kind)} ${shown}` : toolVerb(call.kind);
 }
 

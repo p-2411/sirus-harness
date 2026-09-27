@@ -8,7 +8,7 @@ import { editPreview, toolLine, type DiffLine } from './ChatMessage';
 import { isForeignInput } from './editor';
 import { FramedCard } from './FramedCard';
 import { moveSelection } from './SelectMenu';
-import { terminalText } from '../terminal/text';
+import { terminalText, truncate } from '../terminal/text';
 
 interface ApprovalChoice {
   kind: PermissionOptionKind;
@@ -66,7 +66,7 @@ function approvalDetail(call: ToolCallBlock): string[] {
   }
   if (input === undefined) return lines;
   const text = JSON.stringify(input) ?? String(input);
-  return [...lines, text.length > INPUT_LENGTH ? `${text.slice(0, INPUT_LENGTH)}…` : text];
+  return [...lines, truncate(text, INPUT_LENGTH)];
 }
 
 function markLine(line: DiffLine): string {

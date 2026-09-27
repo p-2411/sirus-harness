@@ -2,7 +2,7 @@
 // the messages waiting to go out, and the prompt for a value a command needs.
 import { Box, Text } from 'ink';
 import { theme } from '../styles/theme';
-import { terminalText } from '../terminal/text';
+import { singleLine, terminalText } from '../terminal/text';
 import { MentionText, type ParticipantColors } from '../MentionText';
 import { characterCount } from './editor';
 import type { Feedback } from '../../commands/feedback';
@@ -47,7 +47,7 @@ export function QueuedRow({ messages, selected = null, participantColors }: {
           <Box key={index} justifyContent="space-between">
             <Text color={active ? theme.text : theme.textMuted} wrap="truncate-end">
               <Text color={active ? theme.accent : theme.textSubtle}>{active ? '› ' : '⋮ '}</Text>
-              <MentionText colors={participantColors}>{message.replace(/\s+/g, ' ').trim()}</MentionText>
+              <MentionText colors={participantColors}>{singleLine(message)}</MentionText>
             </Text>
           </Box>
         );

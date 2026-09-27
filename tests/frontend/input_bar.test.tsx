@@ -421,7 +421,7 @@ describe('approval prompt', () => {
   });
 
   test('cuts an unrecognised input down to a readable line', () => {
-    const output = render(approval({
+    const request = approval({
       type: 'tool_call',
       id: 'call-3',
       kind: 'other',
@@ -430,11 +430,19 @@ describe('approval prompt', () => {
       locations: [],
       content: [],
       input: { note: 'x'.repeat(400) },
-    }));
+    });
+    const output = render(request);
 
     expect(output).toContain('@sirus wants to tool sirus - SaveMemory');
     expect(output).toContain('…');
     expect(output).not.toContain('x'.repeat(300));
+    // On a row wide enough to show it whole, the cut line is 200 characters,
+    // its ellipsis included.
+    const wide = stripAnsi(renderToString(
+      <ApprovalPrompt request={request} waiting={0} onDecide={() => {}} />,
+      { columns: 260 },
+    ));
+    expect(wide.match(/\{"note":"x*…/)?.[0]).toHaveLength(200);
   });
 });
 

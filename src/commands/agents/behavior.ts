@@ -9,6 +9,7 @@ import {
   parseThinkingLevel,
   type ThinkingLevel,
 } from '../../agent_runtime/types';
+import { singleLine, truncate } from '../../frontend/terminal/text';
 import type { Feedback } from '../feedback';
 import type { CommandMenuEntry, CommandMenuItem, CommandSession } from '../types';
 
@@ -208,9 +209,8 @@ function isWorkerAction(value: string | undefined): value is WorkerAction {
   return WORKER_ACTIONS.includes(value as WorkerAction);
 }
 
-function taskPreview(prompt: string, limit = 60): string {
-  const single = prompt.replace(/\s+/g, ' ').trim();
-  return single.length > limit ? `${single.slice(0, limit - 1)}…` : single;
+function taskPreview(prompt: string): string {
+  return truncate(singleLine(prompt), 60);
 }
 
 function findWorker(id: string, session: CommandSession): SubagentRun {

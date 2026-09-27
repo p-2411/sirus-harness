@@ -12,12 +12,13 @@ import { sentenceCase } from './chat/ApprovalPrompt';
 import { questionText } from './chat/QuestionCard';
 import { toolLine } from './chat/ChatMessage';
 import { notify } from './terminal/notifications';
+import { truncate } from './terminal/text';
 
 const BODY_LENGTH = 120;
 
 function firstLine(text: string): string {
   const line = text.split('\n').map(part => part.trim()).find(Boolean) ?? '';
-  return line.length > BODY_LENGTH ? `${line.slice(0, BODY_LENGTH - 1)}…` : line;
+  return truncate(line, BODY_LENGTH);
 }
 
 // The closing words of the turn: the last thing an agent said.
