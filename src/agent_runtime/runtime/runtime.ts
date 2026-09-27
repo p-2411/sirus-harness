@@ -72,6 +72,13 @@ export interface RuntimeOptions {
   onUpdate: (update: RuntimeUpdate) => void;
 }
 
+// What the vendor is told about a request nobody will answer: a permission
+// request or a question whose prompt was cancelled, and a question there is
+// no one to ask.
+export const PERMISSION_CANCELLED: RequestPermissionResponse = { outcome: { outcome: 'cancelled' } };
+export const QUESTION_CANCELLED: CreateElicitationResponse = { action: 'cancel' };
+export const QUESTION_DECLINED: CreateElicitationResponse = { action: 'decline' };
+
 export type RuntimeUpdate =
   | { type: 'text'; text: string }
   | { type: 'thought'; text: string }

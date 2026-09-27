@@ -26,6 +26,9 @@ import { launchFor, type Launch, type SessionParams } from './launch';
 import {
   COMPACTION_STATUSES,
   modeKindOf,
+  PERMISSION_CANCELLED,
+  QUESTION_CANCELLED,
+  QUESTION_DECLINED,
   toolCallBlockFrom,
   vendorModeFor,
   type CompactionStatus,
@@ -62,12 +65,6 @@ const CANCEL_GRACE_MS = 30_000;
 // how both adapters put a question to the user; codex-acp still sends its
 // tool approvals as permission requests either way.
 const CLIENT_CAPABILITIES: ClientCapabilities = { session: { compaction: {} }, elicitation: { form: {} } };
-
-const DECLINED: CreateElicitationResponse = { action: 'decline' };
-const CANCELLED_ELICITATION: CreateElicitationResponse = { action: 'cancel' };
-
-// The answer to a permission request that outlives its turn.
-const CANCELLED: RequestPermissionResponse = { outcome: { outcome: 'cancelled' } };
 
 // The select option each adapter exposes for its reasoning depth.
 const EFFORT_OPTION_IDS: Record<Vendor, string> = { claude: 'effort', gpt: 'reasoning_effort' };
@@ -413,11 +410,12 @@ export async function startAcpRuntime(
   async function permission(request: RequestPermissionRequest): Promise<RequestPermissionResponse> {
     const state = answeringSession(request.sessionId, request.toolCall);
     const signal = state?.turn?.signal;
-    if (!state || !signal || signal.aborted) return CANCELLED;
+    // A request that outlives its turn is answered cancelled.
+    if (!state || !signal || signal.aborted) return PERMISSION_CANCELLED;
     try {
       return await state.hooks.onPermission(request, signal);
     } catch (error) {
-      if (signal.aborted) return CANCELLED;
+      if (signal.aborted) return PERMISSION_CANCELLED;
       throw error;
     }
   }
@@ -428,12 +426,12 @@ export async function startAcpRuntime(
     const sessionId = 'sessionId' in request && typeof request.sessionId === 'string' ? request.sessionId : null;
     const state = sessionId ? answeringSession(sessionId, request) : undefined;
     const signal = state?.turn?.signal;
-    if (!state || !signal || signal.aborted) return CANCELLED_ELICITATION;
-    if (!state.hooks.onElicitation) return DECLINED;
+    if (!state || !signal || signal.aborted) return QUESTION_CANCELLED;
+    if (!state.hooks.onElicitation) return QUESTION_DECLINED;
     try {
       return await state.hooks.onElicitation(request, signal);
     } catch (error) {
-      if (signal.aborted) return CANCELLED_ELICITATION;
+      if (signal.aborted) return QUESTION_CANCELLED;
       throw error;
     }
   }
