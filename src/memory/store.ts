@@ -7,8 +7,6 @@ import { LocalEmbeddingProvider, type EmbeddingProvider } from './embeddings';
 import { SELECT_MEMORIES, globalScopeId, migrate, type MemoryRow } from './schema';
 import { VectorIndex, type IndexableMemory } from './vectorIndex';
 
-export type { EmbeddingProvider };
-
 // Where a memory lives: shared by every project, or tied to one directory.
 export const MEMORY_SCOPES = ['global', 'project'] as const;
 

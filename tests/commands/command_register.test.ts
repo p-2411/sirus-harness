@@ -20,7 +20,7 @@ import type { SubagentRun } from '../../src/agent_runtime/tools/subagents';
 import type { Feedback } from '../../src/commands/feedback';
 import { loadJevApiKey, loadSirusModelPreference, saveSirusModelPreference } from '../../src/persistence';
 import { shouldRequestJevKey } from '../../src/agent_runtime/router';
-import { bindScriptedRuntime, textTurn, unbindRuntime } from '../support/runtime';
+import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
 
 function runCommand(
   command: string,

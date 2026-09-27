@@ -38,7 +38,6 @@ import {
   CheckpointLog,
   defaultDirectoryActivity,
   type Checkpoint,
-  type DirectoryActivity,
   type RewindOptions,
   type RewindResult,
 } from './checkpointLog';
@@ -51,10 +50,8 @@ import { TurnRunner } from './turnRunner';
 // The default model is a catalog fact, named here because that is where
 // callers have always found it.
 export { DEFAULT_MODEL, NAME_PATTERN_SOURCE, defaultDirectoryActivity, isAutoSendable };
-export { SESSION_NAME_LIMIT } from './naming';
 export type {
   Checkpoint,
-  DirectoryActivity,
   Draft,
   Participant,
   QueuedMessage,

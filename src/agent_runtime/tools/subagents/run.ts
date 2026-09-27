@@ -7,7 +7,6 @@ import { transcriptText } from '../../session/transcript';
 import type { Message, ThinkingLevel, WorkerContext } from '../../types';
 import {
   notifySubagentProgress,
-  notifySubagents,
   touchSubagent,
   registerSubagent,
   type SubagentRun,

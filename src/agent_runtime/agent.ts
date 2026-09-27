@@ -491,7 +491,6 @@ export class SessionAgent {
           break;
         }
         case 'compaction': {
-          if (update.status === 'in_progress') return;
           if (update.status !== 'completed') return;
           entry.content.push({ type: 'compaction', ...(update.summary ? { summary: update.summary } : {}) });
           break;

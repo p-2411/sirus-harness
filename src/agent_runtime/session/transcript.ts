@@ -1,7 +1,5 @@
 import path from 'path';
-import { DEFAULT_PARTICIPANT, isPlanCall, textOf, type Message, type ToolCallBlock } from '../types';
-
-export { textOf };
+import { DEFAULT_PARTICIPANT, isPlanCall, type Message, type ToolCallBlock } from '../types';
 
 // One participant's record: every entry that was directed to it, in the
 // order it arrived. A user prompt that mentions it, a message from another
@@ -17,10 +15,6 @@ export class Transcript {
 
   entries(): readonly Message[] {
     return this.items;
-  }
-
-  get length(): number {
-    return this.items.length;
   }
 
   isEmpty(): boolean {
@@ -51,13 +45,6 @@ export class Transcript {
   clear(): void {
     this.items = [];
   }
-
-  // The record as plain text, for a new runtime's first prompt. From the
-  // last compaction the runtime reported a summary for, since that is all
-  // the vendor's own context held from then on; the whole record otherwise.
-  text(): string {
-    return transcriptText(this.items);
-  }
 }
 
 const VERBS: Record<ToolCallBlock['kind'], string> = {
@@ -82,6 +69,9 @@ function compactionCut(entries: readonly Message[]): { from: number; summary: st
   return { from: 0, summary: null };
 }
 
+// A record as plain text, for a new runtime's first prompt. From the last
+// compaction the runtime reported a summary for, since that is all the
+// vendor's own context held from then on; the whole record otherwise.
 export function transcriptText(entries: readonly Message[]): string {
   const { from, summary } = compactionCut(entries);
   const lines: string[] = [];

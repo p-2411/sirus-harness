@@ -138,10 +138,6 @@ export function activeSubagentCount(directory?: string): number {
   return count;
 }
 
-export function allSubagents(): Iterable<SubagentRun> {
-  return runs.values();
-}
-
 // What the session file keeps of one run. The live parts stay behind: the
 // agent doing the work, the session it belongs to, and the content array,
 // which is the assistant entry of the transcript and would otherwise be
@@ -169,5 +165,3 @@ export function workerRecord(run: SubagentRun): WorkerRecord {
     dismissed: run.dismissed,
   };
 }
-
-export type { SubagentSpawnOptions } from './run';
