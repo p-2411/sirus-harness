@@ -13,7 +13,7 @@ import {
 } from '../../src/agent_runtime/tools/subagents';
 import { subagentDone } from '../../src/agent_runtime/tools/subagents/run';
 import { workerReport } from '../../src/agent_runtime/tools/subagents/report';
-import { sirusMcpServerEntry, stopSirusMcpServer } from '../../src/agent_runtime/tools/server';
+import { stopSirusMcpServer } from '../../src/agent_runtime/tools/server';
 import Chat from '../../src/frontend/chat/Chat';
 import { ChatMessage } from '../../src/frontend/chat/ChatMessage';
 import {
@@ -27,10 +27,11 @@ import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
 
 afterAll(() => stopSirusMcpServer());
 
-// SpawnAgent reaches Sirus over the session's own MCP server, the way a
-// vendor runtime calls it, so the runs the chat decorates are real ones.
+// SpawnAgent reaches Sirus over the session's own MCP server, on the entry
+// its runtimes are handed and the way a vendor runtime calls it, so the runs
+// the chat decorates are real ones.
 async function spawnWorker(session: Session): Promise<SubagentRun> {
-  const entry = await sirusMcpServerEntry(session.getId(), 'sirus');
+  const entry = await session.mcpServerEntry('sirus');
   const client = new Client({ name: 'session-subagents-test', version: '0' });
   await client.connect(new StreamableHTTPClientTransport(new URL(entry.url), {
     requestInit: { headers: Object.fromEntries(entry.headers.map(header => [header.name, header.value])) },

@@ -8,6 +8,7 @@ import * as router from '../../src/agent_runtime/router';
 import type { RuntimeOptions } from '../../src/agent_runtime/runtime/runtime';
 import type { Draft } from '../../src/agent_runtime/session';
 import { Session } from '../../src/agent_runtime/session';
+import { sirusMcpServerEntry } from '../../src/agent_runtime/tools/server';
 import { subagentDone } from '../../src/agent_runtime/tools/subagents/run';
 import { textOf } from '../../src/agent_runtime/types';
 import { bindScriptedRuntime, textTurn, unbindRuntime, type ScriptedTurn } from '../support/runtime';
@@ -270,6 +271,18 @@ describe('Session model', () => {
       },
     ]);
     expect(session.getMessages()).toEqual(messages);
+  });
+
+  test('joins the tool server when a runtime first asks for its entry, and leaves it when deleted', async () => {
+    bindScriptedRuntime(testModel, textTurn('Hello back'));
+    const session = new Session({ id: 'tool-server-binding', name: 'Tools', model: testModel });
+    // A draft nobody sent to is dropped without being disposed, so nothing
+    // may hold on to it until then.
+    await expect(sirusMcpServerEntry('tool-server-binding', 'sirus')).rejects.toThrow('not registered');
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Hello' }] });
+    expect(await sirusMcpServerEntry('tool-server-binding', 'sirus')).toMatchObject({ name: 'sirus' });
+    await session.dispose();
+    await expect(sirusMcpServerEntry('tool-server-binding', 'sirus')).rejects.toThrow('not registered');
   });
 
   test('keeps the runtime warm between turns and reseeds a rebuilt one from the record', async () => {

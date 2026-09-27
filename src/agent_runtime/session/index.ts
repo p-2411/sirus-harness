@@ -240,11 +240,6 @@ export class Session {
     this.restoreWorkers(resolved.workers);
     this.checkpoints = new CheckpointLog(this.directory, resolved.checkpoints, this.changes);
     this.turns = new TurnRunner({ timeline: this.timeline, roster: this.roster });
-    registerToolSession(this.id, {
-      directory: this.directory,
-      memoryEnabled: isMemoryAccessEnabled,
-      hostFor: name => this.subagentHostFor(name),
-    });
   }
 
   static fromSnapshot(snapshot: SessionSnapshot): Session {
@@ -278,7 +273,7 @@ export class Session {
       sessionId: this.id,
       directory: this.directory,
       systemPrompt: agent => sirusPrompt(agent.name),
-      mcpServer: agent => sirusMcpServerEntry(this.id, agent.name),
+      mcpServer: agent => this.mcpServerEntry(agent.name),
       permissionMode: () => this.permissionMode,
       requestPermission: (agent, request, signal) =>
         requestPermission({ sessionId: this.id, requester: agent.requester }, request, signal),
@@ -289,7 +284,7 @@ export class Session {
         ...host,
         directory,
         systemPrompt: () => sirusPrompt('sirus', true),
-        mcpServer: () => sirusMcpServerEntry(this.id, `subagent:${id}`),
+        mcpServer: () => this.mcpServerEntry(`subagent:${id}`),
         forWorker: () => { throw new Error('A subagent cannot spawn a subagent'); },
       }),
       workerFinished: run => this.workerFinished(run),
@@ -476,6 +471,23 @@ export class Session {
   // server.
   subagentHostFor(participantName: string): SubagentHost | null {
     return this.roster.find(participantName)?.subagentHost() ?? null;
+  }
+
+  // The Sirus MCP server entry a runtime of this session lists; the
+  // requester is a participant's name, or `subagent:<id>` for a worker. The
+  // session joins the tool server here, when a runtime first asks, rather
+  // than when it is made: a draft nobody sent to is dropped without being
+  // disposed, and the server's map would otherwise hold on to it. Joining
+  // again only replaces the binding, and a deleted session stays out.
+  mcpServerEntry(requester: string): ReturnType<typeof sirusMcpServerEntry> {
+    if (!this.disposed) {
+      registerToolSession(this.id, {
+        directory: this.directory,
+        memoryEnabled: isMemoryAccessEnabled,
+        hostFor: name => this.subagentHostFor(name),
+      });
+    }
+    return sirusMcpServerEntry(this.id, requester);
   }
 
   // A worker of this session ended. Its report goes to the agent that
