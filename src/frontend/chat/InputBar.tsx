@@ -445,7 +445,9 @@ export function InputBar({
         if (!onQueue || draft.images.length > 0) return;
         onQueue(trimmed);
       } else {
-        send(trimmed, draft.images, draft.content);
+        // A command picked from the menu is sent by its full name; the
+        // draft's content is only the prefix typed to find it.
+        send(trimmed, draft.images, selectedCommand ? undefined : draft.content);
       }
       setRecall(null);
       setEditor({ text: '', cursor: 0 });

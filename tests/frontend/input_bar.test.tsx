@@ -23,7 +23,7 @@ import Sidebar from '../../src/frontend/Sidebar';
 import type { ApprovalRequest } from '../../src/agent_runtime/permissions/approvals';
 import type { PermissionOption } from '@agentclientprotocol/sdk';
 import { notifySubagents, type SubagentRun } from '../../src/agent_runtime/tools/subagents';
-import type { ToolCallBlock } from '../../src/agent_runtime/types';
+import type { MessageBlock, ToolCallBlock } from '../../src/agent_runtime/types';
 
 describe('session input drafts', () => {
   test('edits and restores drafts when switching session panes with Option+arrows', async () => {
@@ -111,6 +111,47 @@ describe('session input drafts', () => {
       expect(output).toContain('/▌');
     } finally {
       app.unmount();
+      stdin.destroy();
+      stdout.destroy();
+    }
+  });
+});
+
+describe('the command menu', () => {
+  test('enter on a vendor command sends the command, not the prefix typed to find it', async () => {
+    const sent: MessageBlock[][] = [];
+    const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {}, ref() {}, unref() {} });
+    const stdout = Object.assign(new PassThrough(), { columns: 100, rows: 30 });
+    function Bar() {
+      const [draft, setDraft] = useState('');
+      return <InputBar
+        inputContent={draft}
+        setInputContent={setDraft}
+        // What the chat sends: the draft's content when there is one.
+        send={(text, images = [], content) => sent.push(content ?? [...images, { type: 'text', text }])}
+        disabled={false}
+        feedback={null}
+        participants={[]}
+        nativeCommands={() => [{ name: 'review', description: 'review the changes', invocation: '/review' }]}
+      />;
+    }
+    const app = renderInk(<Bar />, {
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      stdout: stdout as unknown as NodeJS.WriteStream,
+      debug: true, patchConsole: false, exitOnCtrlC: false,
+    });
+    const press = async (key: string) => {
+      stdin.write(key);
+      await new Promise(resolve => setImmediate(resolve));
+      await app.waitUntilRenderFlush();
+    };
+    try {
+      await press('/rev');
+      await press('\r');
+      expect(sent).toEqual([[{ type: 'text', text: '/review' }]]);
+    } finally {
+      app.unmount();
+      await app.waitUntilExit();
       stdin.destroy();
       stdout.destroy();
     }
