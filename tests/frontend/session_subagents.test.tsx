@@ -17,6 +17,7 @@ import { sirusMcpServerEntry, stopSirusMcpServer } from '../../src/agent_runtime
 import Chat from '../../src/frontend/chat/Chat';
 import { ChatMessage } from '../../src/frontend/chat/ChatMessage';
 import {
+  lastDecision,
   pendingApprovals,
   requestPermission,
   resolveApproval,
@@ -225,4 +226,23 @@ test('tool approval indicators do not leak between sessions reusing a call ID', 
   expect(row(second)).toContain('declined by user');
   expect(row(first)).not.toContain('declined by user');
   for (const session of [first, second]) session.dispose();
+});
+
+test('a denial with no reject option to pick answers cancelled, never an allow', async () => {
+  const sessionId = 'deny-without-reject';
+  const answer = requestPermission(
+    { sessionId, requester: { participant: 'sirus' } },
+    {
+      sessionId: 'acp-session',
+      toolCall: { toolCallId: 'deny-call', kind: 'edit', title: 'example.txt' },
+      options: [
+        { optionId: 'once', name: 'Yes', kind: 'allow_once' },
+        { optionId: 'always', name: 'Yes, and don’t ask again', kind: 'allow_always' },
+      ],
+    },
+  );
+  const [approval] = pendingApprovals(sessionId);
+  resolveApproval(approval.id, 'deny');
+  expect(await answer).toEqual({ outcome: { outcome: 'cancelled' } });
+  expect(lastDecision('deny-call', sessionId)).toBe('deny');
 });
