@@ -8,6 +8,7 @@ import {
   thinkingMenuItems,
 } from './behavior';
 import { commandUsage, type CommandSpec } from '../types';
+import { DEFAULT_PARTICIPANT } from '../../agent_runtime/types';
 
 export const modelCommand: CommandSpec = {
   name: 'model',
@@ -18,7 +19,7 @@ export const modelCommand: CommandSpec = {
       return subagentModelCommand(args.slice(1), context.session);
     }
     if (args.length === 1) {
-      return changeModel('sirus', args[0], context.session);
+      return changeModel(DEFAULT_PARTICIPANT, args[0], context.session);
     }
     if (args.length === 2) {
       return changeModel(args[0], args[1], context.session);

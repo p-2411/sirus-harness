@@ -3,6 +3,7 @@ import { listedDescription, modelIds, modelsOf, VENDOR_INFO, VENDORS } from '../
 import type { SubagentRun } from '../../agent_runtime/tools/subagents';
 import { renderTranscript } from '../../agent_runtime/tools/subagents/report';
 import {
+  DEFAULT_PARTICIPANT,
   THINKING_LEVEL_DESCRIPTIONS,
   THINKING_LEVELS,
   parseThinkingLevel,
@@ -87,7 +88,7 @@ export function modelMenuItems(args: readonly string[] = []): CommandMenuEntry[]
 }
 
 export function changeModel(
-  participantName: string = 'sirus',
+  participantName: string,
   model: string,
   session: CommandSession,
 ): Feedback {
@@ -96,7 +97,7 @@ export function changeModel(
   session.changeParticipantModel(participantName, resolvedModel);
   // Choosing Sirus before a conversation starts also chooses the default for
   // future sessions. Existing sessions retain their own participant models.
-  if (session.isEmpty() && normalizedParticipantName.toLocaleLowerCase() === 'sirus'
+  if (session.isEmpty() && normalizedParticipantName.toLocaleLowerCase() === DEFAULT_PARTICIPANT
     && !saveSirusModelPreference(resolvedModel)) {
     return {
       kind: 'error',
@@ -122,7 +123,7 @@ export function subagentModelCommand(args: readonly string[], session: CommandSe
 }
 
 export function changeThinkingLevel(
-  participantName: string = 'sirus',
+  participantName: string,
   value: string,
   session: CommandSession,
 ): Feedback {
@@ -154,11 +155,11 @@ export function thinkingMenuItems(args: readonly string[] = []): CommandMenuItem
 // anything longer.
 export function thinkingCommand(args: readonly string[], session: CommandSession): Feedback {
   if (args.length === 0) {
-    return { kind: 'info', text: `@sirus thinking is ${session.getThinkingLevel()}.` };
+    return { kind: 'info', text: `@${DEFAULT_PARTICIPANT} thinking is ${session.getThinkingLevel()}.` };
   }
   if (args.length === 1) {
     const level = parseThinkingLevel(args[0]);
-    if (level) return changeThinkingLevel('sirus', level, session);
+    if (level) return changeThinkingLevel(DEFAULT_PARTICIPANT, level, session);
     if (!args[0].startsWith('@')) {
       throw new Error(`Unknown thinking level. Try: ${THINKING_LEVELS.join(', ')}`);
     }

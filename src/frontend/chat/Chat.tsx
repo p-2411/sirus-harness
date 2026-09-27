@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
-import type { ImageBlock, Message, MessageBlock, ToolCallBlock } from '../../agent_runtime/types';
+import { DEFAULT_PARTICIPANT, type ImageBlock, type Message, type MessageBlock, type ToolCallBlock } from '../../agent_runtime/types';
 import { saveJevKeyRequested } from '../../persistence';
 import { isAutoSendable, Session } from '../../agent_runtime/session';
 import { attachClipboardImage, describeImage, removeStoredImage } from '../../images';
@@ -572,7 +572,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       {messages.map(message => {
         const participant = message.role === 'assistant'
           ? participants.find(candidate =>
-            candidate.name.toLocaleLowerCase() === (message.participant ?? 'sirus').toLocaleLowerCase())
+            candidate.name.toLocaleLowerCase() === (message.participant ?? DEFAULT_PARTICIPANT).toLocaleLowerCase())
           : undefined;
         return (
           // Known by its seq, which the session hands out once per entry: a

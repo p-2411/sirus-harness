@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { Session, SessionStatus } from '../agent_runtime/session';
-import { textOf } from '../agent_runtime/types';
+import { DEFAULT_PARTICIPANT, textOf } from '../agent_runtime/types';
 import { describeRequester, pendingApprovals, subscribePermissions } from '../agent_runtime/permissions/approvals';
 import { pendingQuestions, subscribeQuestions } from '../agent_runtime/permissions/questions';
 import {
@@ -30,7 +30,7 @@ export function turnSummary(session: Session, status: SessionStatus): string {
     // A hidden entry is nobody's closing words: it was never on screen.
     if (message.hidden) continue;
     const line = firstLine(textOf(message));
-    if (line) return `@${message.participant ?? 'sirus'}: ${line}`;
+    if (line) return `@${message.participant ?? DEFAULT_PARTICIPANT}: ${line}`;
   }
   return 'Turn finished.';
 }

@@ -4,6 +4,7 @@ import {
   parsePermissionMode,
   type PermissionMode,
 } from '../../agent_runtime/permissions/policy';
+import { DEFAULT_PARTICIPANT } from '../../agent_runtime/types';
 import type { Feedback } from '../feedback';
 import type { CommandMenuItem, CommandSession } from '../types';
 
@@ -17,8 +18,7 @@ export function clearSession(session: CommandSession): Feedback {
 // the vendor's and has no switch.
 export async function compactCommand(session: CommandSession, signal?: AbortSignal): Promise<Feedback> {
   await session.compact(signal);
-  const name = session.getParticipants()[0]?.name ?? 'sirus';
-  return { kind: 'success', text: `Compacted @${name}'s context.` };
+  return { kind: 'success', text: `Compacted @${DEFAULT_PARTICIPANT}'s context.` };
 }
 
 export function renameSession(name: string, session: CommandSession): Feedback {

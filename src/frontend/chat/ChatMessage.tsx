@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import {
+	DEFAULT_PARTICIPANT,
 	isPlanCall,
 	planEntriesOf,
 	type CompactionBlock,
@@ -527,7 +528,7 @@ export function ChatMessage({
 	participantColors?: ParticipantColors;
 }) {
 	const isUser = message.role === "user";
-	const participantName = message.participant ?? 'sirus';
+	const participantName = message.participant ?? DEFAULT_PARTICIPANT;
 	const segments = messageSegments(message.content);
 	return (
 		// no bars, no boxes — bold speaker label, body aligned flush beneath,
