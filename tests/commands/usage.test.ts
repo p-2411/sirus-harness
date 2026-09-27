@@ -72,6 +72,19 @@ describe('/usage subscription allowance', () => {
     expect(result.text).not.toContain('100% remaining');
   });
 
+  test('a failed read says why, with any key masked', async () => {
+    const previousKey = process.env.OPENAI_SECRET;
+    process.env.OPENAI_SECRET = 'sk-proj-echoed-secret-9876';
+    try {
+      fakeAppServer(() => { throw new Error('codex app-server exited (1): no account for sk-proj-echoed-secret-9876'); });
+      expect((await readSubscriptionUsage('gpt')).unavailable)
+        .toBe('could not read provider limits: codex app-server exited (1): no account for sk-proj-…9876');
+    } finally {
+      if (previousKey === undefined) delete process.env.OPENAI_SECRET;
+      else process.env.OPENAI_SECRET = previousKey;
+    }
+  });
+
   test('cancels a pending quota read', async () => {
     let started!: () => void;
     const ready = new Promise<void>(resolve => { started = resolve; });

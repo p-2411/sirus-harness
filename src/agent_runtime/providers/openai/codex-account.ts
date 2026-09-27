@@ -17,6 +17,13 @@ type Json = Record<string, unknown>;
 
 type NotificationHandler = (method: string, params: Json) => void;
 
+// Someone waiting on a notification: told of each one that arrives, and of
+// the app-server's end, after which none will.
+interface Waiter {
+  notified: NotificationHandler;
+  failed: (error: Error) => void;
+}
+
 const TARGET_TRIPLES: Record<string, string> = {
   'darwin-arm64': 'aarch64-apple-darwin',
   'darwin-x64': 'x86_64-apple-darwin',
@@ -55,7 +62,7 @@ export class CodexRpc {
   private child: ChildProcessWithoutNullStreams;
   private nextId = 1;
   private pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
-  private notificationHandlers = new Set<NotificationHandler>();
+  private waiters = new Set<Waiter>();
   private stderrTail: string[] = [];
   private exited: Error | null = null;
   private readonly onProcessExit = () => this.close();
@@ -94,8 +101,10 @@ export class CodexRpc {
 
   // An app-server on the profile's store, initialized. A profile other than
   // the default keeps its login in a file: the keychain entry belongs to
-  // the default profile.
-  static async start(profile = 'default'): Promise<CodexRpc> {
+  // the default profile. The process is the caller's only once this
+  // resolves, so a start that is aborted or fails closes it here.
+  static async start(profile = 'default', signal?: AbortSignal): Promise<CodexRpc> {
+    throwIfAborted(signal);
     const args = ['app-server', '--listen', 'stdio://'];
     if (profile !== 'default') args.push('-c', 'cli_auth_credentials_store="file"');
     const child = spawn(codexBinaryPath(), args, {
@@ -103,9 +112,14 @@ export class CodexRpc {
       env: subscriptionEnvironment('gpt', profile),
     });
     const rpc = new CodexRpc(child);
-    await rpc.request('initialize', {
-      clientInfo: { name: 'sirus', title: 'Sirus', version: SIRUS_VERSION },
-    });
+    try {
+      await abortable(rpc.request('initialize', {
+        clientInfo: { name: 'sirus', title: 'Sirus', version: SIRUS_VERSION },
+      }), signal);
+    } catch (error) {
+      rpc.close();
+      throw error;
+    }
     rpc.notify('initialized');
     return rpc;
   }
@@ -123,7 +137,8 @@ export class CodexRpc {
     this.write({ method, params });
   }
 
-  // Resolves when a notification satisfying the predicate arrives.
+  // Resolves when a notification satisfying the predicate arrives, and
+  // rejects with the reason the app-server went if it goes first.
   waitForNotification(
     method: string,
     predicate: (params: Json) => boolean,
@@ -131,11 +146,12 @@ export class CodexRpc {
     signal?: AbortSignal,
   ): Promise<Json> {
     throwIfAborted(signal);
+    if (this.exited) return Promise.reject(this.exited);
     return new Promise((resolve, reject) => {
       const settle = () => {
         clearTimeout(timer);
         signal?.removeEventListener('abort', onAbort);
-        this.notificationHandlers.delete(handler);
+        this.waiters.delete(waiter);
       };
       const timer = setTimeout(() => {
         settle();
@@ -147,12 +163,18 @@ export class CodexRpc {
         settle();
         reject(abortReason(signal!));
       };
-      const handler: NotificationHandler = (incoming, params) => {
-        if (incoming !== method || !predicate(params)) return;
-        settle();
-        resolve(params);
+      const waiter: Waiter = {
+        notified: (incoming, params) => {
+          if (incoming !== method || !predicate(params)) return;
+          settle();
+          resolve(params);
+        },
+        failed: error => {
+          settle();
+          reject(error);
+        },
       };
-      this.notificationHandlers.add(handler);
+      this.waiters.add(waiter);
       signal?.addEventListener('abort', onAbort, { once: true });
     });
   }
@@ -167,6 +189,7 @@ export class CodexRpc {
     process.off('exit', this.onProcessExit);
     for (const { reject } of this.pending.values()) reject(error);
     this.pending.clear();
+    for (const waiter of [...this.waiters]) waiter.failed(error);
   }
 
   private write(message: Json): void {
@@ -189,7 +212,7 @@ export class CodexRpc {
       return;
     }
     if (typeof method === 'string') {
-      for (const handler of this.notificationHandlers) handler(method, params);
+      for (const waiter of this.waiters) waiter.notified(method, params);
       return;
     }
     if (typeof id === 'number') {
@@ -210,8 +233,7 @@ async function withCodex<T>(
   signal: AbortSignal | undefined,
   work: (rpc: CodexRpc) => Promise<T>,
 ): Promise<T> {
-  throwIfAborted(signal);
-  const rpc = await abortable(CodexRpc.start(profile), signal);
+  const rpc = await CodexRpc.start(profile, signal);
   try {
     return await abortable(work(rpc), signal);
   } finally {

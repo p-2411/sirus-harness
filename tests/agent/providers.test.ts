@@ -1,11 +1,20 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
+import * as childProcess from 'child_process';
+import { EventEmitter } from 'events';
 import { existsSync, mkdtempSync, rmSync } from 'fs';
 import os from 'os';
 import path from 'path';
+import { PassThrough } from 'stream';
+import { TurnCancelledError } from '../../src/abort';
 import { providerFor, servableModelIds, servesModel } from '../../src/agent_runtime/providers';
 import { MODELS, modelInfo, VENDOR_INFO, type Vendor } from '../../src/agent_runtime/providers/catalog';
+import { browserCommand } from '../../src/agent_runtime/providers/login';
+import { loginCodex, readCodexAccount, readCodexRateLimits } from '../../src/agent_runtime/providers/openai/codex-account';
 import { sourceEnvironment } from '../../src/agent_runtime/providers/profiles';
 import { maskApiKey, type Source } from '../../src/agent_runtime/providers/sources';
+import * as acp from '../../src/agent_runtime/runtime/acp';
+import { launchFor } from '../../src/agent_runtime/runtime/launch';
+import { createRuntime, type RuntimeOptions } from '../../src/agent_runtime/runtime/runtime';
 import {
   routeSessionModel,
   routeWorker,
@@ -33,6 +42,38 @@ test('serves the catalog plus whatever a scripted runtime is bound to', () => {
     expect(servableModelIds()).toContain('gpt-5.6-luna');
   } finally {
     unbindRuntime(model);
+  }
+});
+
+// What a runtime is started with, less what each test is about.
+function runtimeOptions(overrides: Partial<RuntimeOptions>): RuntimeOptions {
+  return {
+    vendor: 'gpt',
+    model: 'gpt-5.6-luna',
+    thinkingLevel: 'low',
+    directory: os.tmpdir(),
+    systemPrompt: 'Answer briefly.',
+    env: {},
+    mcpServer: null,
+    bare: true,
+    permissionMode: 'ask',
+    onPermission: async () => ({ outcome: { outcome: 'cancelled' } }),
+    onUpdate: () => {},
+    ...overrides,
+  };
+}
+
+// A restored session, or the subagent setting, can name a model a vendor
+// has since stopped listing. It has no credential, and must not be started
+// on the process's own environment instead.
+test('a model no vendor knows any more is refused before any adapter starts', async () => {
+  const start = spyOn(acp, 'startAcpRuntime').mockRejectedValue(new Error('an adapter was started'));
+  try {
+    await expect(createRuntime(runtimeOptions({ model: 'gpt-retired', env: { ...process.env } })))
+      .rejects.toThrow('The model gpt-retired is no longer available. Pick another with /model.');
+    expect(start).not.toHaveBeenCalled();
+  } finally {
+    start.mockRestore();
   }
 });
 
@@ -190,6 +231,17 @@ describe('credential environments', () => {
     expect(sourceEnvironment('gpt', { id: 'k', kind: 'api', key: 'sk-proj-run-5678' }).CODEX_HOME).toBe(first.CODEX_HOME);
     expect(sourceEnvironment('gpt', { id: 'j', kind: 'api', key: 'sk-proj-other-0001' }).CODEX_HOME).not.toBe(first.CODEX_HOME);
     expect(first.CODEX_HOME).not.toContain('sk-proj');
+  });
+
+  test('the launch logs Codex in with a key only inside a home Sirus made for it', () => {
+    const keyed = sourceEnvironment('gpt', { id: 'k', kind: 'api', key: 'sk-proj-run-5678' });
+    expect(launchFor(runtimeOptions({ env: keyed })).authenticate).toEqual({ methodId: 'api-key' });
+    // The shell's own key with no home of Sirus's: a login would land in the
+    // user's Codex home and replace their ChatGPT sign-in.
+    const shell = { OPENAI_API_KEY: 'sk-proj-shell-0000' };
+    expect(launchFor(runtimeOptions({ env: shell })).authenticate).toBeUndefined();
+    expect(launchFor(runtimeOptions({ env: { ...shell, CODEX_HOME: path.join(os.homedir(), '.codex') } })).authenticate)
+      .toBeUndefined();
   });
 
   test('a subscription points the process at its own profile and inherits no key', () => {
@@ -451,5 +503,80 @@ describe('routing a worker', () => {
       'Cost: $10 per million input tokens, $50 per million output (cache reads $0.25).',
       'Allowance: Anthropic has 47% of the 5-hour window remaining.',
     ].join('\n'));
+  });
+});
+
+// `codex app-server`, which the account helper starts for one request at a
+// time: a child that answers each request as the test says, or not at all.
+type AppServerAnswer = { result: unknown } | { error: { message: string } } | null;
+
+function fakeAppServer(answer: (method: string) => AppServerAnswer) {
+  const child = Object.assign(new EventEmitter(), {
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    killed: false,
+    kill() {
+      child.killed = true;
+      setImmediate(() => child.emit('exit', null, 'SIGTERM'));
+      return true;
+    },
+  });
+  let buffer = '';
+  child.stdin.setEncoding('utf8');
+  child.stdin.on('data', (chunk: string) => {
+    buffer += chunk;
+    for (let newline = buffer.indexOf('\n'); newline !== -1; newline = buffer.indexOf('\n')) {
+      const message = JSON.parse(buffer.slice(0, newline)) as { id?: number; method: string };
+      buffer = buffer.slice(newline + 1);
+      const reply = message.id === undefined ? null : answer(message.method);
+      if (reply) child.stdout.write(`${JSON.stringify({ id: message.id, ...reply })}\n`);
+    }
+  });
+  spyOn(childProcess, 'spawn').mockReturnValue(child as unknown as childProcess.ChildProcess);
+  return child;
+}
+
+test('a sign-in link opens whole on every platform', () => {
+  const url = 'https://auth.openai.com/oauth/authorize?response_type=code&client_id=app&state=abc';
+  // Through cmd, everything after the first `&` would be read as another command.
+  expect(browserCommand(url, 'win32')).toEqual({ command: 'rundll32', args: ['url.dll,FileProtocolHandler', url] });
+  expect(browserCommand(url, 'darwin')).toEqual({ command: 'open', args: [url] });
+  expect(browserCommand(url, 'linux')).toEqual({ command: 'xdg-open', args: [url] });
+});
+
+describe('the Codex app-server behind an account request', () => {
+  afterEach(() => {
+    mock.restore();
+  });
+
+  test('a read cancelled while the app-server starts closes it', async () => {
+    const child = fakeAppServer(() => null);
+    const controller = new AbortController();
+    const read = readCodexRateLimits('default', controller.signal);
+    await new Promise(resolve => setImmediate(resolve));
+    controller.abort(new TurnCancelledError());
+    await expect(read).rejects.toThrow('Cancelled');
+    expect(child.killed).toBe(true);
+  });
+
+  test('an app-server that refuses to initialize is closed', async () => {
+    const child = fakeAppServer(method => method === 'initialize' ? { error: { message: 'unsupported client' } } : null);
+    await expect(readCodexAccount('default')).rejects.toThrow('unsupported client');
+    expect(child.killed).toBe(true);
+  });
+
+  test('a login waiting on the browser fails with the reason the app-server went', async () => {
+    const child = fakeAppServer(method => {
+      if (method === 'initialize') return { result: {} };
+      if (method === 'account/read') return { result: { account: null } };
+      if (method === 'account/login/start') return { result: { loginId: 'login-1', authUrl: 'https://auth.example/' } };
+      return null;
+    });
+    const login = loginCodex('default', () => {
+      child.stderr.write('token exchange failed\n');
+      setImmediate(() => child.emit('exit', 1, null));
+    }, 2_000);
+    await expect(login).rejects.toThrow('codex app-server exited (1): token exchange failed');
   });
 });

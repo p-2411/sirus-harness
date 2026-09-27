@@ -9,7 +9,7 @@ import type {
   ToolCallUpdate,
 } from '@agentclientprotocol/sdk';
 import type { PermissionMode } from '../permissions/policy';
-import type { ListedModel, Vendor } from '../providers/catalog';
+import { vendorOf, type ListedModel, type Vendor } from '../providers/catalog';
 import type {
   ImageBlock,
   PlanEntry,
@@ -185,16 +185,26 @@ export function runtimeGeneration(): number {
   return generation;
 }
 
+// Nothing is disposed here: a runtime may be in the middle of a turn, a
+// worker's included, and ending its process would fail that turn as if its
+// credential had. Each one is rebuilt when its participant next prompts it,
+// and the tool server reads memory access on every request anyway.
 export function invalidateAllRuntimes(): void {
   generation++;
-  disposeAllRuntimes();
 }
 
 // Starts a runtime for the model: a scripted one when the test suite bound
-// it, otherwise the vendor's adapter process.
-export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
+// it, otherwise the vendor's adapter process. A model no vendor knows, such
+// as one a vendor has since stopped listing that a restored session or the
+// subagent setting still names, has no credential to run on; started anyway,
+// its adapter would get this process's whole environment, keys included.
+// Aborting the signal ends a startup the adapter has not finished.
+export async function createRuntime(options: RuntimeOptions, signal?: AbortSignal): Promise<Runtime> {
   const bound = boundRuntimes[options.model];
-  const runtime = bound ? await bound(options) : await startAcpRuntime(options);
+  if (!bound && !vendorOf(options.model)) {
+    throw new Error(`The model ${options.model} is no longer available. Pick another with /model.`);
+  }
+  const runtime = bound ? await bound(options) : await startAcpRuntime(options, signal);
   return trackRuntime(runtime);
 }
 

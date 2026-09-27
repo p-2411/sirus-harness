@@ -3,6 +3,7 @@ import { createRequire } from 'module';
 import os from 'os';
 import path from 'path';
 import type { McpServer } from '@agentclientprotocol/sdk';
+import { dataDirectory } from '../../dataDirectory';
 import type { PermissionMode } from '../permissions/policy';
 import { VENDOR_INFO, type Vendor } from '../providers/catalog';
 import type { RuntimeOptions } from './runtime';
@@ -273,9 +274,19 @@ function codexLaunch(options: RuntimeOptions, mode: PermissionMode): Launch {
     forkNeedsResume: false,
     // An API key in the environment is an API-key source (a subscription's
     // environment scrubs it). Codex only honours a key it was logged in
-    // with, in the home the source's environment points it at.
-    ...(options.env[VENDOR_INFO.gpt.credentialEnv] ? { authenticate: { methodId: 'api-key' } } : {}),
+    // with, in the home the source's environment points it at. Logging in
+    // replaces whatever login that home held, so it happens only in a home
+    // Sirus made for the key, never in the user's own `~/.codex`.
+    ...(options.env[VENDOR_INFO.gpt.credentialEnv] && isSirusProfile(options.env[VENDOR_INFO.gpt.profileDirEnv])
+      ? { authenticate: { methodId: 'api-key' } }
+      : {}),
   };
+}
+
+// Whether a profile directory is one of Sirus's own, under its data
+// directory, rather than the user's.
+function isSirusProfile(directory: string | undefined): boolean {
+  return directory !== undefined && path.resolve(directory).startsWith(path.resolve(dataDirectory()) + path.sep);
 }
 
 const LAUNCHES: Record<Vendor, (options: RuntimeOptions, mode: PermissionMode) => Launch> = {

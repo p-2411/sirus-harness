@@ -35,6 +35,14 @@ export function maskApiKey(key: string): string {
   return `${key.length > 8 ? prefix : ''}…${tail}`;
 }
 
+// A message must not carry a key it was handed: every API key among the
+// sources is masked wherever it appears.
+export function maskKeys(text: string, sources: readonly (Source | null)[]): string {
+  return sources.reduce((masked, source) => source?.kind === 'api'
+    ? masked.replaceAll(source.key, maskApiKey(source.key))
+    : masked, text);
+}
+
 // Anything that changes what the sidebar should show: a credential added or
 // removed for any vendor, or a request settling on a different source.
 const listeners = new Set<() => void>();

@@ -23,7 +23,7 @@ import type { ListedModel, Vendor } from '../providers/catalog';
 import { THINKING_LEVELS, type ThinkingLevel, type ToolCallBlock } from '../types';
 import type { ContextUsage } from '../usage';
 import { nativeCommandFrom } from './commands';
-import { launchFor, type SessionParams } from './launch';
+import { launchFor, type Launch, type SessionParams } from './launch';
 import {
   modeKindOf,
   toolCallBlockFrom,
@@ -128,6 +128,19 @@ function textOf(blocks: readonly ContentBlock[]): string {
   return blocks.filter(block => block.type === 'text').map(block => block.text).join('');
 }
 
+// The updates that make up a turn's reply: text, thoughts, tool calls, the
+// plan and compaction. The rest describe the session and may arrive at any
+// time: its commands, mode, options and context gauge.
+const TURN_CONTENT = new Set<SessionUpdate['sessionUpdate']>([
+  'agent_message_chunk',
+  'agent_thought_chunk',
+  'tool_call',
+  'tool_call_update',
+  'plan',
+  'compaction_summary_chunk',
+  'compaction_update',
+]);
+
 type CompactionStatus = 'in_progress' | 'completed' | 'failed' | 'cancelled';
 
 function compactionStatus(status: string): CompactionStatus | null {
@@ -181,6 +194,10 @@ interface SessionState {
   modeUpdates: number;
   configOptions: SessionConfigOption[];
   context: ContextUsage | null;
+  // The running turn's tool calls, so each update folds into its call and a
+  // request from a vendor's subagent finds the Agent call it came from.
+  // Cleared when the turn ends: the transcript keeps them, and nothing more
+  // arrives for them.
   toolCalls: Map<string, ToolCallBlock>;
   // Summary chunks by compaction id, until the terminal update carries them.
   summaries: Map<string, string>;
@@ -204,8 +221,14 @@ interface SessionState {
   stuck: boolean;
 }
 
-export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime> {
-  const launch = launchFor(options);
+// The launch is the vendor's own; the test suite passes one that runs a
+// stand-in adapter.
+export async function startAcpRuntime(
+  options: RuntimeOptions,
+  signal?: AbortSignal,
+  launch: Launch = launchFor(options),
+): Promise<Runtime> {
+  throwIfAborted(signal);
   const child = spawn(launch.command, launch.args, { stdio: ['pipe', 'pipe', 'pipe'], env: launch.env });
 
   // Both adapters write their errors to stderr; the last lines are what the
@@ -367,7 +390,10 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
   // An update for a session nobody is listening to any more — a fork closed
   // while the vendor was still streaming — is dropped, and so is anything a
   // vendor's own subagent streams: only its announcement is kept, so its
-  // requests can be routed.
+  // requests can be routed. So is a turn's content arriving while the
+  // session runs none: what the adapter still streams for a cancelled prompt
+  // until it answers it, which the next prompt waits for with its reply
+  // already listening.
   function receive(sessionId: string, update: SessionUpdate): void {
     const announced = announcedSubagent(update);
     if (announced) {
@@ -377,6 +403,7 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
     }
     const state = sessions.get(sessionId);
     if (!state) return;
+    if (!state.turn && TURN_CONTENT.has(update.sessionUpdate)) return;
     const reduced = reduce(state, update);
     if (!reduced) return;
     try {
@@ -509,6 +536,7 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
     } finally {
       signal.removeEventListener('abort', cancel);
       state.turn = null;
+      state.toolCalls.clear();
     }
   }
 
@@ -676,6 +704,12 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
     };
   }
 
+  // Startup waits on the adapter several times over, and one that never
+  // answers would hold the turn for good. Cancelling the turn, which the
+  // user or a worker's watchdog does, ends the process instead, and that
+  // fails whichever request is still waiting.
+  const stop = () => disposeProcess();
+  signal?.addEventListener('abort', stop, { once: true });
   try {
     const initialized = await connection.agent.request(methods.agent.initialize, {
       protocolVersion: 1,
@@ -711,8 +745,10 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
     await configure(state, launch.mode, options.model, options.thinkingLevel);
     return runtimeFor(state, disposeProcess);
   } catch (error) {
-    const failure = settled(error);
+    const failure = signal?.aborted ? abortReason(signal) : settled(error);
     disposeProcess();
     throw failure;
+  } finally {
+    signal?.removeEventListener('abort', stop);
   }
 }

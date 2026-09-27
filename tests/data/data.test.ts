@@ -5,7 +5,8 @@ import path from 'path';
 import * as checkpoints from '../../src/checkpoints';
 import * as naming from '../../src/agent_runtime/session/naming';
 import * as router from '../../src/agent_runtime/router';
-import type { RuntimeOptions } from '../../src/agent_runtime/runtime/runtime';
+import * as acp from '../../src/agent_runtime/runtime/acp';
+import { invalidateAllRuntimes, type RuntimeOptions } from '../../src/agent_runtime/runtime/runtime';
 import type { Draft } from '../../src/agent_runtime/session';
 import { Session } from '../../src/agent_runtime/session';
 import { sirusMcpServerEntry } from '../../src/agent_runtime/tools/server';
@@ -324,6 +325,33 @@ describe('Session model', () => {
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(binding.runtimes).toHaveLength(2);
     expect(binding.runtimes[1].disposed).toBe(false);
+  });
+
+  // /memory on or off changes the system prompt under every runtime. The
+  // turn running then finishes on the one it has; the next turn gets a new one.
+  test('an invalidated runtime finishes its turn and is rebuilt for the next', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let first = true;
+    const binding = bindScriptedRuntime(testModel, async (_input, emit) => {
+      if (first) {
+        first = false;
+        await gate;
+      }
+      emit({ type: 'text', text: 'Done' });
+    });
+    const session = new Session({ id: 'invalidated', name: 'Invalidated', model: testModel });
+    const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'First' }] });
+    await until(() => binding.runtimes[0]?.prompts.length === 1, 'the first prompt');
+    invalidateAllRuntimes();
+    expect(binding.runtimes[0].disposed).toBe(false);
+    release();
+    await turn;
+    expect(session.getMessages().at(-1)).toMatchObject({ content: [{ type: 'text', text: 'Done' }] });
+
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Second' }] });
+    expect(binding.starts).toHaveLength(2);
+    expect(binding.runtimes[0].disposed).toBe(true);
   });
 
   test('makes a streaming assistant response visible before the runtime finishes', async () => {
@@ -1182,6 +1210,37 @@ describe('Session model', () => {
       releaseCapture?.();
       capture.mockRestore();
       await session.dispose();
+    }
+  });
+
+  test('cancelling a turn stops a runtime that is still starting', async () => {
+    const previousKey = process.env.OPENAI_SECRET;
+    process.env.OPENAI_SECRET = 'sk-proj-starting-0000';
+    const startSignals: (AbortSignal | undefined)[] = [];
+    // An adapter that does not finish starting: it stops when told to, and
+    // gives up by itself after a while, so a start nobody can stop still
+    // ends the test.
+    const start = spyOn(acp, 'startAcpRuntime').mockImplementation((_options, signal) => {
+      startSignals.push(signal);
+      return new Promise((_resolve, reject) => {
+        const hung = setTimeout(() => reject(new Error('The adapter never started')), 2_000);
+        signal?.addEventListener('abort', () => {
+          clearTimeout(hung);
+          reject(signal.reason);
+        }, { once: true });
+      });
+    });
+    const session = new Session({ id: 'starting', name: 'Starting', model: 'gpt-5.6-luna' });
+    try {
+      const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Start' }] });
+      await until(() => startSignals.length === 1, 'the runtime to start');
+      expect(session.cancel()).toBe(true);
+      await expect(turn).rejects.toMatchObject({ name: 'AbortError' });
+      expect(startSignals[0]?.aborted).toBe(true);
+    } finally {
+      start.mockRestore();
+      if (previousKey === undefined) delete process.env.OPENAI_SECRET;
+      else process.env.OPENAI_SECRET = previousKey;
     }
   });
 
