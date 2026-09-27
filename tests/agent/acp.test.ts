@@ -108,6 +108,46 @@ function adapterPid(): Promise<number> {
   return until(() => existsSync(file) && Number(readFileSync(file, 'utf8')), 'the adapter to start');
 }
 
+const text = (value: string): SessionUpdate => ({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: value } });
+
+const textsIn = (updates: readonly RuntimeUpdate[]): string[] =>
+  updates.flatMap(update => update.type === 'text' ? [update.text] : []);
+
+// The next prompt waits for the cancelled one's answer, and the adapter goes
+// on streaming that turn until it gives it. None of that is the next reply's.
+test('what a cancelled prompt still streams stays out of the next one', async () => {
+  const updates: RuntimeUpdate[] = [];
+  const runtime = await startAcpRuntime(runtimeOptions(updates), undefined, standIn({
+    prompts: [
+      [
+        { update: text('Working') },
+        'cancel',
+        { update: text('Stale') },
+        { update: { sessionUpdate: 'tool_call', toolCallId: 'stale-call', title: 'Read notes.txt', kind: 'read', status: 'in_progress' } },
+        { update: { sessionUpdate: 'usage_update', used: 1_200, size: 200_000 } },
+        { stop: 'cancelled' },
+      ],
+      [{ update: text('Fresh') }],
+    ],
+  }));
+  try {
+    const controller = new AbortController();
+    const first = runtime.prompt({ text: 'First', images: [] }, controller.signal);
+    await until(() => textsIn(updates).includes('Working'), 'the first turn to stream');
+    const cancelledAt = updates.length;
+    controller.abort(new TurnCancelledError());
+    await expect(first).rejects.toThrow('Cancelled');
+    await runtime.prompt({ text: 'Second', images: [] }, new AbortController().signal);
+    const since = updates.slice(cancelledAt);
+    expect(textsIn(since)).toEqual(['Fresh']);
+    expect(since.some(update => update.type === 'tool_call')).toBe(false);
+    // What the session reports between turns still arrives.
+    expect(since).toContainEqual({ type: 'context', usage: { tokens: 1_200, window: 200_000 } });
+  } finally {
+    runtime.dispose();
+  }
+});
+
 test('cancelling a turn ends an adapter that never finishes starting', async () => {
   const controller = new AbortController();
   const starting = startAcpRuntime(runtimeOptions(), controller.signal, standIn({ hang: 'initialize' }));

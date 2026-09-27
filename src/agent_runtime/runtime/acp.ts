@@ -128,6 +128,19 @@ function textOf(blocks: readonly ContentBlock[]): string {
   return blocks.filter(block => block.type === 'text').map(block => block.text).join('');
 }
 
+// The updates that make up a turn's reply: text, thoughts, tool calls, the
+// plan and compaction. The rest describe the session and may arrive at any
+// time: its commands, mode, options and context gauge.
+const TURN_CONTENT = new Set<SessionUpdate['sessionUpdate']>([
+  'agent_message_chunk',
+  'agent_thought_chunk',
+  'tool_call',
+  'tool_call_update',
+  'plan',
+  'compaction_summary_chunk',
+  'compaction_update',
+]);
+
 type CompactionStatus = 'in_progress' | 'completed' | 'failed' | 'cancelled';
 
 function compactionStatus(status: string): CompactionStatus | null {
@@ -373,7 +386,10 @@ export async function startAcpRuntime(
   // An update for a session nobody is listening to any more — a fork closed
   // while the vendor was still streaming — is dropped, and so is anything a
   // vendor's own subagent streams: only its announcement is kept, so its
-  // requests can be routed.
+  // requests can be routed. So is a turn's content arriving while the
+  // session runs none: what the adapter still streams for a cancelled prompt
+  // until it answers it, which the next prompt waits for with its reply
+  // already listening.
   function receive(sessionId: string, update: SessionUpdate): void {
     const announced = announcedSubagent(update);
     if (announced) {
@@ -383,6 +399,7 @@ export async function startAcpRuntime(
     }
     const state = sessions.get(sessionId);
     if (!state) return;
+    if (!state.turn && TURN_CONTENT.has(update.sessionUpdate)) return;
     const reduced = reduce(state, update);
     if (!reduced) return;
     try {
