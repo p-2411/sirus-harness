@@ -345,7 +345,7 @@ describe('approval prompt', () => {
   }
 
   const render = (request: ApprovalRequest, waiting = 0) => stripAnsi(renderToString(
-    <ApprovalPrompt request={request} waiting={waiting} selected={0} />,
+    <ApprovalPrompt request={request} waiting={waiting} onDecide={() => {}} />,
     { columns: 100 },
   ));
 
@@ -409,7 +409,7 @@ describe('approval prompt', () => {
           status: 'pending', locations: [{ path: hostile }], content: [], input: { command: hostile },
         }, [{ optionId: 'allow', name: hostile, kind: 'allow_once' }])}
         waiting={0}
-        selected={0}
+        onDecide={() => {}}
       />,
       { columns: 140 },
     );

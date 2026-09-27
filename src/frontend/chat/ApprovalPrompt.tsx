@@ -1,10 +1,13 @@
-import { Box, Text } from 'ink';
+import { useState } from 'react';
+import { Box, Text, useInput } from 'ink';
 import type { PermissionOptionKind } from '@agentclientprotocol/sdk';
 import { theme } from '../styles/theme';
 import type { ToolCallBlock } from '../../agent_runtime/types';
 import { describeRequester, type ApprovalDecision, type ApprovalRequest } from '../../agent_runtime/permissions/approvals';
 import { editPreview, toolLine, type DiffLine } from './ChatMessage';
+import { isForeignInput } from './editor';
 import { FramedCard } from './FramedCard';
+import { moveSelection } from './SelectMenu';
 import { terminalText } from '../terminal/text';
 
 interface ApprovalChoice {
@@ -88,12 +91,25 @@ function detailColor(line: string): string {
 
 // A pending permission prompt as a framed card: who is asking and what for
 // in its top edge, what the call would do, and the choices with their keys.
-export function ApprovalPrompt({ request, waiting, selected }: {
+// The arrows and enter pick a choice, or its key answers at once. Escape is
+// the turn's cancel, which the chat handles, and it withdraws the prompt.
+export function ApprovalPrompt({ request, waiting, onDecide }: {
   request: ApprovalRequest;
   waiting: number;
-  selected: number;
+  onDecide: (decision: ApprovalDecision) => void;
 }) {
+  const [selected, setSelected] = useState(0);
   const choices = approvalChoices(request);
+  useInput((input, key) => {
+    if (isForeignInput(input, key)) return;
+    if (key.upArrow) setSelected(current => moveSelection(current, -1, choices.length));
+    else if (key.downArrow) setSelected(current => moveSelection(current, 1, choices.length));
+    else if (key.return && choices[selected]) onDecide(choices[selected].decision);
+    else {
+      const choice = choices.find(candidate => candidate.key === input);
+      if (choice) onDecide(choice.decision);
+    }
+  });
   const detail = approvalDetail(request.toolCall);
   // A plan is prose: it wraps, and its bullets are not a diff's marks.
   const plan = request.toolCall.kind === 'switch_mode';
