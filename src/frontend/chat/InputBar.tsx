@@ -1,16 +1,20 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { Box, Text, useInput, usePaste } from 'ink';
+import { Box, Text, useApp, useBoxMetrics, useInput, usePaste, useStdout, type DOMElement } from 'ink';
 import { theme } from '../styles/theme';
 import { CommandMenu, useCommandMenu } from './CommandMenu';
 import { isNativeCommand } from '../../commands/registry';
 import { MentionMenu, useMentionMenu } from './MentionMenu';
 import { useFileSuggestions } from './FileMenu';
-import { DraftText, TrailingImages } from './DraftText';
+import { DraftRow, TrailingImages } from './DraftText';
+import { describeImage, attachImageFile } from '../../images';
+import { readPromptHistory, appendPromptHistory } from '../../persistence/promptHistory';
+import { editInExternalEditor } from './externalEditor';
+import { KEY_BINDINGS } from '../../commands/help/commands';
 import { InputFeedback, QueuedRow } from './InputRows';
 import { SubagentStatusRow, type StatusRowProps } from './StatusRow';
 import { stripWorkers, WorkerStrip, type WorkerSelection } from './WorkerStrip';
 import { PromptBar, type PromptMode } from './PromptBar';
-import { applyInputEdit, createInputHistory, inputEditForKey, isKeyboardProtocolReport, normalizeNewlines, onFirstLine, onLastLine, type InputEdit, type InputState } from './editor';
+import { applyInputEdit, createInputHistory, inputEditForKey, isKeyboardProtocolReport, normalizeNewlines, draftRows, draftCursorRow, moveDraftRow, type InputEdit, type InputState } from './editor';
 import { composeContent, removedPlaceholders, stripPlaceholders, useDraftImages } from './draft';
 import { MentionText, participantColorMap } from '../MentionText';
 import { isMouseInput } from '../interaction/mouse';
@@ -47,10 +51,12 @@ interface InputBarProps {
   // Told when the worker strip takes the keyboard and when it gives it back,
   // so the chat's own Escape leaves a focused strip alone.
   onWorkerFocusChange?: (focused: boolean) => void;
+  onOverlayChange?: (open: boolean) => void;
   // images waiting to go with the next message, oldest first
   attachments?: readonly ImageBlock[];
   // ctrl+v in text mode
   onPasteImage?: () => void;
+  onAttachImage?: (image: ImageBlock) => void;
   // backspace over an image in the draft drops it
   onRemoveAttachment?: (image: ImageBlock) => void;
   // the session's current model, shown under the input bar
@@ -87,8 +93,8 @@ const NO_NATIVE_COMMANDS: readonly NativeCommand[] = [];
 
 export function InputBar({
   send,
-  inputContent,
-  setInputContent,
+  inputContent: externalInputContent,
+  setInputContent: setExternalInputContent,
   disabled,
   feedback,
   participants,
@@ -99,8 +105,10 @@ export function InputBar({
   modeNotice,
   onCyclePermissionMode,
   onWorkerFocusChange,
+  onOverlayChange,
   attachments = NO_ATTACHMENTS,
   onPasteImage,
+  onAttachImage,
   onRemoveAttachment,
   model,
   thinkingLevel,
@@ -119,6 +127,31 @@ export function InputBar({
   nativeCommands,
   tasksVisible,
 }: InputBarProps) {
+  const pastes = useRef(new Map<string, { text: string; label: string }>());
+  const pasteNumber = useRef(0);
+  const expandPastes = (text: string) => [...text].map(character => pastes.current.get(character)?.text ?? character).join('');
+  const [inputContent, setLocalInputContent] = useState(externalInputContent);
+  const setInputContent = (text: string) => {
+    setLocalInputContent(text);
+    // Session snapshots always keep the full text, including while a paste is folded.
+    setExternalInputContent(expandPastes(text));
+  };
+  useEffect(() => {
+    if (externalInputContent !== expandPastes(inputContent)) setLocalInputContent(externalInputContent);
+  }, [externalInputContent]);
+  const [savedHistory, setSavedHistory] = useState(() => directory ? readPromptHistory(directory) : []);
+  useEffect(() => { setSavedHistory(directory ? readPromptHistory(directory) : []); }, [directory]);
+  const [search, setSearch] = useState<{ query: string; index: number; draft: InputState } | null>(null);
+  const [shortcuts, setShortcuts] = useState<number | null>(null);
+  const [localFeedback, setLocalFeedback] = useState<Feedback | null>(null);
+  const [editingExternally, setEditingExternally] = useState(false);
+  useEffect(() => { onOverlayChange?.(search !== null || shortcuts !== null || editingExternally); }, [search !== null, shortcuts !== null, editingExternally]);
+  useEffect(() => () => onOverlayChange?.(false), []);
+  const editorPrefix = useRef(false);
+  const { suspendTerminal } = useApp();
+  const { stdout } = useStdout();
+  const inputBox = useRef<DOMElement>(null);
+  const { width: boxWidth } = useBoxMetrics(inputBox);
   const participantColors = participantColorMap(participants);
   const status: StatusRowProps = { permissionMode, modeNotice, model, thinkingLevel, contextUsage, tasksVisible };
 
@@ -153,7 +186,7 @@ export function InputBar({
   const editor: InputState = { text: input, cursor: Math.min(cursor, input.length) };
   function leaveQueue(commit = false): void {
     if (queueSelection) {
-      if (commit) onUpdateQueued?.(queueSelection, queueText);
+      if (commit) onUpdateQueued?.(queueSelection, expandPastes(queueText));
       else onCancelQueuedEdit?.(queueSelection);
     }
     editingRef.current = null;
@@ -197,7 +230,7 @@ export function InputBar({
     },
   });
   const draftMessage = () => {
-    const content = composeContent(input.trim(), imageFor, trailingImages);
+    const content = composeContent(expandPastes(input).trim(), imageFor, trailingImages);
     const text = content.flatMap(block => block.type === 'text' ? [block.text] : []).join('');
     return { text, images: [...placedImages, ...trailingImages], content };
   };
@@ -231,7 +264,8 @@ export function InputBar({
   // ── Earlier prompts ────────────────────────────────────────────────────
   // Which one ↑ has brought back, and the draft it replaced so ↓ past the
   // newest one restores it. Editing leaves the recall.
-  const recallHistory = [...history];
+  const recallHistory = [...savedHistory];
+  for (const prompt of history) if (!recallHistory.includes(prompt)) recallHistory.push(prompt);
   for (const [offset, prompt] of clearedPrompts.current.entries()) {
     recallHistory.splice(Math.min(prompt.after + offset, recallHistory.length), 0, prompt.text);
   }
@@ -285,6 +319,7 @@ export function InputBar({
 
   const edit = (change: InputEdit) => {
     setRecall(null);
+    setLocalFeedback(null);
     const next = stripPlaceholders(applyInputEdit(editor, change, editHistory.current),
       placeholder => !isKnownPlaceholder(placeholder) || imageFor(placeholder) !== undefined);
     for (const placeholder of removedPlaceholders(editor.text, next.text)) {
@@ -294,6 +329,33 @@ export function InputBar({
     setEditor(next);
   };
   const insertText = (text: string) => edit({ type: 'insert', text: normalizeNewlines(text) });
+  const rows = draftRows(input, Math.max(1, (boxWidth || stdout.columns || 80) - 6), character => {
+    const image = imageFor(character);
+    return image ? `[${describeImage(image)}]` : pastes.current.get(character)?.label;
+  });
+  const cursorRow = draftCursorRow(rows, editor.cursor);
+  const maxRows = Math.max(2, Math.min(8, Math.floor((stdout.rows || 24) / 3)));
+  const rowOffset = Math.max(0, cursorRow - maxRows + 1);
+  const searchMatches = search ? recallHistory.filter(text => text.toLowerCase().includes(search.query.toLowerCase())).reverse() : [];
+  const searchResult = searchMatches[search?.index ?? 0];
+  const openEditor = async () => {
+    if (editingExternally) return;
+    setEditingExternally(true);
+    try {
+      const text = await editInExternalEditor(expandPastes(input), suspendTerminal);
+      setLocalFeedback(null);
+      for (const placeholder of removedPlaceholders(input, text)) {
+        const image = imageFor(placeholder);
+        if (image) onRemoveAttachment?.(image);
+      }
+      editHistory.current.undo.push(editor);
+      setRecall(null);
+      setEditor({ text, cursor: text.length });
+    } catch (error) {
+      setLocalFeedback({ kind: 'error', text: error instanceof Error ? error.message : 'Could not open the editor.' });
+    } finally { setEditingExternally(false); }
+  };
+
 
   // Drag-selecting text copies it automatically; acknowledge that briefly
   // where the "enter" hint normally sits.
@@ -307,13 +369,51 @@ export function InputBar({
   }, [copiedAt]);
 
   // A paste lands whole, line breaks included, rather than as keystrokes.
-  usePaste(text => {
-    if (mode.type === 'text') insertText(text);
-  });
+  const pasteText = (text: string) => {
+    if (mode.type !== 'text' || editingExternally || shortcuts !== null) return;
+    if (search) { setSearch({ ...search, query: search.query + normalizeNewlines(text), index: 0 }); return; }
+    const normalized = normalizeNewlines(text);
+    // Terminals drop files as quoted or shell-escaped paths.
+    const file = normalized.trim().replace(/^(['"])(.*)\1$/s, '$2').replace(/\\(.)/g, '$1');
+    if (onAttachImage && /\.(png|jpe?g|gif|webp)$/i.test(file)) {
+      try {
+        onAttachImage(attachImageFile(file.startsWith('file://') ? decodeURIComponent(new URL(file).pathname) : file, directory));
+        return;
+      } catch (error) {
+        setLocalFeedback({ kind: 'warning', text: error instanceof Error ? error.message : 'Could not attach image.' });
+      }
+    }
+    if (normalized.length > 1000 || normalized.split('\n').length > 10) {
+      const number = ++pasteNumber.current;
+      const placeholder = String.fromCodePoint(0xF0000 + number);
+      pastes.current.set(placeholder, { text: normalized, label: `[Pasted text #${number} · ${normalized.split('\n').length} lines]` });
+      insertText(placeholder);
+    } else insertText(normalized);
+  };
+  usePaste(pasteText);
 
   useInput((enteredInput, key) => {
     if (isKeyboardProtocolReport(enteredInput)) return;
     if (key.eventType === 'release') return;
+    if (isMouseInput(enteredInput) || isFocusInput(enteredInput)) return;
+    if (editingExternally) return;
+    if (shortcuts !== null) {
+      const pageSize = Math.max(1, Math.min(12, Math.floor(((stdout.rows || 24) - 12) / 3)));
+      if (key.escape || enteredInput === '?' || (key.ctrl && enteredInput === 'c')) setShortcuts(null);
+      else if (key.downArrow || key.pageDown) setShortcuts(Math.min(KEY_BINDINGS.length - pageSize, shortcuts + (key.pageDown ? pageSize : 1)));
+      else if (key.upArrow || key.pageUp) setShortcuts(Math.max(0, shortcuts - (key.pageUp ? pageSize : 1)));
+      return;
+    }
+    if (search) {
+      if (key.meta && (key.upArrow || key.downArrow)) return;
+      if (key.escape || (key.ctrl && enteredInput === 'c')) { setEditor(search.draft); setSearch(null); }
+      else if (key.return) { if (searchResult !== undefined) setEditor({ text: searchResult, cursor: searchResult.length }); setSearch(null); }
+      else if (key.ctrl && enteredInput === 'r') setSearch({ ...search, index: Math.min(search.index + 1, Math.max(0, searchMatches.length - 1)) });
+      else if (key.ctrl && enteredInput === 's') setSearch({ ...search, index: Math.max(0, search.index - 1) });
+      else if (key.backspace) setSearch({ ...search, query: [...search.query].slice(0, -1).join(''), index: 0 });
+      else if (!key.ctrl && !key.meta && !key.pageUp && !key.pageDown && !key.tab && !key.upArrow && !key.downArrow && !key.leftArrow && !key.rightArrow && enteredInput) setSearch({ ...search, query: search.query + enteredInput, index: 0 });
+      return;
+    }
     if (key.ctrl && enteredInput === 'c') {
       if (onInterrupt?.()) {
         lastInterrupt.current = 0;
@@ -343,6 +443,19 @@ export function InputBar({
     if (isMouseInput(enteredInput) || isFocusInput(enteredInput)) return;
     // Session switching belongs to the sidebar in every input mode.
     if (key.meta && (key.upArrow || key.downArrow)) return;
+
+    if (key.ctrl && enteredInput === 'r') {
+      setSearch({ query: '', index: 0, draft: editor });
+      return;
+    }
+    if (key.ctrl && (enteredInput === 'g' || (editorPrefix.current && enteredInput === 'e'))) {
+      editorPrefix.current = false;
+      void openEditor();
+      return;
+    }
+    editorPrefix.current = key.ctrl && enteredInput === 'x';
+    if (editorPrefix.current) return;
+    if (enteredInput === '?' && !input && !key.ctrl && !key.meta) { setShortcuts(0); return; }
 
     // Ink distinguishes the raw DEL backspace byte from forward Delete.
     const isBackspace = key.backspace;
@@ -438,12 +551,12 @@ export function InputBar({
       }
       // inside a long prompt the arrows move between its lines; past its
       // first or last line they walk the session's earlier prompts
-      if (key.upArrow && !onFirstLine(editor)) {
-        setEditor(applyInputEdit(editor, { type: 'up' }));
+      if (key.upArrow && cursorRow > 0) {
+        setEditor(moveDraftRow(editor, rows, -1));
         return;
       }
-      if (key.downArrow && !onLastLine(editor)) {
-        setEditor(applyInputEdit(editor, { type: 'down' }));
+      if (key.downArrow && cursorRow < rows.length - 1) {
+        setEditor(moveDraftRow(editor, rows, 1));
         return;
       }
       if (onUpdateQueued && queuedMessages.length > 0 && !recall && (selectedQueued || key.upArrow)) {
@@ -502,6 +615,11 @@ export function InputBar({
       if (!trimmed && draft.images.length === 0) return; // nothing to send
       if (key.tab) onQueue?.(trimmed, draft.images, draft.content);
       else if (send(trimmed, draft.images, draft.content) === false) return;
+      if (directory && trimmed && (!trimmed.startsWith('/') || isNativeCommand(trimmed, nativeList))) {
+        try { appendPromptHistory(directory, trimmed); }
+        catch (error) { setLocalFeedback({ kind: 'warning', text: `Could not save prompt history: ${error instanceof Error ? error.message : error}` }); }
+        setSavedHistory(current => [...current, trimmed].slice(-1000));
+      }
       editHistory.current.undo = [];
       setRecall(null);
       setEditor({ text: '', cursor: 0 });
@@ -511,7 +629,8 @@ export function InputBar({
     if (!key.ctrl && !key.meta && !key.escape && !key.tab
       && !key.upArrow && !key.downArrow && !key.leftArrow && !key.rightArrow
       && !key.pageUp && !key.pageDown && !key.home && !key.end) {
-      insertText(enteredInput);
+      if (enteredInput.length > 1) pasteText(enteredInput);
+      else insertText(enteredInput);
     }
   });
 
@@ -544,50 +663,31 @@ export function InputBar({
         loading={fileSuggestions.loading}
         error={fileSuggestions.error}
       />}
-      <InputFeedback feedback={feedback} participantColors={participantColors} />
+      <InputFeedback feedback={localFeedback ?? feedback} participantColors={participantColors} />
       <QueuedRow messages={queuedMessages.map(message => message.text)} selected={selectedQueueIndex} participantColors={participantColors} />
-      <Box
-        borderStyle="round"
-        borderColor={disabled ? theme.border : theme.accent}
-        paddingX={1}
-        marginX={1}
-        flexShrink={0}
-        flexDirection="column"
-      >
-        <Box justifyContent="space-between">
-          <Box flexShrink={1}>
-            <Box flexShrink={0}>
-              <Text color={disabled ? theme.textSubtle : theme.accentSoft}>
-                ›{' '}
-              </Text>
-            </Box>
-            <Text color={theme.text} wrap="wrap">
-              {!selectedQueued && !input && <TrailingImages images={trailingImages} after={false} />}
-              {input ? (
-                <>
-                  <DraftText text={input.slice(0, cursor)} imageFor={imageFor} participantColors={participantColors} />
-                  <Text color={theme.accentSoft}>▌</Text>
-                  <DraftText text={input.slice(cursor)} imageFor={imageFor} participantColors={participantColors} />
-                  {!selectedQueued && <TrailingImages images={trailingImages} after />}
-                </>
-              ) : (
-                <>
-                  <Text color={disabled ? theme.textSubtle : theme.accentSoft}>▌</Text>
-                  <Text color={theme.textSubtle}>
-                    {disabled
-                      ? ' agents are thinking…'
-                      : <> message sirus or <MentionText colors={participantColors}>@mention</MentionText> an agent…</>}
-                  </Text>
-                </>
-              )}
-            </Text>
+      {shortcuts !== null && <Box marginX={1} paddingX={1} borderStyle="round" borderColor={theme.border} flexDirection="column">
+        <Text color={theme.accent}>Keyboard shortcuts · ↑/↓ scroll · esc closes</Text>
+        {KEY_BINDINGS.slice(shortcuts, shortcuts + Math.max(1, Math.min(12, Math.floor(((stdout.rows || 24) - 12) / 3)))).map(([keys, action]) =>
+          <Text key={keys} wrap="wrap"><Text color={theme.accentSoft}>{keys}</Text>{'  '}{action}</Text>)}
+        <Text color={theme.textSubtle}>{shortcuts + 1}–{Math.min(KEY_BINDINGS.length, shortcuts + Math.max(1, Math.min(12, Math.floor(((stdout.rows || 24) - 12) / 3))))} of {KEY_BINDINGS.length}</Text>
+      </Box>}
+      {search && <Box marginX={1} paddingX={1} flexDirection="column">
+        <Text color={theme.accent}>History search: {search.query}<Text inverse> </Text></Text>
+        <Text wrap="truncate-end" color={searchResult ? theme.text : theme.textSubtle}>{searchResult?.replace(/\n/g, ' ↵ ') ?? 'No matching prompts'}</Text>
+        <Text color={theme.textSubtle}>ctrl+r older · ctrl+s newer · enter selects · esc restores</Text>
+      </Box>}
+      <Box ref={inputBox} borderStyle="round" borderColor={theme.accent} paddingX={1} marginX={1} flexShrink={0} flexDirection="column">
+        {rows.slice(rowOffset, rowOffset + maxRows).map((cells, index) => <Box key={rowOffset + index}>
+          <Box width={2} flexShrink={0}><Text color={theme.accentSoft}>{rowOffset + index === 0 ? '› ' : '  '}</Text></Box>
+          <Box flexGrow={1} minWidth={0}>
+            {input ? <DraftRow cells={cells} cursor={editor.cursor} participantColors={participantColors} /> : <Text wrap="truncate-end"><Text inverse> </Text><Text color={theme.textSubtle}>{disabled ? 'enter to steer · tab to queue' : 'message sirus or @mention an agent…'}</Text></Text>}
           </Box>
-          <Box marginLeft={1} flexShrink={0}>
-            {showCopied
-              ? <Text color={theme.success}>copied ✓</Text>
-              : <Text color={theme.textSubtle}>{selectedQueued ? 'enter saves · esc restores' : disabled ? 'enter steers · tab queues' : 'enter ↵'}</Text>}
-          </Box>
-        </Box>
+        </Box>)}
+        {!selectedQueued && trailingImages.length > 0 && <TrailingImages images={trailingImages} after={false} />}
+        <Text color={showCopied ? theme.success : theme.textSubtle} wrap="truncate-end">
+          {showCopied ? 'copied ✓' : selectedQueued ? 'enter saves · esc restores' : disabled ? 'enter to steer · tab to queue' : 'enter ↵ · ? shortcuts'}
+          {rows.length > maxRows ? ` · rows ${rowOffset + 1}–${Math.min(rows.length, rowOffset + maxRows)}/${rows.length}` : ''}
+        </Text>
       </Box>
       <WorkerStrip workers={workers} selection={workerSelection} />
       <SubagentStatusRow {...status} />

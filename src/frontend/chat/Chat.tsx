@@ -171,10 +171,11 @@ function TurnStatus({ messages, awaitingApproval, awaitingAnswer, compacting, st
 
 // Long command output borrows the history area, leaving the editor available.
 // Its scroll position is independent from the conversation underneath it.
-function CommandFeedbackPanel({ feedback, participantColors, sidebarWidth }: {
+function CommandFeedbackPanel({ feedback, participantColors, sidebarWidth, paused }: {
   feedback: Feedback;
   participantColors: ParticipantColors;
   sidebarWidth: number;
+  paused: boolean;
 }) {
   const viewportRef = useRef<DOMElement>(null);
   const contentRef = useRef<DOMElement>(null);
@@ -195,6 +196,7 @@ function CommandFeedbackPanel({ feedback, participantColors, sidebarWidth }: {
   useSelectionRegion(viewportRef, { follows: contentRef, text });
 
   useInput((input, key) => {
+    if (paused) return;
     const wheel = parseMouseWheel(input);
     if (wheel && wheel.column > sidebarWidth) {
       setOffset(Math.max(0, Math.min(maxScroll, visibleOffset + (wheel.direction === 'up' ? -3 : 3))));
@@ -267,6 +269,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   }, [notice]);
   const panelFeedback = feedback?.panel ? feedback : null;
   const [inputMode, setInputMode] = useState<InputMode>({ type: 'text' });
+  const [inputOverlay, setInputOverlay] = useState(false);
   // Images attached to the message being composed, until it is sent.
   const [attachments, setAttachments] = useState<ImageBlock[]>([]);
   const attachmentsRef = useRef<ImageBlock[]>([]);
@@ -397,6 +400,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   }, [contentHeight, maxScroll, panelFeedback, viewportHeight]);
 
   useInput((input, key) => {
+    if (inputOverlay) return;
     if (key.ctrl && input === 't') {
       if (plans.length > 0) setShowTasks(shown => !shown);
       return;
@@ -694,6 +698,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
           feedback={panelFeedback}
           participantColors={participantColors}
           sidebarWidth={sidebarWidth}
+          paused={inputOverlay}
         />
       )}
       <Box
@@ -750,6 +755,8 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         }}
         attachments={attachments}
         onPasteImage={pasteImage}
+        onAttachImage={attachImage}
+        onOverlayChange={setInputOverlay}
         onRemoveAttachment={removeAttachment}
         model={currSession.getModel()}
         thinkingLevel={currSession.getThinkingLevel()}

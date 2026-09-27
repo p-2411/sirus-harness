@@ -1,4 +1,7 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import os from 'os';
+import path from 'path';
 import { Box, render as renderInk, renderToString } from 'ink';
 import { PassThrough } from 'node:stream';
 import { useState, useSyncExternalStore } from 'react';
@@ -30,6 +33,93 @@ import type { ToolCallBlock } from '../../src/agent_runtime/types';
 import { pressAt, releaseAt } from '../../src/frontend/interaction/clickable';
 import stringWidth from 'string-width';
 import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
+import { editInExternalEditor } from '../../src/frontend/chat/externalEditor';
+
+describe('external draft editor', () => {
+  let directory: string;
+  let previousVisual: string | undefined;
+  let previousEditor: string | undefined;
+
+  beforeEach(() => {
+    directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-editor-test-'));
+    previousVisual = process.env.VISUAL;
+    previousEditor = process.env.EDITOR;
+  });
+
+  afterEach(() => {
+    if (previousVisual === undefined) delete process.env.VISUAL;
+    else process.env.VISUAL = previousVisual;
+    if (previousEditor === undefined) delete process.env.EDITOR;
+    else process.env.EDITOR = previousEditor;
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  function editorCommand(source: string, ...args: string[]): string {
+    const script = path.join(directory, 'fake editor.ts');
+    writeFileSync(script, source);
+    return [process.execPath, script, ...args].map(value => JSON.stringify(value)).join(' ');
+  }
+
+  test('VISUAL accepts quoted paths and arguments and edits a private temporary draft', async () => {
+    const report = path.join(directory, 'report.json');
+    process.env.EDITOR = 'missing-editor';
+    process.env.VISUAL = editorCommand(`
+      import { readFileSync, writeFileSync, statSync } from 'fs';
+      import path from 'path';
+      const file = process.argv.at(-1)!;
+      writeFileSync(process.argv[2]!, JSON.stringify({
+        file, fileMode: statSync(file).mode & 0o777,
+        directoryMode: statSync(path.dirname(file)).mode & 0o777,
+        original: readFileSync(file, 'utf8'), argument: process.argv[3],
+      }));
+      writeFileSync(file, 'edited\\ntext');
+    `, report, 'an argument with spaces');
+    const terminal: string[] = [];
+    const edited = await editInExternalEditor('original\ndraft', async callback => {
+      terminal.push('suspend');
+      try { await callback(); } finally { terminal.push('resume'); }
+    });
+    expect(edited).toBe('edited\ntext');
+    expect(terminal).toEqual(['suspend', 'resume']);
+    const metadata = JSON.parse(readFileSync(report, 'utf8'));
+    expect(metadata).toMatchObject({
+      original: 'original\ndraft', argument: 'an argument with spaces',
+      fileMode: 0o600, directoryMode: 0o700,
+    });
+    expect(existsSync(path.dirname(metadata.file))).toBe(false);
+  });
+
+  test('falls back to EDITOR and preserves an intentionally empty edited draft', async () => {
+    delete process.env.VISUAL;
+    process.env.EDITOR = editorCommand(`
+      import { writeFileSync } from 'fs';
+      writeFileSync(process.argv.at(-1)!, '');
+    `);
+    expect(await editInExternalEditor('draft', callback => callback())).toBe('');
+  });
+
+  test('rejects editor failure after restoring the terminal and removing its draft', async () => {
+    const report = path.join(directory, 'draft-path');
+    process.env.VISUAL = editorCommand(`
+      import { writeFileSync } from 'fs';
+      writeFileSync(process.argv[2]!, process.argv.at(-1)!);
+      process.exit(7);
+    `, report);
+    let restored = false;
+    await expect(editInExternalEditor('draft', async callback => {
+      try { await callback(); } finally { restored = true; }
+    })).rejects.toThrow('Editor exited with status 7.');
+    expect(restored).toBe(true);
+    expect(existsSync(path.dirname(readFileSync(report, 'utf8')))).toBe(false);
+  });
+
+  test('reports unavailable executables and malformed editor commands', async () => {
+    process.env.VISUAL = path.join(directory, 'missing-editor');
+    await expect(editInExternalEditor('draft', callback => callback())).rejects.toThrow('Could not open editor');
+    process.env.VISUAL = '"unclosed';
+    await expect(editInExternalEditor('draft', callback => callback())).rejects.toThrow('unclosed quote');
+  });
+});
 
 describe('session input drafts', () => {
   test('edits and restores drafts when switching session panes with Option+arrows', async () => {
@@ -91,18 +181,18 @@ describe('session input drafts', () => {
     const type = async (input: string) => { stdin.write(input); await flush(); };
     try {
       await flush();
-      expect(output).toContain('First draft▌');
+      expect(output).toContain('› First draft');
       await type('!');
       expect(first.getInputContent()).toBe('First draft!');
-      expect(output).toContain('First draft!▌');
+      expect(output).toContain('› First draft!');
 
       await type('\u001b[1;3B');
-      expect(output).toContain('Second draft▌');
+      expect(output).toContain('› Second draft');
       await type('\u007f');
       expect(second.getInputContent()).toBe('Second draf');
 
       await type('\u001b[1;3A');
-      expect(output).toContain('First draft!▌');
+      expect(output).toContain('› First draft!');
       await type('\r');
       expect(sent).toEqual(['First draft!']);
       expect(first.getInputContent()).toBe('');
@@ -111,10 +201,10 @@ describe('session input drafts', () => {
       // An open command menu must not capture the session shortcut.
       await type('/');
       await type('\u001b[1;3B');
-      expect(output).toContain('Second draf▌');
+      expect(output).toContain('› Second draf');
       await type('\u001b[1;3A');
       expect(first.getInputContent()).toBe('/');
-      expect(output).toContain('/▌');
+      expect(output).toContain('› /');
     } finally {
       app.unmount();
       stdin.destroy();
@@ -1002,7 +1092,7 @@ describe('walking the worker strip from the input bar', () => {
       expect(line()).toContain('›');
       await press('h');
       expect(line()).not.toContain('›');
-      expect(output).toContain('h▌');
+      expect(output).toContain('› h');
     } finally {
       app.unmount();
       await app.waitUntilExit();
@@ -1073,21 +1163,21 @@ describe('input queue and interrupt precedence', () => {
       await bar.flush();
       await bar.press('\u001b[A');
       await bar.press(' unfinished');
-      expect(bar.output).toContain('/second unfinished▌');
+      expect(bar.output).toContain('› /second unfinished');
       expect(session.getQueuedMessages().map(item => item.text)).toEqual(['/first', '/second']);
       expect(session.getQueuedMessages()[1]!.editing).toBe(true);
       expect(session.getInputContent()).toBe('saved draft');
       await bar.press('\u001b');
       expect(session.getQueuedMessages().map(item => item.id)).toEqual(ids);
       expect(session.getQueuedMessages()[1]!.editing).toBeUndefined();
-      expect(bar.output).toContain('saved draft▌');
+      expect(bar.output).toContain('› saved draft');
       expect(bar.events).toEqual([]);
       await bar.press('\u001b[A');
       await bar.press(' completed');
       await bar.press('\r');
       expect(session.getQueuedMessages().map(item => item.text)).toEqual(['/first', '/second completed']);
       expect(session.getQueuedMessages()[1]!.editing).toBeUndefined();
-      expect(bar.output).toContain('saved draft▌');
+      expect(bar.output).toContain('› saved draft');
       expect(bar.events).toEqual([]);
     } finally {
       bar.unmount();
@@ -1104,9 +1194,9 @@ describe('input queue and interrupt precedence', () => {
     try {
       await bar.flush();
       await bar.press('\u001b[A');
-      expect(bar.output).toContain('/second▌');
+      expect(bar.output).toContain('› /second');
       await bar.press('\u001b[A');
-      expect(bar.output).toContain('/first▌');
+      expect(bar.output).toContain('› /first');
       expect(session.getQueuedMessages()[1]!.editing).toBeUndefined();
       await bar.press('\u001b[A');
       expect(session.getInputContent()).toBe('recent prompt');
@@ -1147,7 +1237,7 @@ describe('input queue and interrupt precedence', () => {
       expect(session.getQueuedMessages()).toHaveLength(1);
       expect(session.getQueuedMessages()[0]!.text).toBe('Original');
       expect(session.getQueuedMessages()[0]!.editing).toBe(true);
-      expect(bar.output).toContain('Original half▌');
+      expect(bar.output).toContain('› Original half');
       await bar.press(' finished');
       await bar.press('\r');
       const commitDeadline = Date.now() + 2000;

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
 import stringWidth from 'string-width';
 import type { Participant } from '../../agent_runtime/session';
@@ -35,18 +35,19 @@ export function mentionMenuItems(
   agents.sort((left, right) => left.label.length - right.label.length
     || left.label.localeCompare(right.label));
   return [
+    ...creation,
+    ...agents.reverse(),
     ...[...files].reverse().map(file => {
       const label = formatFileMention(file);
       return { key: `file:${file}`, label, description: 'attach file', replacement: `${label} `, kind: 'file' as const };
     }),
-    ...creation,
-    ...agents.reverse(),
   ];
 }
 
 // Which item the menu has selected and which slice of it is on screen. The
 // closest match sits at the bottom, so the window is tracked from its bottom
-// edge: file results arriving above the agents leave the selection where it is.
+// edge. Matching files take precedence once they arrive; explicit keyboard
+// selection stays on the item the user chose.
 export function useMentionMenu({ active, input, cursor, participants, files }: {
   active: boolean;
   input: string;
@@ -57,10 +58,14 @@ export function useMentionMenu({ active, input, cursor, participants, files }: {
   const [navigation, setNavigation] = useState({ key: '', selected: '', bottomGap: 0 });
   const items = active ? mentionMenuItems(input.slice(0, cursor), participants, files) : [];
   const key = `${input}\0${cursor}`;
+  useEffect(() => {
+    setNavigation({ key, selected: '', bottomGap: 0 });
+  }, [key]);
   const saved = navigation.key === key ? items.findIndex(item => item.key === navigation.selected) : -1;
   const selected = saved >= 0 ? saved : Math.max(0, items.length - 1);
-  const offset = Math.max(0, items.length - MENTION_MENU_VISIBLE_ITEMS
+  const bottomOffset = Math.max(0, items.length - MENTION_MENU_VISIBLE_ITEMS
     - (saved >= 0 ? navigation.bottomGap : 0));
+  const offset = Math.max(0, Math.min(selected, Math.max(bottomOffset, selected - MENTION_MENU_VISIBLE_ITEMS + 1)));
   return {
     items,
     selected,

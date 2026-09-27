@@ -1,3 +1,5 @@
+import stringWidth from 'string-width';
+
 // The input bar's text buffer: a string, a cursor, and the edits that move
 // through them. Nothing here knows about React or Ink.
 
@@ -241,4 +243,52 @@ export function applyInputEdit(state: InputState, edit: InputEdit, history?: Inp
     history.killing = killed.length > 0;
   }
   return next;
+}
+
+export interface DraftCell {
+  start: number;
+  end: number;
+  text: string;
+  width: number;
+  chip: boolean;
+}
+
+// Rendering and vertical movement share exactly the same terminal columns.
+export function draftRows(text: string, width: number, label: (character: string) => string | undefined = () => undefined): DraftCell[][] {
+  const rows: DraftCell[][] = [[]];
+  const columns = Math.max(1, width);
+  let used = 0;
+  const segments = new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text);
+  for (const { segment, index } of segments) {
+    const chip = label(segment);
+    const display = segment === '\n' ? (used === columns ? '' : ' ') : segment === '\t' ? '    ' : chip ?? segment;
+    const size = display === '' ? 0 : Math.min(columns, Math.max(1, stringWidth(display)));
+    if (used + size > columns && rows.at(-1)!.length) { rows.push([]); used = 0; }
+    rows.at(-1)!.push({ start: index, end: index + segment.length, text: display, width: size, chip: chip !== undefined });
+    used += size;
+    if (segment === '\n') { rows.push([]); used = 0; }
+  }
+  if (used >= columns) rows.push([]);
+  rows.at(-1)!.push({ start: text.length, end: text.length, text: ' ', width: 1, chip: false });
+  return rows;
+}
+
+export function draftCursorRow(rows: DraftCell[][], cursor: number): number {
+  return Math.max(0, rows.findIndex(row => row.some(cell => cell.start === cursor || (cell.start < cursor && cursor < cell.end))));
+}
+
+export function moveDraftRow(state: InputState, rows: DraftCell[][], delta: -1 | 1): InputState {
+  const current = draftCursorRow(rows, state.cursor);
+  const target = rows[current + delta];
+  if (!target) return state;
+  let column = 0;
+  for (const cell of rows[current]) { if (cell.start >= state.cursor) break; column += cell.width; }
+  let used = 0;
+  let cursor = target[0].start;
+  for (const cell of target) {
+    if (used > column) break;
+    cursor = cell.start;
+    used += cell.width;
+  }
+  return { ...state, cursor };
 }

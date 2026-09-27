@@ -1,10 +1,14 @@
 import { describe, expect, test } from 'bun:test';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { readPromptHistory } from '../../src/persistence/promptHistory';
 import { render as renderInk } from 'ink';
 import { PassThrough } from 'node:stream';
 import { useState } from 'react';
 import stripAnsi from 'strip-ansi';
 import { InputBar } from '../../src/frontend/chat/InputBar';
-import { applyInputEdit, createInputHistory, inputEditForKey } from '../../src/frontend/chat/editor';
+import { applyInputEdit, createInputHistory, inputEditForKey, draftRows, moveDraftRow } from '../../src/frontend/chat/editor';
 import type { ImageBlock, MessageBlock } from '../../src/agent_runtime/types';
 
 interface SentDraft {
@@ -22,7 +26,7 @@ function image(index: number): ImageBlock {
   };
 }
 
-function renderDraft() {
+function renderDraft(options: { history?: string[]; directory?: string; initial?: string; disabled?: boolean } = {}) {
   const images = [image(1), image(2)];
   const sent: SentDraft[] = [];
   let input = '';
@@ -41,7 +45,7 @@ function renderDraft() {
   });
 
   function Harness() {
-    const [draft, setDraft] = useState('');
+    const [draft, setDraft] = useState(options.initial ?? '');
     const [attached, setAttached] = useState<ImageBlock[]>([]);
     input = draft;
     attachments = attached;
@@ -51,7 +55,10 @@ function renderDraft() {
       }}
       inputContent={draft}
       setInputContent={setDraft}
-      disabled={false}
+      disabled={options.disabled ?? false}
+      directory={options.directory}
+      history={options.history}
+      onAttachImage={image => setAttached(current => [...current, image])}
       feedback={null}
       participants={[]}
       attachments={attached}
@@ -338,4 +345,148 @@ test('ignores keyboard protocol reports while preserving keys and literal pasted
   } finally {
     draft.unmount();
   }
+});
+
+
+describe('folded pastes and visual rows', () => {
+  test('folds a large paste while persisting and sending its complete text', async () => {
+    const draft = renderDraft();
+    const text = Array.from({ length: 60 }, (_, index) => `line ${index}`).join('\n');
+    try {
+      await draft.flush();
+      await draft.press(`\u001b[200~${text}\u001b[201~`);
+      expect(draft.output).toContain('[Pasted text #1 · 60 lines]');
+      expect(draft.output).not.toContain('line 59');
+      expect(draft.input).toBe(text);
+      await draft.press(' after');
+      await draft.press('\r');
+      expect(draft.sent[0].input).toBe(text + ' after');
+      expect(draft.sent[0].content).toEqual([{ type: 'text', text: text + ' after' }]);
+    } finally { draft.unmount(); }
+  });
+
+  test('deletes and undoes a folded paste atomically', async () => {
+    const draft = renderDraft();
+    const text = 'long text '.repeat(120);
+    try {
+      await draft.flush();
+      await draft.press(`\u001b[200~${text}\u001b[201~`);
+      await draft.press('\u007f');
+      expect(draft.input).toBe('');
+      await draft.press('\u001f');
+      expect(draft.input).toBe(text);
+      expect(draft.output).toContain('Pasted text #1');
+    } finally { draft.unmount(); }
+  });
+
+  test('caps restored multiline drafts and scrolls to the cursor', async () => {
+    const draft = renderDraft({ initial: Array.from({ length: 60 }, (_, i) => `line-${i}`).join('\n') });
+    try {
+      await draft.flush();
+      expect(draft.output).toContain('line-59');
+      expect(draft.output).not.toContain('line-0');
+      expect(draft.output).toContain('rows 53–60/60');
+      for (let i = 0; i < 59; i++) await draft.press('\u001b[A');
+      expect(draft.output).toContain('line-0');
+      expect(draft.output).not.toContain('line-59');
+    } finally { draft.unmount(); }
+  });
+
+  test('moves up in a wrapped line before recalling history', async () => {
+    const text = 'x'.repeat(120);
+    const draft = renderDraft({ initial: text, history: ['older prompt'] });
+    try {
+      await draft.flush();
+      await draft.press('\u001b[A');
+      await draft.press('!');
+      expect(draft.input).not.toContain('older prompt');
+      expect(draft.input).toContain('!');
+      expect(draft.input.endsWith('!')).toBe(false);
+    } finally { draft.unmount(); }
+  });
+
+  test('shares terminal width for wide characters, chips, and explicit newlines', () => {
+    expect(draftRows('abcd\nx', 4)).toHaveLength(2);
+    const text = 'ab界cd';
+    const rows = draftRows(text, 4);
+    expect(rows[0].map(cell => cell.text).join('')).toBe('ab界');
+    expect(moveDraftRow({ text, cursor: text.length }, rows, -1).cursor).toBe(2);
+    const chipRows = draftRows('aXb', 5, c => c === 'X' ? '[paste]' : undefined);
+    expect(chipRows).toHaveLength(3);
+  });
+});
+
+describe('history, shortcuts and pasted image paths', () => {
+  test('searches older matches, selects without sending, and restores a cancelled draft', async () => {
+    const draft = renderDraft({ initial: 'unfinished', history: ['alpha old', 'beta', 'alpha new'] });
+    try {
+      await draft.flush();
+      await draft.press('\u0012');
+      await draft.press('alpha');
+      expect(draft.output).toContain('alpha new');
+      await draft.press('\u0012');
+      expect(draft.output).toContain('alpha old');
+      await draft.press('\r');
+      expect(draft.input).toBe('alpha old');
+      expect(draft.sent).toHaveLength(0);
+      await draft.press('\u0012');
+      await draft.press('missing');
+      expect(draft.output).toContain('No matching prompts');
+      await draft.press('\u001b');
+      expect(draft.input).toBe('alpha old');
+    } finally { draft.unmount(); }
+  });
+
+  test('persists prompts across editor mounts in the same directory', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'sirus-history-project-'));
+    const first = renderDraft({ directory });
+    try {
+      await first.flush();
+      await first.press('remember this');
+      await first.press('\r');
+      expect(readPromptHistory(directory)).toContain('remember this');
+    } finally { first.unmount(); }
+    const second = renderDraft({ directory });
+    try {
+      await second.flush();
+      await second.press('\u001b[A');
+      expect(second.input).toBe('remember this');
+    } finally { second.unmount(); rmSync(directory, { recursive: true, force: true }); }
+  });
+
+  test('opens shortcuts only on an empty draft and keeps the working hint live', async () => {
+    const draft = renderDraft({ disabled: true });
+    try {
+      await draft.flush();
+      expect(draft.output).toContain('enter to steer · tab to queue');
+      expect(draft.output).not.toContain('agents are thinking');
+      expect(draft.output).not.toContain('▌');
+      await draft.press('?');
+      expect(draft.output).toContain('Keyboard shortcuts');
+      expect(draft.input).toBe('');
+      await draft.press('\u001b');
+      await new Promise(resolve => setTimeout(resolve, 120));
+      await draft.flush();
+      await draft.press('hello?');
+      expect(draft.input).toBe('hello?');
+      expect(draft.output).not.toContain('Keyboard shortcuts');
+    } finally { draft.unmount(); }
+  });
+
+  test('turns a quoted dropped image path into an attachment at the cursor', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'sirus-image-path-'));
+    const file = join(directory, 'my screenshot.png');
+    writeFileSync(file, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    const draft = renderDraft({ directory });
+    try {
+      await draft.flush();
+      await draft.press(`\u001b[200~'${file}'\u001b[201~`);
+      await draft.flush();
+      expect(draft.attachments).toHaveLength(1);
+      expect(draft.output).toContain('image · 8 B · png');
+      expect(draft.input).not.toContain('screenshot');
+      await draft.press('\r');
+      expect(draft.sent[0].content?.[0].type).toBe('image');
+    } finally { draft.unmount(); rmSync(directory, { recursive: true, force: true }); }
+  });
 });

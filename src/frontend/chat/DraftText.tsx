@@ -7,6 +7,7 @@ import { MentionText, type ParticipantColors } from '../MentionText';
 import type { ImageBlock } from '../../agent_runtime/types';
 import { describeImage } from '../../images';
 import { isImagePlaceholder } from './draft';
+import type { DraftCell } from './editor';
 
 function imageChip(image: ImageBlock): string {
   return `[${describeImage(image)}]`;
@@ -46,4 +47,25 @@ export function TrailingImages({ images, after }: { images: readonly ImageBlock[
   if (images.length === 0) return null;
   const chips = images.map(imageChip).join(' ');
   return <Text color={theme.textMuted}>{after ? ` ${chips}` : `${chips} `}</Text>;
+}
+
+export function DraftRow({ cells, cursor, participantColors }: {
+  cells: DraftCell[];
+  cursor: number;
+  participantColors?: ParticipantColors;
+}) {
+  const parts: ReactNode[] = [];
+  let buffer = '';
+  const flush = () => {
+    if (buffer) parts.push(<MentionText key={parts.length} colors={participantColors}>{buffer}</MentionText>);
+    buffer = '';
+  };
+  for (const cell of cells) {
+    if ((cell.start <= cursor && cursor < Math.max(cell.end, cell.start + 1)) || cell.chip) {
+      flush();
+      parts.push(<Text key={parts.length} inverse={cell.start <= cursor && cursor < Math.max(cell.end, cell.start + 1)} color={cell.chip ? theme.textMuted : theme.text}>{cell.text}</Text>);
+    } else buffer += cell.text;
+  }
+  flush();
+  return <Text wrap="truncate-end">{parts}</Text>;
 }

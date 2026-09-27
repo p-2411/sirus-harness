@@ -69,7 +69,7 @@ describe('background session naming', () => {
 
   test('uses only the first accepted prompt, even when another arrives before the name', async () => {
     const session = createSession();
-    await expect(session.sendMessage(prompt('@missing help'))).rejects.toThrow();
+    await expect(session.sendMessage(prompt(`@subagent ${model} help`))).rejects.toThrow();
     expect(generate).not.toHaveBeenCalled();
     expect(session.toSnapshot().autoNamePending).toBe(true);
     await session.sendMessage(prompt('First accepted prompt'));

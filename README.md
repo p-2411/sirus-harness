@@ -69,7 +69,7 @@ Then address that participant by name:
 @reviewer Check whether the latest fix resolves the issues you found.
 ```
 
-Each participant keeps its own conversation. It reads the prompts you address to it, and whatever another participant says in a message that mentions it, attributed to the sender. A prompt that mentions nobody goes to `@sirus`. Set a participant's model with `/model @reviewer <model>` and reasoning depth with `/thinking @reviewer high`. Use `/model` to see the model names supported by your installation.
+Each participant keeps its own conversation. It reads the prompts you address to it, and whatever another participant says in a message that mentions it, attributed to the sender. A prompt that mentions no known participant goes to `@sirus`. An unknown `@word` stays ordinary text unless a supported model follows it. Matching files take priority in the `@` menu. Set a participant's model with `/model @reviewer <model>` and reasoning depth with `/thinking @reviewer high`. Use `/model` to see the model names supported by your installation.
 
 ### Delegate work, follow the results
 

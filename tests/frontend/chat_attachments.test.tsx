@@ -118,7 +118,7 @@ describe('chat attachment lifecycle', () => {
 
       // Keep a separator after the image chip so word deletion can correct the
       // rejected route without deleting the attachment placeholder.
-      await chat.submit(' @missing look at this');
+      await chat.submit(` @subagent ${testModel} look this`);
       await chat.waitFor(() => session.getStatus() === 'error');
       expect(session.getMessages()).toHaveLength(0);
       expect(storedImages()).toEqual([sentPath]);

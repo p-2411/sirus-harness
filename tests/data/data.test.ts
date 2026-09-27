@@ -1272,14 +1272,26 @@ describe('Session model', () => {
     expect(binding.runtimes[0].prompts[0].text).toBe('@Claude claude-opus-5 is still relevant here');
   });
 
-  test('rejects an unknown mention without a model before changing the session', async () => {
-    const session = new Session();
-    await expect(session.sendMessage({
+  test('keeps unknown mentions without a model as ordinary prompt text', async () => {
+    const binding = bindScriptedRuntime(testModel, textTurn('done'));
+    const session = new Session({ model: testModel });
+    await session.sendMessage({
       role: 'user',
-      content: [{ type: 'text', text: 'Could @reviewer inspect this?' }],
-    })).rejects.toThrow(/requires a model/i);
-    expect(session.getParticipants()).toEqual([{ name: 'sirus', model: 'gpt-5.6-luna' }]);
-    expect(session.getMessages()).toEqual([]);
+      content: [{ type: 'text', text: 'Could @reviewer inspect this @mention?' }],
+    });
+    expect(session.getParticipants()).toEqual([{ name: 'sirus', model: testModel }]);
+    expect(binding.runtimes[0].prompts[0].text).toBe('Could @reviewer inspect this @mention?');
+  });
+
+  test('allows an explicit introduction after an ordinary occurrence of the same word', async () => {
+    const binding = bindScriptedRuntime(testModel, textTurn('done'));
+    const session = new Session({ model: testModel });
+    await session.sendMessage({
+      role: 'user',
+      content: [{ type: 'text', text: 'About @reviewer: @reviewer test-session-model inspect this' }],
+    });
+    expect(session.getParticipants().map(participant => participant.name)).toEqual(['sirus', 'reviewer']);
+    expect(binding.runtimes[0].prompts[0].text).toBe('About @reviewer: @reviewer inspect this');
   });
 
   test('does not treat a scoped package name as a participant mention', async () => {

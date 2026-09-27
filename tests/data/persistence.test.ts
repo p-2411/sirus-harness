@@ -4,6 +4,7 @@ import os from 'os';
 import path from 'path';
 import { Session } from '../../src/agent_runtime/session';
 import type { WorkerRecord } from '../../src/agent_runtime/tools/subagents';
+import { appendPromptHistory, readPromptHistory } from '../../src/persistence/promptHistory';
 import {
   loadApiKeys,
   loadSessionSnapshot,
@@ -31,6 +32,73 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(directory, { recursive: true, force: true });
+});
+
+describe('prompt history', () => {
+  let previousDataDirectory: string | undefined;
+
+  beforeEach(() => {
+    previousDataDirectory = process.env.SIRUS_DATA_DIR;
+    process.env.SIRUS_DATA_DIR = directory;
+  });
+
+  afterEach(() => {
+    if (previousDataDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
+    else process.env.SIRUS_DATA_DIR = previousDataDirectory;
+  });
+
+  test('persists multiline prompts privately and separates project directories', () => {
+    const project = path.join(directory, 'project');
+    expect(readPromptHistory(project)).toEqual([]);
+    appendPromptHistory(project, 'first\nsecond');
+    appendPromptHistory(project, '  ');
+    appendPromptHistory(`${project}/.`, 'next prompt');
+    appendPromptHistory(path.join(directory, 'other'), 'other project');
+    expect(readPromptHistory(project)).toEqual(['first\nsecond', 'next prompt']);
+    expect(readPromptHistory(path.join(directory, 'other'))).toEqual(['other project']);
+    const folder = path.join(directory, 'prompt-history');
+    expect(statSync(folder).mode & 0o777).toBe(0o700);
+    for (const file of readdirSync(folder)) {
+      expect(file).toMatch(/^[a-f0-9]{64}\.jsonl$/);
+      expect(statSync(path.join(folder, file)).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  test('keeps the latest thousand valid entries across damaged records', () => {
+    const project = path.join(directory, 'project');
+    for (let index = 0; index < 1_005; index++) appendPromptHistory(project, `prompt ${index}`);
+    const folder = path.join(directory, 'prompt-history');
+    const file = path.join(folder, readdirSync(folder)[0]!);
+    writeFileSync(file, `${readFileSync(file, 'utf8')}invalid JSON\n42\n`);
+    const history = readPromptHistory(project);
+    expect(history).toHaveLength(1_000);
+    expect(history[0]).toBe('prompt 5');
+    expect(history.at(-1)).toBe('prompt 1004');
+  });
+
+  test('concurrent processes append without replacing another window’s prompts', async () => {
+    const project = path.join(directory, 'project');
+    const module = path.resolve(import.meta.dir, '../../src/persistence/promptHistory.ts');
+    const children = Array.from({ length: 4 }, (_, worker) => Bun.spawn([
+      process.execPath, '-e',
+      `import { appendPromptHistory } from ${JSON.stringify(module)};
+       for (let index = 0; index < 40; index++) {
+         appendPromptHistory(${JSON.stringify(project)}, ${JSON.stringify(`worker ${worker}: `)} + index);
+       }`,
+    ], { env: process.env, stdout: 'pipe', stderr: 'pipe' }));
+    expect(await Promise.all(children.map(child => child.exited))).toEqual([0, 0, 0, 0]);
+    const history = readPromptHistory(project);
+    expect(history).toHaveLength(160);
+    expect(new Set(history).size).toBe(160);
+  });
+
+  test('unwritable storage leaves input usable', () => {
+    const file = path.join(directory, 'not-a-directory');
+    writeFileSync(file, 'file');
+    process.env.SIRUS_DATA_DIR = file;
+    expect(() => appendPromptHistory(directory, 'prompt')).not.toThrow();
+    expect(readPromptHistory(directory)).toEqual([]);
+  });
 });
 
 describe('session persistence', () => {
