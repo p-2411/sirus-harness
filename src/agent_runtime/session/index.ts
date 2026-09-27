@@ -360,6 +360,7 @@ export class Session {
   }
 
   async sendMessage(message: Draft): Promise<Message[]> {
+    if (this.disposed) throw new Error('This session was deleted.');
     if (message.role !== 'user') throw new Error('Only user messages can start a session turn');
     if (this.rewinding || this.checkpoints.isRestoringDirectory()) {
       throw new Error('Wait for the rewind to finish before sending a message.');
@@ -730,9 +731,11 @@ export class Session {
   // What is waiting behind the turn that just ended, when nothing about it
   // needs a mounted Chat. A worker that finished during the turn is news the
   // owner needs before it answers anything the user typed meanwhile, so the
-  // reports go first and the queue drains after the turn they start.
+  // reports go first and the queue drains after the turn they start. A
+  // deleted session sends nothing: deleting it cancels the turn, and this
+  // runs as that turn ends.
   private sendNextQueuedPrompt(): void {
-    if (this.activeSends > 0) return;
+    if (this.activeSends > 0 || this.disposed) return;
     if (this.pendingReports.length > 0) {
       this.flushReports();
       return;

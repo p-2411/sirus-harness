@@ -464,6 +464,26 @@ describe('Session model', () => {
     expect(first.getStatus()).toBe('idle');
   });
 
+  test('a deleted session sends nothing it had queued and refuses new prompts', async () => {
+    const prompts: string[] = [];
+    bindScriptedRuntime(testModel, async (input, emit, _options, signal) => {
+      prompts.push(input.text);
+      await new Promise(resolve => signal.addEventListener('abort', resolve));
+      emit({ type: 'text', text: 'Done' });
+    });
+    const session = new Session({ id: 'disposed-queue', name: 'Disposed', model: testModel });
+    const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'start' }] });
+    session.queueMessage('never sent');
+    await until(() => prompts.length === 1, 'the turn to start');
+    await session.dispose();
+    await expect(turn).rejects.toMatchObject({ name: 'AbortError' });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(prompts).toEqual(['start']);
+    expect(session.getMessages().filter(message => message.role === 'user')).toHaveLength(1);
+    await expect(session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'again' }] }))
+      .rejects.toThrow('This session was deleted.');
+  });
+
   test('cancelling a turn leaves its workers running; cancelWorker and dispose stop them', async () => {
     let finish!: () => void;
     const gate = new Promise<void>(resolve => { finish = resolve; });
