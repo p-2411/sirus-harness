@@ -54,8 +54,9 @@ One user prompt, in the order a reader opens the files:
 7. The adapter process runs the model and the vendor's own file, shell, search and web
    tools. Its `session/update` notifications become transcript entries: text (a new block
    for each message), timed thoughts, tool calls merged by id, the context gauge, a
-   compaction boundary, and once the turn ends what it used (`TurnUsage`, from the prompt
-   response). A call the user declined at the approval prompt is marked so in `acp.ts`
+   compaction boundary, and once the turn ends what it used (`TurnUsage`: the prompt
+   response's tally from Claude; from Codex, whose response covers its last model call
+   only, the sum of the turn's usage updates when it made several). A call the user declined at the approval prompt is marked so in `acp.ts`
    (`outcome`), since both vendors report it only as failed.
 8. `agent_runtime/tools/server.ts`: a Sirus tool the model called arrives here over
    loopback HTTP, carrying the session's bearer token and the caller's name, so the call
@@ -122,10 +123,19 @@ the workers' sake, since each one must be stopped and waited for before its work
 removed.
 
 Compaction belongs to the runtime. Each one folds its own conversation when its window
-fills and reports it; `Session.compact` asks the default participant's runtime to do it now
-by sending `/compact` as a prompt, which both vendors take as a slash command. What comes
-back is a compaction block in that participant's record, rendered as a rule in the chat.
-There is no automatic step of Sirus's own and nothing to switch off.
+fills and reports it; `Session.compact` asks a participant's runtime (the selected one's
+unless named) to do it now by sending `/compact` as a prompt, which both vendors take as a
+slash command, with whatever the user wants the summary to keep after it: Claude Code reads
+those as instructions, Codex compacts without any and the command says so. What comes back
+is a compaction block in that participant's record, rendered as a rule in the chat. There is
+no automatic step of Sirus's own and nothing to switch off.
+
+The status row shows the selected agent's context gauge, model and thinking level, the tab
+the chat is on. The gauge warns from `CONTEXT_LOW_PERCENT` on, and a window smaller than one
+already seen for the model is taken for the adapter's placeholder. What each turn used is kept on the assistant entry it
+wrote (`Message.usage`), which its footer shows; a participant's total, which `/status` and
+`/usage` show, is the sum over its entries (`getTurnUsage`), a figure of the breakdown only
+when every turn reported one.
 
 ## Participants and runtimes
 
@@ -171,13 +181,22 @@ settings, are switched off by name through `settings.skillOverrides`. Codex find
 `.codex` skills on its own; when a credential points `CODEX_HOME` at a profile, the user's
 `~/.codex/skills` are linked into it one by one.
 
-The user calls a skill as `/name`. `skillCommands` lists the default participant's skills
-from the same folders, named the way each vendor names them (the frontmatter `name`), and
-the `/` menu shows them after Sirus's commands; `isSkillCommand` is what makes `Chat.send`
-send such a line as a prompt instead of running it. `TurnRunner` rewrites the user's
-`/name` into the addressed participant's vendor form (`skillPrompt`): `/user:name` or
-`/project:name`, which Claude Code reads as a slash command, or `$name`, which Codex
-resolves as a skill mention. Claude reads a slash command only from the prompt's last text
+The vendors' own commands, skills included, are what each runtime reports in
+`available_commands_update` (`runtime/commands.ts`); the last list per vendor and directory
+is kept on disk. The `/` menu shows those of every vendor a participant runs on after Sirus's
+commands, tagged "(claude)" or "(codex)", the selected agent's vendor first; one whose
+name a Sirus command or an earlier vendor already has is listed and reached with the
+vendor's prefix, `/claude:agents` or `/codex:status` (`vendorCommandNames`). `Chat.send`
+sends such a line as a prompt to the selected agent when it is on that vendor, else to one
+that is (`participantOn`), and `TurnRunner` puts it in
+that vendor's words (`nativePrompt`): the prefix goes, and a Codex skill reads `$name`. A
+command that only reports and takes no arguments (`isReportingCommand`: Claude's `/context`,
+Codex's `/status`) is not sent at all: `SessionAgent.runAside` runs it on a throwaway fork of
+the participant's runtime, or on a fresh runtime while the vendor holds no conversation yet,
+and the chat shows what it printed as a panel, so it leaves no turn, no checkpoint and nothing
+in any record. Sirus's own `/init` and `/review` go the prompt way too: the chat shows
+`/init`, and `nativePrompt` hands the participant Sirus's prompt for it, except that Codex's
+`/review` stays Codex's. Claude reads a slash command only from the prompt's last text
 block, so a cold runtime seeded with its record gets that record as a block of its own
 ahead of the command (`PromptInput.context`), and every prompt sends its images before its
 text.
@@ -219,10 +238,13 @@ report says why.
 Reduced to credentials: nothing here knows a wire protocol or runs a turn.
 
 - `catalog.ts`: pure data. `MODELS` (id, vendor, and the profile the router reads) and
-  `VENDOR_INFO` (display names, the API-key environment variable Sirus reads, the one the
-  vendor's harness reads, the credentials a subscription child must not inherit, the profile
-  directory variable, the allowance window). Consumers import model facts straight from
-  here.
+  `VENDOR_INFO` (the one name the user reads and types for each vendor, Claude and Codex,
+  over a stored key that stays `claude` and `gpt`; the API-key environment variable Sirus
+  reads, the one the vendor's harness reads, the credentials a subscription child must not
+  inherit, the profile directory variable, the allowance window). Consumers import model
+  facts straight from here, including what the vendors listed and what a runtime showed
+  about its model: the efforts it offers, which `/thinking` offers, and the largest window
+  it reported, which keeps the gauge from reading a placeholder.
 - `sources.ts`: a vendor's credentials, API keys and subscription profiles, in priority
   order, persisted through settings. The head of the list is the preferred one.
 - `profiles.ts`: a credential as the environment an agent process gets.
@@ -307,7 +329,7 @@ module.
 
 A command is a `CommandSpec` with `run(args, context)` where `context` is
 `{ session: CommandSession, signal, notify }` plus opt-in capabilities (`AttachesImages`,
-`QuitsApp`). `CommandSession` is the structural subset of `Session` that commands use, so
+`QuitsApp`, `sendPrompt` for one that talks to the agents, as `/init` does). `CommandSession` is the structural subset of `Session` that commands use, so
 the command layer never depends on the class. The registry array fixes the user-visible
 order. See `src/commands/README.md` for the file-layout rule.
 

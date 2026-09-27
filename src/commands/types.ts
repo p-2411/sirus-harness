@@ -1,8 +1,10 @@
-import type { BackgroundTask } from '../agent_runtime/runtime/runtime';
+import type { AsideOutput } from '../agent_runtime/agent';
+import type { BackgroundTask, McpServerState } from '../agent_runtime/runtime/runtime';
 import type { PermissionMode } from '../agent_runtime/permissions/policy';
+import type { Source } from '../agent_runtime/providers/sources';
 import type { Checkpoint, Participant, RewindOptions, RewindResult, RewindPreview, SessionSnapshot } from '../agent_runtime/session';
 import type { SubagentRun } from '../agent_runtime/tools/subagents';
-import type { ImageBlock, ThinkingLevel, Message } from '../agent_runtime/types';
+import type { ImageBlock, ThinkingLevel, Message, TurnUsage } from '../agent_runtime/types';
 import type { ContextUsage } from '../agent_runtime/usage';
 import type { Feedback } from './feedback';
 
@@ -20,6 +22,8 @@ export interface CommandMenuItem {
   label: string;
   description?: string;
   command: string;
+  // What is in effect now: marked in the menu, and where the menu opens.
+  current?: boolean;
   // The item needs one more value the menu cannot offer as a choice. Both ask
   // for it in the input bar and append what was typed as the command's final
   // argument; a secret is echoed as dots, an input stays visible.
@@ -42,11 +46,20 @@ export interface CommandSession {
   getModel(): string;
   fork(): SessionSnapshot;
   previewRewind(checkpointId: string, options: RewindOptions): Promise<RewindPreview>;
-  // Sends /compact to the selected participant's runtime as a turn. Rejects
-  // while the session is busy.
-  compact(signal?: AbortSignal, participantName?: string): Promise<void>;
+  // Sends /compact, with any instructions, to a participant's runtime (the
+  // selected one's unless named) as a turn. Rejects while the session is busy.
+  compact(signal?: AbortSignal, participantName?: string, instructions?: string): Promise<void>;
   getCheckpoints(): Checkpoint[];
   getContextUsage(participantName?: string): ContextUsage | null;
+  // What a participant's turns have used, summed from their entries.
+  getTurnUsage(participantName: string): TurnUsage | null;
+  getCredential(participantName: string): Source | null;
+  getMcpServers(participantName: string): McpServerState[] | null;
+  getOfferedThinkingLevels(participantName?: string): ThinkingLevel[] | null;
+  // A participant's reporting vendor command, run on a throwaway fork of its
+  // runtime: no turn, no checkpoint, nothing kept.
+  runCommandAside(participantName: string, text: string, signal: AbortSignal): Promise<AsideOutput>;
+  getId(): string;
   getParticipants(): Participant[];
   getDirectory(): string;
   getName(): string;
@@ -93,6 +106,9 @@ export interface QuitsApp {
 // attach images or quit simply leaves them out, and the one command that
 // needs each says so.
 export type CommandCapabilities = Partial<AttachesImages & QuitsApp & {
+  // Sends text to the agents as the user's own message, the way typing it
+  // would, and settles when the turn it starts is over.
+  sendPrompt(text: string): Promise<void>;
   newSession(): void;
   openSession(snapshot: SessionSnapshot): void;
   resumeSession(query?: string): void;

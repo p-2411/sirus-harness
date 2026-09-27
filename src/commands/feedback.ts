@@ -6,4 +6,6 @@ export interface Feedback {
   showIcon?: boolean;
   // Long output borrows the history area instead of sitting above the input.
   panel?: boolean;
+  // The text is Markdown, as a vendor's report is, and is rendered as such.
+  markdown?: boolean;
 }

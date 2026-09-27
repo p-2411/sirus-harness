@@ -141,13 +141,14 @@ const messageSchema = z.object({
   usage: z.unknown().optional(),
 });
 
+// A Codex turn of several model calls has a total and no breakdown.
 const turnUsageSchema = z.object({
-  inputTokens: z.number().nonnegative(),
-  outputTokens: z.number().nonnegative(),
+  totalTokens: z.number().nonnegative(),
+  inputTokens: z.number().nonnegative().optional(),
+  outputTokens: z.number().nonnegative().optional(),
   cachedReadTokens: z.number().nonnegative().optional(),
   cachedWriteTokens: z.number().nonnegative().optional(),
   thoughtTokens: z.number().nonnegative().optional(),
-  totalTokens: z.number().nonnegative(),
   costUsd: z.number().nonnegative().optional(),
 });
 

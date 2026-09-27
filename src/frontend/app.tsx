@@ -7,6 +7,7 @@ import {
   loadSessionSnapshots,
   loadSessionSnapshot,
   loadSessionRevision,
+  loadSessionDefaults,
   loadSirusModelPreference,
   saveSessionSnapshot,
   saveSessionMetadata,
@@ -50,7 +51,11 @@ function createDraft(
   preference: string | null = loadSirusModelPreference(),
 ): Session {
   const model = preference && isKnownModel(preference) ? preference : DEFAULT_MODEL;
-  return new Session({ name: nextSessionName(sessions), directory, model, autoNamePending: true });
+  const { permissionMode, thinkingLevel } = loadSessionDefaults();
+  return new Session({
+    name: nextSessionName(sessions), directory, model, autoNamePending: true,
+    ...(permissionMode ? { permissionMode } : {}), ...(thinkingLevel ? { thinkingLevel } : {}),
+  });
 }
 
 export function startSession(

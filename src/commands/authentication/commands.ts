@@ -9,7 +9,7 @@ import type { CommandSpec } from '../types';
 
 export const loginCommandSpec: CommandSpec = {
   name: 'login',
-  args: '[claude|gpt] [subscription|api <key>]',
+  args: '[claude|codex] [subscription|api <key>]',
   description: 'add a subscription or API key',
   run: (args, context) => loginCommand(args, context.notify, context.signal),
   menu: loginMenuItems,
@@ -17,7 +17,7 @@ export const loginCommandSpec: CommandSpec = {
 
 export const logoutCommandSpec: CommandSpec = {
   name: 'logout',
-  args: '[claude|gpt] [source]',
+  args: '[claude|codex] [source]',
   description: 'remove a subscription or API key',
   run: args => logoutCommand(args[0], args[1]),
   menu: logoutMenuItems,
@@ -25,7 +25,7 @@ export const logoutCommandSpec: CommandSpec = {
 
 export const usageCommandSpec: CommandSpec = {
   name: 'usage',
-  description: 'remaining subscription allowance and each participant\'s context',
+  description: 'allowance left, and each agent\'s tokens and context',
   run: (args, context) => {
     if (args.length > 0) throw new Error('Usage: /usage');
     return usageCommand(context.signal, context.session);

@@ -102,6 +102,67 @@ test('ACP opts into notices and routes early notices to the session being opened
 });
 
 test.each([
+  ['response', 2], ['usage_updates', 2], ['usage_updates', 1],
+] as const)('ACP reports a turn’s usage from the %s after %d model calls, its cost, its model’s efforts and Claude’s MCP servers', async (turnTokens, calls) => {
+  const adapter = `
+    import { createInterface } from 'node:readline';
+    const send = value => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\\n');
+    const update = update => send({ method: 'session/update', params: { sessionId: 's', update } });
+    const configOptions = [
+      { id: 'model', name: 'Model', type: 'select', currentValue: 'chosen', options: [{ value: 'chosen', name: 'Chosen' }] },
+      { id: 'effort', name: 'Effort', type: 'select', currentValue: 'high', options: ['low', 'medium', 'high'].map(value => ({ value, name: value })) },
+    ];
+    for await (const line of createInterface({ input: process.stdin })) {
+      const request = JSON.parse(line);
+      const reply = result => send({ id: request.id, result });
+      if (request.method === 'initialize') reply({ protocolVersion: 1, agentCapabilities: {} });
+      else if (request.method === 'session/new') reply({ sessionId: 's', configOptions });
+      else if (request.method === 'session/prompt') {
+        send({ method: '_claude/sdkMessage', params: { sessionId: 's', message: { type: 'system', subtype: 'init',
+          mcp_servers: [{ name: 'sirus', status: 'connected' }, { name: 'github', status: 'failed' }] } } });
+        update({ sessionUpdate: 'usage_update', used: 100, size: 1000, cost: { amount: 0.5, currency: 'USD' } });
+        // Codex repeats a call's count when only its rate limits changed.
+        update({ sessionUpdate: 'usage_update', used: 100, size: 1000 });
+        if (process.env.CALLS === '2') update({ sessionUpdate: 'usage_update', used: 150, size: 1000, cost: { amount: 0.75, currency: 'USD' } });
+        reply({ stopReason: 'end_turn', usage: process.env.CALLS === '2'
+          ? { totalTokens: 900, inputTokens: 400, outputTokens: 500, cachedReadTokens: 0 }
+          : { totalTokens: 100, inputTokens: 60, outputTokens: 40 } });
+      } else if (request.id !== undefined) reply({});
+    }
+  `;
+  const spec = spyOn(launch, 'launchFor').mockImplementation(options => ({
+    command: process.execPath, args: ['-e', adapter], env: { ...options.env, CALLS: String(calls) }, mode: options.permissionMode,
+    session: () => ({ mcpServers: [] }), forkNeedsResume: false, turnTokens,
+  }));
+  const updates: RuntimeUpdate[] = [];
+  let runtime: Runtime | undefined;
+  try {
+    runtime = await startAcpRuntime({
+      vendor: 'claude', model: 'chosen', thinkingLevel: 'xhigh', directory: process.cwd(),
+      systemPrompt: '', env: { ...process.env }, mcpServer: null, permissionMode: 'auto',
+      onPermission: async () => ({ outcome: { outcome: 'cancelled' } }),
+      onUpdate: update => { updates.push(update); },
+    });
+    expect(updates.find(update => update.type === 'efforts')).toEqual({ type: 'efforts', efforts: ['low', 'medium', 'high'] });
+    await runtime.prompt({ text: 'Go', images: [] }, new AbortController().signal);
+    expect(updates.find(update => update.type === 'mcp_servers')).toEqual({ type: 'mcp_servers', servers: [
+      { name: 'sirus', status: 'connected' }, { name: 'github', status: 'failed' },
+    ] });
+    // Claude's prompt response is the turn's tally. Codex's is its last
+    // call's, so a turn of several calls is what their usage updates added
+    // up to, without a breakdown; a turn of one call is that call. The cost
+    // is what the session's running figure grew by.
+    expect(updates.filter(update => update.type === 'usage')).toEqual([{ type: 'usage', usage: turnTokens === 'response'
+      ? { inputTokens: 400, outputTokens: 500, cachedReadTokens: 0, totalTokens: 900, costUsd: 0.75 }
+      : calls === 2 ? { totalTokens: 250, costUsd: 0.75 }
+        : { inputTokens: 60, outputTokens: 40, totalTokens: 100, costUsd: 0.5 } }]);
+  } finally {
+    runtime?.dispose();
+    spec.mockRestore();
+  }
+});
+
+test.each([
   ['claude', 'resume'], ['claude', 'load'], ['gpt', 'resume'], ['gpt', 'load'],
 ] as const)('ACP %s %s reopens the recorded session without replaying its transcript', async (vendor, method) => {
   const adapter = `
@@ -172,7 +233,7 @@ test.each([
     });
     expect(runtime.sessionId).toBe('saved-session');
     expect(runtime.context).toEqual({ tokens: 99, window: 1000 });
-    expect(updates.map(update => update.type).sort()).toEqual(['async_task', 'commands', 'context', 'models']);
+    expect(updates.map(update => update.type).sort()).toEqual(['async_task', 'commands', 'context', 'efforts', 'models']);
     await runtime.prompt({ text: 'Continue', images: [] }, new AbortController().signal);
     const answer = updates.at(-1);
     expect(answer?.type).toBe('text');
@@ -451,15 +512,75 @@ describe('Session model', () => {
     expect(session.getContextUsage()).toBeNull();
 
     await session.sendMessage({ role: 'user', content: [{ type: 'text', text: '@reviewer look' }] });
-    // The default participant has not reported: the last responder's shows.
-    expect(session.getContextUsage()).toEqual({ tokens: 50, window: 400_000 });
     expect(session.getContextUsage('reviewer')).toEqual({ tokens: 50, window: 400_000 });
     expect(session.getContextUsage('sirus')).toBeNull();
+    // Unnamed, the window is the selected agent's, which the status row shows.
+    expect(session.getContextUsage()).toBeNull();
+    session.selectParticipant('reviewer');
+    expect(session.getContextUsage()).toEqual({ tokens: 50, window: 400_000 });
 
+    session.selectParticipant('sirus');
     await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Now you' }] });
     expect(session.getContextUsage()).toEqual({ tokens: 300, window: 200_000 });
     // Nothing of it survives a restore: the gauge waits for the runtime.
     expect(Session.fromSnapshot(session.toSnapshot()).getContextUsage()).toBeNull();
+  });
+
+  test('a window smaller than one already seen for the model is the adapter’s placeholder', async () => {
+    // Claude's adapter says 200k until its first reply names the real window.
+    // A model of its own: what is learned about a model's window is kept.
+    const model = 'test-window-model';
+    let window = 200_000;
+    bindScriptedRuntime(model, (_input, emit) => {
+      emit({ type: 'context', usage: { tokens: 40_000, window } });
+      emit({ type: 'text', text: 'Done' });
+      window = 1_000_000;
+      emit({ type: 'context', usage: { tokens: 40_000, window } });
+    });
+    try {
+      const session = new Session({ model });
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'First' }] });
+      expect(session.getContextUsage()).toEqual({ tokens: 40_000, window: 1_000_000 });
+      session.clear();
+      window = 200_000;
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Again' }] });
+      expect(session.getContextUsage()).toEqual({ tokens: 40_000, window: 1_000_000 });
+    } finally {
+      unbindRuntime(model);
+    }
+  });
+
+  test('a reporting command runs on a throwaway runtime and leaves no turn, checkpoint or record', async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-aside-'));
+    const binding = bindScriptedRuntime(testModel, (input, emit) => {
+      emit({ type: 'text', text: input.text === '/context' ? 'Context: 12k of 200k' : 'Answer' });
+    });
+    try {
+      // Before any turn there is no conversation to fork: a fresh runtime of
+      // its own answers, and the participant's is left alone.
+      const session = new Session({ model: testModel, directory });
+      const cold = await session.runCommandAside('sirus', '/context', new AbortController().signal);
+      expect(cold.text).toBe('Context: 12k of 200k');
+      expect(binding.starts).toHaveLength(1);
+      expect(binding.runtimes[0].disposed).toBe(true);
+      expect(session.isEmpty()).toBe(true);
+
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Hello' }] });
+      const messages = session.getMessages().length;
+      const checkpoints = session.getCheckpoints().length;
+      const output = await session.runCommandAside('sirus', '/context', new AbortController().signal);
+      expect(output.text).toBe('Context: 12k of 200k');
+      // A fork of the participant's runtime, closed once it has answered.
+      expect(binding.forks).toHaveLength(1);
+      expect(binding.runtimes.at(-1)!.prompts.map(prompt => prompt.text)).toEqual(['/context']);
+      expect(binding.runtimes.at(-1)!.disposed).toBe(true);
+      expect(binding.runtimes[1].disposed).toBe(false);
+      expect(session.getMessages()).toHaveLength(messages);
+      expect(session.getCheckpoints()).toHaveLength(checkpoints);
+      expect(binding.runtimes[1].prompts.map(prompt => prompt.text)).toEqual(['Hello']);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   test('changing a participant model changes it for that session only', () => {
@@ -1696,7 +1817,7 @@ describe('Session subscriptions', () => {
       role: 'assistant',
       participant: 'sirus',
       model: testModel,
-      content: [{ type: 'text', text: 'Partial before failure' }, { type: 'notice', severity: 'error', title: 'OpenAI refused or could not complete this request. Try again or revise the prompt.' }],
+      content: [{ type: 'text', text: 'Partial before failure' }, { type: 'notice', severity: 'error', title: 'Codex refused or could not complete this request. Try again or revise the prompt.' }],
       startedAt: expect.any(Number),
       finishedAt: expect.any(Number),
     });

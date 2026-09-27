@@ -150,7 +150,7 @@ test('the worker strip follows only the displayed session’s workers', async ()
     await flush();
     stdin.write('\r');
     await flush();
-    expect(output).toContain('ChatGPT');
+    expect(output).toContain('Codex');
     expect(strip()).toContain(theirs.id);
 
     // The same call id in two sessions decorates only the row of the session

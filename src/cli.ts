@@ -135,9 +135,12 @@ export async function runPrint(
   ]);
   const saved = persistence.loadSessionSnapshots(undefined, options.directory!);
   const snapshot = resolveResumeSelection(saved.snapshots, options);
+  const defaults = persistence.loadSessionDefaults();
   const session = snapshot ? Session.fromSnapshot(snapshot) : new Session({
     directory: options.directory!, model: options.model ?? persistence.loadSirusModelPreference() ?? DEFAULT_MODEL,
     name: prompt.trim().slice(0, 80),
+    ...(defaults.permissionMode ? { permissionMode: defaults.permissionMode } : {}),
+    ...(defaults.thinkingLevel ? { thinkingLevel: defaults.thinkingLevel } : {}),
   });
   session.setArchived(false);
   if (options.model) session.changeParticipantModel(session.toSnapshot().defaultModel.name, options.model);

@@ -59,10 +59,12 @@ test('Escape dismisses help, command suggestions, login stages and secret entry'
     await type('i');
     expect(output).toContain('add a subscription or API key');
     await type('\r');
-    expect(output).toContain('ChatGPT');
+    expect(output).toContain('Codex');
     await type('\u001b');
     expect(output).not.toContain('› Claude');
+    // With no credentials the empty chat keeps its tagline and adds the hint.
     expect(output).toContain('What shall we build?');
+    expect(output).toContain('Use /login to sign in to Claude or Codex, or add an API key.');
 
     await type('/login');
     await type('\r');
@@ -76,10 +78,10 @@ test('Escape dismisses help, command suggestions, login stages and secret entry'
     await type('\r');
     await type('\u001b[B');
     await type('\r');
-    expect(output).toContain('Anthropic API key');
+    expect(output).toContain('API key for Claude');
     await type('not-a-real-key');
     await type('\u001b');
-    expect(output).not.toContain('Anthropic API key');
+    expect(output).not.toContain('API key for Claude');
     expect(session.getMessages()).toEqual([]);
   } finally {
     app.unmount();
@@ -191,8 +193,9 @@ test('help and usage stay scrollable above the editor in an 80 by 24 terminal', 
     await type('\u001b[5~');
     expect(output).toBe(firstPage);
     await type('\u001b[1;5F');
-    expect(output).toContain('ctrl+k / u');
-    expect(output).toContain('kill previous / next word');
+    // The end of /help is its notes on the mouse and the vendors' commands.
+    expect(output).toContain('checkpoint');
+    expect(output).toContain('history.');
     expectEditor();
     await type('\u001b[1;5H');
     expect(output).toBe(firstPage);

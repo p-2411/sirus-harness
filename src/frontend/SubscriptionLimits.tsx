@@ -30,10 +30,11 @@ function activeSubscriptions() {
       ? active
       : provider.sources.list().find(item => item.kind === 'subscription');
     if (!source || source.kind !== 'subscription') return [];
+    // The vendor and the window the figure is for: "Claude 5h", "Codex 7d".
     return [{
       vendor, source,
       id: `${vendor}:${source.id}`,
-      label: VENDOR_INFO[vendor].sidebarLabel,
+      label: `${VENDOR_INFO[vendor].displayName} ${VENDOR_INFO[vendor].limitPeriod === '5-hour' ? '5h' : '7d'}`,
     }];
   });
 }

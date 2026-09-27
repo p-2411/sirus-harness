@@ -1,5 +1,6 @@
 import { saveSirusModelPreference } from '../../persistence';
-import { listedDescription, modelIds, modelsOf, vendorOf, VENDOR_INFO, VENDORS } from '../../agent_runtime/providers/catalog';
+import { providerFor } from '../../agent_runtime/providers';
+import { listedDescription, modelIds, modelInfo, modelsOf, vendorOf, VENDOR_INFO, VENDORS } from '../../agent_runtime/providers/catalog';
 import type { SubagentRun } from '../../agent_runtime/tools/subagents';
 import { renderTranscript, workerName, workerTitle } from '../../agent_runtime/tools/subagents/report';
 import {
@@ -80,29 +81,46 @@ function modelRestartWarning(participantName: string, model: string, session?: C
   return `Switching @${participant.name} to ${model} restarts its session; it keeps the conversation as text.`;
 }
 
+// The models are the vendors' own ids, as each listed them. The participant's
+// model is marked and the menu opens on it; under its vendor it is offered
+// even when the vendor does not list it (a model from before the vendor's
+// list, such as a catalog id), so the menu shows where it stands. Only
+// vendors the user is signed in to are offered, since a model of any other
+// could not run.
 export function modelMenuItems(args: readonly string[] = [], session?: CommandSession): CommandMenuEntry[] | null {
   if (args.length > 1 || (args.length === 1 && !args[0].startsWith('@'))) return null;
   const participant = args[0]?.replace(/^@/, '');
+  const current = session?.getParticipants()
+    .find(candidate => candidate.name.toLocaleLowerCase() === (participant ?? 'sirus').toLocaleLowerCase())?.model;
+  const vendors = VENDORS.filter(vendor => providerFor(vendor).sources.list().length > 0);
+  if (vendors.length === 0) throw new Error('No vendor is signed in yet. Use /login to sign in to Claude or Codex, or add an API key.');
 
-  return VENDORS.flatMap(vendor => [
-    {
-      type: 'heading' as const,
-      key: `${vendor}-models`,
-      label: modelsOf(vendor).length > 0
-        ? VENDOR_INFO[vendor].displayName
-        : `${VENDOR_INFO[vendor].displayName} — waiting for vendor models; connect with /login`,
-    },
-    ...modelsOf(vendor).map(model => {
-      const description = [modelRestartWarning(participant ?? 'sirus', model, session), listedDescription(model)].filter(Boolean).join(' ');
-      return {
-        type: 'item' as const,
-        key: model,
-        label: model,
-        ...(description ? { description } : {}),
-        command: participant ? `/model @${participant} ${model}` : `/model ${model}`,
-      };
-    }),
-  ]);
+  return vendors.flatMap(vendor => {
+    // Until the vendor has listed its models there is nothing to choose from.
+    const models = modelsOf(vendor);
+    if (current && vendorOf(current) === vendor && models.length > 0 && !models.includes(current)) models.unshift(current);
+    return [
+      {
+        type: 'heading' as const,
+        key: `${vendor}-models`,
+        label: modelsOf(vendor).length > 0
+          ? VENDOR_INFO[vendor].displayName
+          : `${VENDOR_INFO[vendor].displayName} — waiting for vendor models`,
+      },
+      ...models.map(model => {
+        const describe = listedDescription(model) ?? modelInfo(model)?.profile.strengths.split(/(?<=\.)\s/)[0];
+        const description = [modelRestartWarning(participant ?? 'sirus', model, session), describe].filter(Boolean).join(' ');
+        return {
+          type: 'item' as const,
+          key: model,
+          label: model,
+          ...(description ? { description } : {}),
+          command: participant ? `/model @${participant} ${model}` : `/model ${model}`,
+          ...(model === current ? { current: true } : {}),
+        };
+      }),
+    ];
+  });
 }
 
 export function changeModel(
@@ -115,6 +133,7 @@ export function changeModel(
   const normalizedParticipantName = participantName.replace(/^@/, '');
   const warning = modelRestartWarning(normalizedParticipantName, resolvedModel, session);
   if (warning) notify?.(warning);
+  const levelBefore = session.getThinkingLevel(normalizedParticipantName);
   session.changeParticipantModel(participantName, resolvedModel);
   // Choosing Sirus before a conversation starts also chooses the default for
   // future sessions. Existing sessions retain their own participant models.
@@ -125,9 +144,14 @@ export function changeModel(
       text: `@${normalizedParticipantName} model set to ${resolvedModel}, but the default could not be saved.`,
     };
   }
+  // A model without the level asked for runs at a lower one, and says so.
+  const levelAfter = session.getThinkingLevel(normalizedParticipantName);
+  const lowered = levelAfter !== levelBefore
+    ? ` ${resolvedModel} does not offer ${levelBefore} thinking, so @${normalizedParticipantName} thinks at ${levelAfter}.`
+    : '';
   return {
-    kind: warning ? 'warning' : 'success',
-    text: warning ?? `@${normalizedParticipantName} model set to ${resolvedModel}.`,
+    kind: warning || lowered ? 'warning' : 'success',
+    text: `${warning ?? `@${normalizedParticipantName} model set to ${resolvedModel}.`}${lowered}`,
   };
 }
 
@@ -143,6 +167,18 @@ export function subagentModelCommand(args: readonly string[], session: CommandSe
   return { kind: 'success', text: describe(model) };
 }
 
+// The levels a participant's model offers, as its runtime listed them; all
+// of Sirus's while no runtime on the model has said. Throws for a model with
+// none to choose from.
+function thinkingLevelsFor(participantName: string, session: CommandSession): readonly ThinkingLevel[] {
+  const offered = session.getOfferedThinkingLevels(participantName);
+  if (offered?.length === 0) {
+    const model = session.getParticipants().find(candidate => candidate.name.toLocaleLowerCase() === participantName.toLocaleLowerCase())?.model;
+    throw new Error(`${model ?? `@${participantName}'s model`} has no thinking levels to choose from.`);
+  }
+  return offered ?? THINKING_LEVELS;
+}
+
 export function changeThinkingLevel(
   participantName: string = 'sirus',
   value: string,
@@ -151,6 +187,10 @@ export function changeThinkingLevel(
   const level = parseThinkingLevel(value);
   if (!level) throw new Error(`Unknown thinking level. Try: ${THINKING_LEVELS.join(', ')}`);
   const normalizedParticipantName = participantName.replace(/^@/, '');
+  const offered = thinkingLevelsFor(normalizedParticipantName, session);
+  if (!offered.includes(level)) {
+    throw new Error(`@${normalizedParticipantName}'s model does not offer ${level} thinking. Try: ${offered.join(', ')}`);
+  }
   session.setThinkingLevel(level, normalizedParticipantName);
   return {
     kind: 'success',
@@ -158,17 +198,24 @@ export function changeThinkingLevel(
   };
 }
 
-export function thinkingMenuItems(args: readonly string[] = []): CommandMenuItem[] | null {
+// Only the levels the participant's model offers, with its level marked.
+export function thinkingMenuItems(args: readonly string[] = [], session?: CommandSession): CommandMenuItem[] | null {
   if (args.length > 1 || (args.length === 1 && (parseThinkingLevel(args[0]) || !args[0].startsWith('@')))) {
     return null;
   }
   const participant = args[0]?.replace(/^@/, '');
-  return THINKING_LEVELS.map((level: ThinkingLevel) => ({
+  // A name the session does not know yet fails when the command runs.
+  const known = session?.getParticipants()
+    .some(candidate => candidate.name.toLocaleLowerCase() === (participant ?? 'sirus').toLocaleLowerCase());
+  const current = known ? session!.getThinkingLevel(participant ?? 'sirus') : undefined;
+  const levels = known ? thinkingLevelsFor(participant ?? 'sirus', session!) : THINKING_LEVELS;
+  return levels.map((level: ThinkingLevel) => ({
     type: 'item',
     key: level,
     label: level,
     description: THINKING_LEVEL_DESCRIPTIONS[level],
     command: participant ? `/thinking @${participant} ${level}` : `/thinking ${level}`,
+    ...(level === current ? { current: true } : {}),
   }));
 }
 

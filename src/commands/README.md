@@ -6,8 +6,8 @@ second file, `behavior.ts`, only when something outside the folder imports the b
 directly — the frontend, another command, or a test that exercises the behaviour rather than
 the spec. `agents/`, `authentication/` and `checkpoints/` are split for that reason; `session/`
 is a deliberate exception kept split for now, even though nothing outside it currently imports
-`session/behavior` — collapsing it is a contained follow-up. `help/`, `images/`, `memory/`,
-`notifications/` and `update/` are each one file. Commands see
+`session/behavior` — collapsing it is a contained follow-up. `config/`, `doctor/`, `help/`,
+`images/`, `memory/`, `notifications/`, `project/`, `tasks/` and `update/` are each one file. Commands see
 the conversation through `CommandSession` in `types.ts`, a structural interface of the methods
 they actually call, and reach anything beyond it — attaching an image, quitting the app —
 through an opt-in capability the caller may not supply. Every spec is listed in `registry.ts`,

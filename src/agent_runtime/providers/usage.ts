@@ -166,5 +166,5 @@ export function cachedSubscriptionRemaining(vendor: Vendor, profile: string, per
   return entry.remaining;
 }
 export function formatRemaining(value: number | null): string {
-  return value === null ? 'unavailable' : `${value}%`;
+  return value === null ? 'unavailable' : `${value}% left`;
 }

@@ -129,8 +129,20 @@ export type RuntimeUpdate =
   | { type: 'commands'; commands: NativeCommand[] }
   // The models the vendor's harness offers, as its session opened.
   | { type: 'models'; models: ListedModel[] }
+  // The reasoning depths the vendor's effort option offers for the model the
+  // session is on now; empty when it has no such option.
+  | { type: 'efforts'; efforts: string[] }
+  // The MCP servers the vendor's harness has for this session and how each
+  // connection stands, as Claude Code reports them at the start of a turn.
+  | { type: 'mcp_servers'; servers: McpServerState[] }
   // The agent's plan, the whole of it: Claude's todo list, Codex's plan.
   | { type: 'plan'; entries: PlanEntry[] };
+
+export interface McpServerState {
+  name: string;
+  // The vendor's word: connected, failed, needs-auth, pending, disabled.
+  status: string;
+}
 
 export interface PromptInput {
   text: string;

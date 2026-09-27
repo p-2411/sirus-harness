@@ -3,6 +3,7 @@
 import { Box, Text } from 'ink';
 import { theme } from '../styles/theme';
 import { MentionText, type ParticipantColors } from '../MentionText';
+import { Markdown } from '../markdown/Markdown';
 import type { Feedback } from '../../commands/feedback';
 
 // An information line reads as plain text; the others are marked.
@@ -22,6 +23,15 @@ export function InputFeedback({ feedback, participantColors }: {
     : feedback.kind === 'error' ? theme.danger
       : feedback.kind === 'warning' ? theme.pending : theme.accentSoft;
   const icon = feedback.showIcon === false ? undefined : FEEDBACK_ICONS[feedback.kind];
+  // A vendor's report, such as Claude's /context table, reads as it would in
+  // the chat.
+  if (feedback.markdown) {
+    return (
+      <Box paddingX={3} flexShrink={0} flexDirection="column">
+        <Markdown participantColors={participantColors}>{feedback.text}</Markdown>
+      </Box>
+    );
+  }
   return (
     <Box paddingX={3} flexShrink={0}>
       {icon && <Text color={iconColor}>{icon}</Text>}

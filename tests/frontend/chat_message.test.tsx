@@ -745,7 +745,11 @@ describe('a finished turn', () => {
       startedAt: finishedAt - 12_400, finishedAt,
       usage: { inputTokens: 20_000, outputTokens: 3_100, totalTokens: 23_100 },
     })} />, { columns: 120 }));
-    expect(output).toMatch(/@sirus · 12s · 4:04\s?PM · ↓ 3\.1k tokens/);
+    expect(output).toMatch(/@sirus · 12s · 4:04\s?PM · 23k tokens · ↓ 3\.1k/);
+    // A Codex turn of several model calls has a total alone.
+    expect(stripAnsi(renderToString(<ChatMessage message={reply({
+      startedAt: finishedAt - 12_400, finishedAt, usage: { totalTokens: 87_349 },
+    })} />, { columns: 120 }))).toMatch(/@sirus · 12s · 4:04\s?PM · 87k tokens\n/);
     // Not while it runs, nor for a turn saved before turns were timed.
     expect(stripAnsi(renderToString(<ChatMessage message={reply({ startedAt: finishedAt, finishedAt })} live />)))
       .not.toContain('@sirus');

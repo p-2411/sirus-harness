@@ -677,15 +677,18 @@ function UserPrompt({ message, participantColors }: { message: Message; particip
 	});
 }
 
-// What a finished turn took, under its reply: who, how long, when it ended
-// and how many tokens it wrote, the way Claude Code closes a turn with
-// "Crunched for 12s · done 4:04 AM" and its ↓ token count.
+// What a finished turn took, under its reply: who, how long, when it ended,
+// the tokens it used, which is what /status and /usage add up, and how many
+// it wrote, the way Claude Code closes a turn with "Crunched for 12s · done
+// 4:04 AM" and its ↓ token count. A Codex turn of several model calls has a
+// total and nothing written to set beside it.
 function TurnFooter({ message, name }: { message: Message; name: string }) {
 	if (message.finishedAt === undefined) return null;
 	const parts = [`@${name}`];
 	if (message.startedAt !== undefined) parts.push(formatElapsed(message.finishedAt - message.startedAt));
 	parts.push(new Date(message.finishedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }));
-	if (message.usage) parts.push(`↓ ${formatTokens(message.usage.outputTokens)} tokens`);
+	if (message.usage) parts.push(`${formatTokens(message.usage.totalTokens)} tokens`);
+	if (message.usage?.outputTokens !== undefined) parts.push(`↓ ${formatTokens(message.usage.outputTokens)}`);
 	return (
 		<Box marginTop={1}>
 			<Text color={theme.textSubtle} dimColor wrap="truncate-end">{parts.join(' · ')}</Text>

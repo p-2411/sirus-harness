@@ -19,7 +19,7 @@ Run `sirus` on its own to open the current directory. The npm package includes t
 
 Inside Sirus:
 
-1. Type `/login` and choose Claude or ChatGPT, then sign in with an existing subscription or enter an API key through the masked input. Repeat `/login` to connect more accounts—as many as you want.
+1. Type `/login` and choose Claude or Codex, then sign in with an existing subscription or enter an API key through the masked input. Repeat `/login` to connect more accounts—as many as you want.
 2. Optionally type `/model` and pick a model. The choices come only from your connected vendors and are cached between launches; Sirus fetches missing lists automatically. Short names such as `/model opus` work with vendor aliases such as `opus[1m]`. New sessions use your saved model preference, or `gpt-5.6-luna` by default.
 3. Give Sirus a task:
 
@@ -107,13 +107,13 @@ Restoring the chat waits for the session's subagents to finish, and the conversa
 
 Sirus can remember durable preferences and project decisions, then retrieve them by meaning in later sessions. Global memories carry preferences across projects; project memories stay scoped to the session's directory.
 
-Memory is enabled by default. Ask Sirus to remember, update, or forget something, or use `/memory off` to disable agent access. Memories are stored locally.
+Memory is enabled by default. Ask Sirus to remember, update, or forget something, use `/memory list` to see what is remembered and `/memory forget <name>` to remove one, or `/memory off` to disable agent access. Memories are stored locally.
 
 ### Context that compacts itself
 
 Long sessions fill the model's window. Each participant's runtime folds its own conversation when its window fills, the way Claude Code and Codex do on their own, including in the middle of a very long turn. Sirus records where that happened: a `context compacted` rule appears in that participant's part of the chat, with the summary the runtime reported.
 
-Use `/compact` to ask for it now. There is nothing to turn on or off: compaction belongs to the runtime. `/undo` and `/rewind` treat the rule like any other entry, and rewinding the chat to before one puts the whole conversation back.
+Use `/compact` to ask for it now, optionally followed by what the summary should keep. There is nothing to turn on or off: compaction belongs to the runtime. `/undo` and `/rewind` treat the rule like any other entry, and rewinding the chat to before one puts the whole conversation back.
 
 ### Keep several tasks moving
 

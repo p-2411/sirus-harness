@@ -1,15 +1,16 @@
 import crypto from 'crypto';
-import { SessionAgent, type RuntimeHost } from '../agent';
+import { SessionAgent, type AsideOutput, type RuntimeHost } from '../agent';
 import { isMemoryAccessEnabled } from '../memory-access';
 import { requestPermission } from '../permissions/approvals';
 import { requestAnswers } from '../permissions/questions';
 import { DEFAULT_PERMISSION_MODE, type PermissionMode } from '../permissions/policy';
 import { sirusPrompt } from '../prompt';
 import { servableModelIds, servesModel } from '../providers';
-import { DEFAULT_MODEL, vendorOf } from '../providers/catalog';
+import { DEFAULT_MODEL, vendorOf, type Vendor } from '../providers/catalog';
 import { discoverMissingModels } from '../providers/discovery';
+import type { Source } from '../providers/sources';
 import { nativeCommands, type NativeCommand } from '../runtime/commands';
-import type { BackgroundTask } from '../runtime/runtime';
+import type { BackgroundTask, McpServerState } from '../runtime/runtime';
 import { registerToolSession, sirusMcpServerEntry, unregisterToolSession } from '../tools/server';
 import {
   notifySubagents,
@@ -31,8 +32,9 @@ import {
   type NoticeBlock,
   type ThinkingLevel,
   type ToolCallBlock,
+  type TurnUsage,
 } from '../types';
-import type { ContextUsage } from '../usage';
+import { addTurnUsage, type ContextUsage } from '../usage';
 import { parseFileMentions, resolveFileMentions } from '../../fileMentions';
 import { isAbortError, TurnCancelledError } from '../../abort';
 import { ChangeFeed } from './changeFeed';
@@ -95,6 +97,8 @@ export interface SessionOptions {
   messages?: readonly (Message | Draft)[];
   checkpoints?: readonly Checkpoint[];
   permissionMode?: PermissionMode;
+  // The level participants new to the session start at; high when absent.
+  thinkingLevel?: ThinkingLevel;
   // The model spawned subagents run on; null for the owner's own.
   subagentModel?: string | null;
   // Workers of this session as the snapshot kept them. One still working
@@ -245,6 +249,7 @@ export class Session {
       defaultParticipant: resolved.defaultParticipant,
       participants: resolved.participants,
       host: this.runtimeHost(),
+      ...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}),
     });
     this.selectedParticipant = this.roster.find(options.selectedParticipant ?? '')?.name ?? this.roster.default.name;
     for (const [name, draft] of Object.entries(options.participantDrafts ?? {})) {
@@ -689,11 +694,13 @@ export class Session {
     return cancelled || this.activeSends > 0;
   }
 
-  // Asks the selected participant's runtime to fold its own conversation now:
-  // `/compact` is a slash command both vendors take as a prompt. What the
-  // runtime reports lands in the record like any other turn. Like a rewind,
-  // it waits for nothing else to be running and nothing else runs meanwhile.
-  async compact(signal?: AbortSignal, participantName = this.selectedParticipant): Promise<void> {
+  // Asks a participant's runtime (the selected one's unless named) to fold
+  // its own conversation now: `/compact` is a slash command both vendors take
+  // as a prompt, and Claude Code reads what follows it as instructions for
+  // the summary. What the runtime reports lands in the record like any other
+  // turn. Like a rewind, it waits for nothing else to be running and nothing
+  // else runs meanwhile.
+  async compact(signal?: AbortSignal, participantName = this.selectedParticipant, instructions: string = ''): Promise<void> {
     if (this.activeSends > 0 || this.rewinding || this.compacting) {
       throw new Error('Wait for the current operation to finish before compacting.');
     }
@@ -705,7 +712,7 @@ export class Session {
     this.setStatus('working');
     const round = this.timeline.openRound([{ name: agent.name, model: agent.model, transcript: agent.transcript }]);
     try {
-      await agent.respond({ text: '/compact' }, {
+      await agent.respond({ text: ['/compact', instructions.trim()].filter(Boolean).join(' ') }, {
         entry: round.entries[0],
         onUpdate: () => round.update(0),
         ...(signal ? { signal } : {}),
@@ -979,19 +986,46 @@ export class Session {
     return this.timeline.conversationStartedAt;
   }
 
-  // A participant's window as its runtime last reported it, or for the
-  // status row the default participant's, else the last responder's.
-  getContextUsage(participantName?: string): ContextUsage | null {
-    if (participantName) return this.roster.require(participantName).context;
-    if (this.roster.default.context) return this.roster.default.context;
-    const entries = this.timeline.entries();
-    for (let index = entries.length - 1; index >= 0; index--) {
-      const entry = entries[index];
-      if (entry.role !== 'assistant' || !entry.participant) continue;
-      const context = this.roster.find(entry.participant)?.context;
-      if (context) return context;
-    }
-    return null;
+  // A participant's window as its runtime last reported it; unnamed, the
+  // selected participant's, which the status row shows.
+  getContextUsage(participantName = this.selectedParticipant): ContextUsage | null {
+    return this.roster.require(participantName).context;
+  }
+
+  // What a participant's turns have used so far in this session: the sum of
+  // the usage on the entries they wrote, which is what each turn's footer
+  // shows; null before its first reported turn.
+  getTurnUsage(participantName: string): TurnUsage | null {
+    const name = keyOf(this.roster.require(participantName).name);
+    return this.timeline.entries().reduce<TurnUsage | null>((total, entry) =>
+      entry.role === 'assistant' && entry.usage && keyOf(entry.participant ?? this.roster.default.name) === name
+        ? addTurnUsage(total ?? undefined, entry.usage)
+        : total, null);
+  }
+
+  // The credential a participant's runtime is on, or would start on.
+  getCredential(participantName: string): Source | null {
+    return this.roster.require(participantName).credential;
+  }
+
+  // The MCP servers a participant's runtime last reported; null before it
+  // reported any.
+  getMcpServers(participantName: string): McpServerState[] | null {
+    return this.roster.require(participantName).mcpServers;
+  }
+
+  // The levels a participant's model offers; null while no runtime on that
+  // model has said.
+  getOfferedThinkingLevels(participantName?: string): ThinkingLevel[] | null {
+    return this.roster.require(participantName ?? this.roster.default.name).offeredThinkingLevels;
+  }
+
+  // Runs one of a participant's vendor commands that only reports on a
+  // throwaway fork of its runtime: no turn, no checkpoint, nothing in the
+  // record; what it printed comes back to be shown.
+  runCommandAside(participantName: string, text: string, signal: AbortSignal): Promise<AsideOutput> {
+    if (this.disposed) return Promise.reject(new Error('This session has been closed.'));
+    return this.roster.require(participantName).runAside(text, signal);
   }
 
   // What a vendor could not honour about the session's mode, if anything:
@@ -1048,11 +1082,22 @@ export class Session {
     return this.directory;
   }
 
-  // Vendor commands follow the selected agent, like an unaddressed prompt.
+  // The vendors' own commands the user can call by name, each marked with its
+  // vendor. They follow the selected agent, like an unaddressed prompt: its
+  // vendor's come first and keep their bare names, then those of any other
+  // vendor a participant runs on, which `participantOn` routes.
   getNativeCommands(participantName = this.selectedParticipant): NativeCommand[] {
-    const agent = this.roster.require(participantName);
-    const vendor = vendorOf(agent.model);
-    return vendor ? nativeCommands(vendor, agent.directory) : [];
+    const vendors = [...new Set(this.roster.all().flatMap(agent => vendorOf(agent.model) ?? []))];
+    const first = vendorOf(this.roster.require(participantName).model);
+    return vendors.sort((left, right) => Number(right === first) - Number(left === first))
+      .flatMap(vendor => nativeCommands(vendor, this.directory));
+  }
+
+  // The participant a vendor's command goes to: the selected one when it is
+  // on that vendor, else the first one that is; null when none is.
+  participantOn(vendor: Vendor, selected = this.selectedParticipant): string | null {
+    const agents = [this.roster.require(selected), ...this.roster.all()];
+    return agents.find(agent => vendorOf(agent.model) === vendor)?.name ?? null;
   }
 
   getParticipants(): Participant[] {

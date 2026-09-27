@@ -1,5 +1,6 @@
 import path from 'path';
 import { z } from 'zod';
+import { THINKING_LEVELS, type ThinkingLevel } from '../agent_runtime/types';
 import { dataDirectory } from '../dataDirectory';
 import { readJson, writeJson } from './atomicJson';
 
@@ -52,6 +53,10 @@ const settingsFileSchema = z.object({
   sirusModel: z.string().min(1).optional(),
   // When to send desktop notifications; absent means background only.
   notifications: z.enum(['off', 'background', 'always']).optional(),
+  // What a new session starts in, from /config; absent means the built-in
+  // defaults. Sessions keep their own once created.
+  permissionMode: z.enum(['ask', 'auto', 'bypass']).optional(),
+  thinkingLevel: z.enum(THINKING_LEVELS).optional(),
 }).passthrough();
 
 type SettingsFile = z.infer<typeof settingsFileSchema>;
@@ -64,6 +69,9 @@ export interface SettingsShape {
   apiKeys: StoredApiKeys;
   sirusModel: string | null;
   notifications: NotificationPreference;
+  // Null leaves a new session on the built-in default.
+  permissionMode: 'ask' | 'auto' | 'bypass' | null;
+  thinkingLevel: ThinkingLevel | null;
 }
 
 // The single list of settings: its keys drive both the fallbacks a read uses
@@ -75,10 +83,12 @@ const DEFAULTS: SettingsShape = {
   apiKeys: {},
   sirusModel: null,
   notifications: 'background',
+  permissionMode: null,
+  thinkingLevel: null,
 };
 
-// How one setting maps onto the file. Only `memoryEnabled` and the cleared
-// Sirus model are not a plain key of the same name.
+// How one setting maps onto the file. Only `memoryEnabled` is not a plain
+// key of the same name, and a cleared preference is an absent key.
 interface Codec<K extends keyof SettingsShape> {
   // The stored value, or undefined when the file does not carry it.
   read: (file: SettingsFile) => SettingsShape[K] | undefined;
@@ -111,6 +121,14 @@ const CODECS: { [K in keyof SettingsShape]: Codec<K> } = {
   notifications: {
     read: file => file.notifications,
     write: (file, value) => { file.notifications = value; },
+  },
+  permissionMode: {
+    read: file => file.permissionMode,
+    write: (file, value) => { if (value === null) delete file.permissionMode; else file.permissionMode = value; },
+  },
+  thinkingLevel: {
+    read: file => file.thinkingLevel,
+    write: (file, value) => { if (value === null) delete file.thinkingLevel; else file.thinkingLevel = value; },
   },
 };
 

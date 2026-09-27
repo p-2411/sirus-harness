@@ -1,6 +1,7 @@
 import { openSettings } from './settings';
 import type {
   NotificationPreference,
+  SettingsShape,
   StoredApiKeys,
   SubscriptionPreferences,
 } from './settings';
@@ -80,4 +81,11 @@ export function loadSirusModelPreference(directory?: string): string | null {
 
 export function saveSirusModelPreference(model: string, directory?: string): boolean {
   return openSettings(directory).set({ sirusModel: model });
+}
+
+// What /config says a new session starts in; each is absent when the user
+// has not chosen, and the session's own default holds.
+export function loadSessionDefaults(directory?: string): Pick<SettingsShape, 'permissionMode' | 'thinkingLevel'> {
+  const settings = openSettings(directory);
+  return { permissionMode: settings.get('permissionMode'), thinkingLevel: settings.get('thinkingLevel') };
 }

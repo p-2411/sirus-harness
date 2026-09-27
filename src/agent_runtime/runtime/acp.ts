@@ -20,8 +20,8 @@ import { abortable, abortReason, throwIfAborted } from '../../abort';
 import { imageData } from '../../images';
 import { SIRUS_VERSION } from '../../version';
 import type { PermissionMode } from '../permissions/policy';
-import type { ListedModel, Vendor } from '../providers/catalog';
-import { THINKING_LEVELS, type ThinkingLevel, type ToolCallBlock, type ToolCallOutcome, type TurnUsage } from '../types';
+import { VENDOR_INFO, type ListedModel, type Vendor } from '../providers/catalog';
+import { fitThinkingLevel, offeredThinkingLevels, type ThinkingLevel, type ToolCallBlock, type ToolCallOutcome, type TurnUsage } from '../types';
 import type { ContextUsage } from '../usage';
 import { nativeCommandFrom } from './commands';
 import { AdapterLostError } from './errors';
@@ -115,6 +115,20 @@ function selectValues(option: SelectOption): string[] {
   return option.options.flatMap(item => ('options' in item ? item.options : [item]).map(choice => choice.value));
 }
 
+// The Agent SDK message claude-agent-acp forwards when a session asks for
+// it (`emitRawSDKMessages` in the launch spec). Only the init frame is asked
+// for, and only its MCP servers are read.
+const SDK_MESSAGE_METHOD = '_claude/sdkMessage';
+
+function mcpServersIn(message: unknown): { name: string; status: string }[] | null {
+  const frame = message as { type?: unknown; subtype?: unknown; mcp_servers?: unknown } | null;
+  if (frame?.type !== 'system' || frame.subtype !== 'init' || !Array.isArray(frame.mcp_servers)) return null;
+  return frame.mcp_servers.flatMap(server => {
+    const { name, status } = (server ?? {}) as { name?: unknown; status?: unknown };
+    return typeof name === 'string' && typeof status === 'string' ? [{ name, status }] : [];
+  });
+}
+
 // The Agent call a vendor's subagent request came from, as Claude tags it.
 function parentToolUseIdOf(value: unknown): string | null {
   const meta = (value as { _meta?: { claudeCode?: { parentToolUseId?: unknown } } } | null | undefined)?._meta;
@@ -206,6 +220,13 @@ interface SessionState {
   // The session's running cost as the vendor last reported it (Claude does;
   // codex-acp does not), from which each turn's own share is read.
   cost: number | null;
+  // What the usage updates of the turn in flight added up to, one per model
+  // call, and how many calls that was: a Codex turn's total, since codex-acp
+  // answers a prompt with its last call's usage alone. Codex repeats a call's
+  // count when only its rate limits changed, so a repeat is not counted.
+  turnTokens: number;
+  turnCalls: number;
+  lastCallTokens: number | null;
   toolCalls: Map<string, ToolCallBlock>;
   // Calls the user declined, or whose approval the turn's end withdrew, with
   // why: the vendors report either as failed, and may report the call only
@@ -243,6 +264,8 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
   throwIfAborted(options.signal);
   if (options.resume) options = { ...options, directory: options.resume.directory };
   const launch = launchFor(options);
+  // What the user reads in the errors below.
+  const vendorName = VENDOR_INFO[options.vendor].displayName;
   const child = spawn(launch.command, launch.args, { stdio: ['pipe', 'pipe', 'pipe'], env: launch.env });
 
   // Both adapters write their errors to stderr; the last lines are what the
@@ -258,7 +281,7 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
   // the runtime is lost and the participant rebuilds it.
   let dead: Error | null = null;
   const lost = (what: string): Error => new AdapterLostError(
-    `${options.vendor} adapter ${what}${stderrTail.length ? `: ${stderrTail.join(' | ')}` : ''}`,
+    `${vendorName} adapter ${what}${stderrTail.length ? `: ${stderrTail.join(' | ')}` : ''}`,
   );
   child.on('error', error => { dead ??= lost(`failed to start (${error.message})`); });
   child.on('exit', (code, signal) => { dead ??= lost(`exited (${signal ?? code})`); });
@@ -296,6 +319,9 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
       configOptions: [],
       context: null,
       cost: null,
+      turnTokens: 0,
+      turnCalls: 0,
+      lastCallTokens: null,
       toolCalls: new Map(),
       stopped: new Map(),
       tasks: new Map(),
@@ -341,8 +367,8 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
   // fork on a disposed process is lost rather than closed.
   function live(state: SessionState): void {
     if (dead) throw dead;
-    if (state.closed) throw new Error(`${options.vendor} runtime was disposed`);
-    if (state.stuck) throw new AdapterLostError(`${options.vendor} runtime did not answer a cancel`);
+    if (state.closed) throw new Error(`${vendorName} runtime was disposed`);
+    if (state.stuck) throw new AdapterLostError(`${vendorName} runtime did not answer a cancel`);
   }
 
   function compaction(state: SessionState, id: string, status: CompactionStatus): RuntimeUpdate | null {
@@ -393,6 +419,11 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
       case 'usage_update':
         state.context = { tokens: update.used, window: update.size };
         if (typeof update.cost?.amount === 'number' && Number.isFinite(update.cost.amount)) state.cost = update.cost.amount;
+        if (state.turn && update.used !== state.lastCallTokens) {
+          state.turnTokens += update.used;
+          state.turnCalls++;
+          state.lastCallTokens = update.used;
+        }
         return { type: 'context', usage: state.context };
       case 'compaction_summary_chunk':
         if (update.content.type === 'text') {
@@ -417,7 +448,7 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
       }
       case 'config_option_update':
         state.configOptions = update.configOptions;
-        return null;
+        return effortsUpdate(state);
       case 'available_commands_update':
         return { type: 'commands', commands: update.availableCommands.flatMap(command => nativeCommandFrom(command) ?? []) };
       case 'plan':
@@ -568,6 +599,16 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
           return;
         }
       }
+      // Claude's init frame, forwarded raw: the one read is its MCP servers.
+      if ('method' in message && message.method === SDK_MESSAGE_METHOD && !('id' in message)) {
+        const params = message.params as { sessionId?: unknown; message?: unknown } | undefined;
+        const state = typeof params?.sessionId === 'string' ? sessions.get(params.sessionId) : undefined;
+        const servers = mcpServersIn(params?.message);
+        if (state && servers && !state.reopening) {
+          try { state.hooks.onUpdate({ type: 'mcp_servers', servers }); } catch { /* advisory */ }
+        }
+        return;
+      }
       controller.enqueue(message);
     },
   }));
@@ -584,7 +625,7 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
   function disposeProcess(): void {
     if (disposed) return;
     disposed = true;
-    dead ??= new Error(`${options.vendor} runtime was disposed`);
+    dead ??= new Error(`${vendorName} runtime was disposed`);
     connection.close();
     if (child.exitCode === null && child.signalCode === null) {
       // EOF on stdin is how both adapters learn to stop and take their own
@@ -621,13 +662,16 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
   }
 
   async function prompt(state: SessionState, input: PromptInput, signal: AbortSignal): Promise<PromptResult> {
-    if (state.turn) throw new Error(`The ${options.vendor} runtime is already running a prompt`);
+    if (state.turn) throw new Error(`The ${vendorName} runtime is already running a prompt`);
     await state.inFlight.catch(() => undefined);
     live(state);
     throwIfAborted(signal);
     const current = { signal, error: null as Error | null };
     state.turn = current;
     state.stopBackgroundOnCancel = false;
+    state.turnTokens = 0;
+    state.turnCalls = 0;
+    state.lastCallTokens = null;
     let answered = false;
     let giveUp: () => void = () => undefined;
     const unanswered = new Promise<void>(resolve => { giveUp = resolve; });
@@ -657,12 +701,11 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
       const costBefore = state.cost ?? 0;
       const response = await abortable(request, signal);
       if (response.stopReason === 'cancelled' && signal.aborted) throw abortReason(signal);
-      if (response.usage) {
-        // The SDK answers a request ahead of the notifications read before
-        // it, and the vendor's last cost update is one of those.
-        await new Promise<void>(resolve => setImmediate(resolve));
-        state.hooks.onUpdate({ type: 'usage', usage: turnUsage(response.usage, state.cost === null ? null : state.cost - costBefore) });
-      }
+      // The SDK answers a request ahead of the notifications read before it,
+      // and the vendor's last usage and cost updates are among those.
+      await new Promise<void>(resolve => setImmediate(resolve));
+      const usage = usageOfTurn(state, response.usage, state.cost === null ? null : state.cost - costBefore);
+      if (usage) state.hooks.onUpdate({ type: 'usage', usage });
       if (current.error) throw current.error;
       return { stopReason: response.stopReason };
     } catch (error) {
@@ -672,6 +715,18 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
       signal.removeEventListener('abort', cancel);
       state.turn = null;
     }
+  }
+
+  // What the turn used: the prompt response's tally, which is the whole
+  // turn's from Claude and the last call's from Codex. A Codex turn of several
+  // calls is what their usage updates added up to, without a breakdown. A
+  // turn that counted nothing and cost nothing, such as Claude's /compact,
+  // reports nothing.
+  function usageOfTurn(state: SessionState, reported: Usage | null | undefined, cost: number | null): TurnUsage | null {
+    const usage = launch.turnTokens === 'usage_updates' && (state.turnCalls > 1 || !reported)
+      ? { totalTokens: state.turnTokens, ...(cost !== null && cost > 0 ? { costUsd: cost } : {}) }
+      : reported ? turnUsage(reported, cost) : null;
+    return usage && (usage.totalTokens > 0 || (usage.costUsd ?? 0) > 0) ? usage : null;
   }
 
   async function stopTask(state: SessionState, id: string): Promise<boolean> {
@@ -743,18 +798,31 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
     live(state);
     if (!(await setOption(state, 'model', next))) return false;
     state.model = next;
+    // The effort option is the new model's now.
+    reportEfforts(state);
     return true;
+  }
+
+  // The depths the effort option offers for the model the session is on:
+  // none when the model has no such option (Claude's Haiku), and nothing to
+  // report when the session lists no model option to tie them to.
+  function reportEfforts(state: SessionState): void {
+    const update = effortsUpdate(state);
+    if (update) state.hooks.onUpdate(update);
+  }
+
+  function effortsUpdate(state: SessionState): RuntimeUpdate | null {
+    if (!selectOption(state.configOptions, 'model')) return null;
+    const option = selectOption(state.configOptions, EFFORT_OPTION_IDS[options.vendor]);
+    return { type: 'efforts', efforts: option ? selectValues(option) : [] };
   }
 
   async function setThinkingLevel(state: SessionState, level: ThinkingLevel): Promise<void> {
     live(state);
     const option = selectOption(state.configOptions, EFFORT_OPTION_IDS[options.vendor]);
     if (!option) return;
-    // The level itself when the vendor offers it, else the nearest lower one
-    // it does; nothing when none of Sirus's levels is on its list.
-    const offered = selectValues(option);
-    const value = THINKING_LEVELS.slice(0, THINKING_LEVELS.indexOf(level) + 1).reverse()
-      .find(candidate => offered.includes(candidate));
+    // Exactly what the participant records as the level it runs at.
+    const value = fitThinkingLevel(level, offeredThinkingLevels(selectValues(option)) ?? []);
     if (value) await setOption(state, option.id, value);
   }
 
@@ -768,7 +836,7 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
     const modelOption = selectOption(state.configOptions, 'model');
     if (modelOption && !(await setModel(state, model))) {
       throw new Error(
-        `${options.vendor} does not offer the model ${model}; it offers ${selectValues(modelOption).join(', ')}`,
+        `${vendorName} does not offer the model ${model}; it offers ${selectValues(modelOption).join(', ')}`,
       );
     }
     await setThinkingLevel(state, level);
@@ -776,11 +844,11 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
 
   async function steer(state: SessionState, text: string): Promise<void> {
     live(state);
-    if (!canSteer) throw new Error(`The ${options.vendor} adapter cannot take a message mid-turn`);
+    if (!canSteer) throw new Error(`The ${vendorName} adapter cannot take a message mid-turn`);
     // Asked here as well as by the adapter: the answer is the caller's to
     // report, and an adapter that has already let its turn settle would
     // otherwise decide it for us.
-    if (!state.turn) throw new Error(`The ${options.vendor} runtime is not running a prompt`);
+    if (!state.turn) throw new Error(`The ${vendorName} runtime is not running a prompt`);
     let response: SteeringResponse;
     try {
       response = await connection.agent.request<SteeringResponse>(STEERING_METHOD, {
@@ -794,14 +862,14 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
     if (response.outcome !== 'injected') {
       const reason = response.reason ? `: ${response.reason}` : '';
       throw new Error(
-        `The ${options.vendor} runtime did not take the message (${response.outcome ?? 'no outcome'}${reason})`,
+        `The ${vendorName} runtime did not take the message (${response.outcome ?? 'no outcome'}${reason})`,
       );
     }
   }
 
   async function fork(parent: SessionState, forked: ForkOptions): Promise<Runtime> {
     live(parent);
-    if (!canFork) throw new Error(`The ${options.vendor} adapter cannot fork a session`);
+    if (!canFork) throw new Error(`The ${vendorName} adapter cannot fork a session`);
     const params: SessionParams = launch.session({
       directory: forked.directory,
       systemPrompt: forked.systemPrompt,
@@ -911,7 +979,7 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
       const method = capabilities?.sessionCapabilities?.resume != null
         ? methods.agent.session.resume
         : capabilities?.loadSession ? methods.agent.session.load : null;
-      if (!method) throw new Error(`The ${options.vendor} adapter cannot reopen a session`);
+      if (!method) throw new Error(`The ${vendorName} adapter cannot reopen a session`);
       state = register(options.resume.sessionId, options.directory, options, options.model);
       state.reopening = true;
       session = await connection.agent.request(method, { sessionId: state.id, ...openingParams });

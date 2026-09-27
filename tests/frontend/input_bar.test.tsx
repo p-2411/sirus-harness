@@ -275,6 +275,29 @@ describe('input status', () => {
     expect(output).toContain('ctx 150k (75%) · claude-sonnet-5');
   });
 
+  test('warns when the context runs low', () => {
+    const output = stripAnsi(renderToString(
+      <SubagentStatusRow
+        contextUsage={{ tokens: 170_000, window: 200_000 }}
+        model="gpt-5.6-sol"
+        thinkingLevel="high"
+      />,
+      { columns: 100 },
+    ));
+    expect(output).toContain('ctx 170k · 15% left · /compact · gpt-5.6-sol · high');
+    // A long mode gives way before the gauge does.
+    const crowded = stripAnsi(renderToString(
+      <SubagentStatusRow
+        permissionMode="auto"
+        modeNotice="@sirus switched to acceptEdits; the session is on auto approve"
+        contextUsage={{ tokens: 24_000, window: 200_000 }}
+        model="claude-haiku-4-5"
+      />,
+      { columns: 90 },
+    ));
+    expect(crowded).toContain('ctx 24k (12%) · claude-haiku-4-5');
+  });
+
   test('qualifies the mode with what the vendor made of it', () => {
     const notice = 'auto approve is unavailable to @sirus, which is on Manual';
     const output = stripAnsi(renderToString(

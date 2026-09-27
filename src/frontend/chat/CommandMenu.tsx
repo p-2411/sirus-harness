@@ -92,7 +92,10 @@ export function CommandMenu({
             <Box width={column} flexShrink={0}>
               <Text color={active ? theme.accent : theme.text} wrap="truncate-end">{labels[index]}</Text>
             </Box>
-            <Text color={theme.textMuted} wrap="truncate-end">{spec.description}</Text>
+            <Text color={theme.textMuted} wrap="truncate-end">
+              {'vendor' in spec && spec.vendor && <Text color={theme.textSubtle}>({spec.vendor}) </Text>}
+              {spec.description}
+            </Text>
           </Box>
         );
       })}

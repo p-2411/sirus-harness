@@ -146,7 +146,7 @@ describe('sirus CLI', () => {
       expect(output).toBe('New reply\n');
       expect(loadSessionSnapshots(undefined, directory).snapshots).toHaveLength(1);
       bindScriptedRuntime(model, () => { throw new Error('Turn failed'); });
-      await expect(runPrint(options, 'another', () => {})).rejects.toThrow('OpenAI refused or could not complete this request');
+      await expect(runPrint(options, 'another', () => {})).rejects.toThrow('Codex refused or could not complete this request');
       const saved = loadSessionSnapshots(undefined, directory).snapshots[0];
       expect(saved.messages.filter(message => message.role === 'user')).toHaveLength(3);
       const previousExitCode = process.exitCode;
@@ -196,7 +196,7 @@ describe('doctor', () => {
       });
       expect(checks.every(check => check.status === 'ok')).toBe(true);
       const output = doctor.formatDoctor(checks);
-      for (const name of ['Bun', 'claude-agent-acp', 'codex-acp', 'Claude Code', 'Codex', 'Anthropic login (work)', 'OpenAI login', 'Data directory', 'Git']) expect(output).toContain(name);
+      for (const name of ['Bun', 'claude-agent-acp', 'codex-acp', 'Claude Code', 'Codex', 'Claude login (work)', 'Codex login', 'Data directory', 'Git']) expect(output).toContain(name);
       expect(output).toContain('validity not checked');
       expect(output).not.toContain('secret');
     } finally {

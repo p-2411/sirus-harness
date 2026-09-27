@@ -1,6 +1,6 @@
 import { Box, Text } from 'ink';
 import { theme } from '../styles/theme';
-import { contextPercent, formatTokens, type ContextUsage } from '../../agent_runtime/usage';
+import { CONTEXT_LOW_PERCENT, contextPercent, formatTokens, type ContextUsage } from '../../agent_runtime/usage';
 import { PERMISSION_MODE_NAMES, type PermissionMode } from '../../agent_runtime/permissions/policy';
 
 // How much the vendor may do unasked, by colour: red when nothing is asked,
@@ -18,29 +18,34 @@ export interface StatusRowProps {
   // switched to Bypass Permissions; the session is on ask for approval".
   modeNotice?: string | null;
   model?: string;
+  // Absent when the model has no levels to choose from.
   thinkingLevel?: string;
   contextUsage?: ContextUsage | null;
   tasksVisible?: boolean;
 }
 
 // The context gauge: how much of the model's window the last response used.
-// Muted until it matters, amber when it is getting full, red when nearly so.
+// Muted until it matters; from CONTEXT_LOW_PERCENT on it says how much is
+// left and that /compact frees it, amber, and red once nearly full.
 function ContextGauge({ usage }: { usage: ContextUsage }) {
   const percent = contextPercent(usage);
+  const low = percent !== null && percent >= CONTEXT_LOW_PERCENT;
   const color = percent === null ? theme.textSubtle
-    : percent >= 90 ? theme.danger
-      : percent >= 70 ? theme.pending : theme.textSubtle;
+    : percent >= 95 ? theme.danger
+      : low ? theme.pending : theme.textSubtle;
   return (
-    <Text color={color} dimColor={percent === null || percent < 70}>
-      ctx {formatTokens(usage.tokens)}{percent !== null ? ` (${percent}%)` : ''}
+    <Text color={color} dimColor={!low}>
+      ctx {formatTokens(usage.tokens)}
+      {low ? ` · ${100 - (percent ?? 0)}% left · /compact` : percent !== null ? ` (${percent}%)` : ''}
     </Text>
   );
 }
 
 // The line under the input box: the session's permission mode, qualified when
-// the vendor could not honour it; the context gauge and the session's model
-// stay on the far right. The workers have their own strip above this row.
-// It keeps its height when there is nothing to say so the layout stays put.
+// the vendor could not honour it; the context gauge and the model of the
+// selected agent stay on the far right. The workers have their
+// own strip above this row. It keeps its height when there is nothing to say
+// so the layout stays put.
 export function SubagentStatusRow({
   permissionMode,
   modeNotice,
@@ -63,7 +68,8 @@ export function SubagentStatusRow({
           <Text color={theme.textSubtle}>{permissionMode ? ' · ' : ''}ctrl+t to {tasksVisible ? 'hide' : 'show'} tasks</Text>
         )}
       </Box>
-      <Box>
+      {/* The gauge and model keep their width; the mode on the left gives way. */}
+      <Box flexShrink={0} marginLeft={1}>
         {contextUsage && <ContextGauge usage={contextUsage} />}
         {contextUsage && model && <Text color={theme.textSubtle} dimColor> · </Text>}
         {model && (

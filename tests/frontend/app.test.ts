@@ -107,6 +107,8 @@ describe('app workspace startup', () => {
   });
 
   test('menus keep pane widths fixed and Ctrl+B leaves the dots in place', async () => {
+    // The model picker offers only vendors the user is signed in to.
+    providerFor('claude').sources.addApiKey('test-anthropic-key');
     const sessions = ['First', 'Second'].map(name => {
       const session = new Session({ name, directory: `/projects/${name}`, autoNamePending: true });
       session.append({ role: 'user', content: [{ type: 'text', text: 'Existing history' }] });
@@ -176,7 +178,9 @@ describe('app workspace startup', () => {
       for (const { row } of originalDots) {
         expect(output.split('\n')[row]!.slice(0, 4)).toBe(' ○ │');
       }
-      expect(output).toContain('Anthropic');
+      // Signed in to Claude alone: Codex is not offered.
+      expect(output).toMatch(/^ {3}│ {3}Claude/m);
+      expect(output).not.toContain('Codex');
       expect(output).not.toContain('First');
       expect(output).not.toContain('Second');
       expect(output).not.toContain('new session');

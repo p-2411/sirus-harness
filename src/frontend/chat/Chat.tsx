@@ -17,8 +17,8 @@ import {
   commandMenu,
   commandRegistry,
   executeCommand,
-  isNativeCommand,
   parseCommandLine,
+  vendorCommandFor,
   type CommandMenuEntry,
   type CommandMenuItem,
 } from '../../commands/registry';
@@ -511,6 +511,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         session: currSession,
         participant: recipient,
         notify: text => setFeedback({ kind: 'info', text }),
+        sendPrompt: text => deliver(currSession.messageForParticipant({ role: 'user', content: [{ type: 'text', text }] }, recipient)).then(() => undefined),
         attachImage,
         exit: () => { currSession.setInputContent(''); exit(); },
         newSession: onNewSession,
@@ -568,12 +569,47 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     }
   };
 
+  // A vendor command that only reports runs on a throwaway fork of the
+  // participant's runtime and its output is shown here, kept nowhere: no
+  // turn, no checkpoint, nothing the agents read later.
+  const runAside = (participant: string, text: string) => {
+    setFeedback(null);
+    const controller = new AbortController();
+    commandAbort.current = controller;
+    setCommandIsLoading(true);
+    currSession.runCommandAside(participant, text, controller.signal)
+      .then(output => {
+        if (!mounted.current) return;
+        setFeedback({ kind: 'info', showIcon: false, panel: true, markdown: true,
+          text: output.text || `@${participant} printed nothing for ${text}.` });
+      })
+      .catch((caught: unknown) => {
+        if (mounted.current) setFeedback(isAbortError(caught) ? null
+          : { kind: 'error', text: caught instanceof Error ? caught.message : 'Something went wrong.' });
+      })
+      .finally(() => {
+        if (commandAbort.current === controller) commandAbort.current = null;
+        setCommandIsLoading(false);
+      });
+  };
+
   // A command leaves any attachments waiting for the next real message.
   // Commands are exactly what the background queue leaves for a mounted Chat.
   const send = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[], recipient = selected, to?: readonly string[]): boolean => {
     const commandName = /^\/(\S+)/.exec(text)?.[1];
-    const immediate = commandName && ['model', 'thinking', 'effort', 'fast', 'status', 'usage', 'permissions', 'agents', 'tasks'].includes(commandName);
-    const routed = currSession.messageForParticipant({ role: 'user', ...(to?.length ? { to: [...to] } : {}),
+    const immediate = commandName && ['model', 'thinking', 'effort', 'fast', 'status', 'usage', 'mcp', 'config', 'permissions', 'agents', 'tasks'].includes(commandName);
+    // An agent's own command goes to the agent on that command's vendor: the
+    // selected one when it is, else another. One that only reports runs aside
+    // at once, whatever the agents are doing, and is kept nowhere.
+    const vendorCommand = vendorCommandFor(text, currSession.getNativeCommands(recipient));
+    const vendorTarget = vendorCommand?.vendor ? currSession.participantOn(vendorCommand.vendor, recipient) : null;
+    if (vendorCommand?.reporting && vendorTarget) {
+      // In the vendor's own words: `/codex:status` is Codex's `/status`.
+      runAside(vendorTarget, vendorCommand.command.invocation);
+      return true;
+    }
+    const addressed = to?.length ? [...to] : vendorTarget && vendorTarget !== recipient ? [vendorTarget] : undefined;
+    const routed = currSession.messageForParticipant({ role: 'user', ...(addressed ? { to: addressed } : {}),
       content: content ?? [...images, { type: 'text', text }] }, recipient);
     const targetsBusy = routed.to?.some(name => currSession.isParticipantWorking(name)) ?? false;
     const taskCommand = commandName && commandRegistry.some(spec => spec.name === commandName);
@@ -584,33 +620,13 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     // A Sirus command runs here. Anything else that starts with a slash, an
     // agent's own command or a name nobody knows, goes out as a message and
     // the agent's harness makes of it what it will.
-    const command = text.startsWith('/') && !isNativeCommand(text, currSession.getNativeCommands(recipient))
-      ? parseCommandLine(text)
-      : null;
+    const command = text.startsWith('/') && !vendorCommand ? parseCommandLine(text) : null;
     if (command && commandRegistry.some(spec => spec.name === command.name)) {
       runCommand(command.name, command.args, recipient);
     } else {
-      // Images sit where the draft placed them. The session stamps the
-      // entry's seq when it enters the transcript.
-      const msg = routed;
-      followLatest();
-      setFeedback(null);
-      // Chat is remounted per session (key={session id}), so if the user
-      // navigates away mid-request the unmounted Chat no longer repaints its
-      // history. The session-owned status still updates its sidebar row.
       const previousLength = currSession.getMessages().length;
       const previousDraft = currSession.getInputContent(recipient);
-      const turn = currSession.sendMessage(msg);
-      // Validation can reject a turn before its user message is appended.
-      // Keep those images available so the user can correct the prompt.
-      if ((currSession.getMessages().length > previousLength || currSession.getQueuedMessages().some(item => item.images?.some(image => images.some(sent => sent.path === image.path)))) && images.length > 0) {
-        const sentPaths = new Set(images.map(image => image.path));
-        replaceAttachments(view.attachments.filter(image => !sentPaths.has(image.path)));
-      }
-      // A startup draft becomes a real sidebar session only after the turn is
-      // valid and sendMessage has appended its user message.
-      if (!currSession.isEmpty()) onStartSession?.(currSession);
-      turn
+      deliver(routed, images)
         .catch((caught: unknown) => {
           if (currSession.getMessages().length === previousLength && !currSession.getInputContent(recipient)) {
             currSession.setInputContent(previousDraft, recipient);
@@ -622,6 +638,30 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     }
     return true;
   }
+
+  // The user's message to the agents, however it was started: typed, or sent
+  // by a command such as /init. Settles when the turn it starts is over.
+  const deliver = (msg: Parameters<Session['sendMessage']>[0], images: readonly ImageBlock[] = []) => {
+    // Images sit where the draft placed them. The session stamps the
+    // entry's seq when it enters the transcript.
+    followLatest();
+    setFeedback(null);
+    // Chat is remounted per session (key={session id}), so if the user
+    // navigates away mid-request the unmounted Chat no longer repaints its
+    // history. The session-owned status still updates its sidebar row.
+    const previousLength = currSession.getMessages().length;
+    const turn = currSession.sendMessage(msg);
+    // Validation can reject a turn before its user message is appended.
+    // Keep those images available so the user can correct the prompt.
+    if ((currSession.getMessages().length > previousLength || currSession.getQueuedMessages().some(item => item.images?.some(image => images.some(sent => sent.path === image.path)))) && images.length > 0) {
+      const sentPaths = new Set(images.map(image => image.path));
+      replaceAttachments(view.attachments.filter(image => !sentPaths.has(image.path)));
+    }
+    // A startup draft becomes a real sidebar session only after the turn is
+    // valid and sendMessage has appended its user message.
+    if (!currSession.isEmpty()) onStartSession?.(currSession);
+    return turn;
+  };
 
   const queue = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[], recipient = selected) => {
     const message = currSession.messageForParticipant({ role: 'user', content: content ?? [{ type: 'text', text }] }, recipient);
@@ -678,8 +718,8 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
               ))}
             </Box>
           }
-          <Text color={theme.textMuted}>{hasCredentials ? 'What shall we build?' : 'Welcome to Sirus.'}</Text>
-          {!hasCredentials && <Text color={theme.textMuted}>Use /login to connect a Claude or ChatGPT subscription, or add an API key.</Text>}
+          <Text color={theme.textMuted}>What shall we build?</Text>
+          {!hasCredentials && <Text color={theme.textSubtle}>Use /login to sign in to Claude or Codex, or add an API key.</Text>}
         </Box>
       )}
       <ChatHistory
@@ -770,7 +810,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         onOverlayChange={setInputOverlay}
         onRemoveAttachment={removeAttachment}
         model={participants.find(participant => participant.name === selected)!.model}
-        thinkingLevel={currSession.getThinkingLevel(selected)}
+        thinkingLevel={currSession.getOfferedThinkingLevels(selected)?.length === 0 ? undefined : currSession.getThinkingLevel(selected)}
         history={history}
         queuedMessages={currSession.getQueuedMessages().filter(message => !message.to?.length || message.to.includes(selected))}
         onSendNow={sendNow}

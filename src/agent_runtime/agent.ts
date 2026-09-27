@@ -10,7 +10,7 @@ import { abortable, abortReason, isAbortError, throwIfAborted, TurnCancelledErro
 import type { Requester } from './permissions/approvals';
 import { PERMISSION_MODE_NAMES, type PermissionMode } from './permissions/policy';
 import { providerFor } from './providers';
-import { DEFAULT_MODEL, rememberListedModels, VENDOR_INFO, vendorOf, type Vendor } from './providers/catalog';
+import { DEFAULT_MODEL, modelFacts, rememberListedModels, rememberModelFacts, VENDOR_INFO, vendorOf, type Vendor } from './providers/catalog';
 import { sourceEnvironment, sourceProfileHome } from './providers/profiles';
 import { maskApiKey, type Source } from './providers/sources';
 import { turnFailure, type TurnFailure } from './runtime/errors';
@@ -20,6 +20,7 @@ import {
   runtimeGeneration,
   trackRuntime,
   type BackgroundTask,
+  type McpServerState,
   type ModeKind,
   type Runtime,
   type RuntimeOptions,
@@ -35,8 +36,10 @@ import type { SpawnOptions, SubagentHost } from './tools/types';
 import {
   DEFAULT_THINKING_LEVEL,
   failOpenToolCalls,
+  fitThinkingLevel,
   INTERRUPTED_SEVERITY,
   isPlanCall,
+  offeredThinkingLevels,
   planCall,
   type ImageBlock,
   type Message,
@@ -46,7 +49,7 @@ import {
   type ThinkingLevel,
   type ToolCallBlock,
 } from './types';
-import type { ContextUsage } from './usage';
+import { addTurnUsage, type ContextUsage } from './usage';
 
 // The persisted shape of an agent: what a session snapshot stores and what
 // the UI lists.
@@ -102,6 +105,13 @@ export interface TurnInput {
   images?: readonly ImageBlock[];
 }
 
+// What a reporting command printed when run aside (`runAside`), and the MCP
+// servers its fork reported on the way.
+export interface AsideOutput {
+  text: string;
+  mcpServers: McpServerState[] | null;
+}
+
 export interface RespondOptions {
   // The assistant entry this turn fills in. Its content is replaced on
   // every update, so whoever holds it sees the response as it arrives.
@@ -127,6 +137,8 @@ export class SessionAgent {
   readonly transcript = new Transcript();
   // The latest usage update of the live runtime, or null before the first.
   context: ContextUsage | null = null;
+  // The MCP servers the runtime last said it has, or null before it said.
+  mcpServers: McpServerState[] | null = null;
   // Set when the vendor could not put the session in the mode Sirus asked
   // for, so the status row can say so instead of auto silently meaning ask.
   modeNotice: string | null = null;
@@ -203,7 +215,30 @@ export class SessionAgent {
 
   set thinkingLevel(level: ThinkingLevel) {
     this.level = level;
-    void this.runtime?.setThinkingLevel(level).catch(() => this.releaseRuntime());
+    this.fitThinkingLevel();
+    void this.runtime?.setThinkingLevel(this.thinkingLevel).catch(() => this.releaseRuntime());
+  }
+
+  // The levels this agent's model offers, once a runtime on it has said:
+  // empty for a model with no effort to set, null while nobody knows.
+  get offeredThinkingLevels(): ThinkingLevel[] | null {
+    return offeredThinkingLevels(modelFacts(this.model).efforts);
+  }
+
+  // Keeps the recorded level one the model runs at. The runtime lowers a
+  // level the model lacks to the nearest one it offers; recording the same
+  // lowering lets the status row show what runs instead of what was asked.
+  private fitThinkingLevel(): void {
+    const offered = this.offeredThinkingLevels;
+    if (!offered || offered.length === 0) return;
+    const fitted = fitThinkingLevel(this.thinkingLevel, offered);
+    if (fitted && fitted !== this.thinkingLevel) this.level = fitted;
+  }
+
+  // The credential the runtime is on, or the one its next turn would try
+  // first; null when the vendor has none.
+  get credential(): Source | null {
+    return this.source ?? this.candidateSources()[0] ?? null;
   }
 
   get busy(): boolean {
@@ -293,7 +328,7 @@ export class SessionAgent {
       }
       const vendor = this.vendor;
       if (!failure) {
-        throw new Error(`No ${VENDOR_INFO[vendor].displayName} credentials. Run /login to connect a Claude or ChatGPT subscription, or add an API key.`);
+        throw new Error(`No ${VENDOR_INFO[vendor].displayName} credentials. Run /login to sign in to Claude or Codex, or add an API key.`);
       }
       throw new Error(failure.message);
     } catch (error) {
@@ -366,13 +401,82 @@ export class SessionAgent {
       // The fork runs on the credential the owner's process was started on,
       // so the next turn does not mistake it for a runtime on another one.
       this.source = owner.source;
-      this.context = forked.context;
+      this.context = this.fitContext(forked.context);
       this.seededRuntime = true;
       this.saveNativeSession(forked, owner.source, owner.savedSession?.profileHome);
       return true;
     } catch {
       return false;
     }
+  }
+
+  // Runs a vendor command that only reports, such as `/context` or `/mcp`,
+  // on a throwaway fork of this agent's runtime, so the conversation, its
+  // record and its checkpoints stay as they were, and hands back what the
+  // command printed instead of recording a turn. A busy runtime is forked
+  // mid-turn, and a cold one with a vendor session to reopen is started first,
+  // the way its next turn would start it. Until the vendor holds a
+  // conversation there is nothing to fork (Codex keeps no thread file before
+  // the first turn), so the command runs in a fresh session of its own, which
+  // is what the agent's would be.
+  async runAside(text: string, signal: AbortSignal): Promise<AsideOutput> {
+    const source = this.candidateSources()[0];
+    if (source === undefined) throw new Error(`No ${VENDOR_INFO[this.vendor].displayName} credentials. Run /login to sign in to Claude or Codex, or add an API key.`);
+    const output: AsideOutput = { text: '', mcpServers: null };
+    const hooks: Pick<RuntimeOptions, 'onPermission' | 'onElicitation' | 'onUpdate'> = {
+      // A reporting command asks nothing; anything that does is declined.
+      onPermission: async () => ({ outcome: { outcome: 'cancelled' } }),
+      onElicitation: async () => ({ action: 'decline' }),
+      onUpdate: update => {
+        if (update.type === 'text') output.text += update.text;
+        else if (update.type === 'notice') output.text += `\n${[update.title, update.description].filter(Boolean).join(': ')}\n`;
+        else if (update.type === 'mcp_servers') output.mcpServers = update.servers;
+      },
+    };
+    const aside = {
+      directory: this.host.directory,
+      model: this.model,
+      thinkingLevel: this.thinkingLevel,
+      systemPrompt: this.systemPrompt(),
+      tools: this.definition?.tools,
+      readOnly: true,
+      permissionMode: 'ask' as const,
+      mcpServer: await this.host.mcpServer(this),
+      ...hooks,
+    };
+    // A warmed runtime has a vendor session but no conversation in it yet.
+    const conversation = this.runtime ? this.seededRuntime
+      : this.savedSession !== undefined && this.transcript.entries().length > 0;
+    let opening: Promise<Runtime>;
+    if (conversation) {
+      const runtime = this.busy && this.runtime ? this.runtime : (await this.ensureRuntime(source, signal)).runtime;
+      opening = runtime.fork(aside);
+    } else {
+      const vendor = this.vendor;
+      opening = createRuntime({
+        ...aside, vendor, signal,
+        env: source && vendorOf(this.model) ? sourceEnvironment(vendor, source) : { ...process.env },
+      });
+    }
+    let runtime: Runtime;
+    try {
+      runtime = await abortable(opening, signal);
+    } catch (error) {
+      void opening.then(late => late.dispose(), () => undefined);
+      throw error;
+    }
+    try {
+      await runtime.prompt({ text, images: [] }, signal);
+    } finally {
+      runtime.dispose();
+    }
+    return { ...output, text: output.text.trim() };
+  }
+
+  // The runtime's window, or a larger one already seen for the model: the
+  // adapter's placeholder until its first reply is never the true size.
+  private fitContext(usage: ContextUsage | null): ContextUsage | null {
+    return usage && { tokens: usage.tokens, window: Math.max(usage.window, modelFacts(this.model).window ?? 0) };
   }
 
   // Stops the turn still running. True if there was one.
@@ -398,6 +502,7 @@ export class SessionAgent {
     this.runtime = null;
     this.seededRuntime = false;
     this.context = null;
+    this.mcpServers = null;
     this.limitResetsAt = undefined;
     for (const task of this.backgroundTasks.values()) {
       if (task.state === 'running' || task.state === 'paused') {
@@ -426,6 +531,7 @@ export class SessionAgent {
       this.resetRuntime();
     }
     this.model = model;
+    this.fitThinkingLevel();
     const runtime = this.runtime;
     if (!runtime) {
       this.savedSession = undefined;
@@ -437,6 +543,8 @@ export class SessionAgent {
     }
     void runtime.setModel(model).then(applied => {
       if (!applied && this.runtime === runtime && this.model === model) { this.resetRuntime(); warn(); }
+      // The effort option is the new model's, fitted to it on the way in.
+      else if (applied && this.runtime === runtime) void runtime.setThinkingLevel(this.thinkingLevel).catch(() => undefined);
     }).catch(() => {
       if (this.runtime === runtime && this.model === model) { this.resetRuntime(); warn(); }
     });
@@ -582,7 +690,7 @@ export class SessionAgent {
         this.runtime = runtime;
         this.generation = generation;
         this.source = source;
-        this.context = runtime.context;
+        this.context = this.fitContext(runtime.context);
         this.seededRuntime = !!resume;
         this.saveNativeSession(runtime, source, profileHome, resume?.directory);
         if (source) this.provider?.markActive(this.runtimeId, source);
@@ -649,6 +757,23 @@ export class SessionAgent {
       if (vendor) rememberListedModels(vendor, update.models);
       return;
     }
+    // And what its model offers, which `/thinking` lists; the recorded
+    // level follows what the runtime set.
+    if (update.type === 'efforts') {
+      rememberModelFacts(this.model, { efforts: update.efforts });
+      this.fitThinkingLevel();
+      return;
+    }
+    if (update.type === 'mcp_servers') {
+      this.mcpServers = update.servers;
+      return;
+    }
+    // The gauge follows the runtime between turns too. A window smaller than
+    // one already seen for the model is the adapter's placeholder.
+    if (update.type === 'context') {
+      rememberModelFacts(this.model, { window: update.usage.window });
+      this.context = this.fitContext(update.usage);
+    }
     if (update.type === 'notice' && !this.record) {
       this.host.notice(this, update);
       return;
@@ -695,7 +820,7 @@ export class SessionAgent {
 
   // Everything the runtime reports lands in the entry: text and thoughts as
   // blocks, tool calls merged by id, compaction as a boundary, what the turn
-  // used; the context gauge and mode changes on the agent itself.
+  // used; the context window and mode changes on the agent itself.
   private recorder(entry: Message, onUpdate?: () => void): (update: RuntimeUpdate) => void {
     // When the runtime last said anything, which is when a thought that
     // starts now began, and the message the last text chunk belonged to.
@@ -752,10 +877,11 @@ export class SessionAgent {
           break;
         }
         case 'usage':
-          entry.usage = update.usage;
+          // A turn retried after a lost runtime used both attempts.
+          entry.usage = addTurnUsage(entry.usage, update.usage);
           break;
         case 'context':
-          this.context = update.usage;
+          // Kept on the agent as it arrives (`hear`); the entry only repaints.
           break;
         case 'mode':
           this.noteMode(this.host.permissionMode(), update, true);

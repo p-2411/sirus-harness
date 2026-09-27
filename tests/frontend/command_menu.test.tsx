@@ -16,8 +16,8 @@ describe('command menu', () => {
 
     expect(lines).toHaveLength(6);
     expect(output).toContain('/model');
-    expect(output).toContain('/agents');
-    expect(output).not.toContain('/logout');
+    expect(output).toContain('/review');
+    expect(output).not.toContain('/agents');
   });
 
   test('scrolls the six-command window to keep the selection visible', () => {
@@ -36,7 +36,24 @@ describe('command menu', () => {
 
     expect(lines).toHaveLength(6);
     expect(output).not.toContain('/model');
-    expect(output).toContain('› /login');
+    expect(output).toContain('› /status');
+  });
+
+  test('tags the vendors\' own commands and prefixes one a Sirus command shadows', () => {
+    const nativeCommands = [
+      { name: 'context', description: 'Show current context usage', invocation: '/context', vendor: 'claude' as const },
+      { name: 'agents', description: 'Manage agent configurations', invocation: '/agents', vendor: 'claude' as const },
+      { name: 'status', description: 'Display session configuration', invocation: '/status', vendor: 'gpt' as const },
+    ];
+    const render = (input: string) => stripAnsi(renderToString(
+      <CommandMenu input={input} nativeCommands={nativeCommands} />,
+      { columns: 100 },
+    ));
+    expect(render('/cont')).toMatch(/\/context\s+\(claude\) Show current context usage/);
+    const agents = render('/agen');
+    expect(agents).toMatch(/\/agents\s+\[show/);
+    expect(agents).toMatch(/\/claude:agents\s+\(claude\) Manage agent configurations/);
+    expect(render('/codex:')).toMatch(/\/codex:status\s+\(codex\) Display session configuration/);
   });
 
   test('wraps navigation while resetting the visible window', () => {

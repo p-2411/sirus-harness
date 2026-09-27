@@ -56,6 +56,11 @@ export interface Launch {
   // Both adapters need a resume after forking. Claude also needs the
   // parent's directory to locate its transcript when making the fork.
   forkNeedsResume: boolean;
+  // Where a turn's token count comes from: the prompt response unless said
+  // otherwise. claude-agent-acp answers a prompt with the whole turn's
+  // tally; codex-acp answers with its last model call's alone, so a turn of
+  // several calls is the sum of the usage updates it sent, one per call.
+  turnTokens?: 'response' | 'usage_updates';
   // An `authenticate` to send after `initialize`, when the credential in the
   // environment is one the harness must be logged in with rather than read.
   authenticate?: { methodId: string };
@@ -147,11 +152,16 @@ function claudeLaunch(options: RuntimeOptions, mode: PermissionMode): Launch {
               settings: { skillOverrides: Object.fromEntries(CLAUDE_SKILLS_OFF.map(name => [name, 'off'])) },
               plugins: claudeSkillPlugins(spec.directory),
             },
+            // The SDK's init frame, the only place Claude Code says which
+            // MCP servers a session has and whether each one connected;
+            // `/mcp` over ACP gives a count and points at the terminal.
+            emitRawSDKMessages: [{ type: 'system', subtype: 'init' }],
           },
         },
       mcpServers: mcpServersFor(spec),
     }),
     forkNeedsResume: true,
+    turnTokens: 'response',
   };
 }
 
@@ -292,6 +302,7 @@ function codexLaunch(options: RuntimeOptions, mode: PermissionMode): Launch {
     // codex-acp 1.13.1 unsubscribes the new thread in SessionFork.ts. Resume
     // subscribes it again; without it the first prompt receives no updates.
     forkNeedsResume: true,
+    turnTokens: 'usage_updates',
     // An API key in the environment is an API-key source (a subscription's
     // environment scrubs it). Codex only honours a key it was logged in
     // with, in the home the source's environment points it at.

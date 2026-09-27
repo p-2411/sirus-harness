@@ -1,8 +1,10 @@
-import { compactCommand, permissionsCommand, permissionsMenuItems, renameSession } from './behavior';
+import { compactCommand, mcpCommand, permissionsCommand, permissionsMenuItems, renameSession, statusCommand } from './behavior';
 import { writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { isMemoryAccessEnabled } from '../../agent_runtime/memory-access';
 import { textOf } from '../../agent_runtime/types';
 import { generateSessionName } from '../../agent_runtime/session/naming';
+import { notificationMode } from '../../frontend/terminal/notifications';
 import type { CommandSpec } from '../types';
 
 export const clearCommand: CommandSpec = {
@@ -16,10 +18,26 @@ export const clearCommand: CommandSpec = {
 
 export const compactCommandSpec: CommandSpec = {
   name: 'compact',
-  description: 'ask the agent to compact its context now',
+  args: '[@agent] [instructions]',
+  description: 'ask an agent to compact its context now, saying what to keep',
+  run: (args, context) => compactCommand(args, context.session, context.signal, context.participant),
+};
+
+export const statusCommandSpec: CommandSpec = {
+  name: 'status',
+  description: 'the session, and each agent\'s model, context, tokens and login',
   run: (args, context) => {
-    if (args.length > 0) throw new Error('Usage: /compact');
-    return compactCommand(context.session, context.signal, context.participant);
+    if (args.length > 0) throw new Error('Usage: /status');
+    return statusCommand(context.session, { memory: isMemoryAccessEnabled(), notifications: notificationMode() });
+  },
+};
+
+export const mcpCommandSpec: CommandSpec = {
+  name: 'mcp',
+  description: 'each agent\'s MCP servers and whether they connected',
+  run: (args, context) => {
+    if (args.length > 0) throw new Error('Usage: /mcp. To manage a server, use /claude:mcp or /codex:mcp.');
+    return mcpCommand(context.session, context.signal, context.notify);
   },
 };
 

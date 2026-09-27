@@ -71,7 +71,7 @@ interface InputBarProps {
   onAttachImage?: (image: ImageBlock) => void;
   // backspace over an image in the draft drops it
   onRemoveAttachment?: (image: ImageBlock) => void;
-  // the session's current model, shown under the input bar
+  // the selected agent's model, shown under the input bar
   model?: string;
   thinkingLevel?: string;
   // the session's earlier prompts, oldest first, for ↑/↓ recall
@@ -599,8 +599,11 @@ export function InputBar({
         if (sendImmediately) onSendNow?.();
         return;
       }
-      if (sendImmediately && onSendNow) onSendNow(trimmed, draft.images, draft.content);
-      else if (send(trimmed, draft.images, draft.content) === false) return;
+      // A command picked from the menu goes as its full name, not as the
+      // prefix typed so far, which the draft's own content still holds.
+      const content = selectedCommand ? undefined : draft.content;
+      if (sendImmediately && onSendNow) onSendNow(trimmed, draft.images, content);
+      else if (send(trimmed, draft.images, content) === false) return;
       if (directory && trimmed && (!trimmed.startsWith('/') || isNativeCommand(trimmed, nativeList))) {
         try { appendPromptHistory(directory, trimmed); }
         catch (error) { setLocalFeedback({ kind: 'warning', text: `Could not save prompt history: ${error instanceof Error ? error.message : error}` }); }

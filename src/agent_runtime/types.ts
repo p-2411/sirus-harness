@@ -180,16 +180,18 @@ export function failOpenToolCalls(content: MessageBlock[], outcome?: 'cancelled'
 }
 
 // What one turn used, as the vendor reported it when the turn ended. Claude
-// counts every model call of the turn; codex-acp reports its last call only.
-// The cost is Claude's alone: what this turn added to the running cost of its
-// session.
+// answers a prompt with the tally of every model call of the turn. codex-acp
+// answers with its last call's alone, so a Codex turn's total is what the
+// usage updates of its calls add up to, and its breakdown is known only when
+// the turn made one call. The cost is Claude's alone: what this turn added to
+// the running cost of its session.
 export interface TurnUsage {
-  inputTokens: number;
-  outputTokens: number;
+  totalTokens: number;
+  inputTokens?: number;
+  outputTokens?: number;
   cachedReadTokens?: number;
   cachedWriteTokens?: number;
   thoughtTokens?: number;
-  totalTokens: number;
   costUsd?: number;
 }
 
@@ -223,7 +225,8 @@ export interface Message {
   // as typed; the runtimes read it without these (`withoutCreationModels`).
   creationModels?: { start: number; end: number }[];
   // Assistant entries: when the turn that wrote it started and ended, and what
-  // it used. Absent while it runs and in older snapshots.
+  // it used. Absent while it runs and in older snapshots. A participant's
+  // total, which /status and /usage show, is the sum over its entries.
   startedAt?: number;
   finishedAt?: number;
   usage?: TurnUsage;
@@ -249,6 +252,23 @@ export function parseThinkingLevel(value: unknown): ThinkingLevel | null {
   return typeof value === 'string' && (THINKING_LEVELS as readonly string[]).includes(value)
     ? value as ThinkingLevel
     : null;
+}
+
+// The levels a model offers, read off the efforts its runtime listed: null
+// while no runtime on it has said, empty when it has no effort to set.
+export function offeredThinkingLevels(efforts: readonly string[] | undefined): ThinkingLevel[] | null {
+  return efforts ? THINKING_LEVELS.filter(level => efforts.includes(level)) : null;
+}
+
+// The level a model runs at when asked for this one: the level itself when
+// offered, else the nearest lower one, else the lowest it offers; null when
+// it offers none. The runtime applies exactly this, so the status row can
+// show it rather than what was asked for.
+export function fitThinkingLevel(level: ThinkingLevel, offered: readonly ThinkingLevel[]): ThinkingLevel | null {
+  const lower = THINKING_LEVELS.slice(0, THINKING_LEVELS.indexOf(level) + 1).reverse();
+  return lower.find(candidate => offered.includes(candidate))
+    ?? THINKING_LEVELS.find(candidate => offered.includes(candidate))
+    ?? null;
 }
 
 // The prose of a message: its text blocks joined with exactly one newline.

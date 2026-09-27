@@ -23,6 +23,9 @@ export interface RosterOptions {
   defaultParticipant: string;
   participants: readonly Participant[];
   host: RuntimeHost;
+  // The level a participant new to the session starts at: the user's
+  // default from /config. Restored participants keep their own.
+  thinkingLevel?: ThinkingLevel;
 }
 
 // The one @name grammar, shared by the mention scanner and by name
@@ -79,14 +82,16 @@ export class ParticipantRoster {
   private readonly host: RuntimeHost;
   private readonly agents: SessionAgent[];
   private readonly defaultAgent: SessionAgent;
+  private readonly newLevel?: ThinkingLevel;
 
   constructor(private readonly changes: ChangeFeed, options: RosterOptions) {
     this.sessionId = options.sessionId;
     this.defaultName = options.defaultParticipant;
     this.host = options.host;
+    this.newLevel = options.thinkingLevel;
     const restored = options.participants.map(participant => this.createAgent(participant));
     this.defaultAgent = restored.find(agent => keyOf(agent.name) === keyOf(this.defaultName))
-      ?? this.createAgent({ name: this.defaultName, model: options.model });
+      ?? this.createAgent({ name: this.defaultName, model: options.model, ...(this.newLevel ? { thinkingLevel: this.newLevel } : {}) });
     this.agents = restored.length > 0 ? restored : [this.defaultAgent];
     if (!this.agents.includes(this.defaultAgent)) this.agents.unshift(this.defaultAgent);
   }
@@ -116,7 +121,7 @@ export class ParticipantRoster {
       throw new Error(`Participant @${normalizedName} already exists`);
     }
     requireKnownModel(model);
-    this.agents.push(this.createAgent({ name: normalizedName, model }));
+    this.agents.push(this.createAgent({ name: normalizedName, model, ...(this.newLevel ? { thinkingLevel: this.newLevel } : {}) }));
     this.changes.notify();
   }
 
