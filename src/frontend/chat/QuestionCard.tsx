@@ -2,6 +2,7 @@
 // forth. A form with several questions is reviewed before its answers go out.
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { Box, Text, useBoxMetrics, useInput, usePaste, useStdout, type DOMElement } from 'ink';
+import stringWidth from 'string-width';
 import { theme } from '../styles/theme';
 import { FramedCard } from './FramedCard';
 import { applyInputEdit, inputEditForKey, isKeyboardProtocolReport, type InputEdit, type InputState } from './editor';
@@ -12,13 +13,18 @@ import { describeRequester } from '../../agent_runtime/permissions/approvals';
 import type { QuestionAnswer, QuestionField, QuestionRequest } from '../../agent_runtime/permissions/questions';
 
 type Answers = Record<string, string | number | boolean | string[]>;
+// Typing an answer of the user's own is having "Other…" highlighted, so the
+// typed text stays with the field while the highlight moves elsewhere.
 interface Draft {
   selected: number;
   picked: readonly string[];
-  typingOther: boolean;
   editor: InputState;
 }
-const EMPTY_DRAFT: Draft = { selected: 0, picked: [], typingOther: false, editor: { text: '', cursor: 0 } };
+const EMPTY_DRAFT: Draft = { selected: 0, picked: [], editor: { text: '', cursor: 0 } };
+
+// Narrower than this inside the card, the highlighted option's details go
+// under it instead of beside the list.
+const SIDE_BY_SIDE_WIDTH = 70;
 
 interface Row {
   label: string;
@@ -48,13 +54,13 @@ export function questionText(request: QuestionRequest, field: QuestionField): { 
   return { question, ...(label ? { label } : {}) };
 }
 
-function QuestionRow({ label, description, active, prefix, onChoose, focusRef }: {
+function QuestionRow({ label, active, prefix, onChoose, focusRef, children }: {
   label: string;
-  description?: string;
   active: boolean;
   prefix?: string;
   onChoose: () => void;
   focusRef?: RefObject<DOMElement | null>;
+  children?: ReactNode;
 }) {
   const ref = useRef<DOMElement>(null);
   const hovered = useClickable(ref, onChoose);
@@ -64,10 +70,21 @@ function QuestionRow({ label, description, active, prefix, onChoose, focusRef }:
         <Box width={2} flexShrink={0}><Text color={active ? theme.accent : theme.textSubtle}>{active ? '› ' : '  '}</Text></Box>
         <Box flexDirection="column" flexGrow={1} flexBasis={0} minWidth={0}>
           <Text color={active || hovered ? theme.highlight : theme.text} bold={active} wrap="wrap">{prefix}{label}</Text>
-          {description && <Text color={theme.textMuted} wrap="wrap">{description}</Text>}
+          {children}
         </Box>
       </Box>
     </Box>
+  );
+}
+
+function Entry({ editor, secret }: { editor: InputState; secret?: boolean }) {
+  const shown = (text: string) => secret ? '•'.repeat([...text].length) : text;
+  return (
+    <Text wrap="wrap">
+      <Text color={theme.text}>{shown(editor.text.slice(0, editor.cursor))}</Text>
+      <Text color={theme.accent}>▌</Text>
+      <Text color={theme.text}>{shown(editor.text.slice(editor.cursor))}</Text>
+    </Text>
   );
 }
 
@@ -129,18 +146,25 @@ export function QuestionCard({ request, waiting, onAnswer }: {
   const [error, setError] = useState<string | null>(null);
   const sent = useRef(false);
   const focusRef = useRef<DOMElement>(null);
+  // The question spans the card, so it measures the room the choices have.
+  const questionRef = useRef<DOMElement>(null);
+  const { width: measured } = useBoxMetrics(questionRef);
+  const { stdout } = useStdout();
   const reviewing = index === request.fields.length;
   const field = request.fields[index];
   const draft = field ? drafts[field.key] ?? EMPTY_DRAFT : EMPTY_DRAFT;
   const rows = field ? rowsOf(field) : [];
   const multiple = field?.kind === 'choice' && field.multiple;
-  const typing = draft.typingOther || field?.kind === 'text' || field?.kind === 'number';
+  const typingOther = rows[draft.selected]?.action === 'other';
+  const entryField = field?.kind === 'text' || field?.kind === 'number';
+  const typing = typingOther || entryField;
 
   const updateDraft = (patch: Partial<Draft>) => {
     if (!field) return;
     setDrafts(current => ({ ...current, [field.key]: { ...current[field.key] ?? EMPTY_DRAFT, ...patch } }));
     setError(null);
   };
+  const moveHighlight = (step: number) => updateDraft({ selected: (draft.selected + step + rows.length) % rows.length });
   const goTo = (next: number) => {
     if (reviewing && next < request.fields.length) setEditingReview(true);
     setIndex(next);
@@ -185,7 +209,7 @@ export function QuestionCard({ request, waiting, onAnswer }: {
   };
   const submitEntry = () => {
     const value = draft.editor.text.trim();
-    if (draft.typingOther && field.kind === 'choice' && field.other) {
+    if (typingOther && field.kind === 'choice' && field.other) {
       if (!value) return setError('Enter your answer.');
       if (field.multiple) return submitChoices(value);
       const next = { ...withoutField(), [field.other.key]: value };
@@ -206,15 +230,15 @@ export function QuestionCard({ request, waiting, onAnswer }: {
       commit({ ...answers, [field.key]: number });
     }
   };
+  // Highlighting "Other…" is all choosing it takes: its answer is typed there.
   const choose = (row: Row, rowIndex: number) => {
     updateDraft({ selected: rowIndex });
-    if (row.action === 'other') updateDraft({ typingOther: true });
-    else if (row.action === 'continue') submitChoices();
+    if (row.action === 'continue') submitChoices();
     else if (row.action === 'skip') commit(withoutField());
     else if (multiple && typeof row.value === 'string') {
       const value = row.value;
       updateDraft({ picked: draft.picked.includes(value) ? draft.picked.filter(item => item !== value) : [...draft.picked, value] });
-    } else commit({ ...withoutField(), [field.key]: row.value! });
+    } else if (row.action !== 'other') commit({ ...withoutField(), [field.key]: row.value! });
   };
   const edit = (change: InputEdit) => updateDraft({ editor: applyInputEdit(draft.editor, change) });
 
@@ -233,7 +257,6 @@ export function QuestionCard({ request, waiting, onAnswer }: {
     }
     if (key.tab && key.shift) {
       if (index > 0) goTo(index - 1);
-      else if (draft.typingOther) updateDraft({ typingOther: false });
       return;
     }
     if (reviewing) {
@@ -243,13 +266,15 @@ export function QuestionCard({ request, waiting, onAnswer }: {
       return;
     }
     if (typing) {
-      if (key.return || key.tab) submitEntry();
+      if (typingOther && (key.upArrow || key.downArrow)) moveHighlight(key.upArrow ? -1 : 1);
+      else if (key.tab && multiple && !draft.editor.text.trim()) submitChoices();
+      else if (key.return || key.tab) submitEntry();
       else if (inputEditForKey(input, key)) edit(inputEditForKey(input, key)!);
       else if (!key.ctrl && !key.meta && !key.upArrow && !key.downArrow && !key.pageUp && !key.pageDown) edit({ type: 'insert', text: input });
       return;
     }
     if (key.ctrl || key.meta) return;
-    if (key.upArrow || key.downArrow) updateDraft({ selected: (draft.selected + (key.upArrow ? -1 : 1) + rows.length) % rows.length });
+    if (key.upArrow || key.downArrow) moveHighlight(key.upArrow ? -1 : 1);
     else if (key.leftArrow && index > 0) goTo(index - 1);
     else if (key.tab && multiple) submitChoices();
     else if (key.return || (multiple && input === ' ')) {
@@ -262,11 +287,38 @@ export function QuestionCard({ request, waiting, onAnswer }: {
   const right = [request.fields.length > 1 ? reviewing ? 'Review' : `${index + 1} of ${request.fields.length}` : '', waiting > 0 ? `${waiting} more` : ''].filter(Boolean).join(' · ');
   const next = request.fields.length === 1 ? 'submit' : index === request.fields.length - 1 ? 'review' : 'next';
   const footer = reviewing ? '↑↓ edit · enter select · esc declines'
-    : typing ? `enter ${!field.required && !draft.typingOther && !draft.editor.text.trim() ? 'skip' : next} · shift+tab back · esc declines`
-      : multiple ? '↑↓ move · space toggle · tab continue · esc declines'
-        : '↑↓ move · enter select · esc declines';
-  const secret = field?.kind === 'text' && field.secret;
-  const displayText = (text: string) => secret ? '•'.repeat([...text].length) : text;
+    : typingOther ? `↑↓ move · enter ${next}${index > 0 ? ' · shift+tab back' : ''} · esc declines`
+      : typing ? `enter ${!field.required && !draft.editor.text.trim() ? 'skip' : next} · shift+tab back · esc declines`
+        : multiple ? '↑↓ move · space toggle · tab continue · esc declines'
+          : '↑↓ move · enter select · esc declines';
+
+  // Only the highlighted option says more: beside the list when the card has
+  // room for two columns, under the option when it does not. On "Other…" that
+  // is where the user's own answer is typed.
+  const width = measured || (stdout.columns ?? 80) - 6;
+  const sideBySide = width >= SIDE_BY_SIDE_WIDTH && rows.some(row => row.description);
+  const prefixOf = (row: Row, rowIndex: number) => row.action === 'continue' || row.action === 'skip' ? ''
+    : `${rowIndex + 1}. ${multiple && !row.action ? draft.picked.includes(row.value as string) ? '[x] ' : '[ ] ' : ''}`;
+  const listWidth = Math.min(Math.floor(width * 0.45),
+    Math.max(20, 2 + Math.max(0, ...rows.map((row, rowIndex) => stringWidth(prefixOf(row, rowIndex) + row.label)))));
+  const highlighted = rows[draft.selected];
+  const detail = highlighted?.description || typingOther ? (
+    <Box flexDirection="column">
+      {highlighted.description ? <Text color={theme.textMuted} wrap="wrap">{highlighted.description}</Text> : null}
+      {typingOther && <Entry editor={draft.editor} />}
+    </Box>
+  ) : null;
+  const choices = field && !entryField && (
+    <Choices key={field.key} selected={draft.selected} focusRef={focusRef}>
+      {rows.map((row, rowIndex) => (
+        <QuestionRow key={rowIndex} focusRef={draft.selected === rowIndex ? focusRef : undefined}
+          active={draft.selected === rowIndex} label={row.label} prefix={prefixOf(row, rowIndex)}
+          onChoose={() => choose(row, rowIndex)}>
+          {!sideBySide && draft.selected === rowIndex && detail}
+        </QuestionRow>
+      ))}
+    </Choices>
+  );
 
   return (
     <FramedCard tone={theme.accent} title={[
@@ -275,45 +327,37 @@ export function QuestionCard({ request, waiting, onAnswer }: {
       { text: ' asks' },
       ...(label ? [{ text: ` · ${label}`, color: theme.textMuted }] : []),
     ]} {...(right ? { right } : {})} footer={footer}>
-      <Box flexDirection="column" marginBottom={1} paddingLeft={2}>
+      <Box ref={questionRef} flexDirection="column" marginBottom={1} paddingLeft={2}>
         <Text color={theme.text} bold wrap="wrap">{question}</Text>
         <Text color={theme.textMuted}>{reviewing ? 'Select an answer to change it, or submit below.'
-          : multiple ? `Select all that apply · ${draft.picked.length} selected` : typing ? 'Type your answer below.' : 'Choose one option.'}</Text>
+          : multiple ? `Select all that apply · ${draft.picked.length} selected` : entryField ? 'Type your answer below.' : 'Choose one option.'}</Text>
       </Box>
       {reviewing ? (
         <Choices key="review" selected={reviewSelected} focusRef={focusRef}>
           {request.fields.map((item, itemIndex) => (
             <QuestionRow key={item.key} focusRef={reviewSelected === itemIndex ? focusRef : undefined}
-              prefix={`${itemIndex + 1}. `} label={questionText(request, item).label ?? item.title} description={answerText(item, answers)}
-              active={reviewSelected === itemIndex} onChoose={() => goTo(itemIndex)} />
+              prefix={`${itemIndex + 1}. `} label={questionText(request, item).label ?? item.title}
+              active={reviewSelected === itemIndex} onChoose={() => goTo(itemIndex)}>
+              <Text color={theme.textMuted} wrap="wrap">{answerText(item, answers)}</Text>
+            </QuestionRow>
           ))}
           <QuestionRow focusRef={reviewSelected === request.fields.length ? focusRef : undefined}
             label="Submit answers" active={reviewSelected === request.fields.length} onChoose={() => finish(answers)} />
         </Choices>
-      ) : typing ? (
-        <Box paddingLeft={2} flexDirection="column">
-          {draft.typingOther && <Text color={theme.textMuted}>Your answer</Text>}
-          <Text wrap="wrap">
-            <Text color={theme.text}>{displayText(draft.editor.text.slice(0, draft.editor.cursor))}</Text>
-            <Text color={theme.accent}>▌</Text>
-            <Text color={theme.text}>{displayText(draft.editor.text.slice(draft.editor.cursor))}</Text>
-          </Text>
+      ) : entryField ? (
+        <Box paddingLeft={2}>
+          <Entry editor={draft.editor} secret={field.kind === 'text' && field.secret} />
         </Box>
-      ) : (
-        <Choices key={field.key} selected={draft.selected} focusRef={focusRef}>
-          {rows.map((row, rowIndex) => (
-            <QuestionRow key={rowIndex} focusRef={draft.selected === rowIndex ? focusRef : undefined}
-              active={draft.selected === rowIndex} label={row.label} description={row.description}
-              prefix={row.action === 'continue' || row.action === 'skip' ? '' : `${rowIndex + 1}. ${multiple && !row.action ? draft.picked.includes(row.value as string) ? '[x] ' : '[ ] ' : ''}`}
-              onChoose={() => choose(row, rowIndex)} />
-          ))}
-        </Choices>
-      )}
+      ) : sideBySide ? (
+        <Box>
+          <Box width={listWidth} flexShrink={0} flexDirection="column">{choices}</Box>
+          <Box marginLeft={2} flexGrow={1} flexBasis={0} minWidth={0} flexDirection="column">{detail}</Box>
+        </Box>
+      ) : choices}
       {error && <Text color={theme.danger}>  {error}</Text>}
-      {!reviewing && (draft.typingOther || index > 0) && (
+      {!reviewing && index > 0 && (
         <Box marginTop={1}>
-          <QuestionRow label={draft.typingOther ? 'Back to options' : 'Back'} active={false}
-            onChoose={() => draft.typingOther ? updateDraft({ typingOther: false }) : goTo(index - 1)} />
+          <QuestionRow label="Back" active={false} onChoose={() => goTo(index - 1)} />
         </Box>
       )}
     </FramedCard>

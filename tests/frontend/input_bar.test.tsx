@@ -621,13 +621,16 @@ describe('question card', () => {
     }
   });
 
-  test('numbers the choices and immediately submits a clicked single answer', async () => {
+  test('numbers the choices, describes only the highlighted one, and submits a clicked answer', async () => {
     const view = card([choice()]);
     try {
       await view.flush();
-      expect(view.output()).toMatch(/1[.)]\s+Fast/);
+      expect(view.output()).toMatch(/› 1[.)] Fast\s+A small change with a quick check\./);
       expect(view.output()).toMatch(/2[.)]\s+Careful/);
-      expect(view.output()).toContain('A detailed review before making changes.');
+      expect(view.output()).not.toContain('A detailed review before making changes.');
+      await view.type('\u001b[B');
+      expect(view.output()).toMatch(/1[.)] Fast\s+A detailed review before making changes\./);
+      expect(view.output()).not.toContain('A small change with a quick check.');
       await view.click('Careful');
       expect(view.answers).toEqual([{ action: 'accept', content: { approach: 'careful' } }]);
     } finally {
@@ -757,9 +760,13 @@ describe('question card', () => {
       await view.type('Remember this');
 
       await view.type('\u001b[Z');
-      expect(view.output()).toContain('Custom source▌');
-      await view.click('Back to options');
       expect(view.output()).toContain('[x] Fast');
+      expect(view.output()).toContain('Custom source▌');
+      await view.type('\u001b[A');
+      expect(view.output()).not.toContain('Custom source');
+      await view.type('\u001b[B');
+      expect(view.output()).toContain('Custom source▌');
+      await view.type('\u001b[A');
       await view.click('Other…');
       expect(view.output()).toContain('Custom source▌');
       await view.type('\u001b[H');
