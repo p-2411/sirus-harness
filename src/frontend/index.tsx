@@ -8,7 +8,10 @@ import { closeAllMemoryStores } from "../memory/store";
 import { enableCheckpoints } from "../checkpoints";
 import { sendHeartbeat } from "../telemetry";
 
-// Heartbeats are opt-in through SIRUS_HEARTBEAT_URL and never block startup.
+// A heartbeat, carrying a random installation id and the version, goes to the
+// Sirus stats endpoint at most once a day and never blocks startup. It is on
+// by default: SIRUS_HEARTBEAT_URL points it elsewhere, and an empty value
+// turns it off.
 void sendHeartbeat().catch(() => undefined);
 
 // Frame capture must see Ink's writes, so it wraps stdout before anything else.
