@@ -5,6 +5,7 @@ import { join } from 'path';
 import { afterEach, beforeEach } from 'bun:test';
 import {
   commandMenu,
+  commandRegistry,
   executeCommand,
   matchCommands,
   parseCommandLine,
@@ -207,6 +208,20 @@ describe('executeCommand', () => {
     expect(result.text).toContain('shift+enter');
     expect(result.text).toContain('switch session');
     expect(() => runCommand('help', ['extra'])).toThrow('Usage: /help');
+  });
+
+  test('a usage error writes the command out as /help lists it', () => {
+    const listed = (name: string) => {
+      const spec = commandRegistry.find(candidate => candidate.name === name)!;
+      return `Usage: /${spec.name} ${spec.args}`;
+    };
+    const session = new Session();
+    expect(() => runCommand('model', ['sirus', 'haiku', 'extra'], session)).toThrow(listed('model'));
+    expect(() => runCommand('thinking', ['@sirus', 'high', 'extra'], session)).toThrow(listed('thinking'));
+    expect(() => runCommand('notify', ['loud'], session)).toThrow(listed('notify'));
+    expect(() => runCommand('notify', ['off', 'extra'], session)).toThrow(listed('notify'));
+    expect(() => runCommand('undo', ['everything'], session)).toThrow(listed('undo'));
+    expect(() => runCommand('undo', ['all', 'extra'], session)).toThrow(listed('undo'));
   });
 
   test('model command rejects unknown models', () => {

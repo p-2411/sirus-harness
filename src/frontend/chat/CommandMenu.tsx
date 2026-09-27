@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
 import { matchCommands } from '../../commands/registry';
+import { commandUsage } from '../../commands/types';
 import type { NativeCommand } from '../../agent_runtime/runtime/commands';
 import { theme } from '../styles/theme';
 
@@ -73,7 +74,7 @@ export function CommandMenu({
   const matches = matchCommands(input, nativeCommands);
   if (matches.length === 0) return null;
 
-  const labels = matches.map(spec => `/${spec.name}${spec.args ? ` ${spec.args}` : ''}`);
+  const labels = matches.map(commandUsage);
   // Capped: a vendor's argument hint can run to half a line and would push
   // every description out of view.
   const column = Math.min(Math.max(...labels.map(label => label.length)), LABEL_COLUMN_MAX) + 2;

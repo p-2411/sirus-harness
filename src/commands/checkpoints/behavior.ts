@@ -134,11 +134,9 @@ async function rewindTo(checkpoint: Checkpoint, scope: RewindScope, session: Com
   return describeRewind(await session.rewind(checkpoint.id, { files, chat: scope !== 'files' }));
 }
 
-export function undoCommand(scope: string | undefined, session: CommandSession): Promise<Feedback> {
-  const parsed = parseRewindScope(scope ?? 'all');
-  if (!parsed) throw new Error('Usage: /undo [all|files|chat]');
+export function undoCommand(scope: RewindScope, session: CommandSession): Promise<Feedback> {
   const checkpoints = requireCheckpoints(session);
-  return rewindTo(checkpoints[checkpoints.length - 1], parsed, session);
+  return rewindTo(checkpoints[checkpoints.length - 1], scope, session);
 }
 
 export function rewindCommand(args: readonly string[], session: CommandSession): Promise<Feedback> {

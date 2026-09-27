@@ -150,6 +150,8 @@ export function thinkingMenuItems(args: readonly string[] = []): CommandMenuItem
   }));
 }
 
+// Up to two arguments, the participant and the level; the spec turns away
+// anything longer.
 export function thinkingCommand(args: readonly string[], session: CommandSession): Feedback {
   if (args.length === 0) {
     return { kind: 'info', text: `@sirus thinking is ${session.getThinkingLevel()}.` };
@@ -165,8 +167,7 @@ export function thinkingCommand(args: readonly string[], session: CommandSession
       text: `@${args[0].replace(/^@/, '')} thinking is ${session.getThinkingLevel(args[0])}.`,
     };
   }
-  if (args.length === 2) return changeThinkingLevel(args[0], args[1], session);
-  throw new Error('Usage: /thinking [participant] [low|medium|high|xhigh|max]');
+  return changeThinkingLevel(args[0], args[1], session);
 }
 
 // ── Workers ────────────────────────────────────────────────────────────────

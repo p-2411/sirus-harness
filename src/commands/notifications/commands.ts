@@ -4,10 +4,11 @@ import {
   notificationMode,
   parseNotificationMode,
   setNotificationMode,
+  type NotificationMode,
 } from '../../frontend/terminal/notifications';
 import { terminalFocused } from '../../frontend/terminal/window-focus';
 import type { Feedback } from '../feedback';
-import type { CommandMenuItem, CommandSpec } from '../types';
+import { commandUsage, type CommandMenuItem, type CommandSpec } from '../types';
 
 function notifyMenuItems(): CommandMenuItem[] {
   return NOTIFICATION_MODES.map(mode => ({
@@ -19,7 +20,7 @@ function notifyMenuItems(): CommandMenuItem[] {
   }));
 }
 
-function notifyCommand(mode: string | undefined): Feedback {
+function notifyCommand(mode: NotificationMode | undefined): Feedback {
   if (mode === undefined) {
     const current = notificationMode();
     const focusNote = current === 'background' && terminalFocused() === null
@@ -27,10 +28,8 @@ function notifyCommand(mode: string | undefined): Feedback {
       : '';
     return { kind: 'info', text: `Notifications are ${current}: ${NOTIFICATION_MODE_DESCRIPTIONS[current]}.${focusNote}` };
   }
-  const parsed = parseNotificationMode(mode);
-  if (!parsed) throw new Error('Usage: /notify [off|background|always]');
-  setNotificationMode(parsed);
-  return { kind: 'success', text: `Notifications set to ${parsed}.` };
+  setNotificationMode(mode);
+  return { kind: 'success', text: `Notifications set to ${mode}.` };
 }
 
 export const notifyCommandSpec: CommandSpec = {
@@ -38,8 +37,9 @@ export const notifyCommandSpec: CommandSpec = {
   args: '[off|background|always]',
   description: 'show or set desktop notifications',
   run: args => {
-    if (args.length > 1) throw new Error('Usage: /notify [off|background|always]');
-    return notifyCommand(args[0]);
+    const mode = args[0] === undefined ? undefined : parseNotificationMode(args[0]);
+    if (args.length > 1 || mode === null) throw new Error(`Usage: ${commandUsage(notifyCommandSpec)}`);
+    return notifyCommand(mode);
   },
   menu: args => args.length === 0 ? notifyMenuItems() : null,
 };

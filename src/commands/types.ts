@@ -100,3 +100,10 @@ export interface CommandSpec {
   // command would run in, for menus that list its state.
   menu?: (args: readonly string[], session: CommandSession) => CommandMenuEntry[] | null;
 }
+
+// A command written out with the arguments it takes: `/undo [all|files|chat]`.
+// The `/` menu, /help and every usage error that names the spec's own
+// arguments use this one line, so they cannot drift apart.
+export function commandUsage(spec: Pick<CommandSpec, 'name' | 'args'>): string {
+  return `/${spec.name}${spec.args ? ` ${spec.args}` : ''}`;
+}

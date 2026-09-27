@@ -1,4 +1,4 @@
-import type { CommandSpec } from '../types';
+import { commandUsage, type CommandSpec } from '../types';
 
 // Every key the app answers to, in the words the status hints use.
 export const KEY_BINDINGS: ReadonlyArray<readonly [keys: string, action: string]> = [
@@ -19,7 +19,7 @@ export const KEY_BINDINGS: ReadonlyArray<readonly [keys: string, action: string]
 ];
 
 export function helpText(commands: readonly CommandSpec[]): string {
-  const labels = commands.map(command => `/${command.name}${command.args ? ` ${command.args}` : ''}`);
+  const labels = commands.map(commandUsage);
   const column = Math.max(
     ...labels.map(label => label.length),
     ...KEY_BINDINGS.map(([keys]) => keys.length),

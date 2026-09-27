@@ -7,7 +7,7 @@ import {
   thinkingCommand,
   thinkingMenuItems,
 } from './behavior';
-import type { CommandSpec } from '../types';
+import { commandUsage, type CommandSpec } from '../types';
 
 export const modelCommand: CommandSpec = {
   name: 'model',
@@ -23,7 +23,7 @@ export const modelCommand: CommandSpec = {
     if (args.length === 2) {
       return changeModel(args[0], args[1], context.session);
     }
-    throw new Error('Usage: /model [name|subagent] <model>');
+    throw new Error(`Usage: ${commandUsage(modelCommand)}`);
   },
   menu: modelMenuItems,
 };
@@ -40,6 +40,9 @@ export const thinkingCommandSpec: CommandSpec = {
   name: 'thinking',
   args: '[agent] [low|medium|high|xhigh|max]',
   description: 'show or set an agent\'s reasoning depth',
-  run: (args, context) => thinkingCommand(args, context.session),
+  run: (args, context) => {
+    if (args.length > 2) throw new Error(`Usage: ${commandUsage(thinkingCommandSpec)}`);
+    return thinkingCommand(args, context.session);
+  },
   menu: thinkingMenuItems,
 };

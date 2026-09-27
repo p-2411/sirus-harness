@@ -1,13 +1,14 @@
-import { rewindCommand, rewindMenuItems, undoCommand, undoMenuItems } from './behavior';
-import type { CommandSpec } from '../types';
+import { parseRewindScope, rewindCommand, rewindMenuItems, undoCommand, undoMenuItems } from './behavior';
+import { commandUsage, type CommandSpec } from '../types';
 
 export const undoCommandSpec: CommandSpec = {
   name: 'undo',
   args: '[all|files|chat]',
   description: 'restore files and chat to before the last turn',
   run: (args, context) => {
-    if (args.length > 1) throw new Error('Usage: /undo [all|files|chat]');
-    return undoCommand(args[0], context.session);
+    const scope = parseRewindScope(args[0] ?? 'all');
+    if (args.length > 1 || !scope) throw new Error(`Usage: ${commandUsage(undoCommandSpec)}`);
+    return undoCommand(scope, context.session);
   },
   menu: undoMenuItems,
 };

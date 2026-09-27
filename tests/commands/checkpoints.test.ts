@@ -50,8 +50,8 @@ describe('checkpoint commands', () => {
     for (const args of [['0'], ['3'], ['1.5'], ['1', 'invalid'], ['1', 'files', 'extra']]) {
       expect(() => rewindCommand(args, session)).toThrow('Usage: /rewind');
     }
-    expect(() => undoCommand('invalid', session)).toThrow('Usage: /undo');
     const context: CommandContext = { session, signal: new AbortController().signal, notify: () => {} };
+    expect(() => undoCommandSpec.run(['invalid'], context)).toThrow('Usage: /undo');
     expect(() => undoCommandSpec.run(['chat', 'extra'], context)).toThrow('Usage: /undo');
     expect(rewind).not.toHaveBeenCalled();
   });
