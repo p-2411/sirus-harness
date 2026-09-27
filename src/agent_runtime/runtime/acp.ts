@@ -655,7 +655,11 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
       mcpServer: forked.mcpServer,
       tools: forked.tools,
     });
-    const extras = { mcpServers: params.mcpServers, ...(params.meta ? { _meta: params.meta } : {}) };
+    const extras = {
+      mcpServers: params.mcpServers,
+      ...(params.meta ? { _meta: params.meta } : {}),
+      ...(params.additionalDirectories ? { additionalDirectories: params.additionalDirectories } : {}),
+    };
     let created;
     let state: SessionState;
     try {
@@ -735,6 +739,7 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
       cwd: options.directory,
       mcpServers: params.mcpServers,
       ...(params.meta ? { _meta: params.meta } : {}),
+      ...(params.additionalDirectories ? { additionalDirectories: params.additionalDirectories } : {}),
     }), options.directory, options, options.model);
     state.modes = session.modes?.availableModes ?? [];
     state.currentModeId = session.modes?.currentModeId ?? '';

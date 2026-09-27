@@ -1,11 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, rmSync } from 'fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { providerFor, servableModelIds, servesModel } from '../../src/agent_runtime/providers';
 import { MODELS, modelInfo, VENDOR_INFO, type Vendor } from '../../src/agent_runtime/providers/catalog';
 import { sourceEnvironment } from '../../src/agent_runtime/providers/profiles';
 import { maskApiKey, type Source } from '../../src/agent_runtime/providers/sources';
+import { launchFor } from '../../src/agent_runtime/runtime/launch';
+import { claudeSkillPlugins, codexSkillDirectories } from '../../src/agent_runtime/runtime/skills';
+import type { RuntimeOptions } from '../../src/agent_runtime/runtime/runtime';
 import {
   routeSessionModel,
   vendorAllowance,
@@ -377,4 +380,328 @@ test('worker launch policies disable native delegation and apply definition tool
   expect(JSON.parse(codex.env.CODEX_CONFIG!).features.multi_agent).toBe(false);
   // 1.13.1 unsubscribes forks: a resume is required to receive updates.
   expect(codex.forkNeedsResume).toBe(true);
+});
+
+// Every source and generated file lives in a scratch home. The vendors still
+// own discovery; these tests check only the folders Sirus hands to them.
+describe('shared vendor skills', () => {
+  let directory: string;
+  let project: string;
+  let claudeHome: string;
+  let codexHome: string;
+  let agentsSkills: string;
+  let previous: Record<string, string | undefined>;
+  let claudeInstalls: Record<string, unknown[]>;
+  let claudeEnabled: Record<string, boolean>;
+  let codexConfig: string[];
+
+  beforeEach(() => {
+    directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-shared-skills-'));
+    previous = Object.fromEntries(['HOME', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'SIRUS_DATA_DIR']
+      .map(name => [name, process.env[name]]));
+    process.env.HOME = path.join(directory, 'home');
+    claudeHome = process.env.CLAUDE_CONFIG_DIR = path.join(directory, 'claude');
+    codexHome = process.env.CODEX_HOME = path.join(directory, 'codex');
+    process.env.SIRUS_DATA_DIR = path.join(directory, 'data');
+    agentsSkills = path.join(process.env.HOME, '.agents', 'skills');
+    project = path.join(directory, 'project');
+    for (const folder of [process.env.HOME, claudeHome, codexHome, agentsSkills, project]) {
+      mkdirSync(folder, { recursive: true });
+    }
+    claudeInstalls = {};
+    claudeEnabled = {};
+    codexConfig = [];
+  });
+
+  afterEach(() => {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  function write(file: string, value: string): void {
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, value);
+  }
+
+  function json(file: string, value: unknown): void {
+    write(file, JSON.stringify(value));
+  }
+
+  function skill(root: string, folder: string, fields: Record<string, string | boolean | null> = {}): string {
+    const target = path.join(root, folder);
+    const metadata = { name: folder, description: `Use ${folder}.`, ...fields };
+    const frontmatter = Object.entries(metadata).filter(([, value]) => value !== null)
+      .map(([key, value]) => `${key}: ${JSON.stringify(value)}`).join('\n');
+    write(path.join(target, 'SKILL.md'), `---\n${frontmatter}\n---\nFollow these instructions.\n`);
+    return target;
+  }
+
+  function claudePlugin(id: string, name: string, enabled = true, manifest: Record<string, unknown> = {}): string {
+    const target = path.join(claudeHome, 'plugins', 'cache', 'community', id, '1.0.0');
+    json(path.join(target, '.claude-plugin', 'plugin.json'), { name, ...manifest });
+    claudeInstalls[`${id}@community`] = [{ scope: 'user', installPath: target, version: '1.0.0' }];
+    claudeEnabled[`${id}@community`] = enabled;
+    json(path.join(claudeHome, 'plugins', 'installed_plugins.json'), { version: 2, plugins: claudeInstalls });
+    json(path.join(claudeHome, 'settings.json'), { enabledPlugins: claudeEnabled });
+    return target;
+  }
+
+  function configureCodex(value: string): void {
+    codexConfig.push(value);
+    write(path.join(codexHome, 'config.toml'), codexConfig.join('\n'));
+  }
+
+  function codexPlugin(
+    id: string, name: string, enabled: boolean | null = true, marketplace = 'community', manifest: Record<string, unknown> = {},
+  ): string {
+    const target = path.join(codexHome, 'plugins', 'cache', marketplace, id, '2.0.0');
+    json(path.join(target, '.codex-plugin', 'plugin.json'), { name, ...manifest });
+    configureCodex(`[plugins.${JSON.stringify(`${id}@${marketplace}`)}]\n${enabled === null ? '' : `enabled = ${enabled}\n`}`);
+    return target;
+  }
+
+  // Stop at each link: descending through it would mistake the user's own
+  // files for generated files and would hide accidental copied skill trees.
+  function links(root: string): string[] {
+    return readdirSync(root).flatMap(name => {
+      const entry = path.join(root, name);
+      const stat = lstatSync(entry);
+      if (stat.isSymbolicLink()) return [entry];
+      return stat.isDirectory() ? links(entry) : [];
+    });
+  }
+
+  function pluginNames(root: string): string[] {
+    return readdirSync(root).flatMap(name => {
+      const entry = path.join(root, name);
+      const stat = lstatSync(entry);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) return [];
+      if (name === '.claude-plugin') return [JSON.parse(readFileSync(path.join(entry, 'plugin.json'), 'utf8')).name];
+      return pluginNames(entry);
+    });
+  }
+
+  function targets(roots: string[]): string[] {
+    return roots.flatMap(links).map(link => realpathSync(link)).sort();
+  }
+
+  function expectedTargets(...folders: string[]): string[] {
+    return folders.map(folder => realpathSync(folder)).sort();
+  }
+
+  function claudeBridges(): string[] {
+    const plugins = claudeSkillPlugins(project);
+    for (const plugin of plugins) {
+      expect(plugin.type).toBe('local');
+      expect(plugin.skipMcpDiscovery).toBe(true);
+      expect(plugin.path).toStartWith(process.env.SIRUS_DATA_DIR! + path.sep);
+    }
+    return plugins.map(plugin => plugin.path);
+  }
+
+  test('shares personal skills once by frontmatter name or folder and preserves the source files', () => {
+    const fromClaude = skill(path.join(claudeHome, 'skills'), 'claude-only');
+    const fromCodex = skill(path.join(codexHome, 'skills'), 'codex-only');
+    const fromAgents = skill(agentsSkills, 'agents-only');
+    skill(path.join(claudeHome, 'skills'), 'claude-copy', { name: 'shared-name' });
+    skill(agentsSkills, 'codex-copy', { name: 'shared-name' });
+    skill(path.join(claudeHome, 'skills'), 'fallback-name', { name: null });
+    skill(agentsSkills, 'another-copy', { name: 'fallback-name' });
+    skill(path.join(claudeHome, 'skills'), 'system-copy', { name: 'built-in-name' });
+    skill(path.join(codexHome, 'skills', '.system'), 'system-skill', { name: 'built-in-name' });
+    const before = [fromClaude, fromCodex, fromAgents]
+      .map(folder => readFileSync(path.join(folder, 'SKILL.md'), 'utf8'));
+
+    const claude = claudeBridges();
+    expect(targets(claude)).toEqual(expectedTargets(fromCodex, fromAgents));
+    expect(claude).toHaveLength(1);
+    expect(JSON.parse(readFileSync(path.join(claude[0], '.claude-plugin', 'plugin.json'), 'utf8')).name).toBe('codex');
+    const codex = codexSkillDirectories(project);
+    expect(codex).toHaveLength(1);
+    expect(codex[0]).toStartWith(process.env.SIRUS_DATA_DIR! + path.sep);
+    expect(targets(codex)).toEqual(expectedTargets(fromClaude));
+    expect([fromClaude, fromCodex, fromAgents]
+      .map(folder => readFileSync(path.join(folder, 'SKILL.md'), 'utf8'))).toEqual(before);
+    expect([fromClaude, fromCodex, fromAgents].every(folder => !lstatSync(folder).isSymbolicLink())).toBe(true);
+  });
+
+  test('keeps third-party plugin namespaces and follows custom skill roots', () => {
+    const claudePluginRoot = claudePlugin('claude-package', 'claude-tools', true, { skills: ['./special', './single'] });
+    const claudeNested = skill(path.join(claudePluginRoot, 'special'), 'nested', { name: 'claude-nested' });
+    const claudeSingle = skill(claudePluginRoot, 'single');
+    const claudeDefault = skill(path.join(claudePluginRoot, 'skills'), 'claude-default');
+    const codexPluginRoot = codexPlugin('codex-package', 'codex-tools', true, 'community', { skills: './special' });
+    const codexNested = skill(path.join(codexPluginRoot, 'special'), 'nested', { name: 'codex-nested' });
+    skill(path.join(codexPluginRoot, 'skills'), 'codex-replaced-default');
+
+    const claude = claudeBridges();
+    expect(targets(claude)).toEqual(expectedTargets(codexNested));
+    expect(JSON.parse(readFileSync(path.join(claude[0], '.claude-plugin', 'plugin.json'), 'utf8')).name).toBe('codex-tools');
+    const codex = codexSkillDirectories(project);
+    expect(targets(codex)).toEqual(expectedTargets(claudeNested, claudeSingle, claudeDefault));
+    expect(pluginNames(path.join(codex[0], '.agents', 'skills'))).toEqual(['claude-tools']);
+  });
+
+  test('honours disabled source plugins and reserves installed target names even when disabled', () => {
+    skill(path.join(claudePlugin('disabled-claude', 'disabled-claude', false), 'skills'), 'disabled-claude-skill');
+    skill(path.join(codexPlugin('disabled-codex', 'disabled-codex', false), 'skills'), 'disabled-codex-skill');
+    write(path.join(project, '.codex', 'config.toml'),
+      '[plugins."disabled-codex@community".mcp_servers.test]\nenabled = true\n');
+    skill(path.join(claudePlugin('claude-collision', 'same-on-codex'), 'skills'), 'hidden');
+    codexPlugin('other-package-id', 'same-on-codex', false);
+    skill(path.join(codexPlugin('codex-collision', 'same-on-claude'), 'skills'), 'hidden');
+    claudePlugin('different-package-id', 'same-on-claude', false);
+    const claudeVisible = skill(path.join(claudePlugin('claude-visible', 'claude-visible'), 'skills'), 'claude-visible-skill');
+    const codexVisible = skill(path.join(codexPlugin('codex-visible', 'codex-visible'), 'skills'), 'codex-visible-skill');
+
+    expect(targets(claudeBridges())).toEqual(expectedTargets(codexVisible));
+    expect(targets(codexSkillDirectories(project))).toEqual(expectedTargets(claudeVisible));
+  });
+
+  test('loads configured Codex plugins by default and prefers local then the latest cached version', () => {
+    const old = codexPlugin('versioned', 'versioned', null);
+    skill(path.join(old, 'skills'), 'old-skill');
+    const latestRoot = path.join(path.dirname(old), '10.0.0');
+    json(path.join(latestRoot, '.codex-plugin', 'plugin.json'), { name: 'versioned' });
+    const latest = skill(path.join(latestRoot, 'skills'), 'latest-skill');
+    const orphanRoot = path.join(codexHome, 'plugins', 'cache', 'community', 'uninstalled', '20.0.0');
+    json(path.join(orphanRoot, '.codex-plugin', 'plugin.json'), { name: 'uninstalled' });
+    skill(path.join(orphanRoot, 'skills'), 'orphan-skill');
+    write(path.join(codexHome, 'plugins', 'cache', 'cache-index'), 'stray cache file');
+    write(path.join(codexHome, 'plugins', 'cache', 'community', 'market-index'), 'stray market file');
+
+    expect(targets(claudeBridges())).toEqual(expectedTargets(latest));
+    const localRoot = path.join(path.dirname(old), 'local');
+    json(path.join(localRoot, '.codex-plugin', 'plugin.json'), { name: 'versioned' });
+    const local = skill(path.join(localRoot, 'skills'), 'local-skill');
+    expect(targets(claudeBridges())).toEqual(expectedTargets(local));
+    rmSync(path.join(localRoot, '.codex-plugin', 'plugin.json'));
+    expect(claudeBridges()).toEqual([]);
+  });
+
+  test('excludes vendor skill collections and OpenAI marketplaces', () => {
+    skill(path.join(codexHome, 'skills', '.system'), 'codex-system');
+    skill(path.join(claudeHome, 'skills', 'synced'), 'claude-synced');
+    for (const source of ['anthropic', 'anthropic-example']) {
+      skill(path.join(claudePlugin(source, source, true, { source }), 'skills'), `${source}-skill`);
+    }
+    for (const marketplace of ['openai-bundled', 'openai-primary-runtime', 'openai-curated', 'openai-curated-remote']) {
+      skill(path.join(codexPlugin(`vendor-${marketplace}`, `vendor-${marketplace}`, true, marketplace), 'skills'), 'hidden');
+    }
+    const personalCodex = skill(agentsSkills, 'personal-codex');
+    const personalClaude = skill(path.join(claudeHome, 'skills'), 'personal-claude');
+
+    expect(targets(claudeBridges())).toEqual(expectedTargets(personalCodex));
+    expect(targets(codexSkillDirectories(project))).toEqual(expectedTargets(personalClaude));
+  });
+
+  test('honours disabled Codex skill paths and names including plugin skills', () => {
+    const disabledPath = skill(path.join(codexHome, 'skills'), 'path-disabled');
+    skill(agentsSkills, 'name-disabled-folder', { name: 'name-disabled' });
+    skill(agentsSkills, 'metadata-disabled', { enabled: false });
+    const pluginRoot = codexPlugin('source-tools', 'source-tools', false);
+    skill(path.join(pluginRoot, 'skills'), 'plugin-disabled');
+    const pluginEnabled = skill(path.join(pluginRoot, 'skills'), 'plugin-enabled');
+    const personalEnabled = skill(agentsSkills, 'personal-enabled');
+    configureCodex(`[[skills.config]]\npath = ${JSON.stringify(path.join(disabledPath, 'SKILL.md'))}\nenabled = false\n`);
+    configureCodex('[[skills.config]]\nname = "name-disabled"\nenabled = false\n');
+    configureCodex('[[skills.config]]\nname = "source-tools:plugin-disabled"\nenabled = false\n');
+    write(path.join(project, '.codex', 'config.toml'), [
+      '[plugins."source-tools@community"]', 'enabled = true',
+      '[[skills.config]]', 'name = "name-disabled"', 'enabled = true',
+    ].join('\n'));
+
+    expect(targets(claudeBridges())).toEqual(expectedTargets(pluginEnabled, personalEnabled));
+    configureCodex(`[[skills.config]]\npath = ${JSON.stringify(path.join(disabledPath, 'SKILL.md'))}\nenabled = true\n`);
+    expect(targets(claudeBridges())).toEqual(expectedTargets(disabledPath, pluginEnabled, personalEnabled));
+  });
+
+  test('leaves Claude skills requiring manual invocation and invalid Codex metadata out', () => {
+    const source = path.join(claudeHome, 'skills');
+    skill(source, 'manual-only', { 'disable-model-invocation': true });
+    skill(source, 'no-description', { description: null });
+    skill(source, 'empty-description', { description: '' });
+    skill(source, 'long-name', { name: 'x'.repeat(65) });
+    const accepted = skill(source, 'valid-name', { name: 'x'.repeat(64), 'disable-model-invocation': false });
+    const pluginRoot = claudePlugin('manual-tools', 'manual-tools');
+    skill(path.join(pluginRoot, 'skills'), 'manual-plugin', { 'disable-model-invocation': true });
+
+    expect(targets(codexSkillDirectories(project))).toEqual(expectedTargets(accepted));
+  });
+
+  test('reuses an unchanged inventory and builds a fresh bridge when skills change', () => {
+    const first = skill(path.join(claudeHome, 'skills'), 'first');
+    const original = codexSkillDirectories(project);
+    expect(codexSkillDirectories(project)).toEqual(original);
+    const replacement = skill(path.join(claudeHome, 'skills'), 'replacement');
+    rmSync(first, { recursive: true });
+    const refreshed = codexSkillDirectories(project);
+    expect(refreshed).not.toEqual(original);
+    expect(targets(refreshed)).toEqual(expectedTargets(replacement));
+
+    const codexFirst = skill(agentsSkills, 'codex-first');
+    const originalPlugins = claudeBridges();
+    expect(claudeBridges()).toEqual(originalPlugins);
+    const codexReplacement = skill(agentsSkills, 'codex-replacement');
+    rmSync(codexFirst, { recursive: true });
+    const refreshedPlugins = claudeBridges();
+    expect(refreshedPlugins).not.toEqual(originalPlugins);
+    expect(targets(refreshedPlugins)).toEqual(expectedTargets(codexReplacement));
+  });
+
+  test('walks project skill roots up to the repository and deduplicates native project skills', () => {
+    write(path.join(project, '.git'), 'gitdir: /unused-worktree-metadata\n');
+    const nested = path.join(project, 'packages', 'app');
+    mkdirSync(nested, { recursive: true });
+    const claudeRoot = skill(path.join(project, '.claude', 'skills'), 'claude-root');
+    const claudeNested = skill(path.join(nested, '.claude', 'skills'), 'claude-nested');
+    const codexRoot = skill(path.join(project, '.codex', 'skills'), 'codex-root');
+    const codexNested = skill(path.join(nested, '.agents', 'skills'), 'codex-nested');
+    skill(path.join(project, '.claude', 'skills'), 'duplicate-one', { name: 'project-shared' });
+    skill(path.join(nested, '.agents', 'skills'), 'duplicate-two', { name: 'project-shared' });
+    skill(path.join(directory, '.claude', 'skills'), 'outside-repository');
+
+    expect(targets(claudeSkillPlugins(nested).map(plugin => plugin.path))).toEqual(expectedTargets(codexRoot, codexNested));
+    expect(targets(codexSkillDirectories(nested))).toEqual(expectedTargets(claudeRoot, claudeNested));
+  });
+
+  test('keeps one Codex bridge per process across forks and reads default homes under credential profiles', () => {
+    const claudeSource = skill(path.join(claudeHome, 'skills'), 'claude-personal');
+    const codexSource = skill(agentsSkills, 'codex-personal');
+    const nativeSource = skill(path.join(codexHome, 'skills'), 'native-personal');
+    skill(path.join(codexHome, 'skills'), 'disabled-profile');
+    configureCodex('[[skills.config]]\nname = "disabled-profile"\nenabled = false\n');
+    const options: RuntimeOptions = {
+      vendor: 'gpt', model: 'gpt-5.6-luna', thinkingLevel: 'medium', directory: project,
+      systemPrompt: 'Test prompt.', permissionMode: 'ask', mcpServer: null,
+      env: sourceEnvironment('gpt', { id: 'work', kind: 'subscription', profile: 'work' }),
+      onPermission: async () => ({ outcome: { outcome: 'cancelled' } }), onUpdate: () => {},
+    };
+    const launch = launchFor(options);
+    const spec = { directory: project, systemPrompt: 'Test prompt.', mcpServer: null };
+    const parent = launch.session(spec);
+    expect(parent.additionalDirectories).toHaveLength(1);
+    expect(targets(parent.additionalDirectories!)).toEqual(expectedTargets(claudeSource));
+    skill(path.join(claudeHome, 'skills'), 'added-after-launch');
+    const fork = launch.session({ ...spec, directory: path.join(directory, 'worker') });
+    expect(fork.additionalDirectories).toEqual(parent.additionalDirectories);
+    expect(launch.env.CODEX_HOME).toBe(options.env.CODEX_HOME);
+    const profileSkills = path.join(launch.env.CODEX_HOME!, 'skills');
+    expect(targets([profileSkills])).toEqual(expectedTargets(nativeSource));
+    expect(existsSync(path.join(profileSkills, 'disabled-profile'))).toBe(false);
+    expect(launchFor({ ...options, bare: true }).session(spec).additionalDirectories).toBeUndefined();
+
+    const claude = launchFor({
+      ...options, vendor: 'claude', model: 'claude-sonnet-5',
+      env: sourceEnvironment('claude', { id: 'work', kind: 'subscription', profile: 'work' }),
+    });
+    const meta = claude.session(spec).meta as { claudeCode: { options: { plugins: { path: string }[] } } };
+    expect(targets(meta.claudeCode.options.plugins.map(plugin => plugin.path))).toEqual(expectedTargets(codexSource, nativeSource));
+    const bare = launchFor({ ...options, vendor: 'claude', bare: true }).session(spec).meta;
+    expect(bare).toMatchObject({ claudeCode: { options: { tools: [], settingSources: [] } } });
+    expect((bare?.claudeCode as { options: Record<string, unknown> }).options.plugins).toBeUndefined();
+  });
 });

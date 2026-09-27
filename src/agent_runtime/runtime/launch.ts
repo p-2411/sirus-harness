@@ -3,9 +3,11 @@ import { createRequire } from 'module';
 import os from 'os';
 import path from 'path';
 import type { McpServer } from '@agentclientprotocol/sdk';
+import { dataDirectory } from '../../dataDirectory';
 import type { PermissionMode } from '../permissions/policy';
 import { VENDOR_INFO, type Vendor } from '../providers/catalog';
 import type { RuntimeOptions } from './runtime';
+import { claudeSkillPlugins, codexPersonalSkills, codexSkillDirectories } from './skills';
 
 // A vendor is a launch spec: the adapter to run, the environment its process
 // gets, and what its `session/new` carries. Everything the runtime does after
@@ -34,6 +36,7 @@ export interface SessionSpec {
 export interface SessionParams {
   meta?: Record<string, unknown>;
   mcpServers: McpServer[];
+  additionalDirectories?: string[];
 }
 
 export interface Launch {
@@ -142,6 +145,7 @@ function claudeLaunch(options: RuntimeOptions, mode: PermissionMode): Launch {
               disallowedTools: [...CLAUDE_TOOLS_OFF, ...(spec.tools !== undefined
                 && !spec.tools.some(tool => tool.startsWith('mcp__')) ? ['mcp__*'] : [])],
               settings: { skillOverrides: Object.fromEntries(CLAUDE_SKILLS_OFF.map(name => [name, 'off'])) },
+              plugins: claudeSkillPlugins(spec.directory),
             },
           },
         },
@@ -190,40 +194,41 @@ function codexBinaryPath(): string | null {
 
 const LINK_TYPE = process.platform === 'win32' ? 'junction' : 'dir';
 
-// The skills in one folder by name: its subfolders that hold a SKILL.md.
-function skillsIn(folder: string): Map<string, string> {
-  const found = new Map<string, string>();
-  let names: string[];
-  try {
-    names = readdirSync(folder);
-  } catch {
-    return found;
-  }
-  for (const name of names) {
-    if (name.startsWith('.')) continue;
-    const skill = path.join(folder, name);
-    if (existsSync(path.join(skill, 'SKILL.md'))) found.set(name, skill);
-  }
-  return found;
-}
-
 // Codex finds the user's skills in `~/.codex/skills`. A credential with a
 // profile of its own points CODEX_HOME elsewhere, so the user's skills are
 // linked in there one by one, since Codex writes its built-in skills into the
-// same folder; a link to a skill the user has since removed goes.
-function linkCodexSkills(profileHome: string | undefined): void {
+// same folder; a link to a removed or disabled skill goes. Only profiles
+// inside Sirus's data directory are managed here.
+function linkCodexSkills(profileHome: string | undefined, directory: string): void {
   const userHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
   if (!profileHome || path.resolve(profileHome) === path.resolve(userHome)) return;
-  const source = path.join(userHome, 'skills');
-  const target = path.join(profileHome, 'skills');
+  const data = path.resolve(dataDirectory());
+  const relative = path.relative(data, path.resolve(profileHome));
+  if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return;
+  const source = path.resolve(userHome, 'skills');
+  const target = path.resolve(profileHome, 'skills');
   try {
+    // A profile or skills directory redirected outside Sirus must never be
+    // changed through a symlink, even when its lexical path is inside it.
+    let current = target;
+    for (;;) {
+      try {
+        if (lstatSync(current).isSymbolicLink()) return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+      if (current === data) break;
+      current = path.dirname(current);
+    }
+    const skills = codexPersonalSkills(directory);
     mkdirSync(target, { recursive: true });
     for (const name of readdirSync(target)) {
       const link = path.join(target, name);
       if (!lstatSync(link).isSymbolicLink()) continue;
-      if (readlinkSync(link).startsWith(source + path.sep) && !existsSync(link)) unlinkSync(link);
+      const destination = path.resolve(target, readlinkSync(link));
+      if (destination === path.join(source, name) && (!skills.has(name) || !existsSync(link))) unlinkSync(link);
     }
-    for (const [name, skill] of skillsIn(source)) {
+    for (const [name, skill] of skills) {
       const link = path.join(target, name);
       try {
         lstatSync(link);
@@ -243,7 +248,10 @@ function codexLaunch(options: RuntimeOptions, mode: PermissionMode): Launch {
   // Codex reads itself. A bare runtime's prompt replaces Codex's instead, and
   // it reads no project instructions.
   const codex = codexBinaryPath();
-  if (!options.bare) linkCodexSkills(options.env[VENDOR_INFO.gpt.profileDirEnv]);
+  if (!options.bare) linkCodexSkills(options.env[VENDOR_INFO.gpt.profileDirEnv], options.directory);
+  // Codex caches its discovered skills for the adapter process, so every
+  // session on it uses the same directories collected at launch.
+  const additionalDirectories = options.bare ? undefined : codexSkillDirectories(options.directory);
   const config = options.bare
     ? { instructions: options.systemPrompt, project_doc_max_bytes: 0 }
     : {
@@ -269,9 +277,12 @@ function codexLaunch(options: RuntimeOptions, mode: PermissionMode): Launch {
       ...(codex ? { CODEX_PATH: codex } : {}),
     },
     mode,
-    // The developer instructions are the whole process's, so a forked
-    // session inherits the owner's and takes only its own MCP entry.
-    session: spec => ({ mcpServers: mcpServersFor(spec) }),
+    // Developer instructions and shared skills belong to the whole process;
+    // each fork takes its own MCP entry.
+    session: spec => ({
+      mcpServers: mcpServersFor(spec),
+      ...(additionalDirectories ? { additionalDirectories } : {}),
+    }),
     // codex-acp 1.13.1 unsubscribes the new thread in SessionFork.ts. Resume
     // subscribes it again; without it the first prompt receives no updates.
     forkNeedsResume: true,
