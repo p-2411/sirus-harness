@@ -6,6 +6,12 @@ import type { SubagentHost, Tool, ToolContext } from './types';
 // participant with a subagent host can use these, which is why the server
 // hides them from a worker — a subagent cannot spawn a subagent of its own.
 
+// Whether a vendor's title names a SpawnAgent call: the tool's name comes
+// last, after whatever the vendor puts before it for the server.
+export function isSpawnAgentTitle(title: string): boolean {
+  return /(?:^|[^A-Za-z0-9])SpawnAgent\s*$/.test(title);
+}
+
 function host(ctx: ToolContext, toolName: string): SubagentHost {
   if (!ctx.subagents) throw new Error(`${toolName} needs the calling agent`);
   return ctx.subagents;

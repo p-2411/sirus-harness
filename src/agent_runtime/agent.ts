@@ -25,6 +25,7 @@ import {
 } from './runtime/runtime';
 import { rememberNativeCommands } from './runtime/commands';
 import { Transcript, transcriptText } from './session/transcript';
+import { isSpawnAgentTitle } from './tools/agents';
 import { notifySubagents, type SubagentRun } from './tools/subagents';
 import { describeSubagents } from './tools/subagents/report';
 import { cancelSubagent, checkSubagent, messageSubagent, startSubagent } from './tools/subagents/run';
@@ -616,7 +617,7 @@ export class SessionAgent {
       const block = blocks[index];
       if (block.type !== 'tool_call' || taken.has(block.id)) continue;
       if (block.status === 'completed' || block.status === 'failed') continue;
-      if (/(?:^|[^A-Za-z0-9])SpawnAgent\s*$/.test(block.title)) {
+      if (isSpawnAgentTitle(block.title)) {
         this.claimedSpawnCallIds.add(block.id);
         return block.id;
       }
