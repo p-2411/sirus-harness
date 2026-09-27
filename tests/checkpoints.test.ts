@@ -156,6 +156,30 @@ describe('worktree checkpoints', () => {
     expect(checkpointTree(project, next!.id)).toEqual(['.gitignore', 'edited.txt']);
   });
 
+  test('restores the exact bytes whatever the project attributes say, in older shadow repositories too', async () => {
+    const root = temporaryDirectory('exact-bytes');
+    const project = path.join(root, 'project');
+    mkdirSync(project);
+    process.env.SIRUS_DATA_DIR = path.join(root, 'state');
+    enableCheckpoints();
+    git(project, 'init', '-q');
+    // A shadow repository made by a build that did not write its attributes.
+    expect(await captureCheckpoint(project, 'empty')).not.toBeNull();
+    rmSync(path.join(checkpointRepository(project), 'info', 'attributes'), { force: true });
+
+    writeFileSync(path.join(project, '.gitattributes'), '* text eol=crlf\n');
+    writeFileSync(path.join(project, 'lf.txt'), 'one\ntwo\n');
+    writeFileSync(path.join(project, 'crlf.txt'), 'one\r\ntwo\r\n');
+    const checkpoint = await captureCheckpoint(project, 'line endings');
+    expect(checkpoint).not.toBeNull();
+    writeFileSync(path.join(project, 'lf.txt'), 'agent\n');
+    writeFileSync(path.join(project, 'crlf.txt'), 'agent\n');
+    await restoreCheckpoint(project, checkpoint!.id);
+
+    expect(readFileSync(path.join(project, 'lf.txt'), 'utf8')).toBe('one\ntwo\n');
+    expect(readFileSync(path.join(project, 'crlf.txt'), 'utf8')).toBe('one\r\ntwo\r\n');
+  });
+
   test('refuses a restore that would overwrite a newly ignored file', async () => {
     const root = temporaryDirectory('ignored-conflict');
     const project = path.join(root, 'project');

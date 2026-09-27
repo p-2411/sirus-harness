@@ -115,13 +115,29 @@ const REPOSITORY_CONFIG: ReadonlyArray<[string, string]> = [
   ['user.email', 'sirus@localhost'],
 ];
 
+// A checkpoint must give back the exact bytes it took, whatever the project's
+// .gitattributes or the user's git configuration say: no line-ending
+// conversion, no clean or smudge filter (Git LFS among them), no $Id$
+// expansion and no re-encoding. The shadow repository's own info/attributes
+// takes precedence over the project's files. The encoding is made unspecified
+// rather than unset, since older git releases reject an unset one.
+const EXACT_BYTES_ATTRIBUTES = '* -text -filter -ident !working-tree-encoding\n';
+
 async function ensureRepository(directory: string): Promise<void> {
   const gitDirectory = checkpointRepository(directory);
-  if (existsSync(path.join(gitDirectory, 'HEAD'))) return;
-  mkdirSync(gitDirectory, { recursive: true, mode: 0o700 });
-  await git(directory, ['init', '-q']);
-  for (const [key, value] of REPOSITORY_CONFIG) await git(directory, ['config', key, value]);
-  writeFileSync(path.join(gitDirectory, 'directory'), `${path.resolve(directory)}\n`, 'utf8');
+  if (!existsSync(path.join(gitDirectory, 'HEAD'))) {
+    mkdirSync(gitDirectory, { recursive: true, mode: 0o700 });
+    await git(directory, ['init', '-q']);
+    for (const [key, value] of REPOSITORY_CONFIG) await git(directory, ['config', key, value]);
+    writeFileSync(path.join(gitDirectory, 'directory'), `${path.resolve(directory)}\n`, 'utf8');
+  }
+  // Written whenever it is missing, so that repositories made by builds that
+  // did not write it get it too.
+  const attributes = path.join(gitDirectory, 'info', 'attributes');
+  if (!existsSync(attributes)) {
+    mkdirSync(path.dirname(attributes), { recursive: true });
+    writeFileSync(attributes, EXACT_BYTES_ATTRIBUTES, 'utf8');
+  }
 }
 
 function sourceGit(directory: string, args: readonly string[]): Promise<string> {
