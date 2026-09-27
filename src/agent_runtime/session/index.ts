@@ -390,20 +390,10 @@ export class Session {
       // not part of the conversation. Strip it before either the UI history or
       // any runtime sees the turn.
       const stored = stripCreationModels(resolved, mentions);
-      // Jev reads the user's own words, like the naming does, and its pick
-      // must land before any runtime starts: the turn waits for it.
-      if (this.routePending) {
-        this.routePending = false;
-        const pick = await routeSessionModel(
-          { prompt: textOf(stripCreationModels(message, mentions)), directory: this.directory },
-          routingCandidates(),
-        );
-        if (pick && pick.model !== this.roster.default.model) this.roster.changeModel(this.roster.default.name, pick.model);
-      }
-      if (this.timeline.isEmpty() && this.autoNamePending) {
-        // Name from the user's text, not the contents of resolved attachments.
-        this.startNaming(textOf(stripCreationModels(message, mentions)));
-      }
+      // Jev and the naming read the user's own words, not the contents of
+      // resolved attachments.
+      const ownWords = textOf(stripCreationModels(message, mentions));
+      const firstPrompt = this.timeline.isEmpty();
       if (this.activeSends === 1) this.timeline.startConversationIfNeeded(Date.now());
       accepted = true;
       this.appendRestoredReports();
@@ -414,6 +404,15 @@ export class Session {
         targets.map(target => target.transcript),
         false,
       );
+      // Jev's pick must land before any runtime starts, so the turn waits
+      // for it, but only once the prompt is in the history: the input reads
+      // acceptance straight after the call.
+      if (this.routePending) {
+        this.routePending = false;
+        const pick = await routeSessionModel({ prompt: ownWords, directory: this.directory }, routingCandidates());
+        if (pick && pick.model !== this.roster.default.model) this.roster.changeModel(this.roster.default.name, pick.model);
+      }
+      if (firstPrompt && this.autoNamePending) this.startNaming(ownWords);
       // The runtimes run their tools themselves and cannot wait on a barrier,
       // so the pre-turn snapshot is taken before any of them is prompted.
       await this.checkpoints.capture(entry.seq, messageText || '[image]');

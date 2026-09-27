@@ -125,7 +125,11 @@ describe('Session model', () => {
     const route = spyOn(router, 'routeSessionModel').mockResolvedValue({ model: secondTestModel, confidence: 0.9 });
     try {
       const routed = new Session({ name: 'Routed', directory: process.cwd(), model: testModel, routePending: true });
-      await routed.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Review the auth module carefully' }] });
+      const first = routed.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Review the auth module carefully' }] });
+      // The chat reads whether the prompt was accepted straight after the
+      // call, so it is in the history before Jev has answered.
+      expect(routed.isEmpty()).toBe(false);
+      await first;
       expect(route).toHaveBeenCalledTimes(1);
       expect(route.mock.calls[0]?.[0]).toEqual({ prompt: 'Review the auth module carefully', directory: process.cwd() });
       expect(routed.getModel()).toBe(secondTestModel);
