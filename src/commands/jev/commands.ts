@@ -15,7 +15,7 @@ function status(): string {
   const source = jevKeySource();
   if (source === 'env') return `Jev is on, with the key from ${JEV_API_KEY_ENV} in the environment.`;
   if (source === 'settings') return `Jev is on, with the key ${maskApiKey(jevApiKey()!)}.`;
-  return 'Jev is off: sessions and subagents stay on their default models.';
+  return 'Jev is off: new sessions keep the default model unless only one provider can run, and subagents use their owner’s model.';
 }
 
 function jevMenuItems(args: readonly string[] = []): CommandMenuEntry[] | null {
