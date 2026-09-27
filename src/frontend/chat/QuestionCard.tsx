@@ -8,6 +8,7 @@ import { Box, Text, useInput, usePaste } from 'ink';
 import { theme } from '../styles/theme';
 import { FramedCard } from './FramedCard';
 import { EntryText } from './InputRows';
+import { moveSelection } from './SelectMenu';
 import { terminalText } from '../terminal/text';
 import { backspaceAtEnd, isForeignInput, isTypedText } from './editor';
 import { describeRequester } from '../../agent_runtime/permissions/approvals';
@@ -169,8 +170,8 @@ export function QuestionCard({ request, waiting, onAnswer }: {
       return;
     }
     const multiple = field.kind === 'choice' && field.multiple;
-    if (key.upArrow) setSelected(current => (current - 1 + rows.length) % rows.length);
-    else if (key.downArrow) setSelected(current => (current + 1) % rows.length);
+    if (key.upArrow) setSelected(current => moveSelection(current, -1, rows.length));
+    else if (key.downArrow) setSelected(current => moveSelection(current, 1, rows.length));
     else if (key.leftArrow && index > 0) goTo(index - 1, answers);
     else if (multiple && input === ' ') {
       if (rows[selected]?.other) choose(rows[selected]);

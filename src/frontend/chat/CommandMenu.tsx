@@ -4,34 +4,10 @@ import { matchCommands } from '../../commands/registry';
 import { commandUsage } from '../../commands/types';
 import type { NativeCommand } from '../../agent_runtime/runtime/commands';
 import { theme } from '../styles/theme';
+import { moveInWindow } from './SelectMenu';
 
-export const COMMAND_MENU_VISIBLE_ITEMS = 6;
+const COMMAND_MENU_VISIBLE_ITEMS = 6;
 const LABEL_COLUMN_MAX = 36;
-
-export interface CommandMenuNavigation {
-  selected: number;
-  offset: number;
-}
-
-export function moveCommandMenuSelection(
-  navigation: CommandMenuNavigation,
-  delta: number,
-  length: number,
-): CommandMenuNavigation {
-  if (length === 0) return { selected: 0, offset: 0 };
-
-  const selected = (navigation.selected + delta + length) % length;
-  let offset = navigation.offset;
-  if (selected < offset) offset = selected;
-  else if (selected >= offset + COMMAND_MENU_VISIBLE_ITEMS) {
-    offset = selected - COMMAND_MENU_VISIBLE_ITEMS + 1;
-  }
-
-  return {
-    selected,
-    offset: Math.min(offset, Math.max(0, length - COMMAND_MENU_VISIBLE_ITEMS)),
-  };
-}
 
 // The commands `/…` currently matches, and where the menu sits in them. The
 // selection belongs to the input that produced it: typing anything moves it
@@ -50,10 +26,11 @@ export function useCommandMenu(input: string, active: boolean, nativeCommands: r
     move(delta: number) {
       setNavigation(previous => ({
         input,
-        ...moveCommandMenuSelection(
+        ...moveInWindow(
           previous.input === input ? previous : { selected: 0, offset: 0 },
           delta,
           matches.length,
+          COMMAND_MENU_VISIBLE_ITEMS,
         ),
       }));
     },

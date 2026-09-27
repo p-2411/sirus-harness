@@ -2,9 +2,26 @@ import { Box, Text } from 'ink';
 import type { CommandMenuEntry } from '../../commands/registry';
 import { theme } from '../styles/theme';
 
+// The selection after an arrow key, wrapping around at either end.
 export function moveSelection(selected: number, delta: number, length: number): number {
   if (length === 0) return 0;
   return (selected + delta + length) % length;
+}
+
+// The same move in a list that shows `visible` rows at a time from `offset`:
+// the window follows the selection no further than it must to keep it on
+// screen, and never past the end of the list.
+export function moveInWindow(
+  position: { selected: number; offset: number },
+  delta: number,
+  length: number,
+  visible: number,
+): { selected: number; offset: number } {
+  const selected = moveSelection(position.selected, delta, length);
+  const offset = selected < position.offset ? selected
+    : selected >= position.offset + visible ? selected - visible + 1
+    : position.offset;
+  return { selected, offset: Math.min(offset, Math.max(0, length - visible)) };
 }
 
 // A list the user walks with the arrow keys, shown where the command hints

@@ -1,10 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import { renderToString } from 'ink';
 import stripAnsi from 'strip-ansi';
-import {
-  CommandMenu,
-  moveCommandMenuSelection,
-} from '../../src/frontend/chat/CommandMenu';
+import { CommandMenu } from '../../src/frontend/chat/CommandMenu';
+import { moveInWindow } from '../../src/frontend/chat/SelectMenu';
 
 describe('command menu', () => {
   test('shows only the first six commands initially', () => {
@@ -23,7 +21,7 @@ describe('command menu', () => {
   test('scrolls the six-command window to keep the selection visible', () => {
     let navigation = { selected: 0, offset: 0 };
     for (let index = 0; index < 6; index++) {
-      navigation = moveCommandMenuSelection(navigation, 1, 9);
+      navigation = moveInWindow(navigation, 1, 9, 6);
     }
 
     expect(navigation).toEqual({ selected: 6, offset: 1 });
@@ -40,9 +38,9 @@ describe('command menu', () => {
   });
 
   test('wraps navigation while resetting the visible window', () => {
-    expect(moveCommandMenuSelection({ selected: 0, offset: 0 }, -1, 9))
+    expect(moveInWindow({ selected: 0, offset: 0 }, -1, 9, 6))
       .toEqual({ selected: 8, offset: 3 });
-    expect(moveCommandMenuSelection({ selected: 8, offset: 3 }, 1, 9))
+    expect(moveInWindow({ selected: 8, offset: 3 }, 1, 9, 6))
       .toEqual({ selected: 0, offset: 0 });
   });
 });

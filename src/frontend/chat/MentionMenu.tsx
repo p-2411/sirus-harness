@@ -9,6 +9,7 @@ import { activeFileMention, fileSearchDirectory, listMentionFiles, matchFileSugg
 import { MentionText, participantColorMap } from '../MentionText';
 import { theme } from '../styles/theme';
 import { terminalText } from '../terminal/text';
+import { moveInWindow } from './SelectMenu';
 
 const MENTION_MENU_VISIBLE_ITEMS = 4;
 
@@ -126,14 +127,11 @@ export function useMentionMenu({ active, input, cursor, participants, files }: {
     offset,
     move(delta: -1 | 1) {
       if (items.length === 0) return;
-      const next = (selected + delta + items.length) % items.length;
-      const nextOffset = next < offset ? next
-        : next >= offset + MENTION_MENU_VISIBLE_ITEMS ? next - MENTION_MENU_VISIBLE_ITEMS + 1
-        : offset;
+      const next = moveInWindow({ selected, offset }, delta, items.length, MENTION_MENU_VISIBLE_ITEMS);
       setNavigation({
         key,
-        selected: items[next].key,
-        bottomGap: Math.max(0, items.length - MENTION_MENU_VISIBLE_ITEMS - nextOffset),
+        selected: items[next.selected].key,
+        bottomGap: Math.max(0, items.length - MENTION_MENU_VISIBLE_ITEMS - next.offset),
       });
     },
   };
