@@ -169,12 +169,27 @@ async function commitDirectory(directory: string, message: string): Promise<stri
         if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) return false;
         throw error;
       }
-    }).map(file => `${file}\0`).join('');
-    writeFileSync(pathspecFile, files, { encoding: 'utf8', mode: 0o600 });
-    // Rebuild the shadow index from the owning repository's file set. `-f` is
-    // required for tracked files that happen to match an ignore rule.
-    await git(directory, ['rm', '-r', '-q', '--cached', '--ignore-unmatch', '--', '.']);
+    });
+    const writePathspecs = (paths: string[]) =>
+      writeFileSync(pathspecFile, paths.join('\0'), { encoding: 'utf8', mode: 0o600 });
+    // The shadow index is kept from one capture to the next, so git knows an
+    // unchanged file by its stat data instead of rehashing every byte of the
+    // project before each turn. Only the entries that left the file set are
+    // dropped. `-f` because a restore leaves the index at the checkpoint and
+    // HEAD at the state it replaced, and git would otherwise refuse to unstage
+    // a restored file that was edited since.
+    const listed = new Set(files);
+    const stale = (await git(directory, ['ls-files', '-z'])).split('\0')
+      .filter(file => file && !listed.has(file));
+    if (stale.length > 0) {
+      writePathspecs(stale);
+      await git(directory, [
+        'rm', '-q', '-f', '--cached', '--ignore-unmatch', `--pathspec-from-file=${pathspecFile}`, '--pathspec-file-nul',
+      ]);
+    }
+    // `-f` is required for tracked files that happen to match an ignore rule.
     if (files.length > 0) {
+      writePathspecs(files);
       await git(directory, ['add', '-f', `--pathspec-from-file=${pathspecFile}`, '--pathspec-file-nul']);
     }
     await git(directory, ['commit', '-q', '--allow-empty', '--no-verify', '-m', message]);
