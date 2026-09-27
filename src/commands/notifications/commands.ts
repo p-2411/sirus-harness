@@ -4,8 +4,8 @@ import {
   notificationMode,
   parseNotificationMode,
   setNotificationMode,
-  type NotificationMode,
 } from '../../frontend/terminal/notifications';
+import type { NotificationPreference } from '../../persistence/settings';
 import { terminalFocused } from '../../frontend/terminal/window-focus';
 import type { Feedback } from '../feedback';
 import { commandUsage, type CommandMenuItem, type CommandSpec } from '../types';
@@ -20,7 +20,7 @@ function notifyMenuItems(): CommandMenuItem[] {
   }));
 }
 
-function notifyCommand(mode: NotificationMode | undefined): Feedback {
+function notifyCommand(mode: NotificationPreference | undefined): Feedback {
   if (mode === undefined) {
     const current = notificationMode();
     const focusNote = current === 'background' && terminalFocused() === null

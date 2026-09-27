@@ -5,10 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { promisify } from 'node:util';
-import { Text, render, renderToString } from 'ink';
-import stripAnsi from 'strip-ansi';
+import { Text, render } from 'ink';
 import { activeFileMention, fileSearchDirectory, listMentionFiles, listProjectFiles, matchFileSuggestions } from '../../src/fileSearch';
-import { FileMenu, useFileSuggestions } from '../../src/frontend/chat/FileMenu';
+import { useFileSuggestions } from '../../src/frontend/chat/MentionMenu';
 
 const runFile = promisify(execFile);
 
@@ -111,20 +110,6 @@ describe('file mention suggestions', () => {
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
-  });
-
-  test('clips long paths to four rows and keeps the selection and navigation hint', () => {
-    const files = Array.from({ length: 7 }, (_, index) => `${index}/very-long-directory/${'nested/'.repeat(10)}file.ts`);
-    const output = stripAnsi(renderToString(<FileMenu files={files} selected={3} offset={2} />, { columns: 44 }));
-    const lines = output.split('\n');
-    expect(lines).toHaveLength(5);
-    expect(lines[0]).toContain('2/very-long-directory/');
-    expect(lines[1]).toContain('› 3/very-long-directory/');
-    expect(output).not.toContain('6/very-long');
-    expect(output).toContain('↑↓ choose · tab attach · esc close');
-    expect(lines.every(line => line.length <= 44)).toBe(true);
-    expect(stripAnsi(renderToString(<FileMenu files={[]} selected={0} offset={0} error="secret stack trace" />)))
-      .not.toContain('secret stack trace');
   });
 
   test('refreshes on reopening and isolates results when the directory changes', async () => {

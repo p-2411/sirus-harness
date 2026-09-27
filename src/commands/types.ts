@@ -28,9 +28,6 @@ export interface CommandMenuItem {
 
 export type CommandMenuEntry = CommandMenuHeading | CommandMenuItem;
 
-// Interim progress from a long-running command, shown while it is still going.
-export type { Notify } from '../agent_runtime/providers/login';
-
 // The conversation as commands see it: the Session methods they call, and
 // nothing else. Session satisfies this structurally, so the session code has
 // no idea the commands exist.
@@ -54,8 +51,8 @@ export interface CommandSession {
   setName(name: string): void;
   setPermissionMode(mode: PermissionMode): void;
   setThinkingLevel(level: ThinkingLevel, participantName?: string): void;
-  // The model spawned subagents run on; null means the spawning
-  // participant's own.
+  // The model spawned subagents run on; null leaves it to Jev's pick for
+  // the task, or to the spawning participant's own model without a key.
   getSubagentModel(): string | null;
   setSubagentModel(model: string | null): void;
   // The session's workers, oldest first, and what the user can do to one.
@@ -94,6 +91,8 @@ export type CommandCapabilities = Partial<AttachesImages & QuitsApp>;
 
 export interface CommandSpec {
   name: string;
+  // The arguments it takes, as the menu and /help write them. A spec without
+  // them takes none, and executeCommand turns any away with its usage.
   args?: string;
   description: string;
   // Returned feedback is shown after completion; notify shows interim info

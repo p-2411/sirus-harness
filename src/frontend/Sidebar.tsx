@@ -65,7 +65,7 @@ function useMinuteClock(): number {
   return now;
 }
 
-export function SidebarHeader({ updateAvailable = false }: { updateAvailable?: boolean }) {
+function SidebarHeader({ updateAvailable = false }: { updateAvailable?: boolean }) {
   const now = useMinuteClock();
 
   return (
@@ -100,8 +100,9 @@ export function SessionItem({ session, isSelected, onSelect, onDelete, now = Dat
   const ref = useRef<DOMElement>(null);
   const select = useCallback(() => onSelect(session), [onSelect, session]);
   const hovered = useClickable(ref, select);
-  // the delete control only exists while the row is hovered; unmounted, its
-  // ref is null and it cannot be hit
+  // The × that deleted a session from a hovered row is hidden (the control is
+  // commented out below), so this ref stays null and nothing can be hit. The
+  // wiring is left in place.
   const deleteRef = useRef<DOMElement>(null);
   const remove = useCallback(() => onDelete(session), [onDelete, session]);
   useClickable(deleteRef, remove);

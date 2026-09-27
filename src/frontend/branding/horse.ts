@@ -9,4 +9,3 @@ export const HORSE = [
   "⠀⠀⠀⠀⠀⠀⠀⠈⢻⡍⠳⣦⡀⠀⠶⠶⠚⠋⠀⠀⠀⢹⡄",
   "⠀⠀⠀⠀⠀⠀⠀⠀⠘⠁⠀⠘⠓",
 ] as const;
-export const HORSE_WIDTH = 24;

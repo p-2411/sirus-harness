@@ -1,14 +1,52 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Box, Text } from 'ink';
+import path from 'node:path';
 import stringWidth from 'string-width';
-import type { Participant } from '../../agent_runtime/session';
+import type { Participant } from '../../agent_runtime/agent';
+import { NAME_PATTERN_SOURCE } from '../../agent_runtime/session/roster';
 import { formatFileMention } from '../../fileMentions';
+import { activeFileMention, fileSearchDirectory, listMentionFiles, matchFileSuggestions } from '../../fileSearch';
 import { MentionText, participantColorMap } from '../MentionText';
 import { theme } from '../styles/theme';
 import { terminalText } from '../terminal/text';
-import { participantMenuItems } from './ParticipantMenu';
+import { moveInWindow } from './SelectMenu';
 
-export const MENTION_MENU_VISIBLE_ITEMS = 4;
+const MENTION_MENU_VISIBLE_ITEMS = 4;
+
+// The files the unfinished @token at the cursor could name, listed afresh from
+// disk whenever the directory it browses changes, and matched as it is typed.
+export function useFileSuggestions(directory: string | undefined, input: string, cursor: number) {
+  const mention = activeFileMention(input, cursor);
+  const active = Boolean(directory && mention);
+  const browseDirectory = directory && mention ? fileSearchDirectory(directory, mention.query) : undefined;
+  const absoluteReferences = mention ? path.isAbsolute(mention.query) : false;
+  const searchKey = JSON.stringify([directory, browseDirectory, absoluteReferences]);
+  const [result, setResult] = useState<{ key?: string; files: string[]; loading: boolean; error: string | null }>({
+    files: [], loading: false, error: null,
+  });
+
+  useEffect(() => {
+    if (!active || !directory || !browseDirectory) return;
+    const controller = new AbortController();
+    setResult({ key: searchKey, files: [], loading: true, error: null });
+    listMentionFiles(directory, browseDirectory, absoluteReferences, controller.signal).then(files => {
+      if (!controller.signal.aborted) setResult({ key: searchKey, files, loading: false, error: null });
+    }, () => {
+      if (!controller.signal.aborted) setResult({ key: searchKey, files: [], loading: false, error: 'Unable to list files in this directory.' });
+    });
+    return () => controller.abort();
+  }, [active, directory, browseDirectory, absoluteReferences, searchKey]);
+
+  const files = useMemo(() => active && result.key === searchKey && mention
+    ? matchFileSuggestions(result.files, mention.query, 50, directory) : [],
+  [active, directory, searchKey, result.key, result.files, mention?.query]);
+  return {
+    mention,
+    files,
+    loading: active && (result.key !== searchKey || result.loading),
+    error: active && result.key === searchKey ? result.error : null,
+  };
+}
 
 export interface MentionMenuItem {
   key: string;
@@ -18,31 +56,52 @@ export interface MentionMenuItem {
   kind: 'participant' | 'file' | 'create';
 }
 
+// Only the unfinished @token at the cursor offers participants. This supports
+// a second mention in the same message without mistaking emails or @scope/pkg
+// package names for participant input.
+const activeMentionPattern = new RegExp(`(?<![\\w@])@(${NAME_PATTERN_SOURCE}|)$`);
+
+// The menu's rows, top to bottom: the matching files, then the participant
+// the name typed so far would create unless one already has it, then the
+// participants whose names start with it. The closest match sits at the
+// bottom, next to the input.
 export function mentionMenuItems(
   input: string,
   participants: readonly Participant[],
   files: readonly string[],
 ): MentionMenuItem[] {
-  const participantItems = participantMenuItems(input, participants);
-  const agents: MentionMenuItem[] = [];
-  const creation: MentionMenuItem[] = [];
-  for (const item of participantItems) {
-    if (item.key === 'create-participant') {
-      creation.push({ ...item, kind: 'create', replacement: `${item.label.split(' ')[0]} ` });
-    } else {
-      agents.push({ ...item, kind: 'participant', replacement: `${item.label} ` });
-    }
+  const items: MentionMenuItem[] = [...files].reverse().map(file => {
+    const label = formatFileMention(file);
+    return { key: `file:${file}`, label, description: 'attach file', replacement: `${label} `, kind: 'file' };
+  });
+  const fragment = activeMentionPattern.exec(input)?.[1];
+  if (fragment === undefined) return items;
+
+  const typed = fragment.toLocaleLowerCase();
+  // Longest name first, so the shortest, and so the closest, is last.
+  const matching = participants
+    .filter(participant => participant.name.toLocaleLowerCase().startsWith(typed))
+    .sort((left, right) => right.name.length - left.name.length || right.name.localeCompare(left.name));
+  if (!matching.some(participant => participant.name.toLocaleLowerCase() === typed)) {
+    const name = fragment || 'name';
+    items.push({
+      key: 'create-participant',
+      label: `@${name} <model> <prompt>`,
+      description: 'create participant',
+      replacement: `@${name} `,
+      kind: 'create',
+    });
   }
-  agents.sort((left, right) => left.label.length - right.label.length
-    || left.label.localeCompare(right.label));
-  return [
-    ...[...files].reverse().map(file => {
-      const label = formatFileMention(file);
-      return { key: `file:${file}`, label, description: 'attach file', replacement: `${label} `, kind: 'file' as const };
-    }),
-    ...creation,
-    ...agents.reverse(),
-  ];
+  for (const participant of matching) {
+    items.push({
+      key: `participant:${participant.name.toLocaleLowerCase()}`,
+      label: `@${participant.name}`,
+      description: 'message participant',
+      replacement: `@${participant.name} `,
+      kind: 'participant',
+    });
+  }
+  return items;
 }
 
 // Which item the menu has selected and which slice of it is on screen. The
@@ -68,14 +127,11 @@ export function useMentionMenu({ active, input, cursor, participants, files }: {
     offset,
     move(delta: -1 | 1) {
       if (items.length === 0) return;
-      const next = (selected + delta + items.length) % items.length;
-      const nextOffset = next < offset ? next
-        : next >= offset + MENTION_MENU_VISIBLE_ITEMS ? next - MENTION_MENU_VISIBLE_ITEMS + 1
-        : offset;
+      const next = moveInWindow({ selected, offset }, delta, items.length, MENTION_MENU_VISIBLE_ITEMS);
       setNavigation({
         key,
-        selected: items[next].key,
-        bottomGap: Math.max(0, items.length - MENTION_MENU_VISIBLE_ITEMS - nextOffset),
+        selected: items[next.selected].key,
+        bottomGap: Math.max(0, items.length - MENTION_MENU_VISIBLE_ITEMS - next.offset),
       });
     },
   };

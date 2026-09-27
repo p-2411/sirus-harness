@@ -2,12 +2,15 @@ import { saveSirusModelPreference } from '../../persistence';
 import { listedDescription, modelIds, modelsOf, VENDOR_INFO, VENDORS } from '../../agent_runtime/providers/catalog';
 import type { SubagentRun } from '../../agent_runtime/tools/subagents';
 import { renderTranscript } from '../../agent_runtime/tools/subagents/report';
+import { jevApiKey } from '../../agent_runtime/router';
 import {
+  DEFAULT_PARTICIPANT,
   THINKING_LEVEL_DESCRIPTIONS,
   THINKING_LEVELS,
   parseThinkingLevel,
   type ThinkingLevel,
 } from '../../agent_runtime/types';
+import { singleLine, truncate } from '../../frontend/terminal/text';
 import type { Feedback } from '../feedback';
 import type { CommandMenuEntry, CommandMenuItem, CommandSession } from '../types';
 
@@ -87,7 +90,7 @@ export function modelMenuItems(args: readonly string[] = []): CommandMenuEntry[]
 }
 
 export function changeModel(
-  participantName: string = 'sirus',
+  participantName: string,
   model: string,
   session: CommandSession,
 ): Feedback {
@@ -96,7 +99,7 @@ export function changeModel(
   session.changeParticipantModel(participantName, resolvedModel);
   // Choosing Sirus before a conversation starts also chooses the default for
   // future sessions. Existing sessions retain their own participant models.
-  if (session.isEmpty() && normalizedParticipantName.toLocaleLowerCase() === 'sirus'
+  if (session.isEmpty() && normalizedParticipantName.toLocaleLowerCase() === DEFAULT_PARTICIPANT
     && !saveSirusModelPreference(resolvedModel)) {
     return {
       kind: 'error',
@@ -110,10 +113,12 @@ export function changeModel(
 }
 
 // `/model subagent` reads or sets the model spawned subagents run on, a
-// setting of the session. `default` returns them to the spawning
-// participant's own model.
+// setting of the session. `default` clears it: then Jev picks each worker's
+// model for its task when there is a key, and without one a worker runs on
+// the model of the participant that spawned it.
 export function subagentModelCommand(args: readonly string[], session: CommandSession): Feedback {
-  const describe = (model: string | null) => `Subagents run on ${model ?? 'each participant\'s own model'}.`;
+  const unset = jevApiKey() ? 'the model Jev picks for each task' : 'each participant\'s own model';
+  const describe = (model: string | null) => `Subagents run on ${model ?? unset}.`;
   if (args.length === 0) return { kind: 'info', text: describe(session.getSubagentModel()) };
   if (args.length > 1) throw new Error('Usage: /model subagent [<model>|default]');
   const model = args[0] === 'default' ? null : resolveModelReference(args[0]);
@@ -121,8 +126,8 @@ export function subagentModelCommand(args: readonly string[], session: CommandSe
   return { kind: 'success', text: describe(model) };
 }
 
-export function changeThinkingLevel(
-  participantName: string = 'sirus',
+function changeThinkingLevel(
+  participantName: string,
   value: string,
   session: CommandSession,
 ): Feedback {
@@ -154,11 +159,11 @@ export function thinkingMenuItems(args: readonly string[] = []): CommandMenuItem
 // anything longer.
 export function thinkingCommand(args: readonly string[], session: CommandSession): Feedback {
   if (args.length === 0) {
-    return { kind: 'info', text: `@sirus thinking is ${session.getThinkingLevel()}.` };
+    return { kind: 'info', text: `@${DEFAULT_PARTICIPANT} thinking is ${session.getThinkingLevel()}.` };
   }
   if (args.length === 1) {
     const level = parseThinkingLevel(args[0]);
-    if (level) return changeThinkingLevel('sirus', level, session);
+    if (level) return changeThinkingLevel(DEFAULT_PARTICIPANT, level, session);
     if (!args[0].startsWith('@')) {
       throw new Error(`Unknown thinking level. Try: ${THINKING_LEVELS.join(', ')}`);
     }
@@ -176,7 +181,7 @@ export function thinkingCommand(args: readonly string[], session: CommandSession
 
 // The compact age the worker strip and the `/agents` menu both show: 45s,
 // 2m10s, 1h04m. It lives beside the menu so the two cannot drift apart.
-export function formatWorkerElapsed(ms: number): string {
+function formatWorkerElapsed(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
@@ -191,7 +196,7 @@ export function workerAge(run: SubagentRun, now: number = Date.now()): string {
 // Every worker `/agents` offers, in the order it lists them: the ones still
 // working first, then the finished ones the user has not yet dismissed. The
 // strip has an order of its own, since it shows one line at a time.
-export function visibleWorkers(workers: readonly SubagentRun[]): SubagentRun[] {
+function visibleWorkers(workers: readonly SubagentRun[]): SubagentRun[] {
   const shown = workers.filter(run => !run.dismissed);
   return [
     ...shown.filter(run => run.status === 'working'),
@@ -207,9 +212,8 @@ function isWorkerAction(value: string | undefined): value is WorkerAction {
   return WORKER_ACTIONS.includes(value as WorkerAction);
 }
 
-function taskPreview(prompt: string, limit = 60): string {
-  const single = prompt.replace(/\s+/g, ' ').trim();
-  return single.length > limit ? `${single.slice(0, limit - 1)}…` : single;
+function taskPreview(prompt: string): string {
+  return truncate(singleLine(prompt), 60);
 }
 
 function findWorker(id: string, session: CommandSession): SubagentRun {

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import {
+	DEFAULT_PARTICIPANT,
 	isPlanCall,
 	planEntriesOf,
 	type CompactionBlock,
@@ -17,7 +18,7 @@ import { Box, Text, type DOMElement } from 'ink';
 import { theme } from '../styles/theme';
 import { Markdown } from '../markdown/Markdown';
 import { describeImage } from '../../images';
-import { terminalText } from '../terminal/text';
+import { singleLine, terminalText, truncate } from '../terminal/text';
 import { participantColor, type ParticipantColors } from '../MentionText';
 import { useClickable } from '../interaction/clickable';
 import {
@@ -54,18 +55,13 @@ function toolVerb(kind: ToolKind): string {
 	return TOOL_VERBS[kind];
 }
 
-// A vendor's title or an agent's words, as one line the terminal only prints.
-function singleLine(text: string): string {
-	return terminalText(text).replace(/\s+/g, ' ').trim();
-}
-
 // The whole line as one string, for the callers with no row to truncate it:
 // the approval prompt, the turn status and the desktop notification all name
 // a call the same way the transcript does. `limit` cuts the title where the
 // caller has less room than a row.
 export function toolLine(call: Pick<ToolCallBlock, 'kind' | 'title'>, limit?: number): string {
 	const title = singleLine(call.title);
-	const shown = limit !== undefined && title.length > limit ? `${title.slice(0, limit - 1)}…` : title;
+	const shown = limit !== undefined ? truncate(title, limit) : title;
 	return shown ? `${toolVerb(call.kind)} ${shown}` : toolVerb(call.kind);
 }
 
@@ -85,7 +81,7 @@ function diffsOf(call: ToolCallBlock): ToolCallDiff[] {
 
 // Lines added and removed by a file change, read off the diffs the call
 // carries; null for a call that changed no file.
-export function editCounts(call: ToolCallBlock): { added: number; removed: number } | null {
+function editCounts(call: ToolCallBlock): { added: number; removed: number } | null {
 	const diffs = diffsOf(call);
 	if (diffs.length === 0) return null;
 	let added = 0;
@@ -139,7 +135,7 @@ function spawnReport(call: ToolCallBlock): string {
 
 // What the call produced: the worker's report on a SpawnAgent row, otherwise
 // its text content, or failing that a string output.
-export function outputPreview(call: ToolCallBlock): DiffLine[] {
+function outputPreview(call: ToolCallBlock): DiffLine[] {
 	const report = spawnReport(call);
 	if (report) return diffLines(' ', report);
 	const text = call.content
@@ -253,10 +249,11 @@ function finished(call: ToolCallBlock): boolean {
 // The dot on that row is the run's: amber while the worker works, green once
 // it is done, red if it failed, muted when it was stopped or the process it
 // lived in ended. A run from an earlier process left no record, so its dot
-// stays neutral.
+// stays neutral. The worker strip uses the same colours, so a worker looks
+// the same wherever it appears.
 type SubagentIndicator = SubagentStatus | 'unknown';
 
-const subagentColors: Record<SubagentIndicator, string> = {
+export const subagentColors: Record<SubagentIndicator, string> = {
 	working: theme.pending,
 	done: theme.success,
 	failed: theme.danger,
@@ -410,15 +407,14 @@ function AnimatedCommandStatus({ count }: { count: number }) {
 }
 
 // A group is known by its first call, which stays first as the run grows.
-export function ToolRunGroup({ message, calls, defaultExpanded = false, sessionId }: {
+export function ToolRunGroup({ message, calls, sessionId }: {
 	message: Message;
 	sessionId?: string;
 	calls: readonly ToolCallBlock[];
-	defaultExpanded?: boolean;
 }) {
 	const hasCompletedEdit = calls.some(call => call.status === 'completed' && editPreview(call).length > 0);
 	// Follow arriving file changes until the user chooses whether to expand.
-	const [expanded, toggle] = useRowExpansion(message, `group:${calls[0]?.id}`, defaultExpanded || hasCompletedEdit);
+	const [expanded, toggle] = useRowExpansion(message, `group:${calls[0]?.id}`, hasCompletedEdit);
 	const ref = useRef<DOMElement>(null);
 	const hovered = useClickable(ref, toggle);
 	const complete = calls.every(finished);
@@ -511,7 +507,7 @@ function CompactionRule({ message, block, participantColors }: {
 }
 
 // An attached image: the terminal cannot show it, so its row says what it is.
-export function ImageLine({ image }: { image: ImageBlock }) {
+function ImageLine({ image }: { image: ImageBlock }) {
 	return <Text color={theme.textMuted}>▣ {describeImage(image)}</Text>;
 }
 
@@ -527,7 +523,7 @@ export function ChatMessage({
 	participantColors?: ParticipantColors;
 }) {
 	const isUser = message.role === "user";
-	const participantName = message.participant ?? 'sirus';
+	const participantName = message.participant ?? DEFAULT_PARTICIPANT;
 	const segments = messageSegments(message.content);
 	return (
 		// no bars, no boxes — bold speaker label, body aligned flush beneath,

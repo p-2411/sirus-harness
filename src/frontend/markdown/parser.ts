@@ -11,7 +11,7 @@ const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*\r?\n?$/;
 const LIST_ITEM = /^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|\r?\n|$)/;
 const BLANK = /^[ \t]*\r?\n?$/;
 
-export function segmentMarkdown(text: string): string[] {
+function segmentMarkdown(text: string): string[] {
   const lines = text.split(/(?<=\n)/);
   const segments: string[] = [];
   let start = 0;

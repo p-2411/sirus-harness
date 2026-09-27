@@ -3,7 +3,8 @@ import { parseVendor, VENDOR_INFO, VENDORS, type Vendor } from '../../agent_runt
 import { maskApiKey, type Source } from '../../agent_runtime/providers/sources';
 import { contextPercent, formatTokens } from '../../agent_runtime/usage';
 import type { Feedback } from '../feedback';
-import type { CommandMenuItem, CommandSession, Notify } from '../types';
+import type { Notify } from '../../agent_runtime/providers/login';
+import type { CommandMenuItem, CommandSession } from '../types';
 import { readSubscriptionUsage, remainingAllowance, formatRemaining, type SubscriptionUsage } from '../../agent_runtime/providers/usage';
 
 // `/login` asks which provider first; `/login <provider>` then offers that
@@ -122,7 +123,7 @@ export function describeSubscriptionUsage(usage: SubscriptionUsage): string {
 
 // How full each participant's window is, from the last usage its runtime
 // reported. A participant whose runtime has not reported yet is left out.
-export function describeSessionUsage(session: CommandSession): string {
+function describeSessionUsage(session: CommandSession): string {
   const parts = session.getParticipants().flatMap(participant => {
     const context = session.getContextUsage(participant.name);
     if (!context) return [];

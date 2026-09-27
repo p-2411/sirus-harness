@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
-import type { ImageBlock, Message, MessageBlock, ToolCallBlock } from '../../agent_runtime/types';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { DEFAULT_PARTICIPANT, type ImageBlock, type Message, type MessageBlock, type ToolCallBlock } from '../../agent_runtime/types';
 import { saveJevKeyRequested } from '../../persistence';
-import { isAutoSendable, Session } from '../../agent_runtime/session';
+import { Session } from '../../agent_runtime/session';
 import { attachClipboardImage, describeImage, removeStoredImage } from '../../images';
 import { Box, Text, measureElement, renderToString, useApp, useBoxMetrics, useInput, useStdout, type DOMElement } from 'ink';
 import { theme } from '../styles/theme';
@@ -14,11 +14,10 @@ import { InputFeedback } from './InputRows';
 import {
   commandMenu,
   executeCommand,
-  isNativeCommand,
+  isSirusCommand,
   parseCommandLine,
-  type CommandMenuEntry,
-  type CommandMenuItem,
 } from '../../commands/registry';
+import type { CommandMenuEntry, CommandMenuItem } from '../../commands/types';
 import { parseMouseWheel } from '../interaction/mouse';
 import { SIDEBAR_WIDTH } from '../Sidebar';
 import { useSelectionRegion } from '../interaction/useTextSelection';
@@ -143,12 +142,22 @@ function TurnStatus({ messages, awaitingApproval, awaitingAnswer, compacting, st
   );
 }
 
-// Long command output borrows the history area, leaving the editor available.
-// Its scroll position is independent from the conversation underneath it.
-function CommandFeedbackPanel({ feedback, participantColors, sidebarWidth }: {
-  feedback: Feedback;
-  participantColors: ParticipantColors;
+// Lines the mouse wheel scrolls per notch.
+const WHEEL_STEP = 3;
+
+// A clipped viewport over content that may be taller than it: the refs for
+// the viewport and the content box inside it, and how many lines the content
+// is scrolled from the edge it rests on. The history rests on its last line
+// (`fromEnd`), a command's output on its first. The wheel over the chat,
+// pgup / pgdn and home / end scroll it while it is `active`. Copying a
+// selection renders the content again at the same width, so text scrolled
+// out of the clipped viewport is still part of the copy.
+function useScrollViewport({ fromEnd, active, sidebarWidth, content }: {
+  fromEnd: boolean;
+  active: boolean;
   sidebarWidth: number;
+  // What the content box holds, read again each time a selection is copied.
+  content: () => ReactNode;
 }) {
   const viewportRef = useRef<DOMElement>(null);
   const contentRef = useRef<DOMElement>(null);
@@ -156,38 +165,76 @@ function CommandFeedbackPanel({ feedback, participantColors, sidebarWidth }: {
   const { height: contentHeight } = useBoxMetrics(contentRef);
   const [offset, setOffset] = useState(0);
   const maxScroll = Math.max(0, contentHeight - viewportHeight);
-  const pageSize = Math.max(1, viewportHeight - 2);
-  const visibleOffset = Math.min(offset, maxScroll);
+  // The copy reads the content through a ref, so the region is registered
+  // once rather than again on every render.
+  const latestContent = useRef(content);
+  latestContent.current = content;
   const text = useCallback(() => {
     const width = contentRef.current ? measureElement(contentRef.current).width : 0;
     if (width <= 0) return [];
     return renderToString(
-      <InputFeedback feedback={feedback} participantColors={participantColors} />,
+      <Box flexDirection="column" width={width}>{latestContent.current()}</Box>,
       { columns: width },
     ).split('\n');
-  }, [feedback, participantColors]);
+  }, []);
+  // A drag that starts in the viewport stays in it, and the highlight rides
+  // along with the content box as it scrolls.
   useSelectionRegion(viewportRef, { follows: contentRef, text });
 
+  // Resting on its end, the content grows under the view: scrolled back, the
+  // view keeps its place on what the user is reading while new lines arrive
+  // below it; at the end, it follows them.
+  const previousContentHeight = useRef(0);
+  useEffect(() => {
+    if (!fromEnd || !active || viewportHeight === 0) return;
+    const addedHeight = Math.max(0, contentHeight - previousContentHeight.current);
+    previousContentHeight.current = contentHeight;
+    setOffset(current => Math.min(current > 0 ? current + addedHeight : 0, maxScroll));
+  }, [contentHeight, maxScroll, active, viewportHeight]);
+
+  // Moves the content by lines toward its end, or toward its start when
+  // negative, whichever edge it rests on.
+  const scrollBy = (lines: number) => setOffset(current =>
+    Math.max(0, Math.min(maxScroll, current + (fromEnd ? -lines : lines))));
   useInput((input, key) => {
     const wheel = parseMouseWheel(input);
-    if (wheel && wheel.column > sidebarWidth) {
-      setOffset(Math.max(0, Math.min(maxScroll, visibleOffset + (wheel.direction === 'up' ? -3 : 3))));
-    } else if (key.pageUp) {
-      setOffset(Math.max(0, visibleOffset - pageSize));
-    } else if (key.pageDown) {
-      setOffset(Math.min(maxScroll, visibleOffset + pageSize));
-    } else if (key.home) {
-      setOffset(0);
-    } else if (key.end) {
-      setOffset(maxScroll);
-    }
+    const page = Math.max(1, viewportHeight - 2);
+    if (wheel && wheel.column > sidebarWidth) scrollBy(wheel.direction === 'up' ? -WHEEL_STEP : WHEEL_STEP);
+    else if (key.pageUp) scrollBy(-page);
+    else if (key.pageDown) scrollBy(page);
+    else if (key.home) scrollBy(-Infinity);
+    else if (key.end) scrollBy(Infinity);
+  }, { isActive: active });
+
+  return {
+    viewportRef,
+    contentRef,
+    // The content may have shrunk since the offset was set.
+    offset: Math.min(offset, maxScroll),
+    setOffset,
+  };
+}
+
+// Long command output borrows the history area, leaving the editor available.
+// Its scroll position is independent from the conversation underneath it.
+function CommandFeedbackPanel({ feedback, participantColors, sidebarWidth }: {
+  feedback: Feedback;
+  participantColors: ParticipantColors;
+  sidebarWidth: number;
+}) {
+  const output = <InputFeedback feedback={feedback} participantColors={participantColors} />;
+  const { viewportRef, contentRef, offset } = useScrollViewport({
+    fromEnd: false,
+    active: true,
+    sidebarWidth,
+    content: () => output,
   });
 
   return (
     <Box flexDirection="column" flexGrow={1} minHeight={0}>
       <Box ref={viewportRef} position="relative" flexGrow={1} minHeight={0} overflow="hidden">
-        <Box ref={contentRef} position="absolute" top={-visibleOffset} width="100%" flexDirection="column" flexShrink={0}>
-          <InputFeedback feedback={feedback} participantColors={participantColors} />
+        <Box ref={contentRef} position="absolute" top={-offset} width="100%" flexDirection="column" flexShrink={0}>
+          {output}
         </Box>
       </Box>
       <Box paddingX={3} height={1} flexShrink={0}>
@@ -218,11 +265,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   // started the worker, not as a message of its own.
   const messages = currSession.getMessages().filter(message => !message.hidden);
   const participants = currSession.getParticipants();
-  // The colours follow the roster's names, so the map changes only when
-  // someone joins or leaves, not on every tick of a turn: the command panel
-  // registers its text for copying again whenever it changes.
-  const roster = participants.map(participant => participant.name).join(' ');
-  const participantColors = useMemo(() => participantColorMap(participants), [roster]);
+  const participantColors = participantColorMap(participants);
 
   const [commandIsLoading, setCommandIsLoading] = useState(false);
   const [imageIsLoading, setImageIsLoading] = useState(false);
@@ -307,85 +350,43 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   const cyclePermissionMode = () => {
     send(`/permissions ${nextPermissionMode(currSession.getPermissionMode())}`);
   };
-  const [scrollOffset, setScrollOffset] = useState(0);
   const commandAbort = useRef<AbortController | null>(null);
   const { stdout } = useStdout();
   const { exit } = useApp();
 
-  const viewportRef = useRef<DOMElement>(null);
-  const contentRef = useRef<DOMElement>(null);
-  const { height: viewportHeight } = useBoxMetrics(viewportRef);
-  const { height: contentHeight } = useBoxMetrics(contentRef);
-  // The history content, rendered once into the scrolling box below and again
-  // on demand at the same width when a selection is copied, so text that has
-  // scrolled out of the clipped viewport is still part of the copy.
+  // The history content, built at the end of each render: drawn into the
+  // scrolling box below, and again whenever a selection is copied.
   const historyContent = useRef<ReactNode>(null);
-  const historyText = useCallback(() => {
-    const width = contentRef.current ? measureElement(contentRef.current).width : 0;
-    if (width <= 0) return [];
-    return renderToString(
-      <Box flexDirection="column" width={width}>{historyContent.current}</Box>,
-      { columns: width },
-    ).split('\n');
-  }, []);
-  // a drag that starts in the history stays in the history, and the highlight
-  // rides along with the content box as it scrolls
-  useSelectionRegion(viewportRef, { follows: contentRef, text: historyText });
-  const previousContentHeight = useRef(0);
-  const maxScroll = Math.max(0, contentHeight - viewportHeight);
-  const pageSize = Math.max(1, viewportHeight - 2);
+  const scroll = useScrollViewport({
+    fromEnd: true,
+    // A command's panel covers the history and takes the scroll keys.
+    active: !panelFeedback,
+    sidebarWidth,
+    content: () => historyContent.current,
+  });
 
-  useEffect(() => {
-    if (panelFeedback || viewportHeight === 0) return;
-    const addedHeight = Math.max(0, contentHeight - previousContentHeight.current);
-    previousContentHeight.current = contentHeight;
-
-    setScrollOffset(current => {
-      const next = current > 0 ? current + addedHeight : 0;
-      return Math.min(next, maxScroll);
-    });
-  }, [contentHeight, maxScroll, panelFeedback, viewportHeight]);
-
-  useInput((input, key) => {
-    // What escape means is decided here. It closes the nearest thing open,
-    // and cancels the turn only when nothing is: pressed to close a menu, it
-    // must not also stop the agents.
-    if (key.escape) {
-      if (hasSelection()) {
-        clearSelection();
-        return;
-      }
-      if (panelFeedback) {
-        setFeedback(null);
-        return;
-      }
-      // A menu or entry of the chat's own closes through its onCancel, and
-      // whatever the input bar has open it closes itself.
-      if (inputMode.type !== 'text' || inputBarDismissible.current) return;
-      setFeedback(null);
-      // The turn only: the session's workers keep going in the background and
-      // are stopped from /agents. Queued messages stay, and the next one goes
-      // out once the turn has stopped.
-      currSession.cancel();
-      commandAbort.current?.abort(new TurnCancelledError());
+  // What escape means is decided here. It closes the nearest thing open, and
+  // cancels the turn only when nothing is: pressed to close a menu, it must
+  // not also stop the agents.
+  useInput((_input, key) => {
+    if (!key.escape) return;
+    if (hasSelection()) {
+      clearSelection();
       return;
     }
-    if (panelFeedback) return;
-    const wheel = parseMouseWheel(input);
-    if (wheel && wheel.column > sidebarWidth) {
-      const amount = 3;
-      setScrollOffset(current => wheel.direction === 'up'
-        ? Math.min(maxScroll, current + amount)
-        : Math.max(0, current - amount));
-    } else if (key.pageUp) {
-      setScrollOffset(current => Math.min(maxScroll, current + pageSize));
-    } else if (key.pageDown) {
-      setScrollOffset(current => Math.max(0, current - pageSize));
-    } else if (key.home) {
-      setScrollOffset(maxScroll);
-    } else if (key.end) {
-      setScrollOffset(0);
+    if (panelFeedback) {
+      setFeedback(null);
+      return;
     }
+    // A menu or entry of the chat's own closes through its onCancel, and
+    // whatever the input bar has open it closes itself.
+    if (inputMode.type !== 'text' || inputBarDismissible.current) return;
+    setFeedback(null);
+    // The turn only: the session's workers keep going in the background and
+    // are stopped from /agents. Queued messages stay, and the next one goes
+    // out once the turn has stopped.
+    currSession.cancel();
+    commandAbort.current?.abort(new TurnCancelledError());
   });
 
   // A command with choices (like /login) turns the input bar into a
@@ -483,7 +484,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   const send = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[]) => {
     // A `/name` for one of the agent's own commands is a prompt: the agent's
     // harness runs it.
-    if (!isAutoSendable(text) && !isNativeCommand(text, currSession.getNativeCommands())) {
+    if (isSirusCommand(text, currSession.getNativeCommands())) {
       const { name, args, rest } = parseCommandLine(text);
       runCommand(name, args, rest);
     } else {
@@ -493,7 +494,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         role: 'user' as const,
         content: content ?? [...images, ...(text ? [{ type: 'text' as const, text }] : [])],
       };
-      setScrollOffset(0);
+      scroll.setOffset(0);
       setFeedback(null);
       // Chat is remounted per session (key={session id}), so if the user
       // navigates away mid-request the unmounted Chat no longer repaints its
@@ -572,7 +573,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       {messages.map(message => {
         const participant = message.role === 'assistant'
           ? participants.find(candidate =>
-            candidate.name.toLocaleLowerCase() === (message.participant ?? 'sirus').toLocaleLowerCase())
+            candidate.name.toLocaleLowerCase() === (message.participant ?? DEFAULT_PARTICIPANT).toLocaleLowerCase())
           : undefined;
         return (
           // Known by its seq, which the session hands out once per entry: a
@@ -619,7 +620,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         />
       )}
       <Box
-        ref={viewportRef}
+        ref={scroll.viewportRef}
         display={panelFeedback ? 'none' : 'flex'}
         position="relative"
         flexDirection="column"
@@ -629,9 +630,9 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         justifyContent={messages.length === 0 && !isLoading ? "center" : "flex-end"}
       >
         <Box
-          ref={contentRef}
+          ref={scroll.contentRef}
           position={messages.length === 0 && !isLoading ? "static" : "absolute"}
-          bottom={messages.length === 0 && !isLoading ? undefined : -scrollOffset}
+          bottom={messages.length === 0 && !isLoading ? undefined : -scroll.offset}
           width="100%"
           flexDirection="column"
           flexShrink={0}
@@ -649,20 +650,22 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         workers={currSession.getWorkers()}
         directory={currSession.getDirectory()}
         mode={effectiveInputMode}
-        permissionMode={currSession.getPermissionMode()}
-        modeNotice={currSession.getModeNotice()}
+        status={{
+          permissionMode: currSession.getPermissionMode(),
+          modeNotice: currSession.getModeNotice(),
+          model: currSession.isModelPending() ? undefined : currSession.getModel(),
+          thinkingLevel: currSession.isModelPending() ? undefined : currSession.getThinkingLevel(),
+          contextUsage: currSession.getContextUsage(),
+        }}
         onCyclePermissionMode={cyclePermissionMode}
         onDismissibleChange={dismissible => { inputBarDismissible.current = dismissible; }}
         attachments={attachments}
         onPasteImage={pasteImage}
         onRemoveAttachment={removeAttachment}
-        model={currSession.isModelPending() ? undefined : currSession.getModel()}
-        thinkingLevel={currSession.isModelPending() ? undefined : currSession.getThinkingLevel()}
         history={history}
         queuedMessages={currSession.getQueuedMessages()}
         onQueue={text => currSession.queueMessage(text)}
         onUpdateQueued={(id, text) => currSession.updateQueuedMessage(id, text)}
-        contextUsage={currSession.getContextUsage()}
         nativeCommands={() => currSession.getNativeCommands()}
       />
     </Box>

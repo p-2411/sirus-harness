@@ -1,32 +1,57 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { Box, Text, useInput, usePaste } from 'ink';
 import { theme } from '../styles/theme';
 import { CommandMenu, useCommandMenu } from './CommandMenu';
-import { isNativeCommand } from '../../commands/registry';
-import { MentionMenu, useMentionMenu } from './MentionMenu';
-import { useFileSuggestions } from './FileMenu';
+import { isSirusCommand } from '../../commands/registry';
+import { MentionMenu, useFileSuggestions, useMentionMenu } from './MentionMenu';
 import { DraftText, TrailingImages } from './DraftText';
 import { InputFeedback, QueuedRow } from './InputRows';
-import { SubagentStatusRow, type StatusRowProps } from './StatusRow';
+import { StatusRow, type StatusRowProps } from './StatusRow';
 import { stripWorkers, WorkerStrip, type WorkerSelection } from './WorkerStrip';
-import { PromptBar, type PromptMode } from './PromptBar';
-import { applyInputEdit, normalizeNewlines, onFirstLine, onLastLine, type InputEdit, type InputState } from './editor';
+import { PromptBar, type CommandPrompt } from './PromptBar';
+import { ApprovalPrompt } from './ApprovalPrompt';
+import { QuestionCard } from './QuestionCard';
+import {
+  applyInputEdit,
+  isForeignInput,
+  isTypedText,
+  normalizeNewlines,
+  onFirstLine,
+  onLastLine,
+  type InputEdit,
+  type InputState,
+} from './editor';
 import { composeContent, removedPlaceholders, useDraftImages } from './draft';
 import { MentionText, participantColorMap } from '../MentionText';
-import { isMouseInput } from '../interaction/mouse';
-import { isFocusInput } from '../terminal/window-focus';
 import { getSelectionSnapshot, subscribeSelection } from '../interaction/selection';
 import type { Feedback } from '../../commands/feedback';
 import type { Participant, QueuedMessage } from '../../agent_runtime/session';
 import type { ImageBlock, MessageBlock } from '../../agent_runtime/types';
 import type { SubagentRun } from '../../agent_runtime/tools/subagents';
-import type { ContextUsage } from '../../agent_runtime/usage';
-import type { PermissionMode } from '../../agent_runtime/permissions/policy';
+import type { ApprovalDecision, ApprovalRequest } from '../../agent_runtime/permissions/approvals';
+import type { QuestionAnswer, QuestionRequest } from '../../agent_runtime/permissions/questions';
 import type { NativeCommand } from '../../agent_runtime/runtime/commands';
 
-// What the input bar is collecting: a message, or one of the prompts that
-// take the bar over for a moment.
-export type InputMode = { type: 'text' } | PromptMode;
+// What the input bar is collecting: a message, the answer to an agent's
+// approval request or question, or what a command's prompt asks for. Each of
+// the others takes the bar over for a moment.
+export type InputMode =
+  | { type: 'text' }
+  | {
+    type: 'approval';
+    request: ApprovalRequest;
+    // further prompts queued behind this one for the same session
+    waiting: number;
+    onDecide: (decision: ApprovalDecision) => void;
+  }
+  | {
+    type: 'question';
+    request: QuestionRequest;
+    // further questions queued behind this one for the same session
+    waiting: number;
+    onAnswer: (answer: QuestionAnswer) => void;
+  }
+  | CommandPrompt;
 
 interface InputBarProps {
   send: (input: string, attachments?: readonly ImageBlock[], content?: MessageBlock[]) => void;
@@ -39,9 +64,9 @@ interface InputBarProps {
   workers?: readonly SubagentRun[];
   directory?: string;
   mode?: InputMode;
-  permissionMode?: PermissionMode;
-  // what the vendor made of that mode, when it could not honour it
-  modeNotice?: string | null;
+  // what the row under the input box says about the session: its permission
+  // mode, its model and how full that model's context is
+  status?: StatusRowProps;
   // shift+tab in text mode
   onCyclePermissionMode?: () => void;
   // Told whether the bar has something open that escape closes: the worker
@@ -55,9 +80,6 @@ interface InputBarProps {
   onPasteImage?: () => void;
   // backspace over an image in the draft drops it
   onRemoveAttachment?: (image: ImageBlock) => void;
-  // the session's current model, shown under the input bar
-  model?: string;
-  thinkingLevel?: string;
   // the session's earlier prompts, oldest first, for ↑/↓ recall
   history?: readonly string[];
   // messages waiting to go out once the agents are free, oldest first
@@ -67,13 +89,13 @@ interface InputBarProps {
   onQueue?: (text: string) => void;
   // Edits a waiting message in place; empty text removes it.
   onUpdateQueued?: (id: string, text: string) => void;
-  contextUsage?: ContextUsage | null;
   // The vendor's own commands `/name` reaches, read while a slash command is
   // being typed.
   nativeCommands?: () => readonly NativeCommand[];
 }
 
 const TEXT_MODE: InputMode = { type: 'text' };
+const NO_STATUS: StatusRowProps = {};
 const NO_WORKERS: readonly SubagentRun[] = [];
 const NO_ATTACHMENTS: readonly ImageBlock[] = [];
 const NO_HISTORY: readonly string[] = [];
@@ -90,24 +112,19 @@ export function InputBar({
   workers = NO_WORKERS,
   directory,
   mode = TEXT_MODE,
-  permissionMode,
-  modeNotice,
+  status = NO_STATUS,
   onCyclePermissionMode,
   onDismissibleChange,
   attachments = NO_ATTACHMENTS,
   onPasteImage,
   onRemoveAttachment,
-  model,
-  thinkingLevel,
   history = NO_HISTORY,
   queuedMessages = NO_QUEUE,
   onQueue,
   onUpdateQueued,
-  contextUsage,
   nativeCommands,
 }: InputBarProps) {
   const participantColors = participantColorMap(participants);
-  const status: StatusRowProps = { permissionMode, modeNotice, model, thinkingLevel, contextUsage };
 
   // ── The draft, and the waiting message standing in front of it ──────────
   // Identity survives edits and earlier messages draining from the queue.
@@ -184,14 +201,14 @@ export function InputBar({
   const commands = useCommandMenu(input, mode.type === 'text' && !selectedQueued && !menusDismissed, nativeList);
   // A Sirus command takes no @mentions; a vendor command's arguments are a
   // prompt and do, once its name is complete.
-  const commandText = input.startsWith('/') && !(input.includes(' ') && isNativeCommand(input, nativeList));
+  const sirusCommand = isSirusCommand(input, nativeList);
   const fileSuggestions = useFileSuggestions(
-    mode.type === 'text' && !menusDismissed && !commandText ? directory : undefined,
+    mode.type === 'text' && !menusDismissed && !sirusCommand ? directory : undefined,
     input,
     editor.cursor,
   );
   const mentionActive = mode.type === 'text' && !menusDismissed
-    && !commandText && fileSuggestions.mention !== null;
+    && !sirusCommand && fileSuggestions.mention !== null;
   const mentions = useMentionMenu({
     active: mentionActive,
     input,
@@ -286,10 +303,7 @@ export function InputBar({
   useInput((enteredInput, key) => {
     // The prompt modes read the keyboard themselves.
     if (mode.type !== 'text') return;
-    // Mouse and window-focus reports are not typing.
-    if (isMouseInput(enteredInput) || isFocusInput(enteredInput)) return;
-    // Session switching belongs to the sidebar in every input mode.
-    if (key.meta && (key.upArrow || key.downArrow)) return;
+    if (isForeignInput(enteredInput, key)) return;
 
     // Most terminals (macOS included) send DEL for the backspace key, which
     // Ink reports as key.delete rather than key.backspace.
@@ -314,9 +328,7 @@ export function InputBar({
         setWorkerSelection(null);
         return;
       }
-      if (!enteredInput || isBackspace || key.ctrl || key.meta || key.tab
-        || key.leftArrow || key.rightArrow
-        || key.pageUp || key.pageDown || key.home || key.end) return;
+      if (!enteredInput || !isTypedText(key)) return;
       setWorkerSelection(null);
     }
 
@@ -454,34 +466,37 @@ export function InputBar({
       return;
     }
 
-    if (!key.ctrl && !key.meta && !key.escape && !key.tab
-      && !key.upArrow && !key.downArrow && !key.leftArrow && !key.rightArrow
-      && !key.pageUp && !key.pageDown && !key.home && !key.end) {
-      insertText(enteredInput);
-    }
+    if (isTypedText(key)) insertText(enteredInput);
   });
 
-  if (mode.type !== 'text') {
-    return (
-      <PromptBar
-        mode={mode}
-        feedback={feedback}
-        participantColors={participantColors}
-        queuedMessages={queuedMessages.map(message => message.text)}
-        workers={workers}
-        status={status}
-      />
-    );
-  }
-
-  return (
+  // The lines around the input box stay put whatever the box holds: the last
+  // command's feedback and the waiting messages above it, the worker strip
+  // and the status row below. A menu opens above them all.
+  const frame = (menu: ReactNode, box: ReactNode) => (
     <>
-      {!selectedQueued && !menusDismissed && <CommandMenu
-        input={input}
-        selected={commands.selected}
-        offset={commands.offset}
-        nativeCommands={nativeList}
-      />}
+      {menu}
+      <InputFeedback feedback={feedback} participantColors={participantColors} />
+      <QueuedRow messages={queuedMessages.map(message => message.text)} selected={selectedQueueIndex} participantColors={participantColors} />
+      {box}
+      <WorkerStrip workers={workers} selection={workerSelection} />
+      <StatusRow {...status} />
+    </>
+  );
+
+  // An approval or a question card stands where the input box stands. Each
+  // is known by its request, which the chat wraps in a new mode every time
+  // it draws: a redraw keeps the card's place, a new request starts afresh.
+  if (mode.type === 'approval') {
+    return frame(null, <ApprovalPrompt key={mode.request.id} request={mode.request} waiting={mode.waiting} onDecide={mode.onDecide} />);
+  }
+  if (mode.type === 'question') {
+    return frame(null, <QuestionCard key={mode.request.id} request={mode.request} waiting={mode.waiting} onAnswer={mode.onAnswer} />);
+  }
+  if (mode.type !== 'text') return <PromptBar mode={mode} frame={frame} />;
+
+  return frame(
+    <>
+      <CommandMenu matches={commands.matches} selected={commands.selected} offset={commands.offset} />
       {mentionActive && <MentionMenu
         items={mentions.items}
         participants={participants}
@@ -490,53 +505,49 @@ export function InputBar({
         loading={fileSuggestions.loading}
         error={fileSuggestions.error}
       />}
-      <InputFeedback feedback={feedback} participantColors={participantColors} />
-      <QueuedRow messages={queuedMessages.map(message => message.text)} selected={selectedQueueIndex} participantColors={participantColors} />
-      <Box
-        borderStyle="round"
-        borderColor={disabled ? theme.border : theme.accent}
-        paddingX={1}
-        marginX={1}
-        flexShrink={0}
-        flexDirection="column"
-      >
-        <Box justifyContent="space-between">
-          <Box flexShrink={1}>
-            <Box flexShrink={0}>
-              <Text color={disabled ? theme.textSubtle : theme.accentSoft}>
-                ›{' '}
-              </Text>
-            </Box>
-            <Text color={theme.text} wrap="wrap">
-              {!selectedQueued && !input && <TrailingImages images={trailingImages} after={false} />}
-              {input ? (
-                <>
-                  <DraftText text={input.slice(0, cursor)} imageFor={imageFor} participantColors={participantColors} />
-                  <Text color={theme.accentSoft}>▌</Text>
-                  <DraftText text={input.slice(cursor)} imageFor={imageFor} participantColors={participantColors} />
-                  {!selectedQueued && <TrailingImages images={trailingImages} after />}
-                </>
-              ) : (
-                <>
-                  <Text color={disabled ? theme.textSubtle : theme.accentSoft}>▌</Text>
-                  <Text color={theme.textSubtle}>
-                    {disabled
-                      ? ' agents are thinking…'
-                      : <> message sirus or <MentionText colors={participantColors}>@mention</MentionText> an agent…</>}
-                  </Text>
-                </>
-              )}
+    </>,
+    <Box
+      borderStyle="round"
+      borderColor={disabled ? theme.border : theme.accent}
+      paddingX={1}
+      marginX={1}
+      flexShrink={0}
+      flexDirection="column"
+    >
+      <Box justifyContent="space-between">
+        <Box flexShrink={1}>
+          <Box flexShrink={0}>
+            <Text color={disabled ? theme.textSubtle : theme.accentSoft}>
+              ›{' '}
             </Text>
           </Box>
-          <Box marginLeft={1} flexShrink={0}>
-            {showCopied
-              ? <Text color={theme.success}>copied ✓</Text>
-              : <Text color={theme.textSubtle}>enter ↵</Text>}
-          </Box>
+          <Text color={theme.text} wrap="wrap">
+            {!selectedQueued && !input && <TrailingImages images={trailingImages} after={false} />}
+            {input ? (
+              <>
+                <DraftText text={input.slice(0, cursor)} imageFor={imageFor} participantColors={participantColors} />
+                <Text color={theme.accentSoft}>▌</Text>
+                <DraftText text={input.slice(cursor)} imageFor={imageFor} participantColors={participantColors} />
+                {!selectedQueued && <TrailingImages images={trailingImages} after />}
+              </>
+            ) : (
+              <>
+                <Text color={disabled ? theme.textSubtle : theme.accentSoft}>▌</Text>
+                <Text color={theme.textSubtle}>
+                  {disabled
+                    ? ' agents are thinking…'
+                    : <> message sirus or <MentionText colors={participantColors}>@mention</MentionText> an agent…</>}
+                </Text>
+              </>
+            )}
+          </Text>
+        </Box>
+        <Box marginLeft={1} flexShrink={0}>
+          {showCopied
+            ? <Text color={theme.success}>copied ✓</Text>
+            : <Text color={theme.textSubtle}>enter ↵</Text>}
         </Box>
       </Box>
-      <WorkerStrip workers={workers} selection={workerSelection} />
-      <SubagentStatusRow {...status} />
-    </>
+    </Box>,
   );
 }

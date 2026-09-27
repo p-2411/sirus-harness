@@ -7,7 +7,7 @@ import { InputBar } from '../../src/frontend/chat/InputBar';
 import { ApprovalPrompt, approvalChoices } from '../../src/frontend/chat/ApprovalPrompt';
 import { QuestionCard } from '../../src/frontend/chat/QuestionCard';
 import { EntryInput, InputFeedback, QueuedRow } from '../../src/frontend/chat/InputRows';
-import { SubagentStatusRow } from '../../src/frontend/chat/StatusRow';
+import { StatusRow } from '../../src/frontend/chat/StatusRow';
 import { WorkerStrip } from '../../src/frontend/chat/WorkerStrip';
 import {
   applyInputEdit,
@@ -17,7 +17,7 @@ import {
   type InputState,
 } from '../../src/frontend/chat/editor';
 import { moveSelection, SelectMenu } from '../../src/frontend/chat/SelectMenu';
-import type { CommandMenuEntry, CommandMenuItem } from '../../src/commands/registry';
+import type { CommandMenuEntry, CommandMenuItem } from '../../src/commands/types';
 import type { Feedback } from '../../src/commands/feedback';
 import { Session } from '../../src/agent_runtime/session';
 import Sidebar from '../../src/frontend/Sidebar';
@@ -203,7 +203,7 @@ describe('input feedback', () => {
 describe('input status', () => {
   test('shows the active model and thinking level together', () => {
     const output = stripAnsi(renderToString(
-      <SubagentStatusRow model="gpt-5.6-sol" thinkingLevel="high" />,
+      <StatusRow model="gpt-5.6-sol" thinkingLevel="high" />,
       { columns: 80 },
     ));
     expect(output).toContain('gpt-5.6-sol · high');
@@ -211,7 +211,7 @@ describe('input status', () => {
 
   test('shows context usage beside the model', () => {
     const output = stripAnsi(renderToString(
-      <SubagentStatusRow
+      <StatusRow
         contextUsage={{ tokens: 150_000, window: 200_000 }}
         model="claude-sonnet-5"
       />,
@@ -223,12 +223,12 @@ describe('input status', () => {
   test('qualifies the mode with what the vendor made of it', () => {
     const notice = 'auto approve is unavailable to @sirus, which is on Manual';
     const output = stripAnsi(renderToString(
-      <SubagentStatusRow permissionMode="auto" modeNotice={notice} />,
+      <StatusRow permissionMode="auto" modeNotice={notice} />,
       { columns: 120 },
     ));
     expect(output).toContain(`auto approve · ${notice} · shift+tab`);
     expect(stripAnsi(renderToString(
-      <SubagentStatusRow permissionMode="auto" modeNotice={null} />,
+      <StatusRow permissionMode="auto" modeNotice={null} />,
       { columns: 120 },
     ))).toContain('auto approve · shift+tab');
   });
@@ -345,7 +345,7 @@ describe('approval prompt', () => {
   }
 
   const render = (request: ApprovalRequest, waiting = 0) => stripAnsi(renderToString(
-    <ApprovalPrompt request={request} waiting={waiting} selected={0} />,
+    <ApprovalPrompt request={request} waiting={waiting} onDecide={() => {}} />,
     { columns: 100 },
   ));
 
@@ -409,7 +409,7 @@ describe('approval prompt', () => {
           status: 'pending', locations: [{ path: hostile }], content: [], input: { command: hostile },
         }, [{ optionId: 'allow', name: hostile, kind: 'allow_once' }])}
         waiting={0}
-        selected={0}
+        onDecide={() => {}}
       />,
       { columns: 140 },
     );
@@ -421,7 +421,7 @@ describe('approval prompt', () => {
   });
 
   test('cuts an unrecognised input down to a readable line', () => {
-    const output = render(approval({
+    const request = approval({
       type: 'tool_call',
       id: 'call-3',
       kind: 'other',
@@ -430,11 +430,19 @@ describe('approval prompt', () => {
       locations: [],
       content: [],
       input: { note: 'x'.repeat(400) },
-    }));
+    });
+    const output = render(request);
 
     expect(output).toContain('@sirus wants to tool sirus - SaveMemory');
     expect(output).toContain('…');
     expect(output).not.toContain('x'.repeat(300));
+    // On a row wide enough to show it whole, the cut line is 200 characters,
+    // its ellipsis included.
+    const wide = stripAnsi(renderToString(
+      <ApprovalPrompt request={request} waiting={0} onDecide={() => {}} />,
+      { columns: 260 },
+    ));
+    expect(wide.match(/\{"note":"x*…/)?.[0]).toHaveLength(200);
   });
 });
 
@@ -564,6 +572,14 @@ describe('entry input', () => {
     expect(output).toContain('Paste your Anthropic API key');
     expect(output).toContain('•'.repeat('sk-ant-1234'.length));
     expect(output).not.toContain('sk-ant');
+  });
+
+  test('gives a secret one dot per character, however many code points each takes', () => {
+    const output = stripAnsi(renderToString(
+      <EntryInput prompt="Key" value="a👍🏽b" masked />,
+      { columns: 80 },
+    ));
+    expect(output).toContain('Key: •••▌');
   });
 
   test('shows an ordinary value as it is typed', () => {

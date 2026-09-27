@@ -9,6 +9,12 @@ export interface TitlePart {
   bold?: boolean;
 }
 
+// A title as plain text, for where it is said rather than drawn: the
+// desktop notification says what the card's top edge does.
+export function titleText(parts: readonly TitlePart[]): string {
+  return parts.map(part => part.text).join('');
+}
+
 // The line that fills the rest of an edge: as wide as the room left, and no
 // wider, however long the run of rule it is given.
 function Rule({ color }: { color: string }) {

@@ -6,11 +6,11 @@
 import { useState } from 'react';
 import { Box, Text, useInput, usePaste } from 'ink';
 import { theme } from '../styles/theme';
-import { FramedCard } from './FramedCard';
-import { isMouseInput } from '../interaction/mouse';
-import { isFocusInput } from '../terminal/window-focus';
+import { FramedCard, type TitlePart } from './FramedCard';
+import { EntryText } from './InputRows';
+import { moveSelection } from './SelectMenu';
 import { terminalText } from '../terminal/text';
-import { backspaceAtEnd } from './editor';
+import { backspaceAtEnd, isForeignInput, isTypedText } from './editor';
 import { describeRequester } from '../../agent_runtime/permissions/approvals';
 import type { QuestionAnswer, QuestionField, QuestionOption, QuestionRequest } from '../../agent_runtime/permissions/questions';
 
@@ -49,6 +49,15 @@ export function questionText(request: QuestionRequest, field: QuestionField): { 
   const question = candidates.find(line => line.trim().endsWith('?')) ?? (single ? request.message : field.title);
   const label = [field.title, field.description].find(line => line && line !== question && line.length <= 30);
   return { question, ...(label ? { label } : {}) };
+}
+
+// Who is asking, as the card's top edge sets it after its mark and the
+// desktop notification says it ahead of the question: "@sirus asks".
+export function questionTitle(request: QuestionRequest): TitlePart[] {
+  return [
+    { text: describeRequester(request.requester), color: theme.accent, bold: true },
+    { text: ' asks' },
+  ];
 }
 
 function progress(count: number, index: number): string {
@@ -153,9 +162,8 @@ export function QuestionCard({ request, waiting, onAnswer }: {
   });
 
   useInput((input, key) => {
-    if (isMouseInput(input) || isFocusInput(input)) return;
-    // Escape is the turn's cancel and session switching the sidebar's.
-    if (key.escape || (key.meta && (key.upArrow || key.downArrow))) return;
+    // Escape is the turn's cancel.
+    if (isForeignInput(input, key) || key.escape) return;
     const isBackspace = key.backspace || key.delete;
     if (typing) {
       if (key.return) submitEntry();
@@ -164,16 +172,15 @@ export function QuestionCard({ request, waiting, onAnswer }: {
         else if (key.leftArrow && index > 0) goTo(index - 1, answers);
       } else if (isBackspace) setEntry(backspaceAtEnd);
       else if (key.ctrl && input === 'u') setEntry('');
-      else if (!key.ctrl && !key.meta && !key.tab && !key.upArrow && !key.downArrow
-        && !key.leftArrow && !key.rightArrow && !key.pageUp && !key.pageDown && !key.home && !key.end) {
+      else if (isTypedText(key)) {
         setEntry(current => current + input);
         setError(null);
       }
       return;
     }
     const multiple = field.kind === 'choice' && field.multiple;
-    if (key.upArrow) setSelected(current => (current - 1 + rows.length) % rows.length);
-    else if (key.downArrow) setSelected(current => (current + 1) % rows.length);
+    if (key.upArrow) setSelected(current => moveSelection(current, -1, rows.length));
+    else if (key.downArrow) setSelected(current => moveSelection(current, 1, rows.length));
     else if (key.leftArrow && index > 0) goTo(index - 1, answers);
     else if (multiple && input === ' ') {
       if (rows[selected]?.other) choose(rows[selected]);
@@ -205,8 +212,7 @@ export function QuestionCard({ request, waiting, onAnswer }: {
       tone={theme.accent}
       title={[
         { text: '? ', color: theme.accent },
-        { text: describeRequester(request.requester), color: theme.accent, bold: true },
-        { text: ' asks' },
+        ...questionTitle(request),
         ...(label ? [{ text: ` · ${terminalText(label)}`, color: theme.textMuted }] : []),
       ]}
       {...(right ? { right } : {})}
@@ -239,7 +245,7 @@ export function QuestionCard({ request, waiting, onAnswer }: {
           {typingOther && <Text color={theme.textMuted}>  Your answer</Text>}
           <Text>
             <Text color={theme.accent}>› </Text>
-            <Text color={theme.text}>{secret ? '•'.repeat(entry.length) : entry}</Text>
+            <EntryText value={entry} masked={secret} />
             <Text color={theme.accent}>▌</Text>
           </Text>
           {error && <Text color={theme.danger}>  {error}</Text>}

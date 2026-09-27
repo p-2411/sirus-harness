@@ -2,8 +2,9 @@
 // the messages waiting to go out, and the prompt for a value a command needs.
 import { Box, Text } from 'ink';
 import { theme } from '../styles/theme';
-import { terminalText } from '../terminal/text';
+import { singleLine, terminalText } from '../terminal/text';
 import { MentionText, type ParticipantColors } from '../MentionText';
+import { characterCount } from './editor';
 import type { Feedback } from '../../commands/feedback';
 
 const FEEDBACK_ICONS = {
@@ -46,7 +47,7 @@ export function QueuedRow({ messages, selected = null, participantColors }: {
           <Box key={index} justifyContent="space-between">
             <Text color={active ? theme.text : theme.textMuted} wrap="truncate-end">
               <Text color={active ? theme.accent : theme.textSubtle}>{active ? '› ' : '⋮ '}</Text>
-              <MentionText colors={participantColors}>{message.replace(/\s+/g, ' ').trim()}</MentionText>
+              <MentionText colors={participantColors}>{singleLine(message)}</MentionText>
             </Text>
           </Box>
         );
@@ -55,9 +56,14 @@ export function QueuedRow({ messages, selected = null, participantColors }: {
   );
 }
 
-// One value a command asked for. A secret echoes one dot per character, so
-// the user can see the paste landed without the value ever reaching the
+// What has been typed into a prompt. A secret echoes one dot per character,
+// so the user can see the paste landed without the value ever reaching the
 // screen (or a copied selection); ordinary text is shown as it is typed.
+export function EntryText({ value, masked }: { value: string; masked: boolean }) {
+  return <Text color={theme.text}>{masked ? '•'.repeat(characterCount(value)) : value}</Text>;
+}
+
+// One value a command asked for.
 export function EntryInput({ prompt, value, masked }: {
   prompt: string;
   value: string;
@@ -67,7 +73,7 @@ export function EntryInput({ prompt, value, masked }: {
     <Box>
       <Text color={theme.accentSoft}>›{' '}</Text>
       <Text color={theme.textMuted}>{prompt}:{' '}</Text>
-      <Text color={theme.text}>{masked ? '•'.repeat(value.length) : value}</Text>
+      <EntryText value={value} masked={masked} />
       <Text color={theme.accentSoft}>▌</Text>
     </Box>
   );

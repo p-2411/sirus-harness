@@ -28,3 +28,15 @@ export function terminalText(text: string): string {
     .join('\n')
     .replace(CONTROL, '');
 }
+
+// Text from outside as one line for a row or a menu: made safe to print, and
+// every run of whitespace, line breaks included, turned into one space.
+export function singleLine(text: string): string {
+  return terminalText(text).replace(/\s+/g, ' ').trim();
+}
+
+// A line cut to at most `limit` characters, the last of them an ellipsis
+// saying that more was there.
+export function truncate(line: string, limit: number): string {
+  return line.length > limit ? `${line.slice(0, limit - 1)}…` : line;
+}

@@ -326,8 +326,15 @@ describe('chat message', () => {
   });
 
   test('expands a tool group into compact indented one-line calls', () => {
+    // A finished file change is what opens a group before any click.
+    const edit = toolCall({
+      id: 'call-2',
+      kind: 'edit',
+      title: 'two.ts',
+      content: [{ type: 'diff', path: 'two.ts', oldText: null, newText: 'one line' }],
+    });
     const output = stripAnsi(renderToString(
-      <ToolRunGroup message={reply()} calls={calls} defaultExpanded />,
+      <ToolRunGroup message={reply()} calls={[calls[0], edit]} />,
       { columns: 120 },
     ));
     const lines = output.split('\n');
@@ -336,7 +343,7 @@ describe('chat message', () => {
     expect(lines[0]).toBe('');
     expect(lines[1]).toContain('Ran 2 commands');
     expect(lines[2]).toContain('● Read one.ts');
-    expect(lines[3]).toContain('● Run bun test');
+    expect(lines[3]).toContain('● Edit two.ts +1');
     expect(lines[4]).toBe('');
     expect(lines[2].indexOf('●')).toBeGreaterThan(lines[1].indexOf('Ran'));
     expect(output).not.toMatch(/[›⌄]/);

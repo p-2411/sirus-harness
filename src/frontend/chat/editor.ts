@@ -1,5 +1,9 @@
-// The input bar's text buffer: a string, a cursor, and the edits that move
-// through them. Nothing here knows about React, Ink or the terminal.
+// The text the input bar and the prompts collect: a string, a cursor, the
+// edits that move through them, and which keys are typing at all. Nothing
+// here draws.
+import type { Key } from 'ink';
+import { isMouseInput } from '../interaction/mouse';
+import { isFocusInput } from '../terminal/window-focus';
 
 export interface InputState {
   text: string;
@@ -25,6 +29,11 @@ function deleteWordBackward(text: string): string {
 // over it and backspace takes it whole.
 const graphemes = new Intl.Segmenter();
 
+// How many characters the text shows, which is how many dots a secret gets.
+export function characterCount(text: string): number {
+  return [...graphemes.segment(text)].length;
+}
+
 function previousCharacter(text: string, cursor: number): number {
   if (cursor <= 0) return 0;
   return graphemes.segment(text).containing(cursor - 1)!.index;
@@ -40,7 +49,7 @@ function nextCharacter(text: string, cursor: number): number {
 // line allows.
 function lineMove(text: string, cursor: number, delta: -1 | 1): number {
   const lineStart = cursor === 0 ? 0 : text.lastIndexOf('\n', cursor - 1) + 1;
-  const column = [...graphemes.segment(text.slice(lineStart, cursor))].length;
+  const column = characterCount(text.slice(lineStart, cursor));
   let targetStart: number;
   let targetEnd: number;
   if (delta < 0) {
@@ -101,4 +110,19 @@ export function applyInputEdit(state: InputState, edit: InputEdit): InputState {
     case 'clear':
       return { text: '', cursor: 0 };
   }
+}
+
+// Input no prompt acts on: a mouse or window-focus report, which is not
+// typing, and option+↑/↓, which switches session from the sidebar in every
+// input mode.
+export function isForeignInput(input: string, key: Key): boolean {
+  return isMouseInput(input) || isFocusInput(input) || (key.meta && (key.upArrow || key.downArrow));
+}
+
+// A key that types its text rather than editing, moving or answering.
+export function isTypedText(key: Key): boolean {
+  return !key.ctrl && !key.meta && !key.escape && !key.tab && !key.return
+    && !key.backspace && !key.delete
+    && !key.upArrow && !key.downArrow && !key.leftArrow && !key.rightArrow
+    && !key.pageUp && !key.pageDown && !key.home && !key.end;
 }

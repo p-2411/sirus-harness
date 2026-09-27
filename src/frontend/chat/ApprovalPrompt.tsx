@@ -1,11 +1,14 @@
-import { Box, Text } from 'ink';
+import { useState } from 'react';
+import { Box, Text, useInput } from 'ink';
 import type { PermissionOptionKind } from '@agentclientprotocol/sdk';
 import { theme } from '../styles/theme';
 import type { ToolCallBlock } from '../../agent_runtime/types';
 import { describeRequester, type ApprovalDecision, type ApprovalRequest } from '../../agent_runtime/permissions/approvals';
 import { editPreview, toolLine, type DiffLine } from './ChatMessage';
-import { FramedCard } from './FramedCard';
-import { terminalText } from '../terminal/text';
+import { isForeignInput } from './editor';
+import { FramedCard, type TitlePart } from './FramedCard';
+import { moveSelection } from './SelectMenu';
+import { terminalText, truncate } from '../terminal/text';
 
 interface ApprovalChoice {
   kind: PermissionOptionKind;
@@ -45,7 +48,7 @@ const PLAN_LINES = 30;
 // the change it makes, the command it runs, the plan it would carry out, or
 // failing all of those its input. Each is the vendor's text and is made safe
 // to print before a mark is put in front of it; the input's JSON already is.
-export function approvalDetail(call: ToolCallBlock): string[] {
+function approvalDetail(call: ToolCallBlock): string[] {
   const lines = call.locations.map(location => terminalText(location.path));
   const diff = editPreview(call);
   if (diff.length > 0) return [...lines, ...diff.map(markLine)];
@@ -63,7 +66,7 @@ export function approvalDetail(call: ToolCallBlock): string[] {
   }
   if (input === undefined) return lines;
   const text = JSON.stringify(input) ?? String(input);
-  return [...lines, text.length > INPUT_LENGTH ? `${text.slice(0, INPUT_LENGTH)}…` : text];
+  return [...lines, truncate(text, INPUT_LENGTH)];
 }
 
 function markLine(line: DiffLine): string {
@@ -72,8 +75,18 @@ function markLine(line: DiffLine): string {
 }
 
 // "wants to read src/app.ts": the line's verb loses its capital mid-sentence.
-export function sentenceCase(line: string): string {
+function sentenceCase(line: string): string {
   return line.charAt(0).toLowerCase() + line.slice(1);
+}
+
+// Who is asking and for what, as the card's top edge sets it after its mark
+// and the desktop notification says it: "@sirus wants to edit src/app.ts".
+export function approvalTitle(request: ApprovalRequest): TitlePart[] {
+  return [
+    { text: describeRequester(request.requester), color: theme.accent, bold: true },
+    { text: ' wants to ' },
+    { text: sentenceCase(toolLine(request.toolCall)), color: theme.highlight, bold: true },
+  ];
 }
 
 // Detail lines carry their own marks: removed and added lines of an edit,
@@ -88,24 +101,32 @@ function detailColor(line: string): string {
 
 // A pending permission prompt as a framed card: who is asking and what for
 // in its top edge, what the call would do, and the choices with their keys.
-export function ApprovalPrompt({ request, waiting, selected }: {
+// The arrows and enter pick a choice, or its key answers at once. Escape is
+// the turn's cancel, which the chat handles, and it withdraws the prompt.
+export function ApprovalPrompt({ request, waiting, onDecide }: {
   request: ApprovalRequest;
   waiting: number;
-  selected: number;
+  onDecide: (decision: ApprovalDecision) => void;
 }) {
+  const [selected, setSelected] = useState(0);
   const choices = approvalChoices(request);
+  useInput((input, key) => {
+    if (isForeignInput(input, key)) return;
+    if (key.upArrow) setSelected(current => moveSelection(current, -1, choices.length));
+    else if (key.downArrow) setSelected(current => moveSelection(current, 1, choices.length));
+    else if (key.return && choices[selected]) onDecide(choices[selected].decision);
+    else {
+      const choice = choices.find(candidate => candidate.key === input);
+      if (choice) onDecide(choice.decision);
+    }
+  });
   const detail = approvalDetail(request.toolCall);
   // A plan is prose: it wraps, and its bullets are not a diff's marks.
   const plan = request.toolCall.kind === 'switch_mode';
   return (
     <FramedCard
       tone={theme.pending}
-      title={[
-        { text: '⚠ ', color: theme.pending },
-        { text: describeRequester(request.requester), color: theme.accent, bold: true },
-        { text: ' wants to ' },
-        { text: sentenceCase(toolLine(request.toolCall)), color: theme.highlight, bold: true },
-      ]}
+      title={[{ text: '⚠ ', color: theme.pending }, ...approvalTitle(request)]}
       {...(waiting > 0 ? { right: `${waiting} more` } : {})}
       footer="↑↓ move · enter select · esc cancels the turn"
     >

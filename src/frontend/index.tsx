@@ -1,4 +1,3 @@
-import React from "react";
 import App from "./app";
 import { render } from "ink";
 import { installFrameCapture } from "./terminal/screen";

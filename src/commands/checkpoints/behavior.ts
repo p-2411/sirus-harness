@@ -6,7 +6,7 @@ import type { CommandMenuEntry, CommandSession } from '../types';
 // What a rewind puts back: the directory, the chat, or both.
 export type RewindScope = 'all' | 'files' | 'chat';
 
-export const REWIND_SCOPES: readonly RewindScope[] = ['all', 'files', 'chat'];
+const REWIND_SCOPES: readonly RewindScope[] = ['all', 'files', 'chat'];
 
 const SCOPE_LABELS: Record<RewindScope, string> = {
   all: 'Restore files and chat',
@@ -49,7 +49,7 @@ function checkpointNumber(session: CommandSession, value: string | undefined): C
   return checkpoints[number - 1];
 }
 
-export function formatCheckpointAge(createdAt: number, now: number = Date.now()): string {
+function formatCheckpointAge(createdAt: number, now: number = Date.now()): string {
   const seconds = Math.max(0, Math.round((now - createdAt) / 1000));
   if (seconds < 60) return 'just now';
   const minutes = Math.round(seconds / 60);
@@ -109,7 +109,7 @@ function listFiles(files: readonly string[]): string {
   return files.length > LISTED_FILES ? `${shown} and ${files.length - LISTED_FILES} more` : shown;
 }
 
-export function describeRewind(result: RewindResult): Feedback {
+function describeRewind(result: RewindResult): Feedback {
   const parts: string[] = [];
   if (result.files) {
     const { restored, removed } = result.files;

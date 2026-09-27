@@ -1,5 +1,6 @@
 import { Text } from 'ink';
 import { NAME_PATTERN_SOURCE, type Participant } from '../agent_runtime/session';
+import { DEFAULT_PARTICIPANT } from '../agent_runtime/types';
 import { theme } from './styles/theme';
 import { parseFileMentions } from '../fileMentions';
 
@@ -13,7 +14,7 @@ const filenamePattern = /(?<![\w@])@(?:[A-Za-z0-9_.-]+\/)*(?=[A-Za-z0-9_.-]*\.[A
 
 // Sirus keeps the original soft grey. Additional participants are ordered by
 // creation and receive stable shades from the restrained blue-purple family.
-export const participantPalette = [
+const participantPalette = [
   theme.accentSoft,
   theme.mention,
   '#A184D8',
@@ -33,7 +34,7 @@ export function participantColorMap(participants: readonly Participant[]): Map<s
   let additionalIndex = 0;
   return new Map(participants.map(participant => {
     const name = participant.name.toLocaleLowerCase();
-    if (name === 'sirus') return [name, theme.accentSoft];
+    if (name === DEFAULT_PARTICIPANT) return [name, theme.accentSoft];
     const color = participantPalette[1 + (additionalIndex % (participantPalette.length - 1))];
     additionalIndex++;
     return [name, color];
@@ -42,7 +43,7 @@ export function participantColorMap(participants: readonly Participant[]): Map<s
 
 export function participantColor(name: string, colors?: ParticipantColors): string {
   const normalized = name.replace(/^@/, '').toLocaleLowerCase();
-  if (normalized === 'sirus') return theme.accentSoft;
+  if (normalized === DEFAULT_PARTICIPANT) return theme.accentSoft;
   const assigned = colors?.get(normalized);
   if (assigned) return assigned;
 

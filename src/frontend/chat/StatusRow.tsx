@@ -32,7 +32,7 @@ function ContextGauge({ usage }: { usage: ContextUsage }) {
 // the vendor could not honour it; the context gauge and the session's model
 // stay on the far right. The workers have their own strip above this row.
 // It keeps its height when there is nothing to say so the layout stays put.
-export function SubagentStatusRow({
+export function StatusRow({
   permissionMode,
   modeNotice,
   model,

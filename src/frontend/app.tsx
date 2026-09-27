@@ -172,16 +172,9 @@ export default function App({ launchDirectory = process.cwd() }: { launchDirecto
     setWorkspace(current => ({ ...current, selectedSession: session }));
   }
 
+  // A new session from the sidebar joins it at once, empty.
   function addSession() {
-    setWorkspace(current => {
-      const session = createDraft(current.sessions, launchDirectory);
-      const sessions = [...current.sessions, session];
-      return {
-        sessions,
-        selectedSession: session,
-        draftSession: createDraft(sessions, launchDirectory),
-      };
-    });
+    setWorkspace(current => startSession(current, createDraft(current.sessions, launchDirectory), launchDirectory));
   }
 
   function activateSession(session: Session) {

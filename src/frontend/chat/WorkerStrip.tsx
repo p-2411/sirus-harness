@@ -5,26 +5,14 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../styles/theme';
-import { toolLine } from './ChatMessage';
+import { subagentColors, toolLine } from './ChatMessage';
 import { workerAge } from '../../commands/agents/behavior';
 import {
   getSubagentsVersion,
   subscribeSubagents,
   type SubagentRun,
-  type SubagentStatus,
 } from '../../agent_runtime/tools/subagents';
 import type { ToolCallBlock } from '../../agent_runtime/types';
-
-// The same colours the SpawnAgent row uses, so a worker looks the same
-// wherever it appears. An interrupted run is a record nobody stopped on
-// purpose: muted, like a cancelled one.
-const workerColors: Record<SubagentStatus, string> = {
-  working: theme.pending,
-  done: theme.success,
-  failed: theme.danger,
-  cancelled: theme.textMuted,
-  interrupted: theme.textMuted,
-};
 
 // Room for a tool title on a strip line before it is cut.
 const TOOL_TITLE_LENGTH = 32;
@@ -78,7 +66,7 @@ function WorkerLine({ run, now, selected, position }: {
           so the line does not jump when focus arrives. */}
       <Text color={theme.accent}>{selected ? '› ' : '  '}</Text>
       {position && <Text color={theme.textSubtle}>{position} </Text>}
-      <Text color={workerColors[run.status]}>●</Text>
+      <Text color={subagentColors[run.status]}>●</Text>
       <Text color={theme.textMuted}> {run.id}</Text>
       <Text color={theme.textSubtle}> · {run.model} {run.thinkingLevel}</Text>
       <Text color={theme.textSubtle}> · {workerAge(run, now)}</Text>
