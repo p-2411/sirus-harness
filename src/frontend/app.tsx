@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Box, useInput, useStdout } from "ink";
+import { Box, useApp, useInput, useStdout } from "ink";
 import Chat from "./chat/Chat";
 import Sidebar, { COLLAPSED_SIDEBAR_WIDTH, SIDEBAR_WIDTH } from "./Sidebar";
 import { DEFAULT_MODEL, Session } from "../agent_runtime/session";
@@ -70,6 +70,7 @@ export default function App({ launchDirectory = process.cwd() }: { launchDirecto
   });
   const { sessions, selectedSession, draftSession } = workspace;
   const activeSession = selectedSession ?? draftSession;
+  const { exit } = useApp();
   const { stdout } = useStdout();
   const [terminalHeight, setTerminalHeight] = useState(() => stdout.rows ?? 24);
   const [updateAvailable, setUpdateAvailable] = useState(false);
@@ -84,6 +85,10 @@ export default function App({ launchDirectory = process.cwd() }: { launchDirecto
   useNotifications(useMemo(() => [...sessions, draftSession], [sessions, draftSession]));
 
   useInput((input, key) => {
+    if (key.ctrl && input === 'c' && key.eventType !== 'release') {
+      exit();
+      return;
+    }
     if (key.ctrl && input === 'k') setSidebarCollapsed(collapsed => !collapsed);
   });
 

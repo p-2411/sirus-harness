@@ -29,6 +29,51 @@ describe('app workspace startup', () => {
     else process.env.SIRUS_DATA_DIR = previousDirectory;
     rmSync(settingsDirectory, { recursive: true, force: true });
   });
+  test.each([
+    ['legacy', '\u0003'],
+    ['Kitty', '\u001b[99;5u'],
+    ['Kitty press', '\u001b[99;5:1u'],
+    ['Kitty repeat', '\u001b[99;5:2u'],
+  ])('%s Ctrl+C exits the app', async (_name, sequence) => {
+    const update = spyOn(updater, 'checkSirusUpdate').mockResolvedValue({
+      updateAvailable: false, currentVersion: '1.0.0', latestVersion: '1.0.0',
+    });
+    const stdin = Object.assign(new PassThrough(), {
+      isTTY: true, setRawMode() {}, ref() {}, unref() {},
+    });
+    const stdout = Object.assign(new PassThrough(), { columns: 100, rows: 30 });
+    stdout.resume();
+    const app = render(createElement(App, { launchDirectory: settingsDirectory }), {
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      stdout: stdout as unknown as NodeJS.WriteStream,
+      debug: true, patchConsole: false, exitOnCtrlC: false,
+    });
+    let exited = false;
+    const exit = app.waitUntilExit().then(() => { exited = true; });
+    const flush = async () => {
+      await new Promise(resolve => setImmediate(resolve));
+      await app.waitUntilRenderFlush();
+    };
+    try {
+      await flush();
+      // Plain typing, other shortcuts, and releasing Ctrl+C must not quit.
+      for (const input of ['c', '\u001b[99u', '\u0015', '\u001b[99;5:3u']) {
+        stdin.write(input);
+        await flush();
+        expect(exited).toBe(false);
+      }
+      stdin.write(sequence);
+      await flush();
+      expect(exited).toBe(true);
+      await exit;
+    } finally {
+      app.unmount();
+      stdin.destroy();
+      stdout.destroy();
+      update.mockRestore();
+    }
+  });
+
   test('new sessions keep the saved or default model through the first prompt', async () => {
     const name = spyOn(naming, 'generateSessionName').mockResolvedValue(null);
     const preferred = 'claude-fable-5-1';

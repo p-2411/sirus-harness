@@ -22,7 +22,13 @@ enableCheckpoints();
 // other modifiers that legacy encodings cannot; plain typing is unaffected.
 const app = render(
   <App launchDirectory={process.cwd()} />,
-  { alternateScreen: true, kittyKeyboard: { mode: 'auto' } },
+  {
+    alternateScreen: true,
+    kittyKeyboard: { mode: 'auto' },
+    // App handles decoded Ctrl+C for both legacy and Kitty input. Ink's
+    // built-in handler only exits on the legacy byte and swallows Kitty Ctrl+C.
+    exitOnCtrlC: false,
+  },
 );
 
 // Agent processes outlive individual turns. Tear them down when Ink exits,
