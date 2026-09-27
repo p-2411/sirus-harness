@@ -103,7 +103,12 @@ const blockRenderers: Record<string, BlockRenderer> = {
   space: renderer<Tokens.Space>((_token, key, context) => (
     context.compact ? null : <Text key={key}> </Text>
   )),
-  def: () => null,
+  // Each segment of a message is lexed on its own, so a link defined in a
+  // later paragraph never reaches the reference that uses it. Shown as
+  // written, the definition keeps its address on screen.
+  def: renderer<Tokens.Def>((token, key) => (
+    <Text key={key} color={theme.textSubtle}>{token.raw.trimEnd()}</Text>
+  )),
 };
 
 export function renderBlock(token: Token, key: string, context: BlockContext): ReactNode {

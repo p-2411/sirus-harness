@@ -50,6 +50,17 @@ describe('terminal markdown renderer', () => {
     expect(output).toContain('https://example.com');
   });
 
+  test('keeps the address of a reference link defined in a later paragraph', () => {
+    const output = render([
+      'The loader is described in [the docs][loader].',
+      '',
+      '[loader]: https://example.com/loader',
+    ].join('\n'));
+
+    expect(output).toContain('the docs');
+    expect(output).toContain('https://example.com/loader');
+  });
+
   test('accepts incomplete markdown while the user is typing', () => {
     expect(() => render('unfinished **bold and `code')).not.toThrow();
   });
