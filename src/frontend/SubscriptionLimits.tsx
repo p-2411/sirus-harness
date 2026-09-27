@@ -50,15 +50,27 @@ export default function SubscriptionLimits() {
   // Include cached limits in the sidebar's first frame, before effects run.
   const [rows, setRows] = useState(() => subscriptionRows(activeSubscriptions()));
   useEffect(() => {
-    let controller: AbortController | undefined;
-    const refresh = () => {
-      controller?.abort();
-      const request = controller = new AbortController();
+    // The latest read of each subscription shown, by row id.
+    const reads = new Map<string, AbortController>();
+    // The timer reads every subscription again. A provider change reads only
+    // one that was not shown before: runtimes starting and stopping change
+    // the providers all the time, and every read is a vendor process.
+    const refresh = (everything: boolean) => {
       const subscriptions = activeSubscriptions();
       // Remove signed-out accounts immediately, preserving current values for
       // unchanged accounts while the provider answers the refresh.
       setRows(previous => subscriptionRows(subscriptions, previous));
+      const shown = new Set(subscriptions.map(item => item.id));
+      for (const [id, request] of reads) {
+        if (shown.has(id)) continue;
+        request.abort();
+        reads.delete(id);
+      }
       for (const item of subscriptions) {
+        if (!everything && reads.has(item.id)) continue;
+        reads.get(item.id)?.abort();
+        const request = new AbortController();
+        reads.set(item.id, request);
         void readSubscriptionUsage(item.vendor, request.signal, item.source.profile).then(usage => {
           if (request.signal.aborted) return;
           setRows(previous => previous.map(row => row.id === item.id
@@ -69,10 +81,14 @@ export default function SubscriptionLimits() {
         });
       }
     };
-    refresh();
-    const unsubscribe = onProviderChange(refresh);
-    const timer = setInterval(refresh, 60_000);
-    return () => { clearInterval(timer); unsubscribe(); controller?.abort(); };
+    refresh(true);
+    const unsubscribe = onProviderChange(() => refresh(false));
+    const timer = setInterval(() => refresh(true), 60_000);
+    return () => {
+      clearInterval(timer);
+      unsubscribe();
+      for (const request of reads.values()) request.abort();
+    };
   }, []);
   return <SubscriptionLimitRows rows={rows} />;
 }

@@ -24,7 +24,7 @@ test('shows the active subscription and follows fallback, removal and API select
   const directory = mkdtempSync(path.join(tmpdir(), 'sirus-sidebar-limits-'));
   process.env.SIRUS_DATA_DIR = directory;
   let releaseLimits!: () => void;
-  let limitsReady = new Promise<void>(resolve => { releaseLimits = resolve; });
+  const limitsReady = new Promise<void>(resolve => { releaseLimits = resolve; });
   const reader = spyOn(usage, 'readSubscriptionUsage').mockImplementation(async (vendor, _signal, profile) => {
     await limitsReady;
     return { windows: [
@@ -70,17 +70,17 @@ test('shows the active subscription and follows fallback, removal and API select
     expect(output).not.toContain('codex 2');
     expect(output).toContain('claude: 80%');
     expect(reader.mock.calls.map(call => call[2]).sort()).toEqual(['claude-one', 'two']);
-    limitsReady = new Promise<void>(resolve => { releaseLimits = resolve; });
-    // A change to the list that leaves the active source alone: the rows keep
-    // their values while the refresh it triggers is in flight.
+    // Every read is a vendor process. A change to the list that leaves the
+    // rows as they are reads nothing again, and neither does a runtime
+    // starting and stopping on a subscription already shown.
+    reader.mockClear();
     current.sources.promote('two');
+    current.markActive('sidebar-worker', subscription('two'));
+    current.clearActive('sidebar-worker');
     await flush();
+    expect(reader).not.toHaveBeenCalled();
     expect(output).toContain('codex: 10%');
     expect(output).toContain('claude: 80%');
-    expect(output).not.toContain('loading');
-    expect(output).not.toContain('unavailable');
-    releaseLimits();
-    await flush();
     // A participant whose runtime fell back to the other subscription: the
     // row follows the credential that runtime is actually on.
     current.markActive('sidebar-test', subscription('one'));
@@ -95,8 +95,9 @@ test('shows the active subscription and follows fallback, removal and API select
     await flush();
     expect(output).toContain('codex: 10%');
     expect(output).toContain('claude: 80%');
+    // A subscription shown for the first time is read at once.
     reader.mockResolvedValue({ windows: [], unavailable: 'could not read limits' });
-    providerFor('claude').sources.promote('claude-one');
+    providerFor('claude').sources.addSubscription('claude-two');
     await flush();
     expect(output).toContain('claude: unavailable');
   } finally {
