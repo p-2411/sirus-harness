@@ -40,8 +40,8 @@ export interface SubagentSpawnOptions {
 const WORKER_IDLE_MS = 15 * 60_000;
 const IDLE_CHECK_MS = 30_000;
 
-// What each run is still doing, so cancelling one can wait for it to wind
-// down. A finished run's entry resolves at once.
+// What each working run is still doing, so cancelling one can wait for it to
+// wind down. A run leaves it as it ends, and its status says so from then on.
 const completions = new Map<string, Promise<void>>();
 
 export async function startSubagent(
@@ -107,7 +107,7 @@ export async function startSubagent(
     dismissed: false,
   };
   registerSubagent(run);
-  completions.set(run.id, execute(run, owner, { text, task, entry }));
+  completions.set(run.id, execute(run, owner, { text, task, entry }).finally(() => completions.delete(run.id)));
   // The caller owns the run map the session lists workers from, so it is the
   // caller that announces the run: a listener woken here would re-read that
   // map before the run had reached it.

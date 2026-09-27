@@ -8,6 +8,7 @@ import * as router from '../../src/agent_runtime/router';
 import type { RuntimeOptions } from '../../src/agent_runtime/runtime/runtime';
 import type { Draft } from '../../src/agent_runtime/session';
 import { Session } from '../../src/agent_runtime/session';
+import { subagentDone } from '../../src/agent_runtime/tools/subagents/run';
 import { textOf } from '../../src/agent_runtime/types';
 import { bindScriptedRuntime, textTurn, unbindRuntime, type ScriptedTurn } from '../support/runtime';
 
@@ -722,6 +723,39 @@ describe('Session model', () => {
       await until(() => worker.reported && session.getStatus() === 'idle', 'the report turn');
       session.clear();
       expect(session.isEmpty()).toBe(true);
+    } finally {
+      release();
+      await session.dispose();
+    }
+  });
+
+  test('a worker that has ended is no longer held for anyone to wait on', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let session!: Session;
+    let spawned = false;
+    bindScriptedRuntime(testModel, async (_input, emit, options) => {
+      if (isWorker(options)) {
+        await gate;
+        return;
+      }
+      if (!spawned) {
+        spawned = true;
+        await session.subagentHostFor('sirus')!.spawn('Background task', 'fresh', { callId: 'spawn' });
+      }
+      emit({ type: 'text', text: 'Noted' });
+    });
+    session = new Session({ id: 'worker-completion', name: 'Completion', model: testModel });
+    try {
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Delegate it' }] });
+      const [worker] = session.getWorkers();
+      // What a canceller of the working run would wait on.
+      const completion = new WeakRef(subagentDone(worker));
+      release();
+      await until(() => worker.status === 'done' && session.getStatus() === 'idle', 'the worker and its report');
+      await new Promise(resolve => setTimeout(resolve, 0));
+      Bun.gc(true);
+      expect(completion.deref()).toBeUndefined();
     } finally {
       release();
       await session.dispose();
