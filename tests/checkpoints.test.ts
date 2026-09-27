@@ -180,6 +180,25 @@ describe('worktree checkpoints', () => {
     expect(readFileSync(path.join(project, 'crlf.txt'), 'utf8')).toBe('one\r\ntwo\r\n');
   });
 
+  test('reads file names literally, so glob characters in one capture no ignored file', async () => {
+    const root = temporaryDirectory('literal-names');
+    const project = path.join(root, 'project');
+    mkdirSync(project);
+    process.env.SIRUS_DATA_DIR = path.join(root, 'state');
+    enableCheckpoints();
+    git(project, 'init', '-q');
+    writeFileSync(path.join(project, '.gitignore'), 'secret.txt\n');
+    writeFileSync(path.join(project, 'secret.txt'), 'private before\n');
+    writeFileSync(path.join(project, '*.txt'), 'star\n');
+    const checkpoint = await captureCheckpoint(project, 'glob characters');
+    expect(checkpoint).not.toBeNull();
+    expect(checkpointTree(project, checkpoint!.id)).toEqual(['*.txt', '.gitignore']);
+
+    writeFileSync(path.join(project, 'secret.txt'), 'private after\n');
+    await restoreCheckpoint(project, checkpoint!.id);
+    expect(readFileSync(path.join(project, 'secret.txt'), 'utf8')).toBe('private after\n');
+  });
+
   test('refuses a restore that would overwrite a newly ignored file', async () => {
     const root = temporaryDirectory('ignored-conflict');
     const project = path.join(root, 'project');

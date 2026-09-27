@@ -75,10 +75,13 @@ export function gitEnvironment(): NodeJS.ProcessEnv {
   return env;
 }
 
+// Pathspecs are taken literally: the files handed to a forced add are names,
+// and a file called `*.txt` must not stand for every text file in the
+// project, ignored ones included.
 function git(directory: string, args: readonly string[]): Promise<string> {
   const gitDirectory = checkpointRepository(directory);
   return new Promise((resolve, reject) => {
-    execFile('git', ['--git-dir', gitDirectory, '--work-tree', directory, ...args], {
+    execFile('git', ['--git-dir', gitDirectory, '--work-tree', directory, '--literal-pathspecs', ...args], {
       cwd: directory,
       timeout: GIT_TIMEOUT_MS,
       maxBuffer: 64 * 1024 * 1024,
