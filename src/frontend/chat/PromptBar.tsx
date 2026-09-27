@@ -8,7 +8,7 @@ import { theme } from '../styles/theme';
 import { moveSelection, SelectMenu } from './SelectMenu';
 import { ApprovalPrompt, approvalChoices } from './ApprovalPrompt';
 import { QuestionCard } from './QuestionCard';
-import { applyInputEdit, inputEditForKey, type InputEdit, type InputState } from './editor';
+import { applyInputEdit, inputEditForKey, isKeyboardProtocolReport, type InputEdit, type InputState } from './editor';
 import { EntryInput, InputFeedback, QueuedRow } from './InputRows';
 import { SubagentStatusRow, type StatusRowProps } from './StatusRow';
 import { WorkerStrip } from './WorkerStrip';
@@ -80,6 +80,7 @@ export function PromptBar({ mode, feedback, participantColors, queuedMessages, w
   });
 
   useInput((enteredInput, key) => {
+    if (isKeyboardProtocolReport(enteredInput)) return;
     if (key.eventType === 'release' || (key.ctrl && enteredInput === 'c')) return;
     // Mouse and window-focus reports are not typing.
     if (isMouseInput(enteredInput) || isFocusInput(enteredInput)) return;

@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'rea
 import { Box, Text, useBoxMetrics, useInput, usePaste, useStdout, type DOMElement } from 'ink';
 import { theme } from '../styles/theme';
 import { FramedCard } from './FramedCard';
-import { applyInputEdit, inputEditForKey, type InputEdit, type InputState } from './editor';
+import { applyInputEdit, inputEditForKey, isKeyboardProtocolReport, type InputEdit, type InputState } from './editor';
 import { useClickable } from '../interaction/clickable';
 import { isMouseInput } from '../interaction/mouse';
 import { isFocusInput } from '../terminal/window-focus';
@@ -222,6 +222,7 @@ export function QuestionCard({ request, waiting, onAnswer }: {
     if (typing && !reviewing) edit({ type: 'insert', text: text.replace(/\r\n?|\n/g, ' ') });
   });
   useInput((input, key) => {
+    if (isKeyboardProtocolReport(input)) return;
     if (key.eventType === 'release' || (key.ctrl && input === 'c')) return;
     if (isMouseInput(input) || isFocusInput(input) || sent.current
       || (key.meta && (key.upArrow || key.downArrow))) return;

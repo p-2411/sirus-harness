@@ -317,3 +317,25 @@ describe('readline keys through Ink', () => {
     }
   });
 });
+
+
+test('ignores keyboard protocol reports while preserving keys and literal pasted text', async () => {
+  const draft = renderDraft();
+  try {
+    await draft.flush();
+    await draft.press('hello');
+    await draft.press('\u001b[?0u');
+    expect(draft.input).toBe('hello');
+    await draft.press('\u001b[?');
+    await draft.press('31u');
+    expect(draft.input).toBe('hello');
+    await draft.press('\u001b[97u');
+    expect(draft.input).toBe('helloa');
+    await draft.press('\u001b[200~[?0u\u001b[201~');
+    expect(draft.input).toBe('helloa[?0u');
+    await draft.press('\r');
+    expect(draft.sent[0].input).toBe('helloa[?0u');
+  } finally {
+    draft.unmount();
+  }
+});

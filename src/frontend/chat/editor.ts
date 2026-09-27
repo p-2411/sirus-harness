@@ -22,6 +22,13 @@ export function createInputHistory(): InputHistory {
   return { undo: [], killed: '', killing: false };
 }
 
+// Ghostty and other Kitty-compatible terminals answer Ink's startup query
+// with CSI ? flags u. Ink can also deliver that reply to useInput, with ESC
+// stripped. It is terminal state, not text or a key; paste uses its own path.
+export function isKeyboardProtocolReport(input: string): boolean {
+  return /^(?:\x1b)?\[\?\d+u$/.test(input);
+}
+
 interface InputKey {
   ctrl?: boolean;
   meta?: boolean;

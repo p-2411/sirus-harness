@@ -10,7 +10,7 @@ import { InputFeedback, QueuedRow } from './InputRows';
 import { SubagentStatusRow, type StatusRowProps } from './StatusRow';
 import { stripWorkers, WorkerStrip, type WorkerSelection } from './WorkerStrip';
 import { PromptBar, type PromptMode } from './PromptBar';
-import { applyInputEdit, createInputHistory, inputEditForKey, normalizeNewlines, onFirstLine, onLastLine, type InputEdit, type InputState } from './editor';
+import { applyInputEdit, createInputHistory, inputEditForKey, isKeyboardProtocolReport, normalizeNewlines, onFirstLine, onLastLine, type InputEdit, type InputState } from './editor';
 import { composeContent, removedPlaceholders, stripPlaceholders, useDraftImages } from './draft';
 import { MentionText, participantColorMap } from '../MentionText';
 import { isMouseInput } from '../interaction/mouse';
@@ -312,6 +312,7 @@ export function InputBar({
   });
 
   useInput((enteredInput, key) => {
+    if (isKeyboardProtocolReport(enteredInput)) return;
     if (key.eventType === 'release') return;
     if (key.ctrl && enteredInput === 'c') {
       if (onInterrupt?.()) {
