@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import type { ImageBlock, Message, MessageBlock, ToolCallBlock } from '../../agent_runtime/types';
-import { saveJevKeyRequested } from '../../persistence';
+import { saveJevKeyRequested } from '../../persistence/settings';
 import { Session } from '../../agent_runtime/session';
 import { isAutoSendable } from '../../agent_runtime/session/messageQueue';
 import { attachClipboardImage, describeImage, removeStoredImage } from '../../images';

@@ -5,7 +5,7 @@ import { allProviders } from './providers';
 import { latestModelOf, workerModelsOf, VENDOR_INFO, type ModelProfile, type Vendor } from './providers/catalog';
 import type { Provider } from './providers/provider';
 import { cachedSubscriptionRemaining } from './providers/usage';
-import { loadJevApiKey, loadJevKeyRequested } from '../persistence';
+import { openSettings } from '../persistence/settings';
 import { parseThinkingLevel, type ThinkingLevel } from './types';
 
 // Jev, TypeSafe AI's System One model, picks a new session's model from its
@@ -27,17 +27,17 @@ export type JevKeySource = 'env' | 'settings';
 // Where the key in use comes from, or null when Jev is not configured.
 export function jevKeySource(): JevKeySource | null {
   if (process.env[JEV_API_KEY_ENV]?.trim()) return 'env';
-  return loadJevApiKey() ? 'settings' : null;
+  return openSettings().get('jevApiKey') ? 'settings' : null;
 }
 
 export function jevApiKey(): string | null {
-  return process.env[JEV_API_KEY_ENV]?.trim() || loadJevApiKey();
+  return process.env[JEV_API_KEY_ENV]?.trim() || openSettings().get('jevApiKey');
 }
 
 // Whether to ask the user for a key now: once, on the first launch without
 // one, and never again once they have answered or declined.
 export function shouldRequestJevKey(): boolean {
-  return jevApiKey() === null && !loadJevKeyRequested();
+  return jevApiKey() === null && !openSettings().get('jevKeyRequested');
 }
 
 // One attempt, no retries: a pick that takes longer than this is not worth

@@ -1,4 +1,4 @@
-import { saveJevApiKey } from '../../persistence';
+import { saveJevApiKey } from '../../persistence/settings';
 import { JEV_API_KEY_ENV, jevApiKey, jevKeySource } from '../../agent_runtime/router';
 import { maskApiKey } from '../../agent_runtime/providers/sources';
 import type { Feedback } from '../feedback';

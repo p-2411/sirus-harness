@@ -7,7 +7,7 @@ import {
   MAX_IMAGE_BYTES, removeStoredImage, validatedImagePath,
 } from '../src/images';
 import { Session } from '../src/agent_runtime/session';
-import { loadSessionSnapshots, saveSessionSnapshots } from '../src/persistence';
+import { loadSessionSnapshots, saveSessionSnapshots } from '../src/persistence/sessions';
 import type { ImageBlock } from '../src/agent_runtime/types';
 
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=', 'base64');

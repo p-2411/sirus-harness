@@ -6,7 +6,7 @@ import { LIMIT_PERIODS, type LimitPeriod } from '../types';
 import { providerFor } from './index';
 import { maskKeys } from './sources';
 import { dataDirectory } from '../../dataDirectory';
-import { loadSubscriptionLimitCache, saveSubscriptionLimitCache } from '../../persistence';
+import { loadSubscriptionLimitCache, saveSubscriptionLimitCache } from '../../persistence/subscriptionLimits';
 
 export interface SubscriptionWindow {
   label: string;

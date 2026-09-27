@@ -3,12 +3,8 @@ import { Box, useInput, useStdout } from "ink";
 import Chat from "./chat/Chat";
 import Sidebar, { COLLAPSED_SIDEBAR_WIDTH, SIDEBAR_WIDTH } from "./Sidebar";
 import { Session } from "../agent_runtime/session";
-import {
-  loadSessionSnapshots,
-  loadSirusModelPreference,
-  saveSessionSnapshots,
-  type PersistedSessions,
-} from "../persistence";
+import { loadSessionSnapshots, saveSessionSnapshots, type PersistedSessions } from "../persistence/sessions";
+import { loadSirusModelPreference } from "../persistence/settings";
 import { useTextSelection } from "./interaction/useTextSelection";
 import { useTerminalFocus } from "./interaction/useTerminalFocus";
 import { useNotifications } from "./useNotifications";

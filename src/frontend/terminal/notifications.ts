@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import { spawn } from 'child_process';
-import { loadNotificationPreference, saveNotificationPreference } from '../../persistence';
+import { loadNotificationPreference, saveNotificationPreference } from '../../persistence/settings';
 import { osc } from './osc';
 import { writeOverlay } from './screen';
 import { terminalFocused } from './window-focus';

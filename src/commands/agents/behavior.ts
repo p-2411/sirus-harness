@@ -1,4 +1,4 @@
-import { saveSirusModelPreference } from '../../persistence';
+import { saveSirusModelPreference } from '../../persistence/settings';
 import { listedDescription, modelIds, modelsOf, VENDOR_INFO, VENDORS } from '../../agent_runtime/providers/catalog';
 import type { SubagentRun } from '../../agent_runtime/tools/subagents';
 import { renderTranscript } from '../../agent_runtime/tools/subagents/report';

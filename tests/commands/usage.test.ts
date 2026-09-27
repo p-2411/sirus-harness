@@ -7,7 +7,7 @@ import { CodexRpc } from '../../src/agent_runtime/providers/openai/codex-account
 import { providerFor } from '../../src/agent_runtime/providers';
 import { usageCommand } from '../../src/commands/authentication/behavior';
 import { cachedSubscriptionRemaining, readSubscriptionUsage } from '../../src/agent_runtime/providers/usage';
-import { loadSubscriptionLimitCache, saveSubscriptionLimitCache } from '../../src/persistence';
+import { loadSubscriptionLimitCache, saveSubscriptionLimitCache } from '../../src/persistence/subscriptionLimits';
 import { TurnCancelledError } from '../../src/abort';
 import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
 

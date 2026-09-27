@@ -16,13 +16,13 @@ import {
   type MessageBlock,
   type ToolCallBlock,
 } from '../agent_runtime/types';
-import type { SessionSnapshot } from '../agent_runtime/session';
+import type { Session, SessionSnapshot } from '../agent_runtime/session';
 import type { WorkerRecord } from '../agent_runtime/tools/subagents';
 import { readJson, setAside, writeJson } from './atomicJson';
 
 // The session file: the whole conversation graph, validated on the way in and
 // normalised to one shape. Storage knows the snapshot record, never the
-// `Session` class — the type import above is erased at build time.
+// `Session` class — the type imports above are erased at build time.
 
 const textBlockSchema = z.object({
   type: z.literal('text'),
@@ -205,6 +205,14 @@ const LEGACY_PARTICIPANT_NAME = DEFAULT_PARTICIPANT;
 
 export interface PersistedSessionSnapshots {
   snapshots: SessionSnapshot[];
+  selectedSessionId: string | null;
+}
+
+// The same workspace once `app.tsx` has rebuilt each snapshot into a
+// `Session`. Type-only, like the import it rests on: storage never
+// constructs one.
+export interface PersistedSessions {
+  sessions: Session[];
   selectedSessionId: string | null;
 }
 

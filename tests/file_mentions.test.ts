@@ -6,7 +6,7 @@ import { formatFileMention, MAX_MENTION_FILE_BYTES, parseFileMentions, resolveFi
 import { rootTextRanges } from '../src/mentions';
 import { Session } from '../src/agent_runtime/session';
 import type { Draft } from '../src/agent_runtime/session/timeline';
-import { loadSessionSnapshots, saveSessionSnapshots } from '../src/persistence';
+import { loadSessionSnapshots, saveSessionSnapshots } from '../src/persistence/sessions';
 import { bindScriptedRuntime, textTurn, unbindRuntime } from './support/runtime';
 
 const model = 'test-file-mention-model';

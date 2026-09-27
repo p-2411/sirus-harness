@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Session } from '../../src/agent_runtime/session';
 import type { Draft } from '../../src/agent_runtime/session/timeline';
-import { loadSessionSnapshots, saveSessionSnapshots } from '../../src/persistence';
+import { loadSessionSnapshots, saveSessionSnapshots } from '../../src/persistence/sessions';
 import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
 
 const prompt: Draft = { role: 'user', content: [{ type: 'text', text: 'Continue' }] };

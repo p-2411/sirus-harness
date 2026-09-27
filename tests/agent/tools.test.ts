@@ -30,7 +30,7 @@ const {
   unregisterToolSession,
 } = await import('../../src/agent_runtime/tools/server');
 const { closeAllMemoryStores } = await import('../../src/memory/store');
-const { saveMemoryAccessPreference } = await import('../../src/persistence');
+const { openSettings } = await import('../../src/persistence/settings');
 
 type SubagentHost = import('../../src/agent_runtime/tools/types').SubagentHost;
 type SubagentSpawnCall = import('../../src/agent_runtime/tools/types').SubagentSpawnCall;
@@ -179,7 +179,7 @@ describe('tool registry', () => {
     expect(availableTools().map(tool => tool.name)).toEqual([...MEMORY_TOOLS, ...AGENT_TOOLS]);
     expect(availableTools({ subagent: true }).map(tool => tool.name)).toEqual(MEMORY_TOOLS);
 
-    expect(saveMemoryAccessPreference(false)).toBe(true);
+    expect(openSettings().set({ memoryEnabled: false })).toBe(true);
     expect(availableTools().map(tool => tool.name)).toEqual(AGENT_TOOLS);
     expect(availableTools({ subagent: true })).toEqual([]);
   });

@@ -1,10 +1,6 @@
 import { randomUUID } from 'crypto';
-import {
-  clearSubscriptionLimitCache,
-  openSettings,
-  type StoredProviderSource,
-  type StoredProviderSources,
-} from '../../persistence';
+import { openSettings, type StoredProviderSource, type StoredProviderSources } from '../../persistence/settings';
+import { clearSubscriptionLimitCache } from '../../persistence/subscriptionLimits';
 import type { VendorInfo } from './catalog';
 
 // The single source of truth for one vendor's credentials: an ordered list of
