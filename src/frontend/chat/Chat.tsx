@@ -16,9 +16,8 @@ import {
   executeCommand,
   isSirusCommand,
   parseCommandLine,
-  type CommandMenuEntry,
-  type CommandMenuItem,
 } from '../../commands/registry';
+import type { CommandMenuEntry, CommandMenuItem } from '../../commands/types';
 import { parseMouseWheel } from '../interaction/mouse';
 import { SIDEBAR_WIDTH } from '../Sidebar';
 import { useSelectionRegion } from '../interaction/useTextSelection';

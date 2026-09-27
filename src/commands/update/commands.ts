@@ -1,7 +1,8 @@
 import { updateSirus } from '../../updater';
 import { SIRUS_VERSION } from '../../version';
 import type { Feedback } from '../feedback';
-import type { CommandSpec, Notify } from '../types';
+import type { Notify } from '../../agent_runtime/providers/login';
+import type { CommandSpec } from '../types';
 
 async function updateCommand(notify: Notify, signal?: AbortSignal): Promise<Feedback> {
   const result = await updateSirus(notify, signal);

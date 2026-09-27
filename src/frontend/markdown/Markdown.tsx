@@ -24,5 +24,3 @@ export function Markdown({ children, compact = false, participantColors }: Markd
     </Box>
   );
 }
-
-export { lexMarkdown, segmentMarkdown } from './parser';

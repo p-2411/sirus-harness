@@ -9,9 +9,8 @@ import {
   executeCommand,
   matchCommands,
   parseCommandLine,
-  type CommandMenuItem,
-  type CommandSession,
 } from '../../src/commands/registry';
+import type { CommandMenuItem, CommandSession } from '../../src/commands/types';
 import { loginMenuItems } from '../../src/commands/authentication/behavior';
 import { Session } from '../../src/agent_runtime/session';
 import { providerFor } from '../../src/agent_runtime/providers';

@@ -23,15 +23,6 @@ import {
   type CommandSpec,
 } from './types';
 
-export type {
-  CommandContext,
-  CommandMenuEntry,
-  CommandMenuItem,
-  CommandResult,
-  CommandSession,
-  CommandSpec,
-} from './types';
-
 // The input menu and executor share this registry. Definitions are assembled
 // explicitly to keep the user-visible order independent of domain grouping.
 export const commandRegistry: readonly CommandSpec[] = [

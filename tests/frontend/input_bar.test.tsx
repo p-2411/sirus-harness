@@ -17,7 +17,7 @@ import {
   type InputState,
 } from '../../src/frontend/chat/editor';
 import { moveSelection, SelectMenu } from '../../src/frontend/chat/SelectMenu';
-import type { CommandMenuEntry, CommandMenuItem } from '../../src/commands/registry';
+import type { CommandMenuEntry, CommandMenuItem } from '../../src/commands/types';
 import type { Feedback } from '../../src/commands/feedback';
 import { Session } from '../../src/agent_runtime/session';
 import Sidebar from '../../src/frontend/Sidebar';

@@ -1,5 +1,5 @@
 import { Box, Text } from 'ink';
-import type { CommandMenuEntry } from '../../commands/registry';
+import type { CommandMenuEntry } from '../../commands/types';
 import { theme } from '../styles/theme';
 
 // The selection after an arrow key, wrapping around at either end.

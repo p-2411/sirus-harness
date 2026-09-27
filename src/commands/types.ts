@@ -28,9 +28,6 @@ export interface CommandMenuItem {
 
 export type CommandMenuEntry = CommandMenuHeading | CommandMenuItem;
 
-// Interim progress from a long-running command, shown while it is still going.
-export type { Notify } from '../agent_runtime/providers/login';
-
 // The conversation as commands see it: the Session methods they call, and
 // nothing else. Session satisfies this structurally, so the session code has
 // no idea the commands exist.
