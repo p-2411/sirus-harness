@@ -102,8 +102,9 @@ export interface SessionSnapshot {
   workers?: WorkerRecord[];
   // Directory snapshots taken before turns, oldest first; absent when none.
   checkpoints?: Checkpoint[];
-  // When the history last changed; absent in older snapshots.
-  updatedAt?: number;
+  // When the history last changed. A file written before the field existed
+  // is read as epoch zero, older than anything since.
+  updatedAt: number;
   conversationStartedAt?: number;
   lastResponseFinishedAt?: number | null;
   // A newly-created session may still take its name from its first prompt.
@@ -228,6 +229,7 @@ export class Session {
     this.turns = new TurnRunner({ timeline: this.timeline, roster: this.roster });
   }
 
+  // What the snapshot leaves out, resolveSessionOptions fills in.
   static fromSnapshot(snapshot: SessionSnapshot): Session {
     return new Session({
       id: snapshot.id,
@@ -237,14 +239,14 @@ export class Session {
       defaultParticipant: snapshot.defaultModel.name,
       participants: snapshot.participants,
       messages: snapshot.messages,
-      workers: snapshot.workers ?? [],
-      checkpoints: snapshot.checkpoints ?? [],
-      inputContent: snapshot.inputContent ?? '',
-      autoNamePending: snapshot.autoNamePending ?? false,
-      ...(snapshot.permissionMode ? { permissionMode: snapshot.permissionMode } : {}),
-      ...(snapshot.subagentModel ? { subagentModel: snapshot.subagentModel } : {}),
+      workers: snapshot.workers,
+      checkpoints: snapshot.checkpoints,
+      inputContent: snapshot.inputContent,
+      autoNamePending: snapshot.autoNamePending,
+      permissionMode: snapshot.permissionMode,
+      subagentModel: snapshot.subagentModel,
       timing: {
-        updatedAt: snapshot.updatedAt ?? 0,
+        updatedAt: snapshot.updatedAt,
         conversationStartedAt: snapshot.conversationStartedAt,
         lastResponseFinishedAt: snapshot.lastResponseFinishedAt,
       },
