@@ -17,6 +17,13 @@ type Json = Record<string, unknown>;
 
 type NotificationHandler = (method: string, params: Json) => void;
 
+// Someone waiting on a notification: told of each one that arrives, and of
+// the app-server's end, after which none will.
+interface Waiter {
+  notified: NotificationHandler;
+  failed: (error: Error) => void;
+}
+
 const TARGET_TRIPLES: Record<string, string> = {
   'darwin-arm64': 'aarch64-apple-darwin',
   'darwin-x64': 'x86_64-apple-darwin',
@@ -55,7 +62,7 @@ export class CodexRpc {
   private child: ChildProcessWithoutNullStreams;
   private nextId = 1;
   private pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
-  private notificationHandlers = new Set<NotificationHandler>();
+  private waiters = new Set<Waiter>();
   private stderrTail: string[] = [];
   private exited: Error | null = null;
   private readonly onProcessExit = () => this.close();
@@ -130,7 +137,8 @@ export class CodexRpc {
     this.write({ method, params });
   }
 
-  // Resolves when a notification satisfying the predicate arrives.
+  // Resolves when a notification satisfying the predicate arrives, and
+  // rejects with the reason the app-server went if it goes first.
   waitForNotification(
     method: string,
     predicate: (params: Json) => boolean,
@@ -138,11 +146,12 @@ export class CodexRpc {
     signal?: AbortSignal,
   ): Promise<Json> {
     throwIfAborted(signal);
+    if (this.exited) return Promise.reject(this.exited);
     return new Promise((resolve, reject) => {
       const settle = () => {
         clearTimeout(timer);
         signal?.removeEventListener('abort', onAbort);
-        this.notificationHandlers.delete(handler);
+        this.waiters.delete(waiter);
       };
       const timer = setTimeout(() => {
         settle();
@@ -154,12 +163,18 @@ export class CodexRpc {
         settle();
         reject(abortReason(signal!));
       };
-      const handler: NotificationHandler = (incoming, params) => {
-        if (incoming !== method || !predicate(params)) return;
-        settle();
-        resolve(params);
+      const waiter: Waiter = {
+        notified: (incoming, params) => {
+          if (incoming !== method || !predicate(params)) return;
+          settle();
+          resolve(params);
+        },
+        failed: error => {
+          settle();
+          reject(error);
+        },
       };
-      this.notificationHandlers.add(handler);
+      this.waiters.add(waiter);
       signal?.addEventListener('abort', onAbort, { once: true });
     });
   }
@@ -174,6 +189,7 @@ export class CodexRpc {
     process.off('exit', this.onProcessExit);
     for (const { reject } of this.pending.values()) reject(error);
     this.pending.clear();
+    for (const waiter of [...this.waiters]) waiter.failed(error);
   }
 
   private write(message: Json): void {
@@ -196,7 +212,7 @@ export class CodexRpc {
       return;
     }
     if (typeof method === 'string') {
-      for (const handler of this.notificationHandlers) handler(method, params);
+      for (const waiter of this.waiters) waiter.notified(method, params);
       return;
     }
     if (typeof id === 'number') {

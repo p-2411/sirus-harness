@@ -8,7 +8,7 @@ import { PassThrough } from 'stream';
 import { TurnCancelledError } from '../../src/abort';
 import { providerFor, servableModelIds, servesModel } from '../../src/agent_runtime/providers';
 import { MODELS, modelInfo, VENDOR_INFO, type Vendor } from '../../src/agent_runtime/providers/catalog';
-import { readCodexAccount, readCodexRateLimits } from '../../src/agent_runtime/providers/openai/codex-account';
+import { loginCodex, readCodexAccount, readCodexRateLimits } from '../../src/agent_runtime/providers/openai/codex-account';
 import { sourceEnvironment } from '../../src/agent_runtime/providers/profiles';
 import { maskApiKey, type Source } from '../../src/agent_runtime/providers/sources';
 import * as acp from '../../src/agent_runtime/runtime/acp';
@@ -555,5 +555,19 @@ describe('the Codex app-server behind an account request', () => {
     const child = fakeAppServer(method => method === 'initialize' ? { error: { message: 'unsupported client' } } : null);
     await expect(readCodexAccount('default')).rejects.toThrow('unsupported client');
     expect(child.killed).toBe(true);
+  });
+
+  test('a login waiting on the browser fails with the reason the app-server went', async () => {
+    const child = fakeAppServer(method => {
+      if (method === 'initialize') return { result: {} };
+      if (method === 'account/read') return { result: { account: null } };
+      if (method === 'account/login/start') return { result: { loginId: 'login-1', authUrl: 'https://auth.example/' } };
+      return null;
+    });
+    const login = loginCodex('default', () => {
+      child.stderr.write('token exchange failed\n');
+      setImmediate(() => child.emit('exit', 1, null));
+    }, 2_000);
+    await expect(login).rejects.toThrow('codex app-server exited (1): token exchange failed');
   });
 });
