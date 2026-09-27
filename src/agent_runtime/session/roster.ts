@@ -29,7 +29,7 @@ export const NAME_PATTERN_SOURCE = `[A-Za-z][${NAME_CHARS}]*`;
 const NAME_PATTERN = new RegExp(`^${NAME_PATTERN_SOURCE}$`);
 // The trailing guard leaves scoped package names such as @scope/package as
 // ordinary prompt text rather than participant mentions.
-const mentionPattern = new RegExp(`(?<![\\w@])@(${NAME_PATTERN_SOURCE})(?![A-Za-z0-9_\\/-])`, 'g');
+export const mentionPattern = new RegExp(`(?<![\\w@])@(${NAME_PATTERN_SOURCE})(?![A-Za-z0-9_\\/-])`, 'g');
 
 // `/model subagent <model>` addresses the session's subagents, so no
 // participant may take the name.
