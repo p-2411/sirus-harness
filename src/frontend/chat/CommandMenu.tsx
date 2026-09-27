@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
-import { matchCommands } from '../../commands/registry';
+import { matchCommands, type CommandMatch } from '../../commands/registry';
 import { commandUsage } from '../../commands/types';
 import type { NativeCommand } from '../../agent_runtime/runtime/commands';
 import { theme } from '../styles/theme';
@@ -37,18 +37,16 @@ export function useCommandMenu(input: string, active: boolean, nativeCommands: r
   };
 }
 
+// The matches useCommandMenu found, a window of them at a time.
 export function CommandMenu({
-  input,
+  matches,
   selected = 0,
   offset = 0,
-  nativeCommands = [],
 }: {
-  input: string;
+  matches: readonly CommandMatch[];
   selected?: number;
   offset?: number;
-  nativeCommands?: readonly NativeCommand[];
 }) {
-  const matches = matchCommands(input, nativeCommands);
   if (matches.length === 0) return null;
 
   const labels = matches.map(commandUsage);

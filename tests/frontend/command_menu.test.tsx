@@ -2,12 +2,13 @@ import { describe, expect, test } from 'bun:test';
 import { renderToString } from 'ink';
 import stripAnsi from 'strip-ansi';
 import { CommandMenu } from '../../src/frontend/chat/CommandMenu';
+import { matchCommands } from '../../src/commands/registry';
 import { moveInWindow } from '../../src/frontend/chat/SelectMenu';
 
 describe('command menu', () => {
   test('shows only the first six commands initially', () => {
     const output = stripAnsi(renderToString(
-      <CommandMenu input="/" />,
+      <CommandMenu matches={matchCommands('/')} />,
       { columns: 100 },
     ));
     const lines = output.split('\n').filter(Boolean);
@@ -27,7 +28,7 @@ describe('command menu', () => {
     expect(navigation).toEqual({ selected: 6, offset: 1 });
 
     const output = stripAnsi(renderToString(
-      <CommandMenu input="/" {...navigation} />,
+      <CommandMenu matches={matchCommands('/')} {...navigation} />,
       { columns: 100 },
     ));
     const lines = output.split('\n').filter(Boolean);

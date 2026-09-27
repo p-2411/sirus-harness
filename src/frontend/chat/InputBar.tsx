@@ -496,12 +496,7 @@ export function InputBar({
 
   return frame(
     <>
-      {!selectedQueued && !menusDismissed && <CommandMenu
-        input={input}
-        selected={commands.selected}
-        offset={commands.offset}
-        nativeCommands={nativeList}
-      />}
+      <CommandMenu matches={commands.matches} selected={commands.selected} offset={commands.offset} />
       {mentionActive && <MentionMenu
         items={mentions.items}
         participants={participants}
