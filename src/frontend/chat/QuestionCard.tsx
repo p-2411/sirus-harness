@@ -6,7 +6,7 @@
 import { useState } from 'react';
 import { Box, Text, useInput, usePaste } from 'ink';
 import { theme } from '../styles/theme';
-import { FramedCard } from './FramedCard';
+import { FramedCard, type TitlePart } from './FramedCard';
 import { EntryText } from './InputRows';
 import { moveSelection } from './SelectMenu';
 import { terminalText } from '../terminal/text';
@@ -49,6 +49,15 @@ export function questionText(request: QuestionRequest, field: QuestionField): { 
   const question = candidates.find(line => line.trim().endsWith('?')) ?? (single ? request.message : field.title);
   const label = [field.title, field.description].find(line => line && line !== question && line.length <= 30);
   return { question, ...(label ? { label } : {}) };
+}
+
+// Who is asking, as the card's top edge sets it after its mark and the
+// desktop notification says it ahead of the question: "@sirus asks".
+export function questionTitle(request: QuestionRequest): TitlePart[] {
+  return [
+    { text: describeRequester(request.requester), color: theme.accent, bold: true },
+    { text: ' asks' },
+  ];
 }
 
 function progress(count: number, index: number): string {
@@ -203,8 +212,7 @@ export function QuestionCard({ request, waiting, onAnswer }: {
       tone={theme.accent}
       title={[
         { text: '? ', color: theme.accent },
-        { text: describeRequester(request.requester), color: theme.accent, bold: true },
-        { text: ' asks' },
+        ...questionTitle(request),
         ...(label ? [{ text: ` · ${terminalText(label)}`, color: theme.textMuted }] : []),
       ]}
       {...(right ? { right } : {})}

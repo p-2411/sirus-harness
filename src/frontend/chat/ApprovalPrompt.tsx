@@ -6,7 +6,7 @@ import type { ToolCallBlock } from '../../agent_runtime/types';
 import { describeRequester, type ApprovalDecision, type ApprovalRequest } from '../../agent_runtime/permissions/approvals';
 import { editPreview, toolLine, type DiffLine } from './ChatMessage';
 import { isForeignInput } from './editor';
-import { FramedCard } from './FramedCard';
+import { FramedCard, type TitlePart } from './FramedCard';
 import { moveSelection } from './SelectMenu';
 import { terminalText, truncate } from '../terminal/text';
 
@@ -75,8 +75,18 @@ function markLine(line: DiffLine): string {
 }
 
 // "wants to read src/app.ts": the line's verb loses its capital mid-sentence.
-export function sentenceCase(line: string): string {
+function sentenceCase(line: string): string {
   return line.charAt(0).toLowerCase() + line.slice(1);
+}
+
+// Who is asking and for what, as the card's top edge sets it after its mark
+// and the desktop notification says it: "@sirus wants to edit src/app.ts".
+export function approvalTitle(request: ApprovalRequest): TitlePart[] {
+  return [
+    { text: describeRequester(request.requester), color: theme.accent, bold: true },
+    { text: ' wants to ' },
+    { text: sentenceCase(toolLine(request.toolCall)), color: theme.highlight, bold: true },
+  ];
 }
 
 // Detail lines carry their own marks: removed and added lines of an edit,
@@ -116,12 +126,7 @@ export function ApprovalPrompt({ request, waiting, onDecide }: {
   return (
     <FramedCard
       tone={theme.pending}
-      title={[
-        { text: '⚠ ', color: theme.pending },
-        { text: describeRequester(request.requester), color: theme.accent, bold: true },
-        { text: ' wants to ' },
-        { text: sentenceCase(toolLine(request.toolCall)), color: theme.highlight, bold: true },
-      ]}
+      title={[{ text: '⚠ ', color: theme.pending }, ...approvalTitle(request)]}
       {...(waiting > 0 ? { right: `${waiting} more` } : {})}
       footer="↑↓ move · enter select · esc cancels the turn"
     >

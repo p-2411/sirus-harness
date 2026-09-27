@@ -1,16 +1,16 @@
 import { useEffect, useRef } from 'react';
 import type { Session, SessionStatus } from '../agent_runtime/session';
 import { DEFAULT_PARTICIPANT, textOf } from '../agent_runtime/types';
-import { describeRequester, pendingApprovals, subscribePermissions } from '../agent_runtime/permissions/approvals';
+import { pendingApprovals, subscribePermissions } from '../agent_runtime/permissions/approvals';
 import { pendingQuestions, subscribeQuestions } from '../agent_runtime/permissions/questions';
 import {
   listAllSubagents,
   subscribeSubagents,
   type SubagentStatus,
 } from '../agent_runtime/tools/subagents';
-import { sentenceCase } from './chat/ApprovalPrompt';
-import { questionText } from './chat/QuestionCard';
-import { toolLine } from './chat/ChatMessage';
+import { approvalTitle } from './chat/ApprovalPrompt';
+import { titleText } from './chat/FramedCard';
+import { questionText, questionTitle } from './chat/QuestionCard';
 import { notify } from './terminal/notifications';
 import { truncate } from './terminal/text';
 
@@ -65,7 +65,7 @@ export function subscribeApprovalNotifications(getSessions: () => readonly Sessi
       const session = getSessions().find(candidate => candidate.getId() === request.sessionId);
       send(
         `Sirus · ${session?.getName() ?? 'approval needed'}`,
-        `${describeRequester(request.requester)} wants to ${firstLine(sentenceCase(toolLine(request.toolCall)))}`,
+        firstLine(titleText(approvalTitle(request))),
       );
     }
     seen = new Set(current.map(request => request.id));
@@ -82,7 +82,7 @@ function subscribeQuestionNotifications(getSessions: () => readonly Session[], s
       const session = getSessions().find(candidate => candidate.getId() === request.sessionId);
       send(
         `Sirus · ${session?.getName() ?? 'question'}`,
-        `${describeRequester(request.requester)} asks: ${firstLine(questionText(request, request.fields[0]).question)}`,
+        `${titleText(questionTitle(request))}: ${firstLine(questionText(request, request.fields[0]).question)}`,
       );
     }
     seen = new Set(current.map(request => request.id));
