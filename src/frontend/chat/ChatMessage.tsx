@@ -249,10 +249,11 @@ function finished(call: ToolCallBlock): boolean {
 // The dot on that row is the run's: amber while the worker works, green once
 // it is done, red if it failed, muted when it was stopped or the process it
 // lived in ended. A run from an earlier process left no record, so its dot
-// stays neutral.
+// stays neutral. The worker strip uses the same colours, so a worker looks
+// the same wherever it appears.
 type SubagentIndicator = SubagentStatus | 'unknown';
 
-const subagentColors: Record<SubagentIndicator, string> = {
+export const subagentColors: Record<SubagentIndicator, string> = {
 	working: theme.pending,
 	done: theme.success,
 	failed: theme.danger,
