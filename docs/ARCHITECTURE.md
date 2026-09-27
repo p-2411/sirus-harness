@@ -15,7 +15,7 @@ implementation.
 | Routing | `src/agent_runtime/router.ts` | Which model a new session starts on, and which model and depth a worker runs on, when nobody has said. |
 | Tools | `src/agent_runtime/tools/index.ts` | The tools only Sirus can offer, served to every runtime by one MCP server. |
 | Permissions | `src/agent_runtime/permissions/policy.ts` | The three modes, and the queue for whatever a vendor escalates. |
-| Persistence | `src/persistence/index.ts` | Settings and session snapshots on disk. Knows nothing about the runtime. |
+| Persistence | `src/persistence/settings.ts`, `sessions.ts` | Settings and session snapshots on disk, each file imported directly. Knows nothing about the runtime. |
 | Memory | `src/memory/store.ts` | Long-term memories in SQLite with vector search. |
 | Commands | `src/commands/registry.ts` | Slash commands the user types. |
 | Frontend | `src/frontend/app.tsx` | The Ink UI, worker strip included. Consumes the facades above; owns no runtime logic. |
@@ -28,7 +28,8 @@ One user prompt, in the order a reader opens the files:
    `session.sendMessage(draft)`.
 2. `agent_runtime/session/index.ts`: `Session.sendMessage` reads the mentions through
    `ParticipantRoster`, stamps the entry with the session-wide sequence number and puts it
-   in the transcript of every participant it addresses, and nothing else's. The pre-turn
+   in the transcript of every participant it addresses, and nothing else's. The first
+   prompt of a draft whose model nobody chose waits here for the router's pick. The pre-turn
    checkpoint is awaited before anything is prompted, because the runtimes run their tools
    themselves and cannot wait on a barrier. Then the round goes to `TurnRunner`.
 3. `agent_runtime/session/turnRunner.ts`: the round loop. Every addressed participant runs
@@ -56,9 +57,12 @@ One user prompt, in the order a reader opens the files:
    knows which session it belongs to and who issued it. The registry is `tools/index.ts`;
    delegation runs in `tools/subagents/`.
 9. `agent_runtime/permissions/approvals.ts`: whatever the vendor escalates arrives as
-   `session/request_permission`, is queued here, and `Chat.tsx` renders it and answers with
-   one of the options the vendor offered. A question the agent asks arrives as
-   `elicitation/create` and is queued in `permissions/questions.ts` the same way.
+   `session/request_permission` and is queued here. `Chat.tsx` hands the session's first
+   waiting request to `InputBar`, which draws `frontend/chat/ApprovalPrompt.tsx` in place of
+   the input box; the prompt keeps its own keys and selection and answers with one of the
+   options the vendor offered. A question the agent asks arrives as `elicitation/create`, is
+   queued in `permissions/questions.ts` the same way, and is drawn by `QuestionCard.tsx` once
+   no approval is waiting.
 
 ## Session
 
@@ -74,7 +78,8 @@ facade over collaborators in the same folder, each constructible on its own:
   keeps the activity clocks, and owns the identity of the assistant entries a round fills
   in.
 - `ParticipantRoster`: the agents in the session and all `@name` routing. The mention
-  grammar exists once, here.
+  grammar exists once, here; the chat's colouring (`MentionText.tsx`) and the `@` menu
+  import it.
 - `TurnRunner`: the round loop, and the one place that decides what a participant is
   prompted with.
 - `CheckpointLog`: directory snapshots taken before each turn, and the cross-session
@@ -86,10 +91,22 @@ facade over collaborators in the same folder, each constructible on its own:
 
 A checkpoint records the sequence number of the prompt that started its turn. Rewinding the
 chat drops every participant's entries from that number on and rebuilds their runtimes, so
-each one is reseeded from the record that is left. A rewind waits on the session's workers:
-the chat on all of them, since it rebuilds the records they belong to, the files only on one
-running in the project directory itself, since a worker in its own worktree changes nothing
-there.
+each one is reseeded from the record that is left. A rewind is refused, not queued, while
+other work could be caught by it: the chat while any of the session's workers is working or
+still being set up, since it rebuilds the records they belong to, and `clear` the same way;
+the files while a worker of any session is working in the project directory itself, or
+another session has a turn or a restore running there. A worker in its own worktree changes
+nothing in the project directory, so it does not hold up a file restore.
+
+The snapshots themselves (`src/checkpoints.ts`) are commits in a shadow git repository per
+directory under the data directory, never the project's own. A capture takes the files the
+project's git would track, with literal pathspecs, and keeps the shadow index between
+captures so an unchanged file is not rehashed; the shadow repository's `info/attributes`
+makes captures and restores byte-exact whatever the project's `.gitattributes` say.
+
+`cancel`, which Esc calls, aborts the session's turn from the moment it was accepted, so a
+turn still waiting on the router's pick or on its pre-turn checkpoint stops there, before
+any participant is prompted. Workers keep running.
 
 The session's workers are the subagents its participants spawned, and they are background
 tasks: nothing waits on one. When a worker ends, `workerFinished` queues its report and
@@ -106,7 +123,8 @@ report into the owner's record at the start of the next prompt rather than start
 on launch. Nothing restarts on its own. `getWorkers`, `cancelWorker`, `messageWorker` and
 `dismissWorker` are what `/agents` and the worker strip call; `dispose` is asynchronous for
 the workers' sake, since each one must be stopped and waited for before its worktree can be
-removed.
+removed, and it first waits for any spawn still setting up its worker. `app.tsx` calls it
+from `deleteSession`, whose control in the sidebar is commented out.
 
 Compaction belongs to the runtime. Each one folds its own conversation when its window
 fills and reports it; `Session.compact` asks the default participant's runtime to do it now
@@ -117,7 +135,7 @@ There is no automatic step of Sirus's own and nothing to switch off.
 ## Participants and runtimes
 
 `agent.ts` is one agent in a session: its name and model, its transcript, the credential its
-runtime is on, and its subagents. It asks `RuntimeHost` (implemented by `Session`) for
+runtime is on, and its subagents. It asks `RuntimeHost` (built by `Session.runtimeHost`) for
 everything that belongs to the session rather than the participant: the system prompt, the
 MCP server entry, the permission mode, and where an escalation goes.
 
@@ -131,51 +149,59 @@ fork with it. `runtime/runtime.ts` is the contract, the tool-call reduction ever
 goes through, the mapping from Sirus's modes onto the vendor mode kinds, and
 `boundRuntimes`, the seam the test suite binds scripted runtimes to so sessions run without
 an agent process. `acp.ts` is the only code that speaks the wire protocol. `launch.ts` is
-the per-vendor part: Claude through `@agentclientprotocol/claude-agent-acp` with an explicit
-tool allowlist and the system prompt in `_meta`, Codex through
-`@agentclientprotocol/codex-acp` with the prompt written to a file and named in
-`CODEX_CONFIG`. `Launch.session` builds what one session carries, whether it is opened by
-`session/new`, `session/fork` or `session/resume`, so the vendor's extras are written once
-and each session names the participant it was opened for; `forkNeedsResume` says whether the
+the per-vendor part: Claude through `@agentclientprotocol/claude-agent-acp` with a tool
+denylist (`CLAUDE_TOOLS_OFF`, passed as `disallowedTools`) and Sirus's addendum appended to
+the Claude Code preset prompt in `_meta`, Codex through `@agentclientprotocol/codex-acp` with
+the addendum inline as `developer_instructions` in `CODEX_CONFIG`, which also switches
+Codex's own subagents off (`multi_agent`) and `request_user_input` on in every mode.
+`Launch.session` builds what one session carries, whether it is opened by `session/new`,
+`session/fork` or `session/resume`, so the vendor's extras are written once and each
+session names the participant it was opened for; `forkNeedsResume` says whether the
 vendor's fork answers with a live session (Codex) or has to be reopened in the worker's
 directory first (Claude). On both vendors a fork keeps the system prompt of the conversation
 it was forked from, so the worker's own contract arrives in its first prompt instead
-(`FORKED_WORKER_HANDOVER` in `prompt.ts`). Adding a vendor is a launch spec and a catalog
-row.
+(`FORKED_WORKER_HANDOVER` in `prompt.ts`). Adding a vendor starts with a launch spec and a
+catalog row; Providers below lists the rest.
 
-Skills are the vendors' own, and `runtime/skills.ts` only makes sure each one can see the
-user's and the project's. Claude has `Skill` on its allowlist, but its empty
-`settingSources` also keep its skill folders and enabled plugins out, so each session is
-handed them through the SDK's `plugins` option (`claudeSkillOptions`). Two local plugins,
-`user` and `project`, are written under the launch's folder: symlinks to the skills in
-`.claude/skills` and `.agents/skills` and the commands in `.claude/commands`, in the user's
-home and in the session's directory up to the git root. The plugins the user installed and
-enabled in Claude Code (`plugins/installed_plugins.json` and `enabledPlugins` in the user's,
-the project's and the local settings) go in by path, whole: skills, commands, MCP servers and
-hooks. `SessionSpec.directory` is there so a forked worker gets the project plugin of its own
-worktree. The bundled skills that need tools Sirus leaves off, or act on Claude Code's own
-settings, are switched off by name through `settings.skillOverrides`. Codex finds `.agents` and
-`.codex` skills on its own; when a credential points `CODEX_HOME` at a profile, the user's
-`~/.codex/skills` are linked into it one by one.
+Each vendor runs as it would in its own terminal, with its own instruction files, settings,
+skills, plugins, hooks and commands; Sirus reads none of them and switches off only what it
+has to. On Claude that is `CLAUDE_TOOLS_OFF`, the tools that hand work to Claude's own
+agents or start turns Sirus never asked for, and `CLAUDE_SKILLS_OFF`, the bundled skills
+built on them, switched off through `settings.skillOverrides`; on Codex, `multi_agent`.
+`agentsPointer` adds one thing to Claude's prompt: when the session's directory and its
+parents up to the git root hold an `AGENTS.md` and no `CLAUDE.md`, `.claude/CLAUDE.md` or
+`CLAUDE.local.md`, it names those files and tells Claude to follow them. It is computed from
+`SessionSpec.directory`, so a worker with a runtime of its own gets one for its worktree,
+while a fork keeps its owner's prompt, as above. When a credential points `CODEX_HOME` at a
+profile of Sirus's own, `linkCodexSkills` links the user's `~/.codex/skills` into it.
 
-The user calls a skill as `/name`. `skillCommands` lists the default participant's skills
-from the same folders, named the way each vendor names them (the frontmatter `name`), and
-the `/` menu shows them after Sirus's commands; `isSkillCommand` is what makes `Chat.send`
-send such a line as a prompt instead of running it. `TurnRunner` rewrites the user's
-`/name` into the addressed participant's vendor form (`skillPrompt`): `/user:name` or
-`/project:name`, which Claude Code reads as a slash command, or `$name`, which Codex
-resolves as a skill mention. Claude reads a slash command only from the prompt's last text
-block, so a cold runtime seeded with its record gets that record as a block of its own
-ahead of the command (`PromptInput.context`), and every prompt sends its images before its
-text.
+The `/` menu lists the vendor's own commands after Sirus's. A runtime reports what its
+harness offers in `available_commands_update`, and `runtime/commands.ts` keeps it:
+`nativeCommandFrom` turns each entry into a `NativeCommand`, leaving out the names in
+`HIDDEN` (Claude's internal session commands, and `/effort`, which would change the thinking
+level behind `/thinking`'s back) and any that start with `_`, and `rememberNativeCommands`
+keeps the last list per vendor and directory in `native-commands.json`, so `nativeCommands`
+has something for the menu before the first turn of the day. A worker's list is not kept.
+`Session.getNativeCommands` answers for the default participant, since that is who a bare
+`/name` reaches. `isSirusCommand` in `commands/registry.ts` is what makes `Chat.send` run a
+`/` line as a Sirus command or send it as a prompt: a vendor command goes to the agent
+unless a Sirus command has the same name. `TurnRunner` puts it in the addressed
+participant's vendor's words (`nativePrompt`): `/name` as it is, or `$name` for a Codex
+skill, which Codex lists and resolves that way. Claude reads a slash command only from the
+prompt's last text block, so a cold runtime seeded with its record gets that record as a
+block of its own ahead of the command (`PromptInput.context`), and every prompt sends its
+images before its text.
 
 Delegation is the participant's own: `spawnSubagent` settles the worker's model and thinking
-level (the session's fixed subagent model, else the router's answer for that task), has
-`worktree.ts` cut it a checkout, and returns as soon as the run is under way.
-`createSubagent` builds the worker as a `SessionAgent` of its own under `host.forWorker(id,
-directory)`, with the subagent contract and none of the delegation tools, and `forkFrom`
-starts its first runtime as a fork of the owner's, falling back to a fresh runtime seeded
-with the owner's record as text when there is nothing to fork or the vendor refuses.
+level (`workerModel`: the session's fixed subagent model at the owner's level, else the
+router's answer for that task, else the owner's own model and level), has `worktree.ts` cut
+it a checkout, and returns as soon as the run is under way. Until then the spawn is in
+`settingUp`, and the session counts it as a working worker, so a chat rewind and `clear`
+are refused and `dispose` waits for it. `createSubagent` builds the worker as a
+`SessionAgent` of its own under `host.forWorker(id, directory)`, with the subagent contract
+and none of the delegation tools. A worker started from its owner's conversation has
+`forkFrom` start its first runtime as a fork of the owner's, falling back to a fresh runtime
+seeded with the owner's record as text when there is nothing to fork or the vendor refuses.
 
 Runtimes stay warm between turns. One is rebuilt when a credential fails, a model change
 cannot be applied to the live session, the system prompt changes under it
@@ -194,13 +220,16 @@ report says why.
 
 Reduced to credentials: nothing here knows a wire protocol or runs a turn.
 
-- `catalog.ts`: pure data. `MODELS` (id, vendor, and the profile the router reads) and
-  `VENDOR_INFO` (display names, the API-key environment variable Sirus reads, the one the
-  vendor's harness reads, the credentials a subscription child must not inherit, the profile
-  directory variable, the allowance window). Consumers import model facts straight from
-  here.
+- `catalog.ts`: every fact about the models and vendors. `MODELS` (id, vendor, the profile
+  the router reads, and whether the model is the vendor's latest or kept off the worker
+  list), `VENDOR_INFO` (display names, the API-key environment variable Sirus reads, the one
+  the vendor's harness reads, the credentials a subscription child must not inherit, the
+  profile directory variable, the allowance window), and the models each vendor's runtime
+  last reported offering (`rememberListedModels`, kept in `listed-models.json`), which is
+  what `/model` lists. Consumers import model facts straight from here.
 - `sources.ts`: a vendor's credentials, API keys and subscription profiles, in priority
   order, persisted through settings. The head of the list is the preferred one.
+  `onProviderChange` is how the sidebar hears that a credential or the one in use changed.
 - `profiles.ts`: a credential as the environment an agent process gets.
   `sourceEnvironment` is the whole of it: an API key under the name the vendor's harness
   reads, or a subscription pointed at its own profile directory, with the vendor's other
@@ -210,15 +239,18 @@ Reduced to credentials: nothing here knows a wire protocol or runs a turn.
 - `provider.ts`: one vendor composed from the above, plus which credential each runtime is
   on, which is the row the sidebar shows.
 - `index.ts`: the registry. `providerFor`, `allProviders`, `servesModel`,
-  `servableModelIds`, `onProviderChange`.
+  `servableModelIds`, `requireKnownModel`.
 - `login.ts`, `usage.ts`, and the two account helpers: sign-in and allowance, which ACP
   carries nothing of. `anthropic/claude-account.ts` asks the Agent SDK for usage on a query
   that never receives a prompt, the one place that still imports it.
   `openai/codex-account.ts` runs `codex app-server` for one account request at a time over
   a small JSON-RPC client.
 
-To add a model: one row in `MODELS`. To add a vendor: a `VENDOR_TABLE` row, a launch spec in
-`runtime/launch.ts`, a row in `providers/index.ts`, the exhaustive `switch` statements in
+A model a vendor lists needs nothing here to be chosen and run. A row in `MODELS` is what
+the router needs to consider it: the profile Jev judges it by, and the flags that make it
+the vendor's latest or keep it off the worker list. To add a vendor: a `VENDOR_TABLE` row, a
+launch spec in `LAUNCHES` in `runtime/launch.ts`, its effort option in `EFFORT_OPTION_IDS`
+in `runtime/acp.ts`, a row in `providers/index.ts`, the exhaustive `switch` statements in
 `login.ts` and `usage.ts`, and the vendor enums in `persistence/settings.ts` and
 `persistence/subscriptionLimits.ts`. Every one of those is a compile error until it is done,
 so nothing fails silently.
@@ -239,9 +271,12 @@ can still run, and `Session` awaits it on the first prompt of a draft started wi
 the catalog does not keep off the worker list, in one call with two questions.
 `usableVendor` and `vendorAllowance` read the figures the sidebar has cached; a vendor
 nobody has read yet counts as available rather than making a turn wait on a live read.
-Anything short of a confident answer returns null and the caller keeps the model it had, so
-nothing here can fail or hold up a turn. The `client` option is the seam: the suite passes a
-`RoutingClient` of its own, and null stands for no key.
+With one candidate there is nothing to ask, and both routers return it, key or no key: a
+session takes the one usable vendor's latest model, and a worker the one candidate model at
+its owner's level. Otherwise anything short of a confident answer returns null and the
+caller keeps the model it had, so nothing here can fail or hold up a turn. The `client`
+option is the seam: the suite passes a `RoutingClient` of its own, and null stands for no
+key.
 
 ## Tools and permissions
 
@@ -251,10 +286,14 @@ object: name, description, argument schema, optional `audience` and `requires`, 
 Adding a tool is one entry in one family file.
 
 `tools/server.ts` is the one MCP server inside the Sirus process, on loopback at an
-ephemeral port. Every `session/new` lists it with a per-session bearer token and the
-requester's name in the headers, so one server serves every participant of every session and
-a call knows who made it. The tool list is computed per request, so `/memory on` and `off`
-take effect on the next one. `agents.ts` holds the delegation tools, SpawnAgent,
+ephemeral port. Every session a participant's or a worker's runtime opens lists it with a
+per-session bearer token and the requester's name in the headers, so one server serves
+every participant of every session and a call knows who made it. The requester is the
+participant's name, or `workerRequester(id)` for a worker, which gets the subagent audience
+and no delegation port. A session joins the server in `Session.mcpServerEntry`, when a
+runtime first asks for its entry, rather than when it is made, so a draft nobody sent to is
+never held in the server's map. The tool list is computed per request, so `/memory on` and
+`off` take effect on the next one. `agents.ts` holds the delegation tools, SpawnAgent,
 CheckAgent, MessageAgent, CancelAgent and ListAgents, whose `audience` hides them from a
 worker, so a subagent cannot spawn one. The runs themselves live in `tools/subagents/`:
 `index.ts` (the `WorkerRecord` the snapshot keeps, and the process-wide index of runs the
@@ -262,39 +301,55 @@ chat, the strip, the notifications and the rewind interlock read), `run.ts` (lif
 start, check, steer, cancel, and the report handed to the owner at the end), `report.ts`
 (everything a run says about itself, to the model that asked and in that report),
 `worktree.ts` (the worker's own checkout under the data directory, cut from the project's
-HEAD onto `sirus/<id>`, removed with the session while its branch stays; a project that is
-no repository gets none and the worker runs in place).
+HEAD onto `sirus/<id>`, removed by `Session.dispose` while its branch stays). A project that
+is no repository, or has no commit yet, gets no worktree and the worker runs in place; a
+repository git fails to cut a worktree from fails the spawn instead.
 
 Permissions are the vendor's. `policy.ts` holds the vocabulary of the three modes;
 `runtime/runtime.ts` maps each onto the vendor mode kind (`standard`, `auto_review`,
-`full_access`) and picks the first vendor mode of that kind. In `ask` the vendor asks about
-every action that is not a read, in `auto` its own reviewer escalates only what it judges
-unsafe, in `bypass` nothing is asked. `approvals.ts` is the queue for what does get
-escalated: the prompt renders from the ACP tool call and nothing else, and the answer is one
-of the vendor's own options, so "allow for this session" is the vendor's allow-always and
-Sirus keeps no allowance of its own. There is no `permissions/index.ts`: every import names
-the file that defines the symbol.
+`full_access`) and picks the first vendor mode of that kind. In `ask` Claude asks about
+every action that is not a read, while Codex's mode of that kind (`read-only` in codex-acp)
+still writes and runs commands inside the working directory without asking, in a sandbox
+with no network, and asks about what leaves it. In `auto` the vendor's own reviewer
+escalates only what it judges unsafe, and in `bypass` nothing is asked. `approvals.ts` is
+the queue for what does get escalated: the prompt renders from the ACP tool call and nothing
+else, and the answer is one of the vendor's own options, so "allow for this session" is the
+vendor's allow-always and Sirus keeps no allowance of its own. The queue is built by
+`userRequestQueue`, which builds the questions' queue too. There is no
+`permissions/index.ts`: every import names the file that defines the symbol.
 
-Questions are the vendors' too: Claude's AskUserQuestion (on the allowlist) and Codex's
-request_user_input (on in every mode through `default_mode_request_user_input`), and any
-form an MCP server raises through either. Both adapters send them as ACP form elicitations,
-which Sirus advertises; codex-acp still sends tool approvals as permission requests.
-`questions.ts` reads the form into fields, folding each question's free-text field (marked
-in its `_meta` by either adapter) into it as "Other", queues it per session behind the
-approvals, and answers with the form's content. A subagent's question is declined at once.
-`frontend/chat/QuestionCard.tsx` asks it one field at a time in the same `FramedCard` the
-approval prompt uses; time spent waiting on either is not silence to the watchdog.
+Questions are the vendors' too: Claude's AskUserQuestion (which `CLAUDE_TOOLS_OFF` leaves
+on) and Codex's request_user_input (on in every mode through
+`default_mode_request_user_input`), and any form an MCP server raises through either. Both
+adapters send them as ACP form elicitations, which Sirus advertises; codex-acp still sends
+tool approvals as permission requests. `questions.ts` reads the form into fields, folding
+each question's free-text field (marked in its `_meta` by either adapter) into it as
+"Other", queues it in its own `userRequestQueue`, and answers with the form's content; the
+chat shows a session's questions only once none of its approvals is waiting. A subagent's
+question is declined at once. `frontend/chat/QuestionCard.tsx` asks it one field at a time
+in the same `FramedCard` the approval prompt uses; time spent waiting on either is not
+silence to the watchdog.
 
 ## Persistence
 
-`src/dataDirectory.ts` is a leaf. `persistence/settings.ts` exposes `openSettings()` with
-typed `get`/`set` over one `SettingsShape`; the on-disk file keeps its shape and unknown keys
-survive a write. A new setting is four entries in that one file (schema field, shape field,
-default, codec) and a missing one is a compile error. `persistence/sessions.ts` reads and
-writes plain `SessionSnapshot` values and normalises files written by older builds, tool
-calls and compaction records included; `Session.fromSnapshot` is the only way a `Session` is
-rebuilt. Nothing under `persistence/` imports runtime code except the zero-dependency type
-module.
+`src/dataDirectory.ts` is a leaf, and `persistence/atomicJson.ts` reads and writes every file
+Sirus owns: a write lands whole or not at all, and a failure is `false` rather than a throw.
+There is no index module; callers import `settings.ts`, `sessions.ts` and
+`subscriptionLimits.ts` directly. `settings.ts` exposes `openSettings()` with typed
+`get`/`set` over one `SettingsShape`, and `saveJevApiKey`. Each section of the file is
+validated on its own: one this build cannot read falls back to its default alone and is
+left as found by writes to the others, and unknown keys survive a write. A new setting is
+four entries in that one file (schema field, shape field, default, codec) and a missing one
+is a compile error. `sessions.ts` reads and writes plain `SessionSnapshot` values and
+normalises files written by older builds, tool calls and compaction records included; a
+session this build cannot read is written back unchanged, and `Session.fromSnapshot` is the
+only way a `Session` is rebuilt. A settings or sessions file that is not valid JSON, or not
+version 1, is renamed aside to `<file>.unreadable-<ms>` before anything is written over it.
+`app.tsx` saves the sessions on a 500 ms trailing timer, and synchronously on exit.
+Nothing under `persistence/` imports runtime code: its value imports from outside the folder
+are the zero-dependency `agent_runtime/types.ts`, `src/dataDirectory.ts` and, in
+`sessions.ts`, `isCheckpointId` from `src/checkpoints.ts`; its imports of `Session` and
+`WorkerRecord` are type-only.
 
 ## Commands
 
@@ -324,7 +379,10 @@ has ended.
 ```
 bun run typecheck
 HOME=<scratch> SIRUS_DATA_DIR=<scratch>/data bun test tests
+FORCE_COLOR=1 HOME=<scratch> SIRUS_DATA_DIR=<scratch>/data bun test tests
 ```
 
 Point `HOME` and `SIRUS_DATA_DIR` at a scratch directory; otherwise tests and smoke runs
-read and write the real data directory.
+read and write the real data directory. Run the suite a second time with `FORCE_COLOR=1`:
+Ink trims the trailing spaces of a rendered line only when colour is off, so a render test
+can pass without colour and fail in a colour terminal.

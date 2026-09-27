@@ -13,7 +13,7 @@ sirus /path/to/your/project
 
 Replace the project path with your own. Use a project where you are comfortable allowing file edits, or start with a read-only review.
 
-Inside Sirus, type `/login` to connect a provider. Repeat for your other provider if you want Claude and GPT in the same session. Enter keys only through the masked login input. Use `/model` to see available models and pick your starting model; left alone, a new session can choose one itself from your first prompt, and the model label under the input says which.
+Inside Sirus, type `/login` to connect a provider. Repeat for your other provider if you want Claude and GPT in the same session. Enter keys only through the masked login input. Use `/model` to see available models and pick your starting model. Left alone, a new session chooses one itself from your first prompt if you have given Sirus a TypeSafe AI key for Jev, which it asks for on first launch and `/jev` sets later; if only one of your connected providers has allowance left, it takes that provider's latest model, key or no key. Otherwise it starts on the default. The model label under the input says which.
 
 ## Give it one task
 
@@ -37,7 +37,7 @@ Type `/model` to find the exact model identifier for the other provider. In the 
 @reviewer MODEL_ID Read the uncommitted changes in this project and review them against this task: [the task you gave above]. Read the changed code and relevant tests. Focus on concrete correctness problems and missing edge cases. Do not edit files. If you find no issue, say so and explain what you checked.
 ```
 
-Sirus creates a named participant with a conversation of its own: it reads the message that named it, not your earlier turns, so tell it where to look. The read-only request is a task instruction; use `/permissions ask` if you also want the agent to ask you before every action that is not a read. Review the findings yourself and give the original participant any follow-up. Ask one participant at a time to edit overlapping files.
+Sirus creates a named participant with a conversation of its own: it reads the message that named it, not your earlier turns, so tell it where to look. The read-only request is a task instruction; use `/permissions ask` if you also want the agent to ask you before every action that is not a read. Codex is the exception: in that mode it still edits files and runs commands inside the project directory without asking, in a sandbox with no network, and asks only about what goes beyond it. Review the findings yourself and give the original participant any follow-up. Ask one participant at a time to edit overlapping files.
 
 With only one connected provider, you can still complete the first task and request a review using an available model. A cross-provider review requires both providers to be connected.
 
