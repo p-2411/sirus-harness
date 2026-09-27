@@ -1,7 +1,6 @@
-import { execFile } from 'child_process';
 import { rmSync } from 'fs';
 import path from 'path';
-import { checkpointsEnabled, gitEnvironment } from '../../../checkpoints';
+import { checkpointsEnabled, projectGit } from '../../../checkpoints';
 import { dataDirectory } from '../../../dataDirectory';
 
 // Where a worker works. In a git project it gets a worktree of its own, cut
@@ -24,17 +23,7 @@ export interface Worktree {
 }
 
 function git(directory: string, args: readonly string[]): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile('git', ['-C', directory, ...args], {
-      cwd: directory,
-      timeout: GIT_TIMEOUT_MS,
-      maxBuffer: 16 * 1024 * 1024,
-      env: gitEnvironment(),
-    }, (error, stdout, stderr) => {
-      if (error) reject(new Error(stderr.trim() || error.message));
-      else resolve(stdout);
-    });
-  });
+  return projectGit(directory, args, GIT_TIMEOUT_MS);
 }
 
 export function worktreePath(sessionId: string, runId: string): string {
