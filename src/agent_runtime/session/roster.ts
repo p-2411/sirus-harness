@@ -1,7 +1,6 @@
 import { servableModelIds, servesModel } from '../providers';
 import { SessionAgent, type Participant, type RuntimeHost } from '../agent';
-import type { PermissionMode } from '../permissions/policy';
-import { textOf, type Message, type ThinkingLevel } from '../types';
+import { textOf, type Message, type PermissionMode, type ThinkingLevel } from '../types';
 import { rootTextRanges, type RootTextRange } from '../../mentions';
 import type { SubagentRun } from '../tools/subagents';
 import type { ChangeFeed } from './changeFeed';

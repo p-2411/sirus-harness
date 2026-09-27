@@ -1,7 +1,8 @@
 import { Box, Text } from 'ink';
 import { theme } from '../styles/theme';
 import { contextPercent, formatTokens, type ContextUsage } from '../../agent_runtime/usage';
-import { PERMISSION_MODE_NAMES, type PermissionMode } from '../../agent_runtime/permissions/policy';
+import { PERMISSION_MODE_NAMES } from '../../agent_runtime/permissions/policy';
+import type { PermissionMode } from '../../agent_runtime/types';
 
 export interface StatusRowProps {
   permissionMode?: PermissionMode;

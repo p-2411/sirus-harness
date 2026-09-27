@@ -11,9 +11,8 @@ import {
   getSubagentsVersion,
   subscribeSubagents,
   type SubagentRun,
-  type SubagentStatus,
 } from '../../agent_runtime/tools/subagents';
-import type { ToolCallBlock } from '../../agent_runtime/types';
+import type { SubagentStatus, ToolCallBlock } from '../../agent_runtime/types';
 
 // The same colours the SpawnAgent row uses, so a worker looks the same
 // wherever it appears. An interrupted run is a record nobody stopped on

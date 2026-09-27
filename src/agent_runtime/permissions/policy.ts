@@ -11,10 +11,6 @@ import type { Requester } from './approvals';
 // also picks the vendor mode. Whatever the vendor escalates arrives as
 // `session/request_permission` and is answered by `./approvals`.
 
-// The list of modes lives in the zero-dependency type module, where the
-// session file validates against it; this is still where it is imported from.
-export { PERMISSION_MODES, type PermissionMode };
-
 export const PERMISSION_MODE_NAMES: Record<PermissionMode, string> = {
   ask: 'ask for approval',
   auto: 'auto approve',

@@ -182,8 +182,8 @@ export function parseThinkingLevel(value: unknown): ThinkingLevel | null {
     : null;
 }
 
-// The lists below belong to the permission policy and the subagents, which
-// export them as their own. They are declared here because the session file
+// The lists below are the permission policy's and the subagents' vocabulary.
+// They are declared, and imported from, here because the session file
 // validates against them and persistence imports nothing else of the runtime,
 // so a value added to one is a value the file can read back.
 

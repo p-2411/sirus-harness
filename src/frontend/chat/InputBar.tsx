@@ -18,10 +18,9 @@ import { isFocusInput } from '../terminal/window-focus';
 import { getSelectionSnapshot, subscribeSelection } from '../interaction/selection';
 import type { Feedback } from '../../commands/feedback';
 import type { Participant, QueuedMessage } from '../../agent_runtime/session';
-import type { ImageBlock, MessageBlock } from '../../agent_runtime/types';
+import type { ImageBlock, MessageBlock, PermissionMode } from '../../agent_runtime/types';
 import type { SubagentRun } from '../../agent_runtime/tools/subagents';
 import type { ContextUsage } from '../../agent_runtime/usage';
-import type { PermissionMode } from '../../agent_runtime/permissions/policy';
 import type { NativeCommand } from '../../agent_runtime/runtime/commands';
 
 // What the input bar is collecting: a message, or one of the prompts that

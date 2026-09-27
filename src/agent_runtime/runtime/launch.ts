@@ -4,8 +4,8 @@ import os from 'os';
 import path from 'path';
 import type { McpServer } from '@agentclientprotocol/sdk';
 import { dataDirectory } from '../../dataDirectory';
-import type { PermissionMode } from '../permissions/policy';
 import { VENDOR_INFO, type Vendor } from '../providers/catalog';
+import type { PermissionMode } from '../types';
 import type { RuntimeOptions } from './runtime';
 
 // A vendor is a launch spec: the adapter to run, the environment its process

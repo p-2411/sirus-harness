@@ -1,13 +1,9 @@
 import { useEffect, useRef } from 'react';
 import type { Session, SessionStatus } from '../agent_runtime/session';
-import { textOf } from '../agent_runtime/types';
+import { textOf, type SubagentStatus } from '../agent_runtime/types';
 import { describeRequester, pendingApprovals, subscribePermissions } from '../agent_runtime/permissions/approvals';
 import { pendingQuestions, subscribeQuestions } from '../agent_runtime/permissions/questions';
-import {
-  listAllSubagents,
-  subscribeSubagents,
-  type SubagentStatus,
-} from '../agent_runtime/tools/subagents';
+import { listAllSubagents, subscribeSubagents } from '../agent_runtime/tools/subagents';
 import { sentenceCase } from './chat/ApprovalPrompt';
 import { questionText } from './chat/QuestionCard';
 import { toolLine } from './chat/ChatMessage';

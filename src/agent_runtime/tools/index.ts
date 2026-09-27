@@ -54,5 +54,4 @@ export type {
   ToolArgumentSchema,
   ToolAudience,
   ToolContext,
-  WorkerContext,
 } from './types';

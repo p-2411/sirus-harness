@@ -6,7 +6,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import { abortReason, isAbortError, throwIfAborted, TurnCancelledError } from '../abort';
 import type { Requester } from './permissions/approvals';
-import { PERMISSION_MODE_NAMES, type PermissionMode } from './permissions/policy';
+import { PERMISSION_MODE_NAMES } from './permissions/policy';
 import { providerFor } from './providers';
 import { DEFAULT_MODEL, rememberListedModels, VENDOR_INFO, vendorOf, type Vendor } from './providers/catalog';
 import { sourceEnvironment } from './providers/profiles';
@@ -27,7 +27,7 @@ import { Transcript, transcriptText } from './session/transcript';
 import { notifySubagents, type SubagentRun } from './tools/subagents';
 import { describeSubagents } from './tools/subagents/report';
 import { cancelSubagent, checkSubagent, messageSubagent, startSubagent } from './tools/subagents/run';
-import type { SubagentHandle, SubagentHost, WorkerContext } from './tools/types';
+import type { SubagentHandle, SubagentHost } from './tools/types';
 import {
   DEFAULT_THINKING_LEVEL,
   failOpenToolCalls,
@@ -35,8 +35,10 @@ import {
   planCall,
   type ImageBlock,
   type Message,
+  type PermissionMode,
   type ThinkingLevel,
   type ToolCallBlock,
+  type WorkerContext,
 } from './types';
 import type { ContextUsage } from './usage';
 

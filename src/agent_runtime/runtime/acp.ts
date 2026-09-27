@@ -18,9 +18,8 @@ import {
 import { abortable, abortReason, throwIfAborted } from '../../abort';
 import { imageData } from '../../images';
 import { SIRUS_VERSION } from '../../version';
-import type { PermissionMode } from '../permissions/policy';
 import type { ListedModel, Vendor } from '../providers/catalog';
-import { THINKING_LEVELS, type ThinkingLevel, type ToolCallBlock } from '../types';
+import { THINKING_LEVELS, type PermissionMode, type ThinkingLevel, type ToolCallBlock } from '../types';
 import type { ContextUsage } from '../usage';
 import { nativeCommandFrom } from './commands';
 import { launchFor, type Launch, type SessionParams } from './launch';

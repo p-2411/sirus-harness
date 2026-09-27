@@ -34,7 +34,7 @@ const { saveMemoryAccessPreference } = await import('../../src/persistence');
 
 type SubagentHost = import('../../src/agent_runtime/tools').SubagentHost;
 type SubagentSpawnCall = import('../../src/agent_runtime/tools').SubagentSpawnCall;
-type WorkerContext = import('../../src/agent_runtime/tools').WorkerContext;
+type WorkerContext = import('../../src/agent_runtime/types').WorkerContext;
 
 const MEMORY_TOOLS = ['SaveMemory', 'GetMemory', 'SearchMemories', 'DeleteMemory'];
 const AGENT_TOOLS = ['SpawnAgent', 'CheckAgent', 'MessageAgent', 'CancelAgent', 'ListAgents'];

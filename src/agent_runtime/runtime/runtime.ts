@@ -8,10 +8,10 @@ import type {
   ToolCall,
   ToolCallUpdate,
 } from '@agentclientprotocol/sdk';
-import type { PermissionMode } from '../permissions/policy';
 import { vendorOf, type ListedModel, type Vendor } from '../providers/catalog';
 import type {
   ImageBlock,
+  PermissionMode,
   PlanEntry,
   ThinkingLevel,
   ToolCallBlock,

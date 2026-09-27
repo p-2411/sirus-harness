@@ -4,8 +4,7 @@ import type { SessionAgent } from '../../agent';
 import { FORKED_WORKER_HANDOVER } from '../../prompt';
 import { servableModelIds, servesModel } from '../../providers';
 import { transcriptText } from '../../session/transcript';
-import type { Message, ThinkingLevel } from '../../types';
-import type { WorkerContext } from '../types';
+import type { Message, ThinkingLevel, WorkerContext } from '../../types';
 import {
   notifySubagentProgress,
   notifySubagents,

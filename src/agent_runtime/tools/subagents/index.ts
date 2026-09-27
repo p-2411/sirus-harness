@@ -13,8 +13,6 @@ import type { Message, MessageBlock, SubagentStatus, ThinkingLevel, WorkerContex
 // the chat, the notifications and the rewind interlock can see runs they do
 // not own.
 
-export type { SubagentStatus, WorkerContext };
-
 // What the session file keeps of a worker: enough to show its record, tell
 // where its branch is, and give its owner the report it never received.
 export interface WorkerRecord {
