@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { DEFAULT_PARTICIPANT, type ImageBlock, type Message, type MessageBlock, type ToolCallBlock } from '../../agent_runtime/types';
-import { saveJevKeyRequested } from '../../persistence/settings';
+import { openSettings } from '../../persistence/settings';
 import { Session } from '../../agent_runtime/session';
 import { attachClipboardImage, describeImage, removeStoredImage } from '../../images';
 import { Box, Text, measureElement, renderToString, useApp, useBoxMetrics, useInput, useStdout, type DOMElement } from 'ink';
@@ -539,7 +539,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       },
       onCancel: () => {
         close();
-        saveJevKeyRequested();
+        openSettings().set({ jevKeyRequested: true });
         setFeedback({ kind: 'info', text: 'Jev is off: models stay on their defaults. /jev adds a key later.' });
       },
     });

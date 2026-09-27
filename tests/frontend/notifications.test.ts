@@ -6,7 +6,7 @@ import { Session, type SessionStatus } from '../../src/agent_runtime/session';
 import type { RequestPermissionResponse } from '@agentclientprotocol/sdk';
 import { pendingApprovals, requestPermission, resolveApproval } from '../../src/agent_runtime/permissions/approvals';
 import { isMemoryAccessEnabled, setMemoryAccessEnabled } from '../../src/agent_runtime/memory-access';
-import { loadNotificationPreference } from '../../src/persistence/settings';
+import { openSettings } from '../../src/persistence/settings';
 import { notificationMode, setNotificationMode, shouldNotify, terminalNotificationSequence } from '../../src/frontend/terminal/notifications';
 import { parseFocusEvent, recordFocusEvent, resetFocusState } from '../../src/frontend/terminal/window-focus';
 import {
@@ -78,10 +78,10 @@ describe('notification settings and delivery', () => {
   test('persists the selected mode and preserves other settings', () => {
     setMemoryAccessEnabled(false);
     setNotificationMode('always');
-    expect(loadNotificationPreference()).toBe('always');
+    expect(openSettings().get('notifications')).toBe('always');
     expect(isMemoryAccessEnabled()).toBe(false);
     setMemoryAccessEnabled(true);
-    expect(loadNotificationPreference()).toBe('always');
+    expect(openSettings().get('notifications')).toBe('always');
   });
 
   test('failed persistence leaves the previous mode active', () => {

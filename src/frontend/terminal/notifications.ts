@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import { spawn } from 'child_process';
-import { loadNotificationPreference, saveNotificationPreference, type NotificationPreference } from '../../persistence/settings';
+import { NOTIFICATION_PREFERENCES, openSettings, type NotificationPreference } from '../../persistence/settings';
 import { osc } from './osc';
 import { writeOverlay } from './screen';
 import { terminalFocused } from './window-focus';
@@ -11,8 +11,6 @@ import { terminalFocused } from './window-focus';
 // sequence also works over SSH); otherwise the platform's notifier runs.
 // A bell goes with every notification, for terminals that badge or bounce.
 
-export const NOTIFICATION_MODES: readonly NotificationPreference[] = ['off', 'background', 'always'];
-
 export const NOTIFICATION_MODE_DESCRIPTIONS: Record<NotificationPreference, string> = {
   off: 'never notify',
   background: 'notify when the terminal window is not focused (default)',
@@ -20,18 +18,18 @@ export const NOTIFICATION_MODE_DESCRIPTIONS: Record<NotificationPreference, stri
 };
 
 export function parseNotificationMode(value: unknown): NotificationPreference | null {
-  return value === 'off' || value === 'background' || value === 'always' ? value : null;
+  return NOTIFICATION_PREFERENCES.includes(value as NotificationPreference) ? value as NotificationPreference : null;
 }
 
 let mode: NotificationPreference | null = null;
 
 export function notificationMode(): NotificationPreference {
-  mode ??= loadNotificationPreference();
+  mode ??= openSettings().get('notifications');
   return mode;
 }
 
 export function setNotificationMode(next: NotificationPreference): void {
-  if (!saveNotificationPreference(next)) throw new Error('Could not save notification settings.');
+  if (!openSettings().set({ notifications: next })) throw new Error('Could not save notification settings.');
   mode = next;
 }
 

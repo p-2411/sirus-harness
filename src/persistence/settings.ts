@@ -256,27 +256,3 @@ export function openSettings(directory: string = dataDirectory()): Settings {
 export function saveJevApiKey(key: string | null, directory?: string): boolean {
   return openSettings(directory).set({ jevApiKey: key, jevKeyRequested: true });
 }
-
-// Named for the UI code that reads and writes them: the first launch's
-// request for a Jev key, notifications, and the model new sessions start on.
-// Each is `get` or `set` of one key and nothing more.
-
-export function saveJevKeyRequested(directory?: string): boolean {
-  return openSettings(directory).set({ jevKeyRequested: true });
-}
-
-export function loadNotificationPreference(directory?: string): NotificationPreference {
-  return openSettings(directory).get('notifications');
-}
-
-export function saveNotificationPreference(notifications: NotificationPreference, directory?: string): boolean {
-  return openSettings(directory).set({ notifications });
-}
-
-export function loadSirusModelPreference(directory?: string): string | null {
-  return openSettings(directory).get('sirusModel');
-}
-
-export function saveSirusModelPreference(model: string, directory?: string): boolean {
-  return openSettings(directory).set({ sirusModel: model });
-}

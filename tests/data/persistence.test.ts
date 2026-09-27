@@ -5,15 +5,7 @@ import path from 'path';
 import { Session } from '../../src/agent_runtime/session';
 import type { WorkerRecord } from '../../src/agent_runtime/tools/subagents';
 import { loadSessionSnapshots, saveSessionSnapshots } from '../../src/persistence/sessions';
-import {
-  loadNotificationPreference,
-  loadSirusModelPreference,
-  openSettings,
-  saveJevApiKey,
-  saveJevKeyRequested,
-  saveNotificationPreference,
-  saveSirusModelPreference,
-} from '../../src/persistence/settings';
+import { openSettings, saveJevApiKey } from '../../src/persistence/settings';
 
 let directory: string;
 
@@ -371,35 +363,35 @@ describe('session persistence', () => {
 
 describe('subscription preference persistence', () => {
   test('notification preferences survive updates to the other settings', () => {
-    expect(loadNotificationPreference(directory)).toBe('background');
-    expect(saveNotificationPreference('always', directory)).toBe(true);
+    expect(openSettings(directory).get('notifications')).toBe('background');
+    expect(openSettings(directory).set({ notifications: 'always' })).toBe(true);
     openSettings(directory).set({ subscriptions: { claude: true, gpt: false } });
     openSettings(directory).set({ memoryEnabled: false });
     openSettings(directory).set({ apiKeys: { gpt: 'test-key' } });
-    saveSirusModelPreference('gpt-5.6-sol', directory);
-    expect(loadNotificationPreference(directory)).toBe('always');
-    expect(saveNotificationPreference('off', directory)).toBe(true);
+    openSettings(directory).set({ sirusModel: 'gpt-5.6-sol' });
+    expect(openSettings(directory).get('notifications')).toBe('always');
+    expect(openSettings(directory).set({ notifications: 'off' })).toBe(true);
     expect(openSettings(directory).get('apiKeys')).toEqual({ gpt: 'test-key' });
     expect(openSettings(directory).get('memoryEnabled')).toBe(false);
     expect(openSettings(directory).get('subscriptions')).toEqual({ claude: true, gpt: false });
-    expect(loadSirusModelPreference(directory)).toBe('gpt-5.6-sol');
-    expect(loadNotificationPreference(directory)).toBe('off');
+    expect(openSettings(directory).get('sirusModel')).toBe('gpt-5.6-sol');
+    expect(openSettings(directory).get('notifications')).toBe('off');
   });
 
   test('keeps the Jev key and the one-time request beside the other settings', () => {
     expect(openSettings(directory).get('jevApiKey')).toBeNull();
     expect(openSettings(directory).get('jevKeyRequested')).toBe(false);
-    expect(saveJevKeyRequested(directory)).toBe(true);
+    expect(openSettings(directory).set({ jevKeyRequested: true })).toBe(true);
     expect(openSettings(directory).get('jevKeyRequested')).toBe(true);
     expect(openSettings(directory).get('jevApiKey')).toBeNull();
     expect(saveJevApiKey('ts-live-key-1234', directory)).toBe(true);
-    saveNotificationPreference('always', directory);
+    openSettings(directory).set({ notifications: 'always' });
     expect(openSettings(directory).get('jevApiKey')).toBe('ts-live-key-1234');
     expect(openSettings(directory).get('jevKeyRequested')).toBe(true);
     expect(saveJevApiKey(null, directory)).toBe(true);
     expect(openSettings(directory).get('jevApiKey')).toBeNull();
     expect(openSettings(directory).get('jevKeyRequested')).toBe(true);
-    expect(loadNotificationPreference(directory)).toBe('always');
+    expect(openSettings(directory).get('notifications')).toBe('always');
   });
 
   test('defaults to API keys and restores enabled providers', () => {
@@ -436,7 +428,7 @@ describe('subscription preference persistence', () => {
       notifications: 'mentions',
       futureSetting: { kept: true },
     }));
-    expect(loadNotificationPreference(directory)).toBe('background');
+    expect(openSettings(directory).get('notifications')).toBe('background');
     expect(openSettings(directory).get('apiKeys')).toEqual({ gpt: 'sk-openai-test' });
     expect(openSettings(directory).get('subscriptions')).toEqual({ claude: true, gpt: false });
     expect(openSettings(directory).get('providerSources')).toEqual(sources);
@@ -454,8 +446,8 @@ describe('subscription preference persistence', () => {
     });
 
     // Changing the setting itself replaces what this build could not read.
-    expect(saveNotificationPreference('always', directory)).toBe(true);
-    expect(loadNotificationPreference(directory)).toBe('always');
+    expect(openSettings(directory).set({ notifications: 'always' })).toBe(true);
+    expect(openSettings(directory).get('notifications')).toBe('always');
     expect(openSettings(directory).get('apiKeys')).toEqual({ gpt: 'sk-openai-test' });
   });
 
@@ -469,8 +461,8 @@ describe('subscription preference persistence', () => {
       writeFileSync(path.join(directory, 'settings.json'), unreadable);
       expect(openSettings(directory).get('apiKeys')).toEqual({});
 
-      expect(saveNotificationPreference('always', directory)).toBe(true);
-      expect(loadNotificationPreference(directory)).toBe('always');
+      expect(openSettings(directory).set({ notifications: 'always' })).toBe(true);
+      expect(openSettings(directory).get('notifications')).toBe('always');
       const aside = readdirSync(directory).filter(name => name.startsWith('settings.json.unreadable-'));
       expect(aside).toHaveLength(1);
       expect(readFileSync(path.join(directory, aside[0]!), 'utf8')).toBe(unreadable);
@@ -491,12 +483,12 @@ describe('memory access preference persistence', () => {
 
 describe('Sirus model preference persistence', () => {
   test('defaults unset and survives writes to other settings', () => {
-    expect(loadSirusModelPreference(directory)).toBeNull();
-    expect(saveSirusModelPreference('claude-sonnet-5', directory)).toBe(true);
+    expect(openSettings(directory).get('sirusModel')).toBeNull();
+    expect(openSettings(directory).set({ sirusModel: 'claude-sonnet-5' })).toBe(true);
     expect(openSettings(directory).set({ subscriptions: { claude: true, gpt: false } })).toBe(true);
     expect(openSettings(directory).set({ memoryEnabled: false })).toBe(true);
 
-    expect(loadSirusModelPreference(directory)).toBe('claude-sonnet-5');
+    expect(openSettings(directory).get('sirusModel')).toBe('claude-sonnet-5');
   });
 });
 

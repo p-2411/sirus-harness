@@ -1,4 +1,4 @@
-import { saveSirusModelPreference } from '../../persistence/settings';
+import { openSettings } from '../../persistence/settings';
 import { listedDescription, modelIds, modelsOf, VENDOR_INFO, VENDORS } from '../../agent_runtime/providers/catalog';
 import type { SubagentRun } from '../../agent_runtime/tools/subagents';
 import { renderTranscript } from '../../agent_runtime/tools/subagents/report';
@@ -100,7 +100,7 @@ export function changeModel(
   // Choosing Sirus before a conversation starts also chooses the default for
   // future sessions. Existing sessions retain their own participant models.
   if (session.isEmpty() && normalizedParticipantName.toLocaleLowerCase() === DEFAULT_PARTICIPANT
-    && !saveSirusModelPreference(resolvedModel)) {
+    && !openSettings().set({ sirusModel: resolvedModel })) {
     return {
       kind: 'error',
       text: `@${normalizedParticipantName} model set to ${resolvedModel}, but the default could not be saved.`,

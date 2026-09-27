@@ -4,7 +4,7 @@ import Chat from "./chat/Chat";
 import Sidebar, { COLLAPSED_SIDEBAR_WIDTH, SIDEBAR_WIDTH } from "./Sidebar";
 import { Session } from "../agent_runtime/session";
 import { loadSessionSnapshots, saveSessionSnapshots, type PersistedSessions } from "../persistence/sessions";
-import { loadSirusModelPreference } from "../persistence/settings";
+import { openSettings } from "../persistence/settings";
 import { useTextSelection } from "./interaction/useTextSelection";
 import { useTerminalFocus } from "./interaction/useTerminalFocus";
 import { useNotifications } from "./useNotifications";
@@ -21,7 +21,7 @@ export function nextSessionName(sessions: readonly Session[]): string {
 export function createWorkspace(
   saved: PersistedSessions,
   launchDirectory: string,
-  preferredSirusModel: string | null = loadSirusModelPreference(),
+  preferredSirusModel: string | null = openSettings().get('sirusModel'),
 ) {
   return {
     sessions: [...saved.sessions],
@@ -35,7 +35,7 @@ export type Workspace = ReturnType<typeof createWorkspace>;
 function createDraft(
   sessions: readonly Session[],
   directory: string,
-  preference: string | null = loadSirusModelPreference(),
+  preference: string | null = openSettings().get('sirusModel'),
 ): Session {
   const model = preference && isKnownModel(preference) ? preference : DEFAULT_MODEL;
   // The draft starts on the fallback; its first prompt asks Jev for better,

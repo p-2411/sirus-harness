@@ -17,7 +17,7 @@ import { providerFor } from '../../src/agent_runtime/providers';
 import { resolveModelReference } from '../../src/commands/agents/behavior';
 import type { SubagentRun } from '../../src/agent_runtime/tools/subagents';
 import type { Feedback } from '../../src/commands/feedback';
-import { loadSirusModelPreference, openSettings, saveSirusModelPreference } from '../../src/persistence/settings';
+import { openSettings } from '../../src/persistence/settings';
 import { shouldRequestJevKey } from '../../src/agent_runtime/router';
 import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
 
@@ -91,17 +91,17 @@ describe('executeCommand', () => {
     const session = new Session();
     const other = new Session();
     session.append({ role: 'user', content: [{ type: 'text', text: 'Hello' }] });
-    saveSirusModelPreference('gpt-5.6-terra');
+    openSettings().set({ sirusModel: 'gpt-5.6-terra' });
     expect(runCommand('model', ['claude-fable-5-1'], session)).toEqual({
       kind: 'success',
       text: '@sirus model set to claude-fable-5-1.',
     });
     expect(session.getModel()).toBe('claude-fable-5-1');
     expect(other.getModel()).toBe('gpt-5.6-luna');
-    expect(loadSirusModelPreference()).toBe('gpt-5.6-terra');
+    expect(openSettings().get('sirusModel')).toBe('gpt-5.6-terra');
     runCommand('model', ['@sirus', 'sol'], session);
     expect(session.getModel()).toBe('gpt-5.6-sol');
-    expect(loadSirusModelPreference()).toBe('gpt-5.6-terra');
+    expect(openSettings().get('sirusModel')).toBe('gpt-5.6-terra');
   });
 
   test('choosing Sirus in an empty session saves the default without changing peers', () => {
@@ -109,20 +109,20 @@ describe('executeCommand', () => {
     const other = new Session();
     runCommand('model', ['@Sirus', 'sol'], session);
     expect(session.getModel()).toBe('gpt-5.6-sol');
-    expect(loadSirusModelPreference()).toBe('gpt-5.6-sol');
+    expect(openSettings().get('sirusModel')).toBe('gpt-5.6-sol');
     expect(other.getModel()).toBe('gpt-5.6-luna');
   });
 
   test('model command changes a named participant and accepts its @ prefix', () => {
     const session = new Session();
-    saveSirusModelPreference('gpt-5.6-terra');
+    openSettings().set({ sirusModel: 'gpt-5.6-terra' });
     session.addParticipant('reviewer', 'gpt-5.6-terra');
     expect(runCommand('model', ['@reviewer', 'claude-fable-5-1'], session)).toEqual({
       kind: 'success',
       text: '@reviewer model set to claude-fable-5-1.',
     });
     expect(session.getParticipants()[1]).toEqual({ name: 'reviewer', model: 'claude-fable-5-1' });
-    expect(loadSirusModelPreference()).toBe('gpt-5.6-terra');
+    expect(openSettings().get('sirusModel')).toBe('gpt-5.6-terra');
     expect(session.getModel()).toBe('gpt-5.6-luna');
   });
 
@@ -133,7 +133,7 @@ describe('executeCommand', () => {
       text: '@sirus model set to claude-haiku-4-5.',
     });
     expect(session.getModel()).toBe('claude-haiku-4-5');
-    expect(loadSirusModelPreference()).toBe('claude-haiku-4-5');
+    expect(openSettings().get('sirusModel')).toBe('claude-haiku-4-5');
   });
 
   test('model references choose the latest version within one model family', () => {

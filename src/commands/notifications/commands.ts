@@ -1,17 +1,16 @@
 import {
-  NOTIFICATION_MODES,
   NOTIFICATION_MODE_DESCRIPTIONS,
   notificationMode,
   parseNotificationMode,
   setNotificationMode,
 } from '../../frontend/terminal/notifications';
-import type { NotificationPreference } from '../../persistence/settings';
+import { NOTIFICATION_PREFERENCES, type NotificationPreference } from '../../persistence/settings';
 import { terminalFocused } from '../../frontend/terminal/window-focus';
 import type { Feedback } from '../feedback';
 import { commandUsage, type CommandMenuItem, type CommandSpec } from '../types';
 
 function notifyMenuItems(): CommandMenuItem[] {
-  return NOTIFICATION_MODES.map(mode => ({
+  return NOTIFICATION_PREFERENCES.map(mode => ({
     type: 'item',
     key: mode,
     label: mode,
