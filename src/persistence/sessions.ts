@@ -1,6 +1,7 @@
 import { existsSync } from 'fs';
 import path from 'path';
 import { z } from 'zod';
+import { isCheckpointId } from '../checkpoints';
 import { dataDirectory } from '../dataDirectory';
 import {
   DEFAULT_PARTICIPANT,
@@ -144,7 +145,7 @@ const workerSchema = z.object({
 });
 
 const checkpointSchema = z.object({
-  id: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i),
+  id: z.string().refine(isCheckpointId),
   // `messageIndex` is the name files carried before entries had seqs; the
   // two numbers meant the same thing then.
   seq: z.number().int().nonnegative().optional(),
