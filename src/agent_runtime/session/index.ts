@@ -18,7 +18,7 @@ import {
   type SubagentRun,
   type WorkerRecord,
 } from '../tools/subagents';
-import { INTERRUPTED_REASON, workerReport } from '../tools/subagents/report';
+import { INTERRUPTED_REASON, workerName, workerReport } from '../tools/subagents/report';
 import { cancelSubagent, messageSubagent } from '../tools/subagents/run';
 import type { SubagentHost } from '../tools/types';
 import { textOf, type ImageBlock, type MessageBlock, type Message, type NoticeBlock, type ThinkingLevel, type ToolCallBlock } from '../types';
@@ -39,7 +39,7 @@ import { MessageQueue, isAutoSendable, type QueuedMessage } from './messageQueue
 import { generateSessionName } from './naming';
 import { keyOf, NAME_PATTERN_SOURCE, ParticipantRoster, stripCreationModels, type Participant } from './roster';
 import { Timeline, type Draft } from './timeline';
-import { TurnRunner } from './turnRunner';
+import { TurnRunner, withIntroductions } from './turnRunner';
 
 // The default model is a catalog fact, named here because that is where
 // callers have always found it.
@@ -293,7 +293,8 @@ export class Session {
       requestAnswers: (agent, request, signal) =>
         requestAnswers({ sessionId: this.id, requester: agent.requester }, request, signal),
       notice: (agent, notice) => {
-        this.notice = { participant: agent.subagentId ?? agent.name, notice };
+        const run = agent.subagentId ? this.getWorkers().find(candidate => candidate.id === agent.subagentId) : undefined;
+        this.notice = { participant: run ? workerName(run) : agent.subagentId ?? agent.name, notice };
         this.changes.notify();
       },
       subagentModel: () => this.subagentModel,
@@ -409,6 +410,7 @@ export class Session {
       // any runtime sees the turn.
       const stored = stripCreationModels(resolved, mentions);
       const queued = stripCreationModels(message, mentions);
+      const introduced = mentions.filter(mention => mention.model);
       if (this.timeline.isEmpty() && this.autoNamePending) {
         // Name from the user's text, not the contents of resolved attachments.
         this.startNaming(textOf(stripCreationModels(message, mentions)));
@@ -448,7 +450,7 @@ export class Session {
         try {
           await this.starting.get(target);
           if (generation !== this.sendGeneration) throw new TurnCancelledError();
-          await target.steer(textOf(stored));
+          await target.steer(withIntroductions(textOf(stored), introduced, target.name));
           this.timeline.deliver(entry, [{ name: target.name, transcript: target.transcript }]);
         } catch (error) {
           if (isAbortError(error)) throw error;
@@ -463,7 +465,7 @@ export class Session {
         try {
           await this.checkpoints.capture(entry.seq, messageText || '[image]');
           if (generation !== this.sendGeneration) throw new TurnCancelledError();
-          const turn = this.turns.run([...paused, ...idle.map(participant => ({ participant, entries: [entry] }))]);
+          const turn = this.turns.run([...paused, ...idle.map(participant => ({ participant, entries: [entry], introduced }))]);
           finishStarting();
           await turn;
         } finally {
@@ -555,7 +557,7 @@ export class Session {
     this.setStatus('working');
     try {
       const [first] = invocations[0].entries;
-      await this.checkpoints.capture(first.seq, `Report from ${pending.map(run => `@${run.id}`).join(', ')}`);
+      await this.checkpoints.capture(first.seq, `Report from ${pending.map(workerName).join(', ')}`);
       await this.turns.run(invocations);
     } catch (error) {
       if (isAbortError(error)) this.lastTurnCancelled = true;

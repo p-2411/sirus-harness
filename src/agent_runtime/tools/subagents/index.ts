@@ -58,6 +58,10 @@ export interface WorkerRecord {
   finalMessage: string | null;
   changes: string[];
   error: string | null;
+  // The context its runtime last reported when its turn ended, in tokens:
+  // the figure Claude Code's Agent row gives as the run's tokens. Absent
+  // while it works, and for a runtime that reported none.
+  tokens?: number;
   // Its report has been delivered to the owner's transcript.
   reported: boolean;
   // The user cleared its line from the worker strip.
@@ -189,6 +193,7 @@ export function workerRecord(run: SubagentRun): WorkerRecord {
     finalMessage: run.finalMessage,
     changes: [...run.changes],
     error: run.error,
+    ...(run.tokens !== undefined ? { tokens: run.tokens } : {}),
     reported: run.reported,
     dismissed: run.dismissed,
   };

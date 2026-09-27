@@ -8,6 +8,7 @@ import {
   subscribeSubagents,
   type SubagentStatus,
 } from '../agent_runtime/tools/subagents';
+import { workerName } from '../agent_runtime/tools/subagents/report';
 import { sentenceCase } from './chat/ApprovalPrompt';
 import { questionText } from './chat/QuestionCard';
 import { toolLine } from './chat/ChatMessage';
@@ -110,7 +111,7 @@ export function subscribeWorkerNotifications(
       const closing = firstLine(run.finalMessage ?? run.error ?? '');
       send(
         `Sirus · ${session?.getName() ?? 'worker'}`,
-        `Worker ${run.id} ${run.status}; its report went to @${run.owner}${closing ? `: ${closing}` : '.'}`,
+        `Worker ${workerName(run)} ${run.status}; its report went to @${run.owner}${closing ? `: ${closing}` : '.'}`,
       );
     }
   });

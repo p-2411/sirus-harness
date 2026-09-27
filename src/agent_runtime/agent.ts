@@ -29,8 +29,8 @@ import { rememberNativeCommands } from './runtime/commands';
 import { Transcript, transcriptText } from './session/transcript';
 import { notifySubagents, type SubagentRun } from './tools/subagents';
 import { agentDefinitions, definitionModel, readOnlyTools, type AgentDefinition } from './tools/subagents/definitions';
-import { describeSubagents, workerReport } from './tools/subagents/report';
-import { cancelSubagent, checkSubagent, messageSubagent, startSubagent, subagentDone, waitSubagents } from './tools/subagents/run';
+import { describeSubagents, workerName, workerReport } from './tools/subagents/report';
+import { awaitForeground, cancelSubagent, checkSubagent, messageSubagent, startSubagent, TOOL_WAIT_LIMIT_MS, waitSubagents } from './tools/subagents/run';
 import type { SpawnOptions, SubagentHost } from './tools/types';
 import {
   DEFAULT_THINKING_LEVEL,
@@ -212,10 +212,14 @@ export class SessionAgent {
   }
 
   // How long the turn in flight has gone without a word from its runtime:
-  // no text, no tool call update, nothing. Zero when no turn is running or
-  // the turn is waiting on the user's approval.
+  // no text, no tool call update, nothing. Zero when no turn is running, the
+  // turn is waiting on the user's approval, or one of its tool calls is still
+  // running: a long build or test run is quiet, not stuck, and the vendor's
+  // own tool timeouts bound it.
   get quietFor(): number {
     if (!this.turn || this.asking > 0) return 0;
+    if (this.entry?.content.some(block => block.type === 'tool_call'
+      && (block.status === 'pending' || block.status === 'in_progress'))) return 0;
     return Date.now() - this.heardAt;
   }
 
@@ -837,12 +841,20 @@ export class SessionAgent {
   subagentHost(): SubagentHost {
     return {
       spawn: async (prompt, options, call, signal) => {
+        const deadline = Date.now() + TOOL_WAIT_LIMIT_MS;
+        // Esc stops the owner's turn whether or not the vendor then closes
+        // the call, so the wait follows the turn as well as the call.
+        const turn = this.turn?.signal;
         const callId = this.spawnCallId(call.vendorCallId);
         const run = await this.spawnSubagent(prompt, options, callId ?? call.callId);
-        if (options.runInBackground === false) await abortable(subagentDone(run), signal);
-        return { ...checkSubagent(run), context: run.context, branch: run.branch,
-          ...(run.status === 'working' ? { note: 'Working in the background. WaitAgent waits; SendMessage sends instructions or resumes it later.' } : {}),
-        };
+        if (options.runInBackground === false) {
+          await awaitForeground(run, deadline - Date.now(), turn && signal ? AbortSignal.any([turn, signal]) : turn ?? signal);
+        }
+        const note = run.status !== 'working' ? null
+          : options.runInBackground === false
+            ? 'Still working when this call had to return, so it carries on in the background and reports to you when it ends. WaitAgent waits for it; SendMessage sends it instructions.'
+            : 'Working in the background. WaitAgent waits; SendMessage sends instructions or resumes it later.';
+        return { ...checkSubagent(run), context: run.context, branch: run.branch, ...(note ? { note } : {}) };
       },
       check: id => checkSubagent(this.requireSubagent(id)),
       cancel: (id, signal) => cancelSubagent(this.requireSubagent(id), signal),
@@ -874,7 +886,7 @@ export class SessionAgent {
   private requireSubagent(id: string): SubagentRun {
     const run = this.subagents.get(id) ?? this.listSubagents().find(run => run.name === id);
     if (run) return run;
-    const known = [...this.subagents.keys()];
+    const known = this.listSubagents().map(workerName);
     throw new Error(known.length > 0
       ? `Unknown subagent "${id}". Known subagents: ${known.join(', ')}`
       : `Unknown subagent "${id}". No subagent has been spawned yet.`);

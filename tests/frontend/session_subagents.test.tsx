@@ -165,8 +165,10 @@ test('the worker strip follows only the displayed session’s workers', async ()
       <ChatMessage message={{ seq: 0, role: 'assistant', content: [call] }} sessionId={session.getId()} />,
       { columns: 140 },
     ));
-    expect(toolRow(first)).toContain(`${mine.id} · cancelled`);
-    expect(toolRow(second)).not.toContain(`${mine.id} · cancelled`);
+    expect(toolRow(first)).toContain(`● Agent(Work) · ${model} high · ${mine.id}`);
+    expect(toolRow(first)).toContain('⎿ Cancelled by CancelAgent (0 tool uses');
+    expect(toolRow(second)).not.toContain(`high · ${mine.id}`);
+    expect(toolRow(second)).not.toContain('Cancelled by CancelAgent (');
     // The report is under the row, without the user having to open it.
     expect(toolRow(first)).toContain(`Subagent ${mine.id} cancelled`);
     expect(toolRow(first)).toContain('Task: Work');

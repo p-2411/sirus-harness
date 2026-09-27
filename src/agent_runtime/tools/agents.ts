@@ -4,6 +4,7 @@ import { listedDescription, modelIds, modelInfo, vendorOf, VENDORS, VENDOR_INFO 
 import { parseThinkingLevel, THINKING_LEVELS } from '../types';
 import { requiredString } from './arguments';
 import { agentDefinitions } from './subagents/definitions';
+import { TOOL_WAIT_LIMIT_MS } from './subagents/run';
 import type { SpawnOptions, SubagentHost, Tool, ToolContext } from './types';
 
 function host(ctx: ToolContext, toolName: string): SubagentHost {
@@ -106,19 +107,20 @@ export const agentTools: Tool[] = [
   },
   {
     name: 'WaitAgent',
-    description: 'Wait up to timeoutMs for the workers named by ids to finish. Returns completed reports and the current status of the rest. Timing out leaves workers running.',
+    description: `Wait up to timeoutMs for the workers named by ids to finish. Returns completed reports and the current status of the rest. Timing out leaves workers running. One call waits at most ${TOOL_WAIT_LIMIT_MS} ms, since a longer tool call is cut off; call again to keep waiting.`,
     args: {
       ids: { type: 'array', items: { type: 'string' }, minItems: 1, description: 'Worker ids or names.' },
-      timeoutMs: { type: 'integer', minimum: 0, maximum: 600000, default: 30000 },
+      timeoutMs: { type: 'integer', minimum: 0, maximum: TOOL_WAIT_LIMIT_MS, default: 30000 },
     },
     audience: { subagent: false },
     async run(args, ctx) {
       if (!Array.isArray(args.ids) || !args.ids.length || args.ids.some(id => typeof id !== 'string' || !id.trim())) {
         throw new TypeError('WaitAgent requires a nonempty array of ids or names');
       }
+      // A longer wait is cut to the limit rather than refused.
       const timeout = args.timeoutMs ?? 30000;
-      if (typeof timeout !== 'number' || !Number.isInteger(timeout) || timeout < 0 || timeout > 600000) {
-        throw new TypeError('timeoutMs must be an integer from 0 to 600000');
+      if (typeof timeout !== 'number' || !Number.isInteger(timeout) || timeout < 0) {
+        throw new TypeError('timeoutMs must be a non-negative integer');
       }
       return { subagents: await host(ctx, 'WaitAgent').wait(args.ids, timeout, ctx.signal) };
     },

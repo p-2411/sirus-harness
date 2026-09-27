@@ -3,7 +3,7 @@ import type { SessionAgent, TurnInput } from '../agent';
 import { vendorOf } from '../providers/catalog';
 import { nativePrompt } from '../runtime/commands';
 import { textOf, type ImageBlock, type Message } from '../types';
-import { keyOf, type ParticipantRoster } from './roster';
+import { keyOf, type Mention, type ParticipantRoster } from './roster';
 import type { Timeline } from './timeline';
 
 // One agent to run in a round, and what woke it: the user's prompt entry on
@@ -13,6 +13,23 @@ export interface Invocation {
   // The entries this turn's prompt carries. They are already in the
   // participant's transcript; the runtime hears them through the prompt.
   entries: Message[];
+  // The participants the user's prompt added to the session.
+  introduced?: readonly Mention[];
+}
+
+// The user's prompt as a participant reads it, told who the prompt added to
+// the session. The model that created a participant is taken out of the
+// prompt, and with it the only sign that the name is a participant now, so a
+// peer addressed in the same prompt would otherwise take it for a stranger.
+// A slash command stays the prompt's own text, for the vendor to read it.
+export function withIntroductions(text: string, introduced: readonly Mention[], reader: string): string {
+  const others = introduced.filter(mention => keyOf(mention.name) !== keyOf(reader));
+  if (others.length === 0 || text.startsWith('/')) return text;
+  const names = others.map(mention => `@${mention.name} (${mention.model})`).join(' and ');
+  const note = others.length === 1
+    ? `This message adds ${names} to the session as a new participant, and it receives this message too.`
+    : `This message adds ${names} to the session as new participants, and they receive this message too.`;
+  return `${note}\n\n${text}`;
 }
 
 export interface TurnRunnerOptions {
@@ -33,7 +50,7 @@ function promptFor(invocation: Invocation): TurnInput {
     const vendor = vendorOf(participant.model);
     const text = textOf(first);
     return {
-      text: vendor ? nativePrompt(text, vendor, participant.directory) : text,
+      text: withIntroductions(vendor ? nativePrompt(text, vendor, participant.directory) : text, invocation.introduced ?? [], participant.name),
       images: first.content.filter((block): block is ImageBlock => block.type === 'image'),
     };
   }

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, spyOn, test } from 'bun:test';
+import { afterEach, describe, expect, jest, setSystemTime, spyOn, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'fs';
 import os from 'os';
 import path from 'path';
@@ -9,6 +9,7 @@ import { pendingQuestions, questionFields, requestAnswers, resolveQuestion } fro
 import type { Runtime, RuntimeOptions, RuntimeUpdate } from '../../src/agent_runtime/runtime/runtime';
 import type { Draft } from '../../src/agent_runtime/session';
 import { Session } from '../../src/agent_runtime/session';
+import { TOOL_WAIT_LIMIT_MS } from '../../src/agent_runtime/tools/subagents/run';
 import { textOf } from '../../src/agent_runtime/types';
 import { bindScriptedRuntime, textTurn, unbindRuntime, type ScriptedTurn } from '../support/runtime';
 
@@ -805,6 +806,9 @@ describe('Session model', () => {
       expect(prompts[1]).toStartWith(`Subagent ${worker.id} done`);
       expect(prompts[1]).toContain(`Subagent ${worker.id} done`);
       expect(prompts[1]).toContain('I rewrote the parser.');
+      // How to continue a worker is the tools' to say; a report that says it
+      // gets finished workers sent follow-ups.
+      expect(prompts[1]).not.toContain('SendMessage');
 
       const report = session.getMessages().find(entry => entry.hidden && textOf(entry).includes(worker.id));
       expect(report).toMatchObject({ role: 'user', to: ['sirus'], hidden: true });
@@ -1211,6 +1215,30 @@ describe('Session model', () => {
         { seq: 1, role: 'assistant', participant: 'Reviewer', model: testModel, content: [{ type: 'text', text: 'reviewed' }] },
         { seq: 3, role: 'assistant', participant: 'Reviewer', model: testModel, content: [{ type: 'text', text: 'reviewed' }] },
       ]);
+  });
+
+  test('tells the others a prompt addresses who it added to the session', async () => {
+    const sirus = bindScriptedRuntime(secondTestModel, textTurn('asked'));
+    const reviewer = bindScriptedRuntime(testModel, textTurn('reviewed'));
+    const session = new Session({ id: 'introductions', name: 'Introductions', model: secondTestModel });
+
+    await session.sendMessage({
+      role: 'user',
+      content: [{ type: 'text', text: '@reviewer test-session-model review the diff, then ask @sirus to fix it' }],
+    });
+    expect(sirus.runtimes[0].prompts[0].text).toBe([
+      'This message adds @reviewer (test-session-model) to the session as a new participant, and it receives this message too.',
+      '',
+      '@reviewer review the diff, then ask @sirus to fix it',
+    ].join('\n'));
+    // The new participant knows its own name, and the record keeps the
+    // prompt as the chat shows it.
+    expect(reviewer.runtimes[0].prompts[0].text).toBe('@reviewer review the diff, then ask @sirus to fix it');
+    expect(textOf(session.getMessages()[0])).toBe('@reviewer review the diff, then ask @sirus to fix it');
+
+    // Once it exists, a prompt naming it introduces nobody.
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: '@sirus @reviewer compare notes' }] });
+    expect(sirus.runtimes[0].prompts[1].text).toBe('@sirus @reviewer compare notes');
   });
 
   test('runs unique mentions in parallel and commits responses in mention order', async () => {
@@ -1782,6 +1810,123 @@ test('foreground workers return their report without a notification and apply ag
   }
 });
 
+test('a foreground worker its owner stops waiting for carries on in the background and reports', async () => {
+  const gates = new Map<string, () => void>();
+  const ownerPrompts: string[] = [];
+  let spawned: Promise<Record<string, unknown>> | null = null;
+  let session!: Session;
+  bindScriptedRuntime(testModel, async (input, emit, options) => {
+    if (isWorker(options)) {
+      await new Promise<void>(resolve => { gates.set(input.text, resolve); });
+      emit({ type: 'text', text: `Finished: ${input.text}` });
+      return;
+    }
+    ownerPrompts.push(input.text);
+    if (ownerPrompts.length === 1) {
+      spawned = session.subagentHostFor('sirus')!.spawn('Slow task', { runInBackground: false }, { callId: 'spawn' });
+      await spawned.catch(() => {});
+    }
+    emit({ type: 'text', text: 'Noted' });
+  });
+  session = new Session({ id: 'foreground-left', name: 'Foreground left', model: testModel });
+  const host = session.subagentHostFor('sirus')!;
+  try {
+    // Esc stops the owner's turn while it waits in its SpawnAgent call.
+    const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Delegate it' }] });
+    await until(() => gates.has('Slow task'), 'the worker to start');
+    session.cancel();
+    await turn.catch(() => {});
+    await expect(spawned!).rejects.toThrow();
+    const [cancelled] = session.getWorkers();
+    expect(cancelled).toMatchObject({ status: 'working', runInBackground: true });
+    gates.get('Slow task')!();
+    await until(() => ownerPrompts.length === 2 && session.getStatus() === 'idle', 'the report turn');
+    expect(cancelled.reported).toBe(true);
+    expect(ownerPrompts[1]).toStartWith(`Subagent ${cancelled.id} done`);
+    expect(ownerPrompts[1]).toContain('Finished: Slow task');
+
+    // A wait that would outlast the vendor's patience with a tool call
+    // returns before it gives up, and the run reports the same way.
+    jest.useFakeTimers();
+    let result: Record<string, unknown>;
+    try {
+      const pending = host.spawn('Long task', { runInBackground: false }, { callId: 'spawn-long' });
+      // Microtasks only: the wait's own timer is the one being tested.
+      for (let tick = 0; tick < 1000 && session.getWorkers().length < 2; tick++) await Promise.resolve();
+      for (let tick = 0; tick < 20; tick++) await Promise.resolve();
+      jest.advanceTimersByTime(TOOL_WAIT_LIMIT_MS);
+      result = await pending;
+    } finally {
+      jest.useRealTimers();
+    }
+    expect(result).toMatchObject({ status: 'working', note: expect.stringContaining('carries on in the background') });
+    const long = session.getWorkers()[1];
+    expect(long.runInBackground).toBe(true);
+    await until(() => gates.has('Long task'), 'the long worker to start');
+    gates.get('Long task')!();
+    await until(() => ownerPrompts.length === 3 && session.getStatus() === 'idle', 'the second report turn');
+    expect(ownerPrompts[2]).toContain('Finished: Long task');
+  } finally {
+    for (const release of gates.values()) release();
+    await session.dispose();
+  }
+});
+
+test('a worker whose call was refused says so in the report its owner reads', async () => {
+  bindScriptedRuntime(testModel, (_input, emit) => {
+    emit({ type: 'tool_call', call: {
+      type: 'tool_call', id: 'refused-edit', title: 'Edit README.md', kind: 'edit', status: 'failed', locations: [],
+      content: [{ type: 'text', text: '```\n<tool_use_error>User refused permission to run tool</tool_use_error>\n```' }],
+    } });
+    emit({ type: 'text', text: 'The edit was declined.' });
+  });
+  const session = new Session({ id: 'refused-worker', name: 'Refused', model: testModel });
+  try {
+    const result = await session.subagentHostFor('sirus')!.spawn('Append a line', { runInBackground: false }, { callId: 'spawn' });
+    expect(result).toMatchObject({ status: 'done', failedCalls: ['Edit README.md: User refused permission to run tool'] });
+    const { workerReport } = await import('../../src/agent_runtime/tools/subagents/report');
+    expect(workerReport(session.getWorkers()[0])).toContain(
+      'Calls that did not go through:\n- Edit README.md: User refused permission to run tool\n\nFinal message:\n\nThe edit was declined.');
+  } finally {
+    await session.dispose();
+  }
+});
+
+test('time inside a running tool call is not silence to the worker watchdog', async () => {
+  let finishCall!: () => void;
+  const callGate = new Promise<void>(resolve => { finishCall = resolve; });
+  let finishTurn!: () => void;
+  const turnGate = new Promise<void>(resolve => { finishTurn = resolve; });
+  const call = { type: 'tool_call' as const, id: 'suite', title: 'bun test', kind: 'execute' as const, locations: [], content: [] };
+  bindScriptedRuntime(testModel, async (_input, emit, options) => {
+    if (!isWorker(options)) return;
+    emit({ type: 'tool_call', call: { ...call, status: 'in_progress' } });
+    await callGate;
+    emit({ type: 'tool_call', call: { ...call, status: 'completed' } });
+    await turnGate;
+  });
+  const session = new Session({ id: 'quiet-tool', name: 'Quiet tool', model: testModel });
+  try {
+    await session.subagentHostFor('sirus')!.spawn('Run the suite', {}, { callId: 'spawn' });
+    const [run] = session.getWorkers();
+    await until(() => run.content.some(block => block.type === 'tool_call'), 'the command to start');
+    // Twenty minutes into the command, the worker is busy, not hung.
+    setSystemTime(new Date(Date.now() + 20 * 60_000));
+    expect(run.worker!.quietFor).toBe(0);
+    setSystemTime();
+    finishCall();
+    await until(() => run.content.some(block => block.type === 'tool_call' && block.status === 'completed'), 'the command to end');
+    // Once nothing is running, silence counts again.
+    setSystemTime(new Date(Date.now() + 16 * 60_000));
+    expect(run.worker!.quietFor).toBeGreaterThanOrEqual(15 * 60_000);
+  } finally {
+    setSystemTime();
+    finishCall();
+    finishTurn();
+    await session.dispose();
+  }
+});
+
 test('owner context on another vendor seeds a fresh runtime and never attempts a fork', async () => {
   const previous = { ANTHROPIC_API: process.env.ANTHROPIC_API, OPENAI_SECRET: process.env.OPENAI_SECRET };
   process.env.ANTHROPIC_API = 'test-anthropic-key';
@@ -1837,12 +1982,12 @@ test('notifications stay attached to their completed turn when steering acknowle
     await new Promise(resolve => setImmediate(resolve));
     const notifications = session.getMessages().filter(entry => entry.hidden).map(textOf);
     expect(notifications).toHaveLength(2);
-    expect(notifications.some(text => text.includes('Final message:\nFIRST_RESULT'))).toBe(true);
-    expect(notifications.some(text => text.includes('Final message:\nSECOND_RESULT'))).toBe(true);
+    expect(notifications.some(text => text.includes('Final message:\n\nFIRST_RESULT'))).toBe(true);
+    expect(notifications.some(text => text.includes('Final message:\n\nSECOND_RESULT'))).toBe(true);
     expect(steered[0]).toContain('FIRST_RESULT');
     expect(steered[1]).toContain('SECOND_RESULT');
     const call = session.getMessages().flatMap(entry => entry.content).find(block => block.type === 'tool_call');
-    expect(call).toMatchObject({ output: expect.stringContaining('Final message:\nSECOND_RESULT') });
+    expect(call).toMatchObject({ output: expect.stringContaining('Final message:\n\nSECOND_RESULT') });
     expect(session.getWorkers()[0].reported).toBe(true);
   } finally {
     for (const acknowledge of acknowledgements) acknowledge();

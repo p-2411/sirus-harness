@@ -76,7 +76,8 @@ facade over collaborators in the same folder, each constructible on its own:
 - `ParticipantRoster`: the agents in the session and all `@name` routing. The mention
   grammar exists once, here.
 - `TurnRunner`: the round loop, and the one place that decides what a participant is
-  prompted with.
+  prompted with, including who a user prompt added to the session
+  (`withIntroductions`), since the model that created them is stripped from its text.
 - `CheckpointLog`: directory snapshots taken before each turn, and the cross-session
   interlock that makes restoring one safe. Injectable `DirectoryActivity`; the default is
   process-wide.
@@ -92,7 +93,10 @@ running in the project directory itself, since a worker in its own worktree chan
 there.
 
 The session's workers are the subagents its participants spawned, and they are background
-tasks: nothing waits on one. When a worker ends, `workerFinished` queues its report and
+tasks: nothing waits on one. A foreground spawn is the exception, whose SpawnAgent call waits
+for the report (`awaitForeground`); when that wait ends first, because the owner's turn was
+cancelled or it reached `TOOL_WAIT_LIMIT_MS`, a little inside the five minutes after which
+both vendors give up on a tool call, the run becomes a background one. When a worker ends, `workerFinished` queues its report and
 `flushReports` delivers it as soon as nothing else holds the session: no turn, rewind,
 compaction or directory restore. `deliverReports` gives it to the agent that spawned it as a
 message from the run, which starts that agent's turn the way a peer's message does, one turn
@@ -197,8 +201,8 @@ marks the tool calls it left open as failed, since nothing more will be heard of
 a snapshot restores an open call the same way.
 
 A participant keeps the time its runtime last reported anything (`quietFor`), not counting
-time spent waiting on the user's approval. After a minute of silence the turn status line
-says so. A worker, which nobody is watching, is stopped after 15 minutes of it, and its
+time spent waiting on the user's approval or inside a tool call that is still running. After
+a minute of silence the turn status line says so. A worker, which nobody is watching, is stopped after 15 minutes of it, and its
 report says why.
 
 ## Providers
@@ -305,10 +309,13 @@ mutated in place. It is one line: the run with the freshest `updatedAt` of those
 finished within the last second, with a counter for the rest. `↓` from the input bar hands
 it the keyboard against a list frozen as focus arrives, so nothing moves under the user, and
 `enter` sends `/agents <id>` down the path typing it takes; the ordering is the strip's own,
-while `/agents` keeps listing every run nobody has dismissed. In the history, `ChatMessage.tsx`
-lets the SpawnAgent row follow the run it started, keeps it out of the `Ran N commands`
-groups, and shows the report the session set as the call's output, open already once the run
-has ended.
+while `/agents` keeps listing every run nobody has dismissed. A worker goes by the name its owner gave it (`workerName`), or its id when it has none, in
+all of these and on its approval prompts. In the history, `ChatMessage.tsx` lets the
+SpawnAgent row follow the run it started and keeps it out of the `Ran N commands` groups. The
+row is laid out like Claude Code's Agent row: the worker and its task, then how the run stands
+(`runSummary`, "Done (3 tool uses · 24k tokens · 16s)"), then the report the session set as
+the call's output, whole and as Markdown, open already once the run has ended. A spawn that
+started no worker shows the tool's error instead.
 
 ## Verification
 

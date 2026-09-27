@@ -336,17 +336,25 @@ describe('chat message', () => {
   });
 
   test('recognizes Codex’s execute-kind MCP SpawnAgent title', () => {
+    // Codex records an MCP call's arguments under `arguments`.
     const spawn = toolCall({
       id: 'mcp-spawn-call',
       kind: 'execute',
       title: 'mcp.sirus.SpawnAgent',
       content: [{ type: 'text', text: '{"id":"sub-1234"}' }],
-      output: 'Subagent sub-1234 done.',
+      input: { server: 'sirus', tool: 'SpawnAgent', arguments: { prompt: 'Rewrite it', description: 'Loader rewrite', name: 'loader' } },
+      output: 'Subagent loader (sub-1234) done.',
     });
 
     expect(messageSegments([calls[0], spawn, calls[1]]).map(segment => segment.type))
       .toEqual(['tool_call', 'tool_call', 'tool_call']);
-    expect(callDetail(spawn)).toEqual([{ sign: ' ', text: 'Subagent sub-1234 done.' }]);
+    const output = stripAnsi(renderToString(
+      <ChatMessage message={{ seq: 0, role: 'assistant', content: [spawn] }} sessionId="session" />,
+      { columns: 140 },
+    ));
+    expect(output).toContain('● loader(Loader rewrite)');
+    expect(output).toContain('Subagent loader (sub-1234) done.');
+    expect(output).not.toContain('{"id":"sub-1234"}');
   });
 
   test('summarizes completed and running tool groups while collapsed', () => {
@@ -425,17 +433,7 @@ describe('what an expanded row reveals', () => {
     ]);
   });
 
-  test('reads a worker report off the SpawnAgent call, not its content', () => {
-    // The content of that call is the handle the vendor was given back; the
-    // report the session set as its output is what the user came to read.
-    expect(callDetail(toolCall({
-      id: 'call-5',
-      kind: 'other',
-      title: 'sirus - SpawnAgent',
-      content: [{ type: 'text', text: '{"id":"sub-1234","status":"working"}' }],
-      output: 'Subagent sub-1234 done after 45s.',
-    }))).toEqual([{ sign: ' ', text: 'Subagent sub-1234 done after 45s.' }]);
-    // Every other call still leads with what it produced.
+  test('leads with what a call produced rather than its raw output', () => {
     expect(callDetail(toolCall({
       id: 'call-6',
       kind: 'execute',
@@ -688,19 +686,47 @@ describe('the SpawnAgent row', () => {
     { columns: 140 },
   );
 
-  test('names the run it started and follows it to the end', () => {
+  test('names the run it started by its task and follows it to the end', () => {
+    const edit = toolCall({ id: 'edit', kind: 'edit', title: 'src/loader.ts', status: 'completed' });
+    const read = toolCall({ id: 'read', kind: 'read', title: 'src/loader.ts', status: 'completed' });
     const run = workerRun({
-      id: 'sub-1234', callId: call.id, status: 'done', branch: 'sirus/sub-1234',
+      id: 'sub-1234', callId: call.id, status: 'done', branch: 'sirus/sub-1234', name: 'loader',
+      description: 'Rewrite the loader', content: [read, edit], tokens: 12_300, startedAt: 0, finishedAt: 45_000,
     });
     registerSubagent(run);
     try {
-      expect(stripAnsi(row('session')))
-        .toContain('● Tool claude-sonnet-5 sirus - SpawnAgent · sub-1234 · done · sirus/sub-1234');
+      const output = stripAnsi(row('session'));
+      // Claude Code's shape: the agent and its task, then how it went.
+      expect(output).toContain('● loader(Rewrite the loader) · claude-sonnet-5 medium · sub-1234 · sirus/sub-1234');
+      expect(output).toContain('⎿ Done (2 tool uses · 12k tokens · 45s)');
       // A run of another session never decorates this one's row.
       expect(stripAnsi(row('elsewhere'))).not.toContain('sub-1234');
     } finally {
       unregisterSubagent(run.id);
     }
+  });
+
+  test('counts what failed, and says why a spawn or a run failed', () => {
+    const run = workerRun({
+      id: 'sub-2468', callId: call.id, status: 'failed', error: 'Vendor refused the request', startedAt: 0, finishedAt: 3_000,
+      content: [toolCall({ id: 'broken', kind: 'execute', title: 'bun test', status: 'failed' })],
+    });
+    registerSubagent(run);
+    try {
+      expect(stripAnsi(row('session'))).toContain('⎿ Failed (1 tool use · 1 failed · 3s): Vendor refused the request');
+    } finally {
+      unregisterSubagent(run.id);
+    }
+    // No worker was ever started: the tool's error is the reason.
+    const refused = toolCall({
+      id: 'refused-spawn', title: 'mcp__sirus__SpawnAgent', status: 'failed',
+      input: { prompt: 'Review it', name: 'helper' },
+      content: [{ type: 'text', text: 'Subagent name "helper" is already in use.' }],
+    });
+    expect(stripAnsi(renderToString(
+      <ChatMessage message={{ seq: 0, role: 'assistant', content: [refused] }} sessionId="session" />,
+      { columns: 140 },
+    ))).toContain('● helper(Review it)\n        ⎿ Failed: Subagent name "helper" is already in use.');
   });
 
   test('updates a worker inside memoised history without a parent repaint', async () => {
@@ -715,11 +741,11 @@ describe('the SpawnAgent row', () => {
     />, { stdout, debug: true, patchConsole: false, exitOnCtrlC: false });
     try {
       await app.waitUntilRenderFlush();
-      expect(frames.at(-1)).toContain('sub-memo · working');
+      expect(frames.at(-1)).toContain('⎿ Working (0 tool uses)');
       run.status = 'done';
       notifySubagents();
       await app.waitUntilRenderFlush();
-      expect(frames.at(-1)).toContain('sub-memo · done');
+      expect(frames.at(-1)).toContain('⎿ Done (0 tool uses');
     } finally {
       app.unmount();
       await app.waitUntilExit();
@@ -731,7 +757,7 @@ describe('the SpawnAgent row', () => {
     const run = workerRun({ id: 'sub-5678', callId: call.id, status: 'interrupted' });
     registerSubagent(run);
     try {
-      expect(stripAnsi(row('session'))).toContain('· sub-5678 · interrupted');
+      expect(stripAnsi(row('session'))).toContain('⎿ Interrupted (0 tool uses · 0s): Sirus quit while it was working');
     } finally {
       unregisterSubagent(run.id);
     }
@@ -739,8 +765,9 @@ describe('the SpawnAgent row', () => {
 
   test('says nothing of a run no record survives', () => {
     const output = stripAnsi(row('session'));
-    expect(output).toContain('● Tool sirus - SpawnAgent');
+    expect(output).toContain('● Agent');
     expect(output).not.toContain('·');
+    expect(output).not.toContain('⎿');
   });
 
   test('sits directly under a neighbouring tool row', () => {
@@ -749,7 +776,7 @@ describe('the SpawnAgent row', () => {
       <ChatMessage message={{ seq: 0, role: 'assistant', content: twins }} />,
       { columns: 140 },
     )).split('\n');
-    const rows = lines.flatMap((line, index) => line.includes('SpawnAgent') ? [index] : []);
+    const rows = lines.flatMap((line, index) => line.includes('● Agent') ? [index] : []);
     expect(rows).toHaveLength(2);
     expect(rows[1] - rows[0]).toBe(1);
   });
@@ -784,14 +811,16 @@ describe('a worker report', () => {
     }
   });
 
-  test('is cut the way any other output is, saying how much is left', () => {
+  test('is shown whole, as Markdown', () => {
     const run = workerRun({ id: 'sub-1234', callId: 'reported-call', status: 'done' });
     registerSubagent(run);
     try {
-      const output = row(reported(Array.from({ length: 11 }, (_, index) => `line ${index}`).join('\n')));
-      expect(output).toContain('line 7');
-      expect(output).not.toContain('line 8');
-      expect(output).toContain('3 more lines');
+      const lines = Array.from({ length: 11 }, (_, index) => `- line ${index}`).join('\n');
+      const output = row(reported(`Final message:\n\n**Rewrote** the loader.\n\n${lines}`));
+      expect(output).toContain('line 10');
+      expect(output).not.toContain('more lines');
+      expect(output).toContain('Rewrote the loader.');
+      expect(output).not.toContain('**');
     } finally {
       unregisterSubagent(run.id);
     }

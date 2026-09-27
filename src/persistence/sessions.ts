@@ -175,6 +175,7 @@ const workerSchema = z.object({
   finalMessage: z.string().nullable(),
   changes: z.array(z.string()),
   error: z.string().nullable(),
+  tokens: z.number().optional(),
   reported: z.boolean(),
   dismissed: z.boolean(),
 });

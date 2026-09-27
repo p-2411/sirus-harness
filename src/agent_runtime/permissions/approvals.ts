@@ -6,6 +6,7 @@ import type {
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
 import { toolCallBlockFrom } from '../runtime/runtime';
+import { findSubagent } from '../tools/subagents';
 import type { ToolCallBlock } from '../types';
 import type { PermissionContext } from './policy';
 
@@ -17,8 +18,11 @@ import type { PermissionContext } from './policy';
 
 export type Requester = { participant: string } | { subagent: string };
 
+// A worker goes by the name its owner gave it, as on the strip and in
+// `/agents`; one given none by its id.
 export function describeRequester(requester: Requester): string {
-  return 'participant' in requester ? `@${requester.participant}` : `subagent ${requester.subagent}`;
+  if ('participant' in requester) return `@${requester.participant}`;
+  return findSubagent(requester.subagent)?.name ?? `subagent ${requester.subagent}`;
 }
 
 // What the user picked: one of the vendor's options by id, as the prompt

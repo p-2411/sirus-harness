@@ -30,7 +30,7 @@ export const modelCommand: CommandSpec = {
 
 export const agentsCommandSpec: CommandSpec = {
   name: 'agents',
-  args: '[show|message|cancel|dismiss] [id]',
+  args: '[show|message|cancel|dismiss] [name]',
   description: 'watch, steer, stop or clear the session\'s background workers',
   run: (args, context) => agentsCommand(args, context.session),
   menu: agentsMenuItems,

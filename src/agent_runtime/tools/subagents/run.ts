@@ -87,16 +87,34 @@ export function subagentDone(run: SubagentRun): Promise<void> {
   return completions.get(run.id) ?? Promise.resolve();
 }
 
+// The longest one tool call waits on workers, whatever it asked for. Both
+// vendors give up on an MCP call that has been silent for five minutes, Codex
+// at its tool_timeout_sec and Claude Code at its idle timeout for an HTTP
+// server, and the answer of a call they gave up on reaches nobody.
+export const TOOL_WAIT_LIMIT_MS = 270_000;
+
 export async function waitSubagents(runs: SubagentRun[], timeoutMs: number, signal?: AbortSignal): Promise<Record<string, unknown>[]> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     await abortable(Promise.race([
       Promise.all(runs.map(subagentDone)),
-      new Promise<void>(resolve => { timer = setTimeout(resolve, timeoutMs); }),
+      new Promise<void>(resolve => { timer = setTimeout(resolve, Math.min(timeoutMs, TOOL_WAIT_LIMIT_MS)); }),
     ]), signal);
     return runs.map(describeRun);
   } finally {
     clearTimeout(timer);
+  }
+}
+
+// The owner of a foreground run waits for it in its SpawnAgent call. A wait
+// that ends first, cancelled with the owner's turn or out of time, leaves the
+// run working as a background one, so its report still reaches the owner when
+// it ends rather than going to a call nobody is waiting on.
+export async function awaitForeground(run: SubagentRun, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+  try {
+    await waitSubagents([run], timeoutMs, signal);
+  } finally {
+    if (run.status === 'working') run.runInBackground = true;
   }
 }
 
@@ -166,6 +184,7 @@ function startTurn(run: SubagentRun, owner: SessionAgent, text: string, recorded
   run.finishedAt = null;
   run.finalMessage = null;
   run.error = null;
+  run.tokens = undefined;
   run.reported = false;
   run.dismissed = false;
   const completion = execute(run, owner, { text, task, entry });
@@ -193,6 +212,8 @@ async function execute(run: SubagentRun, owner: SessionAgent, turn: { text: stri
     status = isAbortError(error) ? 'cancelled' : 'failed';
   } finally {
     clearInterval(watchdog);
+    // Before an unchanged worktree's removal resets the runtime and its gauge.
+    run.tokens = worker.context?.tokens;
     run.changes = summarizeChanges(run.transcript.flatMap(entry => entry.content), run.directory);
     if (run.branch && run.startHead) {
       const worktree = { directory: run.directory, branch: run.branch, startHead: run.startHead };

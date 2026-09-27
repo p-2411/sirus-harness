@@ -752,11 +752,34 @@ describe('/agents', () => {
     expect(asked).toEqual(['dismiss sub-done']);
   });
 
+  test('names a worker by the name its owner gave it, with the id secondary', async () => {
+    const { session, asked } = workerSession([
+      worker({ id: 'sub-1a2b3c4d', name: 'greet-jsdoc', description: 'Add JSDoc to greet' }),
+      worker({ id: 'sub-done', name: 'loader', status: 'done' }),
+    ]);
+    expect(items([], session).map(item => [item.label, item.description, item.command])).toEqual([
+      ['greet-jsdoc · gpt-5.6-terra · working 2m10s', 'Add JSDoc to greet · sub-1a2b3c4d', '/agents sub-1a2b3c4d'],
+      ['loader · gpt-5.6-terra · done 2m10s', 'Rewrite the loader · sub-done', '/agents sub-done'],
+    ]);
+    expect(commandMenu('agents', ['greet-jsdoc'], session)?.[0]).toMatchObject({ label: 'greet-jsdoc (sub-1a2b3c4d) · working' });
+    const shown = (runCommand('agents', ['show', 'greet-jsdoc'], session) as Feedback).text;
+    expect(shown).toStartWith('greet-jsdoc (sub-1a2b3c4d) · working · 2m10s');
+    expect((runCommand('agents', [], session) as Feedback).text)
+      .toContain('greet-jsdoc (sub-1a2b3c4d) · gpt-5.6-terra · working 2m10s · Add JSDoc to greet');
+    expect(await runCommand('agents', ['message', 'greet-jsdoc', 'also the tests'], session))
+      .toEqual({ kind: 'success', text: 'Sent to greet-jsdoc.' });
+    expect(await runCommand('agents', ['cancel', 'sub-1a2b3c4d'], session))
+      .toEqual({ kind: 'success', text: 'Cancelled greet-jsdoc.' });
+    expect(runCommand('agents', ['dismiss', 'loader'], session))
+      .toEqual({ kind: 'success', text: 'Dismissed loader.' });
+    expect(asked).toEqual(['message sub-1a2b3c4d: also the tests', 'cancel sub-1a2b3c4d', 'dismiss sub-done']);
+  });
+
   test('is offered in the command menu and in /help', () => {
     expect(matchCommands('/ag').map(command => command.name)).toEqual(['agents']);
-    expect(matchCommands('/agents')[0].args).toBe('[show|message|cancel|dismiss] [id]');
+    expect(matchCommands('/agents')[0].args).toBe('[show|message|cancel|dismiss] [name]');
     expect((runCommand('help', []) as Feedback).text)
-      .toContain('/agents [show|message|cancel|dismiss] [id]');
+      .toContain('/agents [show|message|cancel|dismiss] [name]');
   });
 });
 

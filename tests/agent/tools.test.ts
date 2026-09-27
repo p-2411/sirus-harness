@@ -427,6 +427,9 @@ test('WaitAgent and SendMessage validate names, timeouts and interrupt flags at 
     expect((await call(client, 'WaitAgent', { ids: [], timeoutMs: 0 })).isError).toBe(true);
     expect((await call(client, 'WaitAgent', { ids: ['run-1'], timeoutMs: -1 })).isError).toBe(true);
     expect((await call(client, 'WaitAgent', { ids: ['run-1'], timeoutMs: 0 })).isError).toBe(false);
+    // Longer than the vendors wait on a tool call: cut to the limit, not refused.
+    expect((await call(client, 'WaitAgent', { ids: ['run-1'], timeoutMs: 600000 })).isError).toBe(false);
+    expect(findTool('WaitAgent')?.args.timeoutMs).toMatchObject({ maximum: 270000 });
     expect((await call(client, 'SendMessage', { to: 'run-1', message: 'Next', interrupt: 'yes' })).isError).toBe(true);
     expect((await call(client, 'SpawnAgent', { prompt: 'Work', cwd: '/tmp', isolation: 'worktree' })).isError).toBe(true);
     expect((await call(client, 'SpawnAgent', { prompt: 'Work', cwd: 'relative' })).isError).toBe(true);

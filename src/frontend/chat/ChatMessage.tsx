@@ -26,6 +26,9 @@ import {
 	type SubagentRun,
 	type SubagentStatus,
 } from '../../agent_runtime/tools/subagents';
+import { INTERRUPTED_REASON } from '../../agent_runtime/tools/subagents/report';
+import { formatTokens } from '../../agent_runtime/usage';
+import { workerAge } from '../../commands/agents/behavior';
 import {
 	getPermissionsVersion,
 	isAwaitingApproval,
@@ -132,14 +135,34 @@ function isSpawnAgent(call: ToolCallBlock): boolean {
 // The call's own content is the handle the vendor was given back, which is
 // not what the user came to read.
 function spawnReport(call: ToolCallBlock): string {
-	return isSpawnAgent(call) && typeof call.output === 'string' ? call.output.trim() : '';
+	return typeof call.output === 'string' ? call.output.trim() : '';
 }
 
-// What the call produced: the worker's report on a SpawnAgent row, otherwise
-// its text content, or failing that a string output.
+// What SpawnAgent was asked, as the vendor recorded the call: the arguments
+// themselves from Claude, nested under `arguments` from Codex.
+function spawnArguments(call: ToolCallBlock): Record<string, unknown> {
+	const record = (value: unknown) => value !== null && typeof value === 'object' && !Array.isArray(value)
+		? value as Record<string, unknown> : null;
+	const input = record(call.input) ?? {};
+	return record(input.arguments) ?? input;
+}
+
+// Why a spawn failed before any worker existed: the error the tool returned,
+// which Claude carries as the call's text and Codex as its raw output.
+function spawnFailure(call: ToolCallBlock): string {
+	const text = call.content.flatMap(block => block.type === 'text' ? [block.text] : []).join(' ');
+	if (text.trim()) return singleLine(text);
+	const output = call.output !== null && typeof call.output === 'object' ? call.output as Record<string, unknown> : {};
+	const error = output.error;
+	if (typeof error === 'string' && error.trim()) return singleLine(error);
+	const message = error !== null && typeof error === 'object' ? (error as { message?: unknown }).message : undefined;
+	if (typeof message === 'string') return singleLine(message);
+	const result = output.result as { content?: { text?: unknown }[] } | undefined;
+	return singleLine((result?.content ?? []).flatMap(block => typeof block.text === 'string' ? [block.text] : []).join(' '));
+}
+
+// What the call produced: its text content, or failing that a string output.
 export function outputPreview(call: ToolCallBlock): DiffLine[] {
-	const report = spawnReport(call);
-	if (report) return diffLines(' ', report);
 	const text = call.content
 		.flatMap(block => block.type === 'text' ? [block.text] : [])
 		.join('\n');
@@ -309,12 +332,11 @@ const subagentColors: Record<SubagentIndicator, string> = {
 // carries what the call never did: the model it got, its id and its branch.
 function useSubagentRun(call: ToolCallBlock, sessionId?: string): {
 	run?: SubagentRun;
-	status: SubagentIndicator | null;
+	status: SubagentIndicator;
 } {
 	useSyncExternalStore(subscribeSubagents, getSubagentsVersion);
 	const run = sessionId === undefined ? undefined : findSubagentByCall(call.id, sessionId);
 	if (run) return { run, status: run.status };
-	if (!isSpawnAgent(call)) return { status: null };
 	if (call.status === 'failed') return { status: 'failed' };
 	return { status: call.status === 'completed' ? 'unknown' : 'working' };
 }
@@ -344,22 +366,16 @@ function ToolSummary({ call, indent = '', hovered = false, sessionId }: {
 	indent?: string;
 	hovered?: boolean;
 }) {
-	const { run, status: subagent } = useSubagentRun(call, sessionId);
 	const permission = usePermissionStatus(call, sessionId);
-	const color = subagent ? subagentColors[subagent] : statusColors[call.status];
 	const title = singleLine(call.title);
 	const counts = editCounts(call);
 	return (
 		<Text wrap="truncate-end">
-			<Text color={color}>{indent}●</Text>
+			<Text color={statusColors[call.status]}>{indent}●</Text>
 			<Text color={hovered ? theme.textMuted : theme.textSubtle}> {toolVerb(call.kind)}</Text>
-			{run && <Text color={theme.textSubtle} dimColor> {run.model}</Text>}
 			{title && <Text color={theme.textSubtle} dimColor> {title}</Text>}
 			{counts && <Text color={theme.success}> +{counts.added}</Text>}
 			{counts && counts.removed > 0 && <Text color={theme.danger}> −{counts.removed}</Text>}
-			{run && <Text color={theme.textSubtle} dimColor> · {run.id}</Text>}
-			{subagent && subagent !== 'unknown' && <Text color={color}> · {subagent}</Text>}
-			{run?.branch && <Text color={theme.textSubtle} dimColor> · {run.branch}</Text>}
 			{permission && <Text color={permission.color}> · {permission.text}</Text>}
 		</Text>
 	);
@@ -385,19 +401,14 @@ function DiffPreview({ lines }: { lines: readonly DiffLine[] }) {
 }
 
 // One call, collapsed to its summary line until clicked; expanded, it also
-// shows what the call carried. A worker's report is the exception: it is what
-// the user has been waiting for, so the SpawnAgent row opens itself once the
-// run has ended, and a click still closes it.
+// shows what the call carried.
 function ToolCallEntry({ call, indent, sessionId }: {
 	sessionId?: string;
 	call: ToolCallBlock;
 	indent?: string;
 }) {
-	const { status } = useSubagentRun(call, sessionId);
-	const showsReport = spawnReport(call) !== '' && status !== 'working';
-	const [expansionOverride, setExpansionOverride] = useState<boolean | null>(null);
-	const expanded = expansionOverride ?? showsReport;
-	const toggle = useCallback(() => setExpansionOverride(!expanded), [expanded]);
+	const [expanded, setExpanded] = useState(false);
+	const toggle = useCallback(() => setExpanded(current => !current), []);
 	const ref = useRef<DOMElement>(null);
 	const hovered = useClickable(ref, toggle);
 	const detail = expanded ? callDetail(call) : [];
@@ -453,6 +464,98 @@ export function ToolRunGroup({ calls, defaultExpanded = false, sessionId }: {
 	);
 }
 
+// How a run stands, in the words of Claude Code's Agent row: "Done (4 tool
+// uses · 12k tokens · 45s)". A call the user declined fails like any other,
+// and the count says so, so that "Done" never reads as everything went
+// through.
+function runSummary(run: SubagentRun): string {
+	const calls = run.content.filter((block): block is ToolCallBlock => block.type === 'tool_call' && !isPlanCall(block));
+	const failed = calls.filter(call => call.status === 'failed');
+	const declined = failed.filter(call => lastDecision(call.id, run.sessionId) === 'deny').length;
+	const ended = run.status !== 'working';
+	const parts = [
+		`${calls.length} tool use${calls.length === 1 ? '' : 's'}`,
+		...(declined > 0 ? [`${declined} declined`] : []),
+		...(failed.length > declined ? [`${failed.length - declined} failed`] : []),
+		...(ended && run.tokens !== undefined ? [`${formatTokens(run.tokens)} tokens`] : []),
+		...(ended ? [workerAge(run)] : []),
+	].join(' · ');
+	switch (run.status) {
+		case 'working': {
+			const latest = calls.at(-1);
+			return `Working (${parts})${latest ? ` · ${toolLine(latest, 60)}` : ''}`;
+		}
+		case 'done':
+			return `Done (${parts})`;
+		case 'failed':
+			return `Failed (${parts}): ${singleLine(run.error ?? 'unknown error')}`;
+		case 'cancelled':
+			// "Cancelled by CancelAgent" says it already; a watchdog's reason does not.
+			return run.error && /^cancelled\b/i.test(run.error)
+				? `${singleLine(run.error)} (${parts})`
+				: `Cancelled (${parts})${run.error ? `: ${singleLine(run.error)}` : ''}`;
+		case 'interrupted':
+			return `Interrupted (${parts}): ${singleLine(run.error ?? INTERRUPTED_REASON)}`;
+	}
+}
+
+// A SpawnAgent call is the anchor of the worker it started, laid out the way
+// Claude Code lays out an Agent row: the worker's name, or "Agent" for one
+// given none, with its task; under it how the run stands; and once it has
+// ended, the report its owner received, whole and as Markdown. A spawn that
+// never started a worker says why. A click folds the report away and back,
+// and opens a running one's task in full.
+function SpawnAgentEntry({ call, sessionId }: { call: ToolCallBlock; sessionId?: string }) {
+	const { run, status } = useSubagentRun(call, sessionId);
+	const permission = usePermissionStatus(call, sessionId);
+	const report = spawnReport(call);
+	const [expansionOverride, setExpansionOverride] = useState<boolean | null>(null);
+	const expanded = expansionOverride ?? (report !== '' && status !== 'working');
+	const toggle = useCallback(() => setExpansionOverride(!expanded), [expanded]);
+	const ref = useRef<DOMElement>(null);
+	const hovered = useClickable(ref, toggle);
+	const args = spawnArguments(call);
+	const argument = (key: string) => typeof args[key] === 'string' ? singleLine(args[key] as string) : '';
+	const name = run?.name ?? (argument('name') || 'Agent');
+	const prompt = run?.prompt ?? (typeof args.prompt === 'string' ? args.prompt : '');
+	const task = run ? run.description || singleLine(run.prompt) : argument('description') || singleLine(prompt);
+	const color = subagentColors[status];
+	// A spawn waiting on the user's approval has not started anything yet;
+	// its title says what it waits for.
+	const summary = run ? runSummary(run)
+		: status === 'failed' ? ['Failed', spawnFailure(call)].filter(Boolean).join(': ')
+			: status === 'working' && !permission ? 'Starting' : '';
+	return (
+		<Box flexDirection="column">
+			<Box ref={ref} flexDirection="column">
+				<Text wrap="truncate-end">
+					<Text color={color}>{'  '}●</Text>
+					<Text color={hovered ? theme.accentSoft : theme.text} bold> {name}</Text>
+					{task && <Text color={hovered ? theme.accentSoft : theme.textMuted}>({task})</Text>}
+					{run && <Text color={theme.textSubtle} dimColor> · {run.model} {run.thinkingLevel} · {run.id}</Text>}
+					{run?.branch && <Text color={theme.textSubtle} dimColor> · {run.branch}</Text>}
+					{permission && <Text color={permission.color}> · {permission.text}</Text>}
+				</Text>
+				{summary && (
+					<Box marginLeft={4}>
+						<Text color={status === 'failed' ? theme.danger : theme.textMuted} wrap="truncate-end">⎿ {summary}</Text>
+					</Box>
+				)}
+			</Box>
+			{expanded && report && (
+				<Box marginLeft={6}>
+					<Markdown>{report}</Markdown>
+				</Box>
+			)}
+			{expanded && !report && prompt.trim() && (
+				<Box marginLeft={6}>
+					<Text color={theme.textMuted} wrap="wrap">{prompt.trim()}</Text>
+				</Box>
+			)}
+		</Box>
+	);
+}
+
 // A row on its own is set off by a blank line; rows that follow one another
 // stack directly, as the entries of a group do.
 function ToolCallRow({ call, sessionId, joinsPrevious = false, joinsNext = false }: {
@@ -463,7 +566,9 @@ function ToolCallRow({ call, sessionId, joinsPrevious = false, joinsNext = false
 }) {
 	return (
 		<Box flexDirection="column" paddingX={1} paddingTop={joinsPrevious ? 0 : 1} paddingBottom={joinsNext ? 0 : 1}>
-			<ToolCallEntry call={call} indent="  " sessionId={sessionId} />
+			{isSpawnAgent(call)
+				? <SpawnAgentEntry call={call} sessionId={sessionId} />
+				: <ToolCallEntry call={call} indent="  " sessionId={sessionId} />}
 		</Box>
 	);
 }
