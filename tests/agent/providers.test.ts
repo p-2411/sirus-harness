@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { existsSync, mkdtempSync, rmSync } from 'fs';
 import os from 'os';
 import path from 'path';
@@ -6,6 +6,9 @@ import { providerFor, servableModelIds, servesModel } from '../../src/agent_runt
 import { MODELS, modelInfo, VENDOR_INFO, type Vendor } from '../../src/agent_runtime/providers/catalog';
 import { sourceEnvironment } from '../../src/agent_runtime/providers/profiles';
 import { maskApiKey, type Source } from '../../src/agent_runtime/providers/sources';
+import * as acp from '../../src/agent_runtime/runtime/acp';
+import { launchFor } from '../../src/agent_runtime/runtime/launch';
+import { createRuntime, type RuntimeOptions } from '../../src/agent_runtime/runtime/runtime';
 import {
   routeSessionModel,
   routeWorker,
@@ -33,6 +36,38 @@ test('serves the catalog plus whatever a scripted runtime is bound to', () => {
     expect(servableModelIds()).toContain('gpt-5.6-luna');
   } finally {
     unbindRuntime(model);
+  }
+});
+
+// What a runtime is started with, less what each test is about.
+function runtimeOptions(overrides: Partial<RuntimeOptions>): RuntimeOptions {
+  return {
+    vendor: 'gpt',
+    model: 'gpt-5.6-luna',
+    thinkingLevel: 'low',
+    directory: os.tmpdir(),
+    systemPrompt: 'Answer briefly.',
+    env: {},
+    mcpServer: null,
+    bare: true,
+    permissionMode: 'ask',
+    onPermission: async () => ({ outcome: { outcome: 'cancelled' } }),
+    onUpdate: () => {},
+    ...overrides,
+  };
+}
+
+// A restored session, or the subagent setting, can name a model a vendor
+// has since stopped listing. It has no credential, and must not be started
+// on the process's own environment instead.
+test('a model no vendor knows any more is refused before any adapter starts', async () => {
+  const start = spyOn(acp, 'startAcpRuntime').mockRejectedValue(new Error('an adapter was started'));
+  try {
+    await expect(createRuntime(runtimeOptions({ model: 'gpt-retired', env: { ...process.env } })))
+      .rejects.toThrow('The model gpt-retired is no longer available. Pick another with /model.');
+    expect(start).not.toHaveBeenCalled();
+  } finally {
+    start.mockRestore();
   }
 });
 
@@ -190,6 +225,17 @@ describe('credential environments', () => {
     expect(sourceEnvironment('gpt', { id: 'k', kind: 'api', key: 'sk-proj-run-5678' }).CODEX_HOME).toBe(first.CODEX_HOME);
     expect(sourceEnvironment('gpt', { id: 'j', kind: 'api', key: 'sk-proj-other-0001' }).CODEX_HOME).not.toBe(first.CODEX_HOME);
     expect(first.CODEX_HOME).not.toContain('sk-proj');
+  });
+
+  test('the launch logs Codex in with a key only inside a home Sirus made for it', () => {
+    const keyed = sourceEnvironment('gpt', { id: 'k', kind: 'api', key: 'sk-proj-run-5678' });
+    expect(launchFor(runtimeOptions({ env: keyed })).authenticate).toEqual({ methodId: 'api-key' });
+    // The shell's own key with no home of Sirus's: a login would land in the
+    // user's Codex home and replace their ChatGPT sign-in.
+    const shell = { OPENAI_API_KEY: 'sk-proj-shell-0000' };
+    expect(launchFor(runtimeOptions({ env: shell })).authenticate).toBeUndefined();
+    expect(launchFor(runtimeOptions({ env: { ...shell, CODEX_HOME: path.join(os.homedir(), '.codex') } })).authenticate)
+      .toBeUndefined();
   });
 
   test('a subscription points the process at its own profile and inherits no key', () => {
