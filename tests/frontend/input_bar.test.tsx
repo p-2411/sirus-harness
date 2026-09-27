@@ -226,12 +226,9 @@ describe('input feedback', () => {
       .toContain('✓ Session history cleared.');
   });
 
-  test('renders status updates with an arrow', () => {
+  test('renders status updates as plain text, with no arrow', () => {
     expect(render({ kind: 'info', text: 'Opening your browser…' }))
-      .toContain('→ Opening your browser…');
-  });
-
-  test('can render informational output without an arrow', () => {
+      .toBe('   Opening your browser…');
     expect(render({ kind: 'info', text: 'claude: not configured', showIcon: false }))
       .toBe('   claude: not configured');
   });
@@ -246,17 +243,17 @@ describe('input feedback', () => {
 });
 
 describe('input status', () => {
-  test('makes the vendor difference in ask mode visible', () => {
+  test('names ask mode the same way for either vendor', () => {
     const codex = stripAnsi(renderToString(
       <SubagentStatusRow permissionMode="ask" model="gpt-5.6-luna" />,
       { columns: 120 },
     ));
-    expect(codex).toContain('ask for approval (workspace edits allowed)');
+    expect(codex).toContain('ask for approval · shift+tab');
     const claude = stripAnsi(renderToString(
       <SubagentStatusRow permissionMode="ask" model="claude-sonnet-5" />,
       { columns: 120 },
     ));
-    expect(claude).toContain('ask for approval (asks before writes)');
+    expect(claude).toContain('ask for approval · shift+tab');
   });
 
   test('shows the active model and thinking level together', () => {

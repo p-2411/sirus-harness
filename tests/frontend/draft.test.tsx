@@ -385,7 +385,7 @@ describe('folded pastes and visual rows', () => {
       await draft.flush();
       expect(draft.output).toContain('line-59');
       expect(draft.output).not.toContain('line-0');
-      expect(draft.output).toContain('rows 53–60/60');
+      expect(draft.output).toContain('53–60/60');
       for (let i = 0; i < 59; i++) await draft.press('\u001b[A');
       expect(draft.output).toContain('line-0');
       expect(draft.output).not.toContain('line-59');
@@ -458,7 +458,7 @@ describe('history, shortcuts and pasted image paths', () => {
     const draft = renderDraft({ disabled: true });
     try {
       await draft.flush();
-      expect(draft.output).toContain('enter to steer · tab to queue');
+      expect(draft.output).toContain('enter steers · tab queues');
       expect(draft.output).not.toContain('agents are thinking');
       expect(draft.output).not.toContain('▌');
       await draft.press('?');

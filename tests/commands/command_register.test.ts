@@ -93,10 +93,8 @@ describe('executeCommand', () => {
     const description = 'Claude asks before writes. Codex asks before leaving the workspace; edits inside it are not asked.';
     expect(menuItems('permissions', []).find(item => item.key === 'ask')?.description).toBe(description);
     const session = new Session();
-    expect(runCommand('permissions', ['ask'], session)).toEqual({
-      kind: 'success',
-      text: `Permission mode set to ask for approval. ${description}`,
-    });
+    expect(runCommand('permissions', ['ask'], session)).toBeUndefined();
+    expect(session.getPermissionMode()).toBe('ask');
     expect(runCommand('permissions', [], session)).toEqual({
       kind: 'info',
       text: `Permission mode is ask for approval. ${description}`,
@@ -789,9 +787,9 @@ test('removed routing command is absent from help and suggestions', () => {
 });
 
 
-test('permission cycling never enables bypass, which remains an explicit menu choice', () => {
+test('permission cycling goes ask, auto, bypass and round again', () => {
   expect(nextPermissionMode('ask')).toBe('auto');
-  expect(nextPermissionMode('auto')).toBe('ask');
+  expect(nextPermissionMode('auto')).toBe('bypass');
   expect(nextPermissionMode('bypass')).toBe('ask');
   expect(menuItems('permissions', []).some(item => item.command === '/permissions bypass')).toBe(true);
 });

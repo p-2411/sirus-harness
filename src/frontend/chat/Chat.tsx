@@ -539,32 +539,15 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
 
   // A command leaves any attachments waiting for the next real message.
   // Commands are exactly what the background queue leaves for a mounted Chat.
-  const send = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[], asMessage = false): boolean => {
-    // A `/name` for one of the agent's own commands is a prompt: the agent's
-    // harness runs it.
-    if (!asMessage && !isAutoSendable(text) && !isNativeCommand(text, currSession.getNativeCommands())) {
-      const { name, args } = parseCommandLine(text);
-      if (!commandRegistry.some(command => command.name === name)) {
-        currSession.setInputContent(text);
-        setFeedback({ kind: 'warning', text: `Unknown command: /${name}. Send it as a message?` });
-        setInputMode({
-          type: 'menu',
-          items: [
-            { type: 'item', key: 'edit', label: 'Keep editing', command: '' },
-            { type: 'item', key: 'send', label: 'Send as a message', command: '' },
-          ],
-          onSelect: item => {
-            setInputMode({ type: 'text' });
-            if (item.key === 'send') {
-              currSession.setInputContent('');
-              send(text, images, content, true);
-            }
-          },
-          onCancel: () => setInputMode({ type: 'text' }),
-        });
-        return false;
-      }
-      runCommand(name, args);
+  const send = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[]): boolean => {
+    // A Sirus command runs here. Anything else that starts with a slash, an
+    // agent's own command or a name nobody knows, goes out as a message and
+    // the agent's harness makes of it what it will.
+    const command = !isAutoSendable(text) && !isNativeCommand(text, currSession.getNativeCommands())
+      ? parseCommandLine(text)
+      : null;
+    if (command && commandRegistry.some(spec => spec.name === command.name)) {
+      runCommand(command.name, command.args);
     } else {
       // Images sit where the draft placed them. The session stamps the
       // entry's seq when it enters the transcript.

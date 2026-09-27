@@ -466,7 +466,7 @@ test('notices between turns appear as input feedback without adding transcript e
         type: 'notice', severity, title: 'Configuration\nchanged', description: 'A vendor\tdetail.',
       });
       await chat.flush();
-      expect(chat.output()).toContain(`${severity === 'vendor-info' ? '→' : '!'} @sirus: Configuration changed · A vendor detail.`);
+      expect(chat.output()).toContain(`${severity === 'vendor-info' ? '' : '! '}@sirus: Configuration changed · A vendor detail.`);
       expect(session.getMessages()).toEqual(before);
       await chat.type('\u001b');
       expect(chat.output()).not.toContain('Configuration changed');
@@ -526,7 +526,7 @@ describe('turn status', () => {
 });
 
 
-test('slash paths are sent and unknown commands retain their draft until explicitly sent', async () => {
+test('slash paths and unknown commands are sent as messages', async () => {
   const model = 'test-slash-input';
   const received: string[] = [];
   bindScriptedRuntime(model, (input, emit) => { received.push(input.text); emit({ type: 'text', text: 'Received.' }); });
@@ -540,13 +540,8 @@ test('slash paths are sent and unknown commands retain their draft until explici
     expect(received[0]).toContain('/tmp/foo.txt what is in this file');
     await chat.type('/not-a-command hello');
     await chat.type('\r');
-    expect(session.getInputContent()).toBe('/not-a-command hello');
-    expect(chat.output()).toContain('Send as a message');
-    expect(received).toHaveLength(1);
-    await chat.type('\u001b[B');
-    await chat.type('\r');
-    await chat.waitFor('Received.');
-    expect(received).toHaveLength(2);
+    for (let attempt = 0; attempt < 200 && received.length < 2; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+    expect(chat.output()).not.toContain('Unknown command');
     expect(received[1]).toBe('/not-a-command hello');
     expect(session.getInputContent()).toBe('');
   } finally {

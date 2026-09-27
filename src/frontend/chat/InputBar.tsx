@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { Box, Text, useApp, useBoxMetrics, useInput, usePaste, useStdout, type DOMElement } from 'ink';
+import stringWidth from 'string-width';
 import { theme } from '../styles/theme';
 import { CommandMenu, useCommandMenu } from './CommandMenu';
 import { isNativeCommand } from '../../commands/registry';
@@ -329,7 +330,11 @@ export function InputBar({
     setEditor(next);
   };
   const insertText = (text: string) => edit({ type: 'insert', text: normalizeNewlines(text) });
-  const rows = draftRows(input, Math.max(1, (boxWidth || stdout.columns || 80) - 6), character => {
+  // What Enter does sits at the right of the draft's first line, and the
+  // draft wraps short of it; a long draft's position shows on its last line.
+  const enterHint = selectedQueued ? 'enter saves · esc restores' : disabled ? 'enter steers · tab queues' : 'enter ↵';
+  const hintWidth = Math.max(stringWidth(enterHint), stringWidth('copied ✓'), 11) + 1;
+  const rows = draftRows(input, Math.max(1, (boxWidth || stdout.columns || 80) - 6 - hintWidth), character => {
     const image = imageFor(character);
     return image ? `[${describeImage(image)}]` : pastes.current.get(character)?.label;
   });
@@ -677,17 +682,22 @@ export function InputBar({
         <Text color={theme.textSubtle}>ctrl+r older · ctrl+s newer · enter selects · esc restores</Text>
       </Box>}
       <Box ref={inputBox} borderStyle="round" borderColor={theme.accent} paddingX={1} marginX={1} flexShrink={0} flexDirection="column">
-        {rows.slice(rowOffset, rowOffset + maxRows).map((cells, index) => <Box key={rowOffset + index}>
+        {rows.slice(rowOffset, rowOffset + maxRows).map((cells, index, shown) => <Box key={rowOffset + index}>
           <Box width={2} flexShrink={0}><Text color={theme.accentSoft}>{rowOffset + index === 0 ? '› ' : '  '}</Text></Box>
           <Box flexGrow={1} minWidth={0}>
-            {input ? <DraftRow cells={cells} cursor={editor.cursor} participantColors={participantColors} /> : <Text wrap="truncate-end"><Text inverse> </Text><Text color={theme.textSubtle}>{disabled ? 'enter to steer · tab to queue' : 'message sirus or @mention an agent…'}</Text></Text>}
+            {input
+              ? <DraftRow cells={cells} cursor={editor.cursor} participantColors={participantColors} />
+              : <Text wrap="truncate-end"><Text inverse> </Text><Text color={theme.textSubtle}> message sirus or <MentionText colors={participantColors}>@mention</MentionText> an agent…</Text></Text>}
+          </Box>
+          <Box width={hintWidth} flexShrink={0} justifyContent="flex-end">
+            {index === 0
+              ? <Text color={showCopied ? theme.success : theme.textSubtle} wrap="truncate-end">{showCopied ? 'copied ✓' : enterHint}</Text>
+              : index === shown.length - 1 && rows.length > maxRows
+                ? <Text color={theme.textSubtle}>{rowOffset + 1}–{Math.min(rows.length, rowOffset + maxRows)}/{rows.length}</Text>
+                : null}
           </Box>
         </Box>)}
         {!selectedQueued && trailingImages.length > 0 && <TrailingImages images={trailingImages} after={false} />}
-        <Text color={showCopied ? theme.success : theme.textSubtle} wrap="truncate-end">
-          {showCopied ? 'copied ✓' : selectedQueued ? 'enter saves · esc restores' : disabled ? 'enter to steer · tab to queue' : 'enter ↵ · ? shortcuts'}
-          {rows.length > maxRows ? ` · rows ${rowOffset + 1}–${Math.min(rows.length, rowOffset + maxRows)}/${rows.length}` : ''}
-        </Text>
       </Box>
       <WorkerStrip workers={workers} selection={workerSelection} />
       <SubagentStatusRow {...status} />

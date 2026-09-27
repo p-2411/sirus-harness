@@ -5,12 +5,12 @@ import { theme } from '../styles/theme';
 import { MentionText, type ParticipantColors } from '../MentionText';
 import type { Feedback } from '../../commands/feedback';
 
-const FEEDBACK_ICONS = {
-  info: '→',
+// An information line reads as plain text; the others are marked.
+const FEEDBACK_ICONS: Partial<Record<Feedback['kind'], string>> = {
   success: '✓',
   warning: '!',
   error: '!',
-} as const;
+};
 
 export function InputFeedback({ feedback, participantColors }: {
   feedback: Feedback | null;
@@ -21,12 +21,12 @@ export function InputFeedback({ feedback, participantColors }: {
     ? theme.success
     : feedback.kind === 'error' ? theme.danger
       : feedback.kind === 'warning' ? theme.pending : theme.accentSoft;
-  const showIcon = feedback.showIcon !== false;
+  const icon = feedback.showIcon === false ? undefined : FEEDBACK_ICONS[feedback.kind];
   return (
     <Box paddingX={3} flexShrink={0}>
-      {showIcon && <Text color={iconColor}>{FEEDBACK_ICONS[feedback.kind]}</Text>}
+      {icon && <Text color={iconColor}>{icon}</Text>}
       <Text color={feedback.kind === 'error' ? theme.danger : feedback.kind === 'warning' ? theme.pending : theme.textMuted}>
-        {showIcon ? ' ' : ''}<MentionText colors={participantColors}>{feedback.text}</MentionText>
+        {icon ? ' ' : ''}<MentionText colors={participantColors}>{feedback.text}</MentionText>
       </Text>
     </Box>
   );

@@ -2,7 +2,6 @@ import { Box, Text } from 'ink';
 import { theme } from '../styles/theme';
 import { contextPercent, formatTokens, type ContextUsage } from '../../agent_runtime/usage';
 import { PERMISSION_MODE_NAMES, type PermissionMode } from '../../agent_runtime/permissions/policy';
-import { vendorOf } from '../../agent_runtime/providers/catalog';
 
 export interface StatusRowProps {
   permissionMode?: PermissionMode;
@@ -42,17 +41,12 @@ export function SubagentStatusRow({
   contextUsage,
   tasksVisible,
 }: StatusRowProps) {
-  const vendor = permissionMode === 'ask' && model ? vendorOf(model) : undefined;
-  const askScope = vendor
-    ? vendor === 'gpt' ? 'workspace edits allowed' : 'asks before writes'
-    : null;
   return (
     <Box paddingX={3} height={1} flexShrink={0} justifyContent="space-between">
       <Box>
         {permissionMode && (
           <Text color={permissionMode === 'bypass' ? theme.pending : theme.textMuted} wrap="truncate-end">
             {PERMISSION_MODE_NAMES[permissionMode]}
-            {askScope && <Text> ({askScope})</Text>}
             {modeNotice && <Text color={theme.textSubtle} dimColor> · {modeNotice}</Text>}
             <Text color={theme.textSubtle}> · shift+tab</Text>
           </Text>

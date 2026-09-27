@@ -19,7 +19,7 @@ export const KEY_BINDINGS: ReadonlyArray<readonly [keys: string, action: string]
   ['ctrl+v', 'attach a clipboard image'],
   ['@ · ↑ / ↓ · tab / enter', 'find and mention a project file'],
   ['backspace over an image', 'remove it'],
-  ['shift+tab', 'switch ask / auto; choose bypass through /permissions'],
+  ['shift+tab', 'cycle ask / auto / bypass'],
   ['esc', 'close menu · restore queue edit · decline card · cancel turn'],
   ['esc twice', 'clear draft (↑ recalls) · empty draft opens /rewind'],
   ['ctrl+c', 'interrupt · clear draft · press again within 1s to exit'],

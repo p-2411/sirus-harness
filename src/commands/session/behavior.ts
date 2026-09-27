@@ -40,7 +40,8 @@ export function permissionsMenuItems(): CommandMenuItem[] {
   }));
 }
 
-export function permissionsCommand(mode: string | undefined, session: CommandSession): Feedback {
+// Setting a mode says nothing: the status row shows it.
+export function permissionsCommand(mode: string | undefined, session: CommandSession): Feedback | void {
   if (mode === undefined) {
     const current = session.getPermissionMode();
     return {
@@ -51,8 +52,4 @@ export function permissionsCommand(mode: string | undefined, session: CommandSes
   const parsed = parsePermissionMode(mode);
   if (!parsed) throw new Error('Usage: /permissions [ask|auto|bypass]');
   session.setPermissionMode(parsed);
-  return {
-    kind: 'success',
-    text: `Permission mode set to ${PERMISSION_MODE_NAMES[parsed]}.${parsed === 'ask' ? ` ${ASK_MODE_DESCRIPTION}` : ''}`,
-  };
 }
