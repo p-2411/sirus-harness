@@ -10,6 +10,7 @@ import { FramedCard } from './FramedCard';
 import { isMouseInput } from '../interaction/mouse';
 import { isFocusInput } from '../terminal/window-focus';
 import { terminalText } from '../terminal/text';
+import { backspaceAtEnd } from './editor';
 import { describeRequester } from '../../agent_runtime/permissions/approvals';
 import type { QuestionAnswer, QuestionField, QuestionOption, QuestionRequest } from '../../agent_runtime/permissions/questions';
 
@@ -161,7 +162,7 @@ export function QuestionCard({ request, waiting, onAnswer }: {
       else if ((key.leftArrow || isBackspace) && entry === '') {
         if (typingOther) setTypingOther(false);
         else if (key.leftArrow && index > 0) goTo(index - 1, answers);
-      } else if (isBackspace) setEntry(current => current.slice(0, -1));
+      } else if (isBackspace) setEntry(backspaceAtEnd);
       else if (key.ctrl && input === 'u') setEntry('');
       else if (!key.ctrl && !key.meta && !key.tab && !key.upArrow && !key.downArrow
         && !key.leftArrow && !key.rightArrow && !key.pageUp && !key.pageDown && !key.home && !key.end) {

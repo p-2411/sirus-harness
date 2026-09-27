@@ -20,33 +20,27 @@ function deleteWordBackward(text: string): string {
   return text.replace(/\S*\s*$/, '');
 }
 
+// A character is what the user sees as one: an emoji with its skin tone, a
+// flag, a family joined by ZWJs, each several code points. The cursor steps
+// over it and backspace takes it whole.
+const graphemes = new Intl.Segmenter();
+
 function previousCharacter(text: string, cursor: number): number {
   if (cursor <= 0) return 0;
-  const previous = text.charCodeAt(cursor - 1);
-  return previous >= 0xDC00 && previous <= 0xDFFF
-    && cursor > 1
-    && text.charCodeAt(cursor - 2) >= 0xD800
-    && text.charCodeAt(cursor - 2) <= 0xDBFF
-    ? cursor - 2
-    : cursor - 1;
+  return graphemes.segment(text).containing(cursor - 1)!.index;
 }
 
 function nextCharacter(text: string, cursor: number): number {
   if (cursor >= text.length) return text.length;
-  const current = text.charCodeAt(cursor);
-  return current >= 0xD800 && current <= 0xDBFF
-    && cursor + 1 < text.length
-    && text.charCodeAt(cursor + 1) >= 0xDC00
-    && text.charCodeAt(cursor + 1) <= 0xDFFF
-    ? cursor + 2
-    : cursor + 1;
+  const { index, segment } = graphemes.segment(text).containing(cursor)!;
+  return index + segment.length;
 }
 
 // The cursor one line up or down, keeping its character column where the
-// line allows. Count whole characters so movement cannot split a surrogate pair.
+// line allows.
 function lineMove(text: string, cursor: number, delta: -1 | 1): number {
   const lineStart = cursor === 0 ? 0 : text.lastIndexOf('\n', cursor - 1) + 1;
-  const column = [...text.slice(lineStart, cursor)].length;
+  const column = [...graphemes.segment(text.slice(lineStart, cursor))].length;
   let targetStart: number;
   let targetEnd: number;
   if (delta < 0) {
@@ -73,6 +67,12 @@ export function onFirstLine(state: InputState): boolean {
 
 export function onLastLine(state: InputState): boolean {
   return !state.text.slice(state.cursor).includes('\n');
+}
+
+// Backspace for the prompts that take one value and keep no cursor of
+// their own: the last character goes, whole.
+export function backspaceAtEnd(text: string): string {
+  return applyInputEdit({ text, cursor: text.length }, { type: 'backspace' }).text;
 }
 
 export function applyInputEdit(state: InputState, edit: InputEdit): InputState {

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { render as renderInk, renderToString } from 'ink';
 import { PassThrough } from 'node:stream';
-import { useState, useSyncExternalStore } from 'react';
+import { useState, useSyncExternalStore, type ReactElement } from 'react';
 import stripAnsi from 'strip-ansi';
 import { InputBar } from '../../src/frontend/chat/InputBar';
 import { ApprovalPrompt, approvalChoices } from '../../src/frontend/chat/ApprovalPrompt';
@@ -268,6 +268,26 @@ describe('input cursor editing', () => {
     expect(state).toEqual({ text: 'ab', cursor: 1 });
   });
 
+  test('steps and deletes whole characters, however many code points they take', () => {
+    // A thumbs-up with a skin tone, a flag, and a family joined by ZWJs.
+    const text = 'a👍🏽🇳🇿👨‍👩‍👧b';
+    let state: InputState = { text, cursor: 1 };
+    state = applyInputEdit(state, { type: 'right' });
+    expect(text.slice(1, state.cursor)).toBe('👍🏽');
+    state = applyInputEdit(state, { type: 'right' });
+    expect(text.slice(5, state.cursor)).toBe('🇳🇿');
+    state = applyInputEdit(state, { type: 'right' });
+    expect(text.slice(9, state.cursor)).toBe('👨‍👩‍👧');
+    state = applyInputEdit(state, { type: 'left' });
+    expect(state.cursor).toBe(9);
+    state = applyInputEdit(state, { type: 'backspace' });
+    expect(state).toEqual({ text: 'a👍🏽👨‍👩‍👧b', cursor: 5 });
+    state = applyInputEdit(state, { type: 'backspace' });
+    expect(state).toEqual({ text: 'a👨‍👩‍👧b', cursor: 1 });
+    // A column is counted in characters too.
+    expect(applyInputEdit({ text: '👍🏽x\nabc', cursor: 5 }, { type: 'down' }).cursor).toBe(8);
+  });
+
   test('moves vertically through multiline prompts and detects their edges', () => {
     let state: InputState = { text: 'one\ntwelve\nxyz', cursor: 8 };
     expect(onFirstLine(state)).toBe(false);
@@ -480,6 +500,58 @@ describe('select menu', () => {
       '   OpenAI',
       '   › gpt-5.6-sol',
     ]);
+  });
+});
+
+describe('entry prompts', () => {
+  // Types into a prompt the way a terminal would, then reads what it sent.
+  async function typeInto(element: ReactElement, keys: string[]) {
+    const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {}, ref() {}, unref() {} });
+    const stdout = Object.assign(new PassThrough(), { columns: 100, rows: 30 });
+    const app = renderInk(element, {
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      stdout: stdout as unknown as NodeJS.WriteStream,
+      debug: true, patchConsole: false, exitOnCtrlC: false,
+    });
+    try {
+      for (const key of keys) {
+        stdin.write(key);
+        await new Promise(resolve => setImmediate(resolve));
+        await app.waitUntilRenderFlush();
+      }
+    } finally {
+      app.unmount();
+      await app.waitUntilExit();
+      stdin.destroy();
+      stdout.destroy();
+    }
+  }
+
+  test('backspace takes a whole character off a value the bar asks for', async () => {
+    const submitted: string[] = [];
+    await typeInto(<InputBar
+      inputContent=""
+      setInputContent={() => {}}
+      send={() => {}}
+      disabled={false}
+      feedback={null}
+      participants={[]}
+      mode={{ type: 'entry', prompt: 'Message', masked: false, onSubmit: value => submitted.push(value), onCancel: () => {} }}
+    />, ['a', '👍🏽', '\u007f', '\r']);
+    expect(submitted).toEqual(['a']);
+  });
+
+  test('backspace takes a whole character off an answer typed into a question', async () => {
+    const answers: unknown[] = [];
+    await typeInto(<QuestionCard
+      request={{
+        id: 'question-emoji', sessionId: 'session-1', requester: { participant: 'sirus' }, message: 'Name it?',
+        fields: [{ kind: 'text', key: 'name', title: 'Name it?', required: true, secret: false }],
+      }}
+      waiting={0}
+      onAnswer={answer => answers.push(answer)}
+    />, ['a', '👍🏽', '\u007f', '\r']);
+    expect(answers).toEqual([{ action: 'accept', content: { name: 'a' } }]);
   });
 });
 

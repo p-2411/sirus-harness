@@ -13,6 +13,7 @@ import { SubagentStatusRow, type StatusRowProps } from './StatusRow';
 import { WorkerStrip } from './WorkerStrip';
 import { isMouseInput } from '../interaction/mouse';
 import { isFocusInput } from '../terminal/window-focus';
+import { backspaceAtEnd } from './editor';
 import type { ParticipantColors } from '../MentionText';
 import type { Feedback } from '../../commands/feedback';
 import type { CommandMenuEntry, CommandMenuItem } from '../../commands/registry';
@@ -110,7 +111,7 @@ export function PromptBar({ mode, feedback, participantColors, queuedMessages, w
       const value = entry.trim();
       if (value) mode.onSubmit(value);
     } else if (key.ctrl && enteredInput === 'u') setEntry('');
-    else if (isBackspace) setEntry(current => current.slice(0, -1));
+    else if (isBackspace) setEntry(backspaceAtEnd);
     else if (!key.ctrl && !key.meta && !key.tab
       && !key.upArrow && !key.downArrow && !key.leftArrow && !key.rightArrow
       && !key.pageUp && !key.pageDown && !key.home && !key.end) {
