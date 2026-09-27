@@ -19,11 +19,13 @@ function elapsedSeconds(run: SubagentRun): number {
 export function describeSubagents(subagents: readonly SubagentRun[]): Record<string, unknown>[] {
   return subagents.map(run => ({
     id: run.id,
+    name: run.name,
+    description: run.description,
     model: run.model,
     thinkingLevel: run.thinkingLevel,
     status: run.status,
     elapsedSeconds: elapsedSeconds(run),
-    task: truncate(run.prompt, COMMAND_PREVIEW_CHARS),
+    task: run.description || truncate(run.prompt, COMMAND_PREVIEW_CHARS),
     branch: run.branch,
     context: run.context,
   }));
@@ -31,14 +33,17 @@ export function describeSubagents(subagents: readonly SubagentRun[]): Record<str
 
 // The run as it stands right now. A working run shows the tail of what it has
 // produced; a finished one shows what it ended with, which its owner has also
-// received as a message.
+// received as a result or notification.
 export function describeRun(run: SubagentRun): Record<string, unknown> {
   const base = {
     id: run.id,
+    name: run.name,
+    description: run.description,
     model: run.model,
     thinkingLevel: run.thinkingLevel,
     status: run.status,
     elapsedSeconds: elapsedSeconds(run),
+    continue: `SendMessage({ to: ${JSON.stringify(run.name ?? run.id)}, message: "Your follow-up task" })`,
     ...(run.branch ? { branch: run.branch, worktree: run.directory } : {}),
   };
   if (run.status === 'working') {
@@ -49,14 +54,14 @@ export function describeRun(run: SubagentRun): Record<string, unknown> {
       progress: transcript.length > PROGRESS_TAIL_CHARS
         ? `…${transcript.slice(-PROGRESS_TAIL_CHARS)}`
         : transcript,
-      note: 'Still working. It reports back to you as a message when it ends; MessageAgent sends it instructions meanwhile.',
+      note: 'Still working. WaitAgent waits for completion; SendMessage sends instructions.',
     };
   }
   if (run.status === 'failed') {
-    return { ...base, error: run.error, changes: run.changes };
+    return { ...base, error: run.error, finalMessage: run.finalMessage, changes: run.changes };
   }
   if (run.status === 'cancelled' || run.status === 'interrupted') {
-    return { ...base, reason: run.error, changes: run.changes };
+    return { ...base, reason: run.error, finalMessage: run.finalMessage, changes: run.changes };
   }
   return { ...base, finalMessage: run.finalMessage, changes: run.changes };
 }
@@ -67,7 +72,7 @@ export function describeRun(run: SubagentRun): Record<string, unknown> {
 // remembers there was one.
 export function workerReport(run: SubagentRun): string {
   const lines = [
-    `Subagent ${run.id} ${run.status} after ${elapsedSeconds(run)}s on ${run.model} (${run.thinkingLevel}).`,
+    `Subagent ${run.id}${run.name ? ` (${run.name})` : ''} ${run.status} after ${elapsedSeconds(run)}s on ${run.model} (${run.thinkingLevel}).`,
     `Task: ${truncate(run.prompt, COMMAND_PREVIEW_CHARS)}`,
   ];
   if (run.branch) {
@@ -82,6 +87,7 @@ export function workerReport(run: SubagentRun): string {
   if (run.status === 'done') lines.push(`Final message:\n${run.finalMessage ?? '(none)'}`);
   else if (run.status === 'failed') lines.push(`It failed: ${run.error ?? 'unknown error'}`);
   else lines.push(`It stopped: ${run.error ?? INTERRUPTED_REASON}`);
+  lines.push(`Continue with SendMessage({ to: ${JSON.stringify(run.name ?? run.id)}, message: "Your follow-up task" }).`);
   return lines.join('\n');
 }
 

@@ -1,104 +1,139 @@
+import path from 'path';
+import { statSync } from 'fs';
+import { listedDescription, modelIds, modelInfo, vendorOf, VENDORS, VENDOR_INFO } from '../providers/catalog';
+import { parseThinkingLevel, THINKING_LEVELS } from '../types';
 import { requiredString } from './arguments';
-import type { SubagentHost, Tool, ToolContext, WorkerContext } from './types';
-
-// Delegation: starting, watching, steering and stopping subagents. Only a
-// participant with a subagent host can use these, which is why the server
-// hides them from a worker — a subagent cannot spawn a subagent of its own.
+import { agentDefinitions } from './subagents/definitions';
+import type { SpawnOptions, SubagentHost, Tool, ToolContext } from './types';
 
 function host(ctx: ToolContext, toolName: string): SubagentHost {
   if (!ctx.subagents) throw new Error(`${toolName} needs the calling agent`);
   return ctx.subagents;
 }
 
-const WORKER_CONTEXTS: readonly WorkerContext[] = ['fresh', 'owner'];
+// Computed when tools/list is served, so new vendor models and project agent
+// definitions are available to the next caller without restarting Sirus.
+export function spawnDescription(directory: string): string {
+  const models = modelIds();
+  const lines = VENDORS.flatMap(vendor => [
+    `${VENDOR_INFO[vendor].displayName}:`,
+    ...models.filter(model => vendorOf(model) === vendor).map(model => {
+      const strengths = modelInfo(model)?.profile.strengths;
+      const description = strengths?.split(/(?<=[.!?])\s+/)[0] || listedDescription(model) || 'Vendor-listed model.';
+      return `- ${model}: ${description.replace(/\s+/g, ' ')}`;
+    }),
+  ]);
+  const definitions = agentDefinitions(directory);
+  return [agentTools[0].description, '', 'Models:', ...lines, '', 'Agent types:',
+    ...definitions.map(definition => `- ${definition.name}: ${definition.description.replace(/\s+/g, ' ')}`),
+    ...(definitions.length ? [] : ['No named definitions found.']),
+  ].join('\n');
+}
 
-function workerContext(args: Record<string, unknown>): WorkerContext {
-  const value = args.context;
-  if (value === undefined || value === null) return 'fresh';
-  if (typeof value !== 'string' || !WORKER_CONTEXTS.includes(value as WorkerContext)) {
-    throw new TypeError(`SpawnAgent requires context to be one of ${WORKER_CONTEXTS.join(', ')}`);
-  }
-  return value as WorkerContext;
+function optionalString(args: Record<string, unknown>, key: string): string | undefined {
+  if (args[key] === undefined || args[key] === '') return undefined;
+  return requiredString(args, key, 'SpawnAgent');
+}
+
+function booleanArg(args: Record<string, unknown>, key: string, fallback: boolean): boolean {
+  const value = args[key];
+  if (value === undefined) return fallback;
+  if (typeof value !== 'boolean') throw new TypeError(`${key} must be a boolean`);
+  return value;
+}
+
+function spawnOptions(args: Record<string, unknown>): SpawnOptions {
+  const context = args.context ?? 'fresh';
+  if (context !== 'fresh' && context !== 'owner') throw new TypeError('SpawnAgent requires context to be fresh or owner');
+  const isolation = args.isolation ?? 'none';
+  if (isolation !== 'none' && isolation !== 'worktree') throw new TypeError('SpawnAgent requires isolation to be none or worktree');
+  const cwd = optionalString(args, 'cwd');
+  if (cwd && isolation === 'worktree') throw new TypeError('cwd and worktree isolation are exclusive');
+  if (cwd && (!path.isAbsolute(cwd) || !statSync(cwd).isDirectory())) throw new TypeError('cwd must be an absolute directory');
+  const thinkingLevel = args.thinkingLevel === undefined || args.thinkingLevel === '' ? undefined : parseThinkingLevel(args.thinkingLevel);
+  if (thinkingLevel === null) throw new TypeError(`thinkingLevel must be one of ${THINKING_LEVELS.join(', ')}`);
+  const name = optionalString(args, 'name');
+  if (name && !/^[a-zA-Z0-9][\w-]*$/.test(name)) throw new TypeError('name must contain only letters, numbers, underscores or hyphens');
+  return {
+    context, isolation, cwd, name, thinkingLevel,
+    description: optionalString(args, 'description'), model: optionalString(args, 'model'),
+    agentType: optionalString(args, 'agentType'), runInBackground: booleanArg(args, 'runInBackground', true),
+  };
 }
 
 export const agentTools: Tool[] = [
   {
     name: 'SpawnAgent',
-    description: 'Start a subagent that works on one task on its own, with its own file, shell, search and web tools plus the memory tools, and return immediately. In a git project it works on its own branch in its own worktree, cut from the project\'s HEAD, so its edits do not collide with yours. It runs on the session\'s subagent model: /model subagent <model> sets it, and while unset the host picks the model and thinking level that fit the task. Delegate self-contained work that does not need step-by-step supervision. The subagent cannot ask questions and cannot spawn agents of its own. When it ends, its report arrives as a message from @<id> and starts your next turn; until then use CheckAgent for its state and MessageAgent to send it further instructions.',
+    description: 'Start a subagent for a self-contained task. Pick a model from either vendor that fits the work; a review or second opinion is worth more on the other vendor. The user’s /model subagent pin wins, then your model argument, then the agent definition’s model, then your own model. Thinking follows your thinkingLevel, the definition, then your own level. Workers run in your directory by default; isolation "worktree" creates a branch from HEAD and keeps it only if changed. cwd chooses another absolute directory and cannot accompany worktree isolation. Background runs return immediately and notify you when done, steering your current turn or starting a turn if idle. runInBackground false waits and returns the report in this call. Workers cannot ask questions or delegate. SendMessage continues a worker, including one that has finished.',
     args: {
-      prompt: {
-        type: 'string',
-        description: 'The complete, self-contained task for the subagent, including every detail it needs, because it does not see this conversation unless you pass context "owner".',
-      },
-      context: {
-        type: 'string',
-        enum: WORKER_CONTEXTS,
-        default: 'fresh',
-        description: '"fresh" starts the subagent from nothing but the task. "owner" starts it from your conversation so far, for work that depends on what you and the user have already established; the task is still its first instruction.',
-      },
+      prompt: { type: 'string', description: 'The complete task, context, constraints, file ownership and expected verification.' },
+      description: { type: 'string', default: '', description: 'Short description for the worker strip.' },
+      name: { type: 'string', default: '', description: 'Unique name to address with SendMessage, CheckAgent or WaitAgent.' },
+      model: { type: 'string', default: '', description: 'Any model in the list below, from either vendor.' },
+      thinkingLevel: { type: 'string', enum: THINKING_LEVELS, default: '', description: 'Reasoning depth; otherwise inherited from the definition or owner.' },
+      agentType: { type: 'string', default: '', description: 'A named agent definition from the list below.' },
+      isolation: { type: 'string', enum: ['none', 'worktree'], default: 'none' },
+      cwd: { type: 'string', default: '', description: 'Absolute working directory, exclusive with worktree isolation.' },
+      runInBackground: { type: 'boolean', default: true },
+      context: { type: 'string', enum: ['fresh', 'owner'], default: 'fresh', description: 'Owner carries your conversation. A cross-vendor choice starts fresh with your record as context.' },
     },
     audience: { subagent: false },
     async run(args, ctx) {
-      const handle = await host(ctx, 'SpawnAgent').spawn(
-        requiredString(args, 'prompt', 'SpawnAgent'),
-        workerContext(args),
-        { callId: ctx.callId, ...(ctx.vendorCallId ? { vendorCallId: ctx.vendorCallId } : {}) },
-      );
-      return {
-        ...handle,
-        note: handle.branch
-          ? `Working in the background on branch ${handle.branch}. It reports back to you as a message from @${handle.id} when it ends, which starts your turn; that report names the branch to merge or inspect. CheckAgent gives its state now, MessageAgent sends it instructions meanwhile.`
-          : `Working in the background in your working directory. It reports back to you as a message from @${handle.id} when it ends, which starts your turn. CheckAgent gives its state now, MessageAgent sends it instructions meanwhile.`,
-      };
+      return host(ctx, 'SpawnAgent').spawn(requiredString(args, 'prompt', 'SpawnAgent'), spawnOptions(args),
+        { callId: ctx.callId, ...(ctx.vendorCallId ? { vendorCallId: ctx.vendorCallId } : {}) }, ctx.signal);
     },
   },
   {
     name: 'CheckAgent',
-    description: 'Report on a subagent started with SpawnAgent, as it stands right now. While it is working the result includes its status and the tail of its output so far; once it has finished the result includes its final message and a summary of the changes it made, or the error if it failed. It never waits: a finished subagent reports back to you on its own.',
+    description: 'Return a worker’s status and progress now, or its completed report. Accepts an id or name. Use WaitAgent to wait for completion.',
+    args: { id: { type: 'string', description: 'Worker id or name.' } },
+    audience: { subagent: false },
+    async run(args, ctx) { return host(ctx, 'CheckAgent').check(requiredString(args, 'id', 'CheckAgent')); },
+  },
+  {
+    name: 'SendMessage',
+    description: 'Send instructions to a worker by id or name. A running worker receives them in its current turn. interrupt true stops that turn and starts one with the message. A finished, failed or cancelled worker resumes with its conversation intact and reports again when that turn ends.',
     args: {
-      id: { type: 'string', description: 'The subagent id returned by SpawnAgent.' },
+      to: { type: 'string', description: 'Worker id or name.' },
+      message: { type: 'string', description: 'Complete instructions for the worker.' },
+      interrupt: { type: 'boolean', default: false },
     },
     audience: { subagent: false },
     async run(args, ctx) {
-      return host(ctx, 'CheckAgent').check(requiredString(args, 'id', 'CheckAgent'));
+      return host(ctx, 'SendMessage').message(requiredString(args, 'to', 'SendMessage'),
+        requiredString(args, 'message', 'SendMessage'), booleanArg(args, 'interrupt', false));
     },
   },
   {
-    name: 'MessageAgent',
-    description: 'Send text into the turn a working subagent is running: a correction, a constraint you forgot, or an answer it needs. It folds the message into the work in flight. A subagent that has already finished refuses with its status; there is nothing to send it to.',
+    name: 'WaitAgent',
+    description: 'Wait up to timeoutMs for the workers named by ids to finish. Returns completed reports and the current status of the rest. Timing out leaves workers running.',
     args: {
-      id: { type: 'string', description: 'The subagent id returned by SpawnAgent.' },
-      message: { type: 'string', description: 'What to tell it, complete in itself: it sees this message and its own task, not this conversation.' },
+      ids: { type: 'array', items: { type: 'string' }, minItems: 1, description: 'Worker ids or names.' },
+      timeoutMs: { type: 'integer', minimum: 0, maximum: 600000, default: 30000 },
     },
     audience: { subagent: false },
-    run(args, ctx) {
-      return host(ctx, 'MessageAgent').message(
-        requiredString(args, 'id', 'MessageAgent'),
-        requiredString(args, 'message', 'MessageAgent'),
-      );
+    async run(args, ctx) {
+      if (!Array.isArray(args.ids) || !args.ids.length || args.ids.some(id => typeof id !== 'string' || !id.trim())) {
+        throw new TypeError('WaitAgent requires a nonempty array of ids or names');
+      }
+      const timeout = args.timeoutMs ?? 30000;
+      if (typeof timeout !== 'number' || !Number.isInteger(timeout) || timeout < 0 || timeout > 600000) {
+        throw new TypeError('timeoutMs must be an integer from 0 to 600000');
+      }
+      return { subagents: await host(ctx, 'WaitAgent').wait(args.ids, timeout, ctx.signal) };
     },
   },
   {
     name: 'CancelAgent',
-    description: 'Stop a working subagent started with SpawnAgent. Waits for it to stop and returns its status with a summary of the changes it had already made. A subagent that has already finished is reported as it is.',
-    args: {
-      id: { type: 'string', description: 'The subagent id returned by SpawnAgent.' },
-    },
+    description: 'Stop a worker and wait for its report. A worker that already finished is reported as it is. SendMessage can resume it later.',
+    args: { id: { type: 'string', description: 'Worker id or name.' } },
     audience: { subagent: false },
-    run(args, ctx) {
-      return host(ctx, 'CancelAgent').cancel(requiredString(args, 'id', 'CancelAgent'), ctx.signal);
-    },
+    async run(args, ctx) { return host(ctx, 'CancelAgent').cancel(requiredString(args, 'id', 'CancelAgent'), ctx.signal); },
   },
   {
     name: 'ListAgents',
-    description: 'List every subagent you have spawned with its id, model, thinking level, status, elapsed time, task, branch and context, to find one to check, message, or cancel.',
-    args: {},
-    audience: { subagent: false },
-    async run(_args, ctx) {
-      const subagents = host(ctx, 'ListAgents').list();
-      return subagents.length > 0
-        ? { subagents }
-        : { subagents, note: 'You have not spawned any subagent yet.' };
-    },
+    description: 'List your workers with their ids, names, descriptions, models, thinking levels, statuses, elapsed times, branches and context.',
+    args: {}, audience: { subagent: false },
+    async run(_args, ctx) { return { subagents: host(ctx, 'ListAgents').list() }; },
   },
 ];

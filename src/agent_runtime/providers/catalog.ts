@@ -32,6 +32,8 @@ export interface ModelProfile {
   // disappoints, how fast and how wordy it is, and how it behaves when the
   // goal is under-specified.
   reviews: string;
+  // Primary sources checked when this profile was researched.
+  sources?: readonly string[];
   // List price in US dollars per million tokens.
   cost: { input: number; output: number; note?: string };
 }
@@ -42,9 +44,6 @@ export interface ModelInfo {
   // The vendor's newest model: what Jev chooses between when it picks a new
   // session's model. One per vendor.
   latest?: true;
-  // Never offered as a worker. A subagent is left alone with a task for a
-  // while, which is not what every model in the line is for.
-  worker?: false;
   profile: ModelProfile;
 }
 
@@ -121,56 +120,106 @@ export function parseVendor(name: string | undefined): Vendor {
   throw new Error(`Unknown provider "${name ?? ''}". Try: ${VENDORS.join(', ')}`);
 }
 
+// Primary-source research refreshed 28 September 2026. Vendor-listed models
+// without a profile retain the vendor’s own description in SpawnAgent.
 export const MODELS: readonly ModelInfo[] = [
+  {
+    id: 'gpt-5.5',
+    vendor: 'gpt',
+    profile: {
+      strengths: 'Legacy model for sustained coding, debugging and research across tools. Newer GPT-5.6 and GPT-6 tiers offer alternatives at lower prices.',
+      benchmarks: [
+        'Terminal-Bench 2.0 82.7% (OpenAI, April 2026)',
+        'OSWorld-Verified 78.7% (OpenAI, April 2026)',
+      ],
+      reviews: 'Cursor’s launch testing reported greater persistence and more reliable tool use than GPT-5.4. OpenAI reports fewer tokens used on Codex tasks than its predecessor.',
+      cost: { input: 5, output: 30, note: 'Above 272K input tokens, input costs double and output costs rise by 50%.' },
+      sources: [
+        'https://openai.com/index/introducing-gpt-5-5/',
+        'https://developers.openai.com/api/docs/models/gpt-5.5',
+      ],
+    },
+  },
   {
     id: 'gpt-5.6-luna',
     vendor: 'gpt',
     profile: {
-      strengths: 'OpenAI\'s cheapest and fastest tier: high-volume work that needs little reasoning, such as classification, extraction, routing, short summaries and small mechanical edits where the change is already decided. It shares the family\'s 1M-token window but recalls far less of it, and has no top reasoning effort, so anything that must hold a large codebase or a subtle bug in mind belongs elsewhere.',
+      strengths: 'Fast, inexpensive work such as extraction, short summaries and small edits with clear instructions. Long-context recall is substantially below Terra and Sol.',
       benchmarks: [
-        'Terminal-Bench 2.1 84.7%, about four points under Sol (July 2026)',
-        'Agents\' Last Exam 50.3, within 3.3 of Sol (July 2026)',
-        'MRCR v2 long-context recall 41.3%, against Sol\'s 91.5% (July 2026)',
-        'Artificial Analysis Coding Agent Index 75, Intelligence Index 51 (July 2026)',
-        'Arena creative writing Elo 1411, rank 81 (13 Sept 2026)',
+        'Terminal-Bench 2.1 84.7% (OpenAI, July 2026)',
+        'MRCR v2 256K–512K 41.3% (OpenAI, July 2026)',
       ],
-      reviews: 'The batch workhorse: a thousand news summaries for $3.80 in twelve minutes with no malformed JSON, and structured instructions followed to the letter. It comes apart on open-ended reasoning and on long inputs, where it starts summarising instead of citing at around 300K tokens, and Artificial Analysis found it unusually verbose for its tier.',
-      cost: { input: 0.2, output: 1.2, note: 'after the 80% cut of 30 July 2026; the cheapest tier by an order of magnitude' },
+      reviews: 'OpenAI positions Luna for volume and latency; reserve context-heavy investigations for a larger tier.',
+      cost: { input: 0.2, output: 1.2 },
+      sources: [
+        'https://openai.com/index/gpt-5-6/',
+      ],
     },
   },
   {
     id: 'gpt-5.6-terra',
     vendor: 'gpt',
     profile: {
-      strengths: 'The balanced middle of the GPT-5.6 family and OpenAI\'s default for everyday work: scoped implementation, first-pass review, document analysis, data work and general agentic tasks, at well under half Sol\'s price and about twice its throughput. Recall across its 1M-token window is close behind Sol\'s. Effort goes up to max but not Sol\'s parallel ultra mode, so the hardest open-ended reasoning belongs on Sol and bulk mechanical work on Luna.',
+      strengths: 'Balanced everyday implementation, review and data analysis, with stronger long-context recall than Luna.',
       benchmarks: [
-        'SWE-bench Pro 63.4%, 1.2 points behind Sol on fewer tokens (July 2026)',
-        'Terminal-Bench 2.1 87.4% (July 2026)',
-        'Agents\' Last Exam 50.4 (July 2026)',
-        'MRCR v2 long-context recall 89.6% (July 2026)',
-        'Artificial Analysis Coding Agent Index 77, Intelligence Index 55 (July 2026)',
-        'Arena creative writing Elo 1426, rank 69 (13 Sept 2026)',
+        'SWE-bench Pro 63.4% (OpenAI, July 2026)',
+        'MRCR v2 256K–512K 89.6% (OpenAI, July 2026)',
       ],
-      reviews: 'Reviewers treat it as the sensible default: near-Sol results on ordinary production work at half the cost, competent on anything routine. Precision falls away at scale, and a 700K-token read missed two references buried past the 500K mark; several argue it is a step back from GPT-5.5 on the benchmarks OpenAI did not print.',
-      cost: { input: 2, output: 12, note: 'after the 20% cut of 30 July 2026' },
+      reviews: 'A middle tier for routine work; compare with newer GPT-6 Sol at the same input price.',
+      cost: { input: 2, output: 12 },
+      sources: [
+        'https://openai.com/index/gpt-5-6/',
+      ],
     },
   },
   {
     id: 'gpt-5.6-sol',
     vendor: 'gpt',
     profile: {
-      strengths: 'OpenAI\'s flagship of the GPT-5.6 generation, for long-horizon agentic work that has to persist across files, tests and follow-up fixes, and for hard reasoning, terminal and computer-use tasks, browsing and security research. The family\'s best recall over its 1M-token window, with an ultra mode that fans the work out to parallel subagents. Wasted on classification, summaries and routine scoped edits.',
+      strengths: 'Complex coding, terminal work and research that need sustained reasoning across a large context.',
       benchmarks: [
-        'SWE-bench Pro 64.6% (July 2026)',
-        'Terminal-Bench 2.1 88.8%, 91.9% in ultra mode (July 2026)',
-        'Terminal-Bench 4.0 37.3%, a generation behind the 2026 frontier (Sept 2026)',
-        'BrowseComp 90.4% (July 2026); GPQA Diamond above 92% (July 2026)',
-        'MRCR v2 long-context recall 91.5% (July 2026)',
-        'EQ-Bench creative writing Elo 1963, rank 3 (Sept 2026)',
-        'Arena creative writing Elo 1473, rank 12 (13 Sept 2026)',
+        'SWE-bench Pro 64.6% (OpenAI, July 2026)',
+        'Terminal-Bench 2.1 88.8% (OpenAI, July 2026)',
       ],
-      reviews: 'Fast and decisive on work that is already specified: a full FastAPI migration in one pass in under nine minutes, and the best presentation output Artificial Analysis has rated. Diagnosis is its weak spot, and testers watched it patch the symptom of a websocket race twice while a Claude model found the cause. Strong on browsing and security research.',
-      cost: { input: 5, output: 30 },
+      reviews: 'Cognition reported strong coding-agent cost efficiency in OpenAI’s launch testing. GPT-6 offers newer alternatives.',
+      cost: { input: 4, output: 20 },
+      sources: [
+        'https://openai.com/index/gpt-5-6/',
+        'https://openai.com/index/introducing-gpt-6-sol-and-luna/',
+      ],
+    },
+  },
+  {
+    id: 'gpt-6-luna',
+    vendor: 'gpt',
+    profile: {
+      strengths: 'High-volume coding and everyday agent tasks where low cost and speed matter. Supports a 1,050,000-token context and reasoning through max.',
+      benchmarks: [
+        'DeepSWE v1.1 66.6% at max (OpenAI, September 2026)',
+      ],
+      reviews: 'OpenAI reports stronger factuality and clearer communication than GPT-5.6 Luna. Independent long-running production evidence is still limited.',
+      cost: { input: 0.1, output: 0.5 },
+      sources: [
+        'https://openai.com/index/introducing-gpt-6-sol-and-luna/',
+        'https://developers.openai.com/api/docs/models/gpt-6-luna',
+      ],
+    },
+  },
+  {
+    id: 'gpt-6-sol',
+    vendor: 'gpt',
+    profile: {
+      strengths: 'Everyday coding, multi-step workflows and reviews that need more reasoning than the smallest tier at a moderate price. Supports a 1,050,000-token context and reasoning through max.',
+      benchmarks: [
+        'DeepSWE v1.1 68.8% at max (OpenAI, September 2026)',
+        'Agents’ Last Exam V1 56.4% at max (OpenAI, September 2026)',
+      ],
+      reviews: 'OpenAI reports improvements in coding and factuality over GPT-5.6 Sol. Astra remains its recommendation for the hardest work.',
+      cost: { input: 2, output: 10 },
+      sources: [
+        'https://openai.com/index/introducing-gpt-6-sol-and-luna/',
+        'https://developers.openai.com/api/docs/models/gpt-6-sol',
+      ],
     },
   },
   {
@@ -178,86 +227,98 @@ export const MODELS: readonly ModelInfo[] = [
     vendor: 'gpt',
     latest: true,
     profile: {
-      strengths: 'OpenAI\'s most capable model, at its best carrying out work that is already well defined. A 1M-token window holds a whole mid-sized repository at once, so it suits large refactors and long multi-step tasks in one session, and it leads on math, browser and computer use. Effort adjusts from low to max, so routine work is not over-thought. Expert-level academic reasoning is where it trails.',
+      strengths: 'OpenAI’s strongest tier for demanding software engineering, scientific research, browsing and computer use. Use it when correctness and sustained reasoning justify the higher cost.',
       benchmarks: [
-        'Terminal-Bench 4.0 57.7% vs Fable 5.1\'s 55.8%; DeepSWE 74.1% (Sept 2026)',
-        'FrontierCode 1.1 53.3%, behind both Claudes; no SWE-bench figure',
-        'OSWorld 2.0 72.6%, ScreenSpot-Pro 92.7% (Sept 2026)',
-        'BrowseComp 91.5%, just above Opus 5 (Sept 2026)',
-        'Humanity\'s Last Exam with tools 57.2%, behind every Claude (Sept 2026)',
-        'GPQA Diamond 96.0%, FrontierMath Tier 4 97.6%, MRCR v2 96.3% (Sept 2026)',
-        'Arena creative writing Elo 1461, rank 25 (13 Sept 2026)',
+        'Terminal-Bench 4.0 57.9% at high (OpenAI, September 2026)',
+        'FrontierCode 1.1 Main 53.3% (OpenAI, September 2026)',
+        'Terminal-Bench Science 0.1 64.6% (OpenAI, September 2026)',
       ],
-      reviews: 'The executor of the two frontier models: it one-shots well-specified features, drives desktop and browser workflows unsupervised, and holds a multi-day build together. It assumes where Fable asks, moving past ambiguity fast and flagging fewer of its own leaps. Concise and cheap per task.',
-      cost: { input: 10, output: 50, note: 'cached input $1; dearer above 272K tokens' },
+      reviews: 'OpenAI’s launch partners report fewer iterations on complex coding and professional workflows. Its evaluation results depend on effort, harness and safeguards.',
+      cost: { input: 10, output: 50 },
+      sources: [
+        'https://openai.com/index/gpt-6-astra/',
+      ],
     },
   },
   {
     id: 'claude-opus-5',
     vendor: 'claude',
     profile: {
-      strengths: 'Anthropic\'s model for complex agentic coding and enterprise work, and where it says to start for most workloads: a large codebase to navigate, multi-file refactors across tightly coupled code, debugging that spans systems, vision-heavy workflows, computer use, and autonomous runs measured in hours. 1M-token context, at half Fable 5.1\'s price for coding within a whisker of it.',
+      strengths: 'Complex agentic coding, debugging and professional work requiring sustained follow-through.',
       benchmarks: [
-        'Frontier-Bench v0.1 agentic terminal coding 43.3%, against Fable 5\'s 33.7% (July 2026)',
-        'Terminal-Bench 2.1 89.1% at max effort, Terminal-Bench 4.0 52.3% (2026)',
-        'CursorBench 3.2 within 0.5% of Fable 5 at half the cost (July 2026)',
-        'BrowseComp 90.8%; Humanity\'s Last Exam with tools 63.6% (2026)',
-        'ARC-AGI-3 30.2% against Sol\'s 7.8%; FrontierMath Tier 4 73.2% (2026)',
-        'EQ-Bench creative writing Elo 2121, rank 1 (Sept 2026)',
-        'No SWE-bench figure published',
+        'CursorBench 3.2 within 0.5 percentage points of Fable 5 at half the cost per task (Anthropic, July 2026)',
       ],
-      reviews: 'It plans deliberately, checks its own work unasked and keeps going for hours, which reviewers value on ambiguous, design-heavy work. It is expensive with it: about 50% more input and 65% more output tokens than a GPT-5.6 call for the same review, and it widens the task unless the deliverable is spelled out.',
+      reviews: 'Anthropic’s launch testing reports stronger engineering and computer use than Opus 4.8. Opus 5.5 is the newer, cheaper successor.',
       cost: { input: 5, output: 25 },
+      sources: [
+        'https://www.anthropic.com/news/claude-opus-5',
+        'https://www.anthropic.com/claude/opus',
+      ],
     },
   },
   {
     id: 'claude-sonnet-5',
     vendor: 'claude',
     profile: {
-      strengths: 'Anthropic\'s best combination of speed and intelligence, for work that is well scoped however large: code generation and short coding sessions, data analysis, documentation and other writing, visual understanding and ordinary agentic tool use, at a fraction of the price above it and with the same 1M-token context. Ambiguous architecture calls and subtle multi-system debugging belong higher.',
+      strengths: 'Routine and moderately complex implementation, debugging and review with a balance of speed, intelligence and cost.',
       benchmarks: [
-        'SWE-bench Pro 63.2, against Opus 4.8\'s 69.2 (launch, 30 June 2026)',
-        'SWE-bench Verified 72.7% (third-party, 2026)',
-        'Terminal-Bench 2.1 80.4, up 13.4 on Sonnet 4.6; CursorBench 57% (June 2026)',
-        'Humanity\'s Last Exam with tools 57.4 (June 2026)',
-        'OSWorld-Verified 81.2; GDPval-AA v2 knowledge work Elo 1618 (June 2026)',
-        'Arena creative writing Elo 1437, rank 55 (13 Sept 2026)',
+        'BrowseComp and OSWorld-Verified cost-performance curves improve over Sonnet 4.6 (Anthropic, July 2026)',
       ],
-      reviews: 'The best of the middle tier on scoped agentic coding, at its best given named files and a clear target: it follows a multi-step change through and checks itself before handing back. Adaptive thinking makes it slower than Sonnet 4.6 on small edits, which it over-thinks, at twice the output tokens and three times the agentic turns.',
-      cost: { input: 3, output: 15, note: 'the $2/$10 introductory rate ended 31 Aug 2026' },
+      reviews: 'Early partners report better task completion and checking of its own output. Anthropic made its introductory $2/$10 token pricing permanent.',
+      cost: { input: 2, output: 10 },
+      sources: [
+        'https://www.anthropic.com/news/claude-sonnet-5',
+      ],
     },
   },
   {
     id: 'claude-haiku-4-5',
     vendor: 'claude',
-    worker: false,
     profile: {
-      strengths: 'Anthropic\'s fastest and cheapest model, with near-frontier intelligence for its class: real-time responses, high-volume processing, and simple, fully specified tasks. A 200K-token context, a knowledge cutoff more than a year older than the rest of the line, and the older manual thinking rather than the adaptive kind, so it loses the thread on long multi-step work, large codebases and anything whose answer is not already clear.',
+      strengths: 'Fast, bounded coding subtasks, lookups and responsive pair programming where latency matters.',
       benchmarks: [
-        'SWE-bench Verified 73.3%, averaged over 50 trials with a 128K thinking budget (Oct 2025)',
-        'Matches Sonnet 4 on coding, computer use and agentic tasks (Anthropic, Oct 2025)',
-        'Absent from the 2026 research and writing leaderboards',
+        'SWE-bench Verified 73.3%, 50 trials with a bash/edit scaffold (Anthropic, October 2025)',
       ],
-      reviews: 'Rated the pick of the cheap tier for latency and for straightforward code, and it holds up on well-specified edits. It is out of its depth on anything exploratory: the short context, the older cutoff and the lack of adaptive thinking leave it assuming rather than asking, and drifting on multi-step work.',
-      cost: { input: 1, output: 5, note: 'up to 90% off cached input, 50% off batched' },
+      reviews: 'Augment’s launch evaluation put it at 90% of Sonnet 4.5 on its coding tasks. It suits scoped delegation more than open-ended investigations.',
+      cost: { input: 1, output: 5 },
+      sources: [
+        'https://www.anthropic.com/news/claude-haiku-4-5',
+      ],
     },
   },
   {
     id: 'claude-fable-5-1',
     vendor: 'claude',
+    profile: {
+      strengths: 'Difficult root-cause investigations, long-running coding and research with many interacting constraints.',
+      benchmarks: [
+        'Terminal-Bench 4.0 55.8% (Anthropic, September 2026)',
+        'Humanity’s Last Exam with tools 65.6% (Anthropic, September 2026)',
+      ],
+      reviews: 'Anthropic reports that Millennium used it to diagnose a rare crash other models had missed. Safeguards and fallback models affect some published scores; Opus 5.5 now offers a cheaper alternative.',
+      cost: { input: 10, output: 50 },
+      sources: [
+        'https://www.anthropic.com/claude-fable-and-mythos-5-1',
+      ],
+    },
+  },
+  {
+    id: 'claude-opus-5-5',
+    vendor: 'claude',
     latest: true,
     profile: {
-      strengths: 'Anthropic\'s most capable model, for demanding reasoning, long-horizon agentic engineering and work whose goal is not yet crisp: hard debugging, architecture and design judgement, security-sensitive review, long documents to read or write, and research whose conclusion must be defended. Thinks before every answer and can spend minutes on one turn, wasted on quick lookups or small edits. 1M-token context.',
+      strengths: 'Large code migrations, audits, difficult debugging and long-running agent tasks that need frontier reasoning.',
       benchmarks: [
-        'SWE-bench Pro 81.2, ahead of Fable 5 and Opus 5 (system card, Sept 2026)',
-        'Terminal-Bench 4.0 55.8%, up from Fable 5\'s 42.0% (Sept 2026)',
-        'Terminal-Bench-Science 0.1 52.6%; CursorBench 3.2.0 73.4% (Sept 2026)',
-        'Humanity\'s Last Exam 65.0% with tools, 60.9% without, best of any (Sept 2026)',
-        'GDPval-AA v2 knowledge work Elo 1853 vs Astra\'s 1580 (Sept 2026)',
-        'Arena creative writing Elo 1486, rank 6, the highest (13 Sept 2026)',
+        'Terminal-Bench 4.0 66.4% at xhigh (Anthropic, September 2026)',
+        'FrontierCode v1.1 Main 54.4% at max (Anthropic, September 2026)',
+        'CursorBench 4.0 57.8% (Anthropic, September 2026)',
       ],
-      reviews: 'The collaborator of the two frontier models: it asks before deciding, says what it is unsure of and refuses a premature conclusion, which reviewers prefer when the goal is vague or the analysis must be defended; its prose is the most natural of the line. On crisp work it costs, at some 35% more text and twice Astra\'s price per task.',
-      cost: { input: 10, output: 50, note: 'cache reads $0.25' },
+      reviews: 'Early testers report large migrations and audits completing with fewer tokens and steps. Anthropic reports roughly 40% lower typical task costs than Opus 5; some evaluations use fallback models when safeguards intervene.',
+      cost: { input: 4, output: 20 },
+      sources: [
+        'https://www.anthropic.com/claude-opus-5-5',
+        'https://www.anthropic.com/claude/opus',
+      ],
     },
   },
 ];
@@ -291,12 +352,6 @@ export function modelsOf(vendor: Vendor): string[] {
 // The vendor's models that have a profile, in the table's order.
 export function profiledModelsOf(vendor: Vendor): string[] {
   return MODELS.filter(model => model.vendor === vendor).map(model => model.id);
-}
-
-// The models a vendor offers as workers: all of its own, minus the ones the
-// table keeps off the subagent list.
-export function workerModelsOf(vendor: Vendor): ModelInfo[] {
-  return MODELS.filter(model => model.vendor === vendor && model.worker !== false);
 }
 
 export function vendorOf(id: string): Vendor | undefined {

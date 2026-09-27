@@ -26,6 +26,7 @@ export interface SessionSpec {
   // Sirus's addendum to the vendor's prompt, or a bare runtime's whole prompt.
   systemPrompt: string;
   mcpServer: RuntimeOptions['mcpServer'];
+  tools?: readonly string[];
 }
 
 // What that session's `session/new`, `session/fork` or `session/resume`
@@ -49,12 +50,8 @@ export interface Launch {
   // whole process's; on a fork only the MCP entry actually lands, since
   // Claude keeps the prompt the forked transcript was written under.
   session(spec: SessionSpec): SessionParams;
-  // claude-agent-acp's `session/fork` only writes the forked transcript: it
-  // looks the session being forked up under the directory the call names, so
-  // that must be the parent's, and the fork is not a session in the adapter
-  // until a `session/resume` opens it in the worker's directory. codex-acp
-  // creates the forked session outright, in the directory the call names, and
-  // answers with it already live.
+  // Both adapters need a resume after forking. Claude also needs the
+  // parent's directory to locate its transcript when making the fork.
   forkNeedsResume: boolean;
   // An `authenticate` to send after `initialize`, when the credential in the
   // environment is one the harness must be logged in with rather than read.
@@ -96,7 +93,10 @@ function projectDirectories(directory: string): string[] {
 // Claude Code's tools that delegate to Claude's own agents (Agent, which
 // Task names too, Workflow, RemoteTrigger) or that start turns on their own
 // (the cron tools, ScheduleWakeup, Monitor).
-const CLAUDE_TOOLS_OFF = ['Agent', 'Workflow', 'RemoteTrigger', 'CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'Monitor'];
+const CLAUDE_TOOLS_OFF = [
+  'Agent', 'Task', 'SendMessage', 'ListAgents', 'TeamCreate', 'TeamDelete', 'Workflow', 'RemoteTrigger',
+  'CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'Monitor',
+];
 
 // Claude Code's bundled skills built on those tools, so the `/` menu does
 // not offer what cannot run.
@@ -138,7 +138,9 @@ function claudeLaunch(options: RuntimeOptions, mode: PermissionMode): Launch {
           systemPrompt: { append: spec.systemPrompt + agentsPointer(spec.directory) },
           claudeCode: {
             options: {
-              disallowedTools: CLAUDE_TOOLS_OFF,
+              ...(spec.tools !== undefined ? { tools: spec.tools } : {}),
+              disallowedTools: [...CLAUDE_TOOLS_OFF, ...(spec.tools !== undefined
+                && !spec.tools.some(tool => tool.startsWith('mcp__')) ? ['mcp__*'] : [])],
               settings: { skillOverrides: Object.fromEntries(CLAUDE_SKILLS_OFF.map(name => [name, 'off'])) },
             },
           },
@@ -270,7 +272,9 @@ function codexLaunch(options: RuntimeOptions, mode: PermissionMode): Launch {
     // The developer instructions are the whole process's, so a forked
     // session inherits the owner's and takes only its own MCP entry.
     session: spec => ({ mcpServers: mcpServersFor(spec) }),
-    forkNeedsResume: false,
+    // codex-acp 1.13.1 unsubscribes the new thread in SessionFork.ts. Resume
+    // subscribes it again; without it the first prompt receives no updates.
+    forkNeedsResume: true,
     // An API key in the environment is an API-key source (a subscription's
     // environment scrubs it). Codex only honours a key it was logged in
     // with, in the home the source's environment points it at.
@@ -284,5 +288,5 @@ const LAUNCHES: Record<Vendor, (options: RuntimeOptions, mode: PermissionMode) =
 };
 
 export function launchFor(options: RuntimeOptions): Launch {
-  return LAUNCHES[options.vendor](options, options.bare ? 'ask' : options.permissionMode);
+  return LAUNCHES[options.vendor](options, options.bare || options.readOnly ? 'ask' : options.permissionMode);
 }

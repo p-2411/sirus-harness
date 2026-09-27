@@ -117,6 +117,16 @@ const participantSchema = z.object({
 // assistant entry, and restoring points at that.
 const workerSchema = z.object({
   id: z.string().min(1),
+  name: z.string().optional(),
+  description: z.string().optional(),
+  runInBackground: z.boolean().optional(),
+  isolation: z.enum(['none', 'worktree']).optional(),
+  baseDirectory: z.string().optional(),
+  startHead: z.string().optional(),
+  definition: z.object({
+    name: z.string(), description: z.string(), prompt: z.string(), model: z.string().optional(),
+    thinkingLevel: z.enum(THINKING_LEVELS).optional(), tools: z.array(z.string()).optional(),
+  }).optional(),
   callId: z.string().min(1).nullable(),
   owner: z.string().min(1),
   model: z.string().min(1),

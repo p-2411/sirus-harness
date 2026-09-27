@@ -1,9 +1,11 @@
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { agentDefinitions } from '../../src/agent_runtime/tools/subagents/definitions';
+import { MODELS, rememberListedModels } from '../../src/agent_runtime/providers/catalog';
 import type { EmbeddingProvider } from '../../src/memory/embeddings';
 
 // The local embedding model is a download the memory tools do not need for
@@ -36,7 +38,7 @@ type SubagentSpawnCall = import('../../src/agent_runtime/tools').SubagentSpawnCa
 type WorkerContext = import('../../src/agent_runtime/tools').WorkerContext;
 
 const MEMORY_TOOLS = ['SaveMemory', 'GetMemory', 'SearchMemories', 'DeleteMemory'];
-const AGENT_TOOLS = ['SpawnAgent', 'CheckAgent', 'MessageAgent', 'CancelAgent', 'ListAgents'];
+const AGENT_TOOLS = ['SpawnAgent', 'CheckAgent', 'SendMessage', 'WaitAgent', 'CancelAgent', 'ListAgents'];
 const SESSION = 'tools-test-session';
 
 let testDirectory: string;
@@ -48,7 +50,8 @@ let messaged: { id: string; text: string }[];
 const findTool = (name: string) => toolRegistry.find(tool => tool.name === name) ?? null;
 
 const stubHost: SubagentHost = {
-  async spawn(prompt, context, call) {
+  async spawn(prompt, options, call) {
+    const context = options.context ?? 'fresh';
     spawned.push({ prompt, context, call });
     return {
       id: 'run-1',
@@ -59,6 +62,7 @@ const stubHost: SubagentHost = {
       context,
     };
   },
+  async wait(ids) { return ids.map(id => ({ id, status: 'done' })); },
   check(id) { return { id, status: 'done' }; },
   async cancel(id) { return { id, status: 'cancelled' }; },
   async message(id, text) {
@@ -154,22 +158,22 @@ describe('tool registry', () => {
 
   test('SpawnAgent takes the prompt and an optional context; the model is a session setting', () => {
     const spawn = findTool('SpawnAgent');
-    expect(Object.keys(spawn?.args ?? {})).toEqual(['prompt', 'context']);
+    expect(Object.keys(spawn?.args ?? {})).toEqual(['prompt', 'description', 'name', 'model', 'thinkingLevel', 'agentType', 'isolation', 'cwd', 'runInBackground', 'context']);
     expect(spawn?.args.prompt).toEqual(expect.objectContaining({ type: 'string' }));
     expect(spawn?.args.context).toEqual(expect.objectContaining({ type: 'string', enum: ['fresh', 'owner'], default: 'fresh' }));
     expect(spawn?.description).toContain('/model subagent');
     // The owner is told what it gets back: an id, not a finished result.
     expect(spawn?.description).toContain('return immediately');
-    expect(spawn?.description).toContain('starts your next turn');
+    expect(spawn?.description).toContain('starting a turn if idle');
     for (const name of AGENT_TOOLS) {
       expect(findTool(name)?.audience).toEqual({ subagent: false });
     }
   });
 
-  test('CheckAgent no longer waits and MessageAgent carries an id and a message', () => {
+  test('CheckAgent no longer waits and SendMessage carries an id and a message', () => {
     expect(Object.keys(findTool('CheckAgent')?.args ?? {})).toEqual(['id']);
-    expect(findTool('CheckAgent')?.description).toContain('never waits');
-    expect(Object.keys(findTool('MessageAgent')?.args ?? {})).toEqual(['id', 'message']);
+    expect(findTool('CheckAgent')?.description).toContain('status and progress now');
+    expect(Object.keys(findTool('SendMessage')?.args ?? {})).toEqual(['to', 'message', 'interrupt']);
     expect(Object.keys(findTool('CancelAgent')?.args ?? {})).toEqual(['id']);
     expect(Object.keys(findTool('ListAgents')?.args ?? {})).toEqual([]);
   });
@@ -196,10 +200,10 @@ describe('Sirus MCP server', () => {
       const spawn = (await participant.listTools()).tools.find(tool => tool.name === 'SpawnAgent');
       expect(spawn?.inputSchema).toEqual({
         type: 'object',
-        properties: {
+        properties: expect.objectContaining({
           prompt: expect.objectContaining({ type: 'string' }),
           context: expect.objectContaining({ enum: ['fresh', 'owner'], default: 'fresh' }),
-        },
+        }),
         required: ['prompt'],
       });
     } finally {
@@ -259,7 +263,6 @@ describe('Sirus MCP server', () => {
         status: 'working',
         branch: 'sirus/run-1',
         context: 'fresh',
-        note: expect.stringContaining('sirus/run-1'),
       });
       expect(spawned).toHaveLength(1);
       expect(spawned[0].prompt).toBe('Do the work');
@@ -271,7 +274,7 @@ describe('Sirus MCP server', () => {
       expect(spawned[1].context).toBe('owner');
 
       const wrong = await call(client, 'SpawnAgent', { prompt: 'Do the work', context: 'sideways' });
-      expect(wrong).toEqual({ isError: true, text: 'SpawnAgent requires context to be one of fresh, owner' });
+      expect(wrong).toEqual({ isError: true, text: 'SpawnAgent requires context to be fresh or owner' });
       expect(spawned).toHaveLength(2);
 
       const listed = await call(client, 'ListAgents', {});
@@ -283,16 +286,16 @@ describe('Sirus MCP server', () => {
     }
   });
 
-  test('MessageAgent sends text into a run and CheckAgent answers without waiting', async () => {
+  test('SendMessage sends text into a run and CheckAgent answers without waiting', async () => {
     const client = await connect('sirus');
     try {
       await call(client, 'SpawnAgent', { prompt: 'Do the work' });
-      const sent = await call(client, 'MessageAgent', { id: 'run-1', message: 'Use the new API instead' });
+      const sent = await call(client, 'SendMessage', { to: 'run-1', message: 'Use the new API instead' });
       expect(sent.isError).toBe(false);
       expect(JSON.parse(sent.text)).toEqual({ id: 'run-1', status: 'working', delivered: 'Use the new API instead' });
       expect(messaged).toEqual([{ id: 'run-1', text: 'Use the new API instead' }]);
 
-      const blank = await call(client, 'MessageAgent', { id: 'run-1' });
+      const blank = await call(client, 'SendMessage', { to: 'run-1' });
       expect(blank.isError).toBe(true);
       expect(blank.text).toContain('message to be a non-empty string');
 
@@ -360,4 +363,74 @@ describe('Sirus MCP server', () => {
     registerToolSession(SESSION, { directory: testDirectory, memoryEnabled: () => true, hostFor: () => null });
     expect((await sirusMcpServerEntry(SESSION, 'sirus')).headers[0]).not.toEqual(first.headers[0]);
   });
+});
+
+
+test('SpawnAgent lists researched catalog models and models reported by the vendor on each request', async () => {
+  const client = await connect('sirus');
+  try {
+    rememberListedModels('gpt', [{ id: 'gpt-future-test', description: 'Vendor description for a new model.' }]);
+    const spawn = (await client.listTools()).tools.find(tool => tool.name === 'SpawnAgent')!;
+    for (const model of MODELS) {
+      expect(model.profile.sources?.length).toBeGreaterThan(0);
+      expect(spawn.description).toContain(`- ${model.id}: `);
+    }
+    expect(spawn.description).toContain('- gpt-future-test: Vendor description for a new model.');
+    rememberListedModels('gpt', [{ id: 'gpt-next-test', description: 'Newer listing.' }]);
+    const refreshed = (await client.listTools()).tools.find(tool => tool.name === 'SpawnAgent')!;
+    expect(refreshed.description).toContain('gpt-next-test');
+    expect(refreshed.description).not.toContain('gpt-future-test');
+  } finally {
+    await client.close();
+  }
+});
+
+test('agent definitions honour project precedence, YAML, config homes and enabled plugins', () => {
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  const home = join(testDirectory, 'claude');
+  const project = join(testDirectory, 'project');
+  const child = join(project, 'src');
+  const plugin = join(testDirectory, 'plugin');
+  process.env.CLAUDE_CONFIG_DIR = home;
+  const write = (file: string, text: string) => {
+    mkdirSync(join(file, '..'), { recursive: true });
+    writeFileSync(file, text);
+  };
+  const definition = (body: string) => `---\nname: reviewer\ndescription: |\n  A careful reviewer.\n  Reads the project.\ntools: [Read, Grep, Glob]\nmodel: inherit\nthinkingLevel: low\n---\n${body}`;
+  try {
+    mkdirSync(join(project, '.git'), { recursive: true });
+    mkdirSync(child, { recursive: true });
+    write(join(home, 'agents', 'reviewer.md'), definition('User prompt'));
+    write(join(project, '.claude', 'agents', 'reviewer.md'), definition('Root prompt'));
+    write(join(child, '.claude', 'agents', 'reviewer.md'), definition('Child prompt'));
+    write(join(plugin, 'agents', 'reviewer.md'), definition('Plugin prompt'));
+    write(join(plugin, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'review-kit' }));
+    write(join(home, 'plugins', 'installed_plugins.json'), JSON.stringify({ plugins: {
+      'review-kit@local': [{ scope: 'user', installPath: plugin }],
+    } }));
+    write(join(home, 'settings.json'), JSON.stringify({ enabledPlugins: { 'review-kit@local': true } }));
+    expect(agentDefinitions(child)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'reviewer', prompt: 'Child prompt', tools: ['Read', 'Grep', 'Glob'], thinkingLevel: 'low' }),
+      expect.objectContaining({ name: 'review-kit:reviewer', prompt: 'Plugin prompt' }),
+    ]));
+    write(join(child, '.claude', 'settings.local.json'), JSON.stringify({ enabledPlugins: { 'review-kit@local': false } }));
+    expect(agentDefinitions(child).map(definition => definition.name)).toEqual(['reviewer']);
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previous;
+  }
+});
+
+test('WaitAgent and SendMessage validate names, timeouts and interrupt flags at the MCP boundary', async () => {
+  const client = await connect('sirus');
+  try {
+    expect((await call(client, 'WaitAgent', { ids: [], timeoutMs: 0 })).isError).toBe(true);
+    expect((await call(client, 'WaitAgent', { ids: ['run-1'], timeoutMs: -1 })).isError).toBe(true);
+    expect((await call(client, 'WaitAgent', { ids: ['run-1'], timeoutMs: 0 })).isError).toBe(false);
+    expect((await call(client, 'SendMessage', { to: 'run-1', message: 'Next', interrupt: 'yes' })).isError).toBe(true);
+    expect((await call(client, 'SpawnAgent', { prompt: 'Work', cwd: '/tmp', isolation: 'worktree' })).isError).toBe(true);
+    expect((await call(client, 'SpawnAgent', { prompt: 'Work', cwd: 'relative' })).isError).toBe(true);
+  } finally {
+    await client.close();
+  }
 });

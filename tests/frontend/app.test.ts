@@ -183,7 +183,7 @@ describe('app workspace startup', () => {
     changeModel('sirus', 'haiku', workspace.draftSession);
     const started = startSession(workspace, workspace.draftSession, '/projects/current');
     expect(started.selectedSession?.getModel()).toBe('claude-haiku-4-5');
-    expect(started.draftSession.getModel()).toBe('gpt-5.6-sol');
+    expect(started.draftSession.getModel()).toBe('gpt-6-sol');
     saveSessionSnapshots(
       started.sessions.filter(s => !s.isEmpty()).map(s => s.toSnapshot()),
       started.selectedSession!.getId(),
@@ -194,6 +194,6 @@ describe('app workspace startup', () => {
       selectedSessionId: saved.selectedSessionId,
     }, '/projects/current');
     expect(restored.sessions[0].getModel()).toBe('claude-haiku-4-5');
-    expect(restored.draftSession.getModel()).toBe('gpt-5.6-sol');
+    expect(restored.draftSession.getModel()).toBe('gpt-6-sol');
   });
 });

@@ -621,6 +621,7 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
       directory: forked.directory,
       systemPrompt: forked.systemPrompt,
       mcpServer: forked.mcpServer,
+      tools: forked.tools,
     });
     const extras = { mcpServers: params.mcpServers, ...(params.meta ? { _meta: params.meta } : {}) };
     let created;
@@ -630,7 +631,7 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
         // Where the adapter finds the session being forked when the fork only
         // copies its transcript, and where the new session runs when it does
         // not; the launch spec says which this vendor does.
-        cwd: launch.forkNeedsResume ? parent.directory : forked.directory,
+        cwd: options.vendor === 'claude' ? parent.directory : forked.directory,
         ...extras,
       });
     } catch (error) {
@@ -650,7 +651,7 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
       state.modes = opened.modes?.availableModes ?? [];
       state.currentModeId = opened.modes?.currentModeId ?? '';
       state.configOptions = opened.configOptions ?? [];
-      await configure(state, forked.permissionMode, forked.model, forked.thinkingLevel);
+      await configure(state, forked.readOnly ? 'ask' : forked.permissionMode, forked.model, forked.thinkingLevel);
     } catch (error) {
       const failure = settled(error);
       closeSession(state);
@@ -696,6 +697,7 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
       directory: options.directory,
       systemPrompt: options.systemPrompt,
       mcpServer: options.mcpServer,
+      tools: options.tools,
     });
     const session = await connection.agent.request(methods.agent.session.new, {
       cwd: options.directory,

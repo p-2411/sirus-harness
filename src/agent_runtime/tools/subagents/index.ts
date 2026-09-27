@@ -1,6 +1,7 @@
 import path from 'path';
 import type { SessionAgent } from '../../agent';
 import type { Message, MessageBlock, ThinkingLevel } from '../../types';
+import type { AgentDefinition } from './definitions';
 import type { WorkerContext } from '../types';
 
 // Subagents: one detached runtime per delegated task, a worker like a
@@ -24,6 +25,13 @@ export type { WorkerContext };
 // where its branch is, and give its owner the report it never received.
 export interface WorkerRecord {
   id: string;
+  name?: string;
+  description?: string;
+  runInBackground?: boolean;
+  isolation?: 'none' | 'worktree';
+  baseDirectory?: string;
+  startHead?: string;
+  definition?: AgentDefinition;
   // The SpawnAgent tool call that started the run, so the UI can decorate it.
   callId: string | null;
   // The participant that spawned the run.
@@ -32,8 +40,8 @@ export interface WorkerRecord {
   thinkingLevel: ThinkingLevel;
   context: WorkerContext;
   prompt: string;
-  // Where the worker runs: its own worktree in a git project, the project
-  // itself otherwise.
+  // Where the worker runs: the owner's directory, an explicit cwd, or an
+  // isolated worktree when requested.
   directory: string;
   // The branch its worktree is on, or null when it works in place.
   branch: string | null;
@@ -43,8 +51,8 @@ export interface WorkerRecord {
   // When the run last changed: something streamed in, a message was sent to
   // it, or its status moved. The worker strip shows the freshest run first.
   updatedAt: number;
-  // The worker's own record: the task, the steering messages sent to it,
-  // and the one assistant entry its turn fills in. Live while it works.
+  // The worker's own record: its tasks, steering messages and responses,
+  // including any turns started by SendMessage. Live while it works.
   transcript: Message[];
   finalMessage: string | null;
   changes: string[];
@@ -156,6 +164,13 @@ export function allSubagents(): Iterable<SubagentRun> {
 export function workerRecord(run: SubagentRun): WorkerRecord {
   return {
     id: run.id,
+    name: run.name,
+    description: run.description,
+    runInBackground: run.runInBackground,
+    isolation: run.isolation,
+    baseDirectory: run.baseDirectory,
+    startHead: run.startHead,
+    definition: run.definition,
     callId: run.callId,
     owner: run.owner,
     model: run.model,

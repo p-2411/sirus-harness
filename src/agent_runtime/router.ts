@@ -2,11 +2,10 @@ import path from 'path';
 import { choice, TypeSafeClient, type ChoiceCriteria } from '@typesafe-ai/sdk';
 import { parseFileMentions } from '../fileMentions';
 import { allProviders } from './providers';
-import { latestModelOf, workerModelsOf, VENDOR_INFO, type ModelProfile, type Vendor } from './providers/catalog';
+import { latestModelOf, VENDOR_INFO, type ModelProfile, type Vendor } from './providers/catalog';
 import type { Provider } from './providers/provider';
 import { cachedSubscriptionRemaining } from './providers/usage';
 import { loadJevApiKey, loadJevKeyRequested } from '../persistence';
-import { parseThinkingLevel, type ThinkingLevel } from './types';
 
 // Jev, TypeSafe AI's System One model, picks a new session's model from its
 // first prompt: one typed choice between the latest model of each vendor
@@ -130,8 +129,7 @@ function criteriaFor(candidates: readonly RoutingCandidate[], allowance: readonl
   return Object.fromEntries(candidates.map(candidate => [candidate.model, candidateCriteria(candidate, allowance)]));
 }
 
-// How Jev is told to read a profile. The same sentence ends both questions
-// about a model, because the trade is the same one either way.
+// How Jev weighs a profile against the first request.
 const WEIGHING = 'Weigh the benchmarks and what users report against what the work actually demands, cost against how large that work is, and remaining allowance against both: a vendor near the end of its window should lose a close call, while work that plainly needs the stronger model should still get it.';
 
 // What Jev answers with: the shape the SDK's `systemOne` returns for choice
@@ -190,35 +188,6 @@ export async function routeSessionModel(
   }
 }
 
-// Jev also picks a worker's model and thinking level when the session has
-// no fixed subagent model. Candidates are every catalog model of a vendor
-// with allowance, except the ones the catalog keeps off the worker list, each
-// with its own vendor's allowance rendered into its criteria, so a vendor near
-// its limit is chosen less. The state carries the task, the files it names and
-// the project's name. Two questions in one call: the model, then how hard to
-// think.
-
-export interface WorkerRoutingInput {
-  task: string;
-  directory: string;
-}
-
-export interface WorkerPick {
-  model: string;
-  thinkingLevel: ThinkingLevel;
-}
-
-export function workerCandidates(): RoutingCandidate[] {
-  const candidates: RoutingCandidate[] = [];
-  for (const provider of allProviders()) {
-    if (!usableVendor(provider)) continue;
-    for (const model of workerModelsOf(provider.vendor.id)) {
-      candidates.push({ model: model.id, vendor: model.vendor, profile: model.profile });
-    }
-  }
-  return candidates;
-}
-
 // Every vendor the user has a credential for. A subscription reports what the
 // sidebar last cached, and the most generous of several stands for the
 // vendor; an API key has no window at all, so a vendor holding one reports
@@ -240,67 +209,4 @@ export function vendorAllowance(): VendorAllowance[] {
     allowances.push({ vendor: provider.vendor.id, remaining });
   }
   return allowances;
-}
-
-// The levels a worker may be routed to, and what each one is for. `max` is
-// left off on purpose: a worker that thinks that hard costs more than the
-// delegation saves, and the owner can still set it by hand.
-const WORKER_THINKING: Record<Exclude<ThinkingLevel, 'max'>, string> = {
-  low: 'Fastest, with lighter reasoning: a mechanical or fully specified change, a lookup, a rename, a small edit whose answer is already plain.',
-  medium: 'Balanced speed and reasoning depth: ordinary scoped work with a few judgement calls in it, such as a contained feature or a straightforward review.',
-  high: 'Deep reasoning for complex work: several files or constraints to hold at once, a careful review, a design decision, or a bug whose cause is not obvious.',
-  xhigh: 'Extended reasoning for difficult, long-running work: a hidden root cause, a large multi-file refactor, a security audit, anything that will take many careful steps to get right.',
-};
-
-// The pick for one task, or null when Jev is not configured, did not answer
-// in time, failed, or was unsure about the model; the caller then keeps the
-// owner's model and level. An unsure thinking level alone falls back to the
-// owner's level while the model pick stands.
-export async function routeWorker(
-  input: WorkerRoutingInput,
-  candidates: readonly RoutingCandidate[],
-  allowance: readonly VendorAllowance[],
-  options: { signal?: AbortSignal; client?: RoutingClient | null; fallbackLevel?: ThinkingLevel } = {},
-): Promise<WorkerPick | null> {
-  const fallbackLevel = options.fallbackLevel ?? 'high';
-  if (candidates.length === 0) return null;
-  // One candidate is not a choice, and the level alone does not earn a round
-  // trip before the worker's first turn: it takes the owner's.
-  if (candidates.length === 1) return { model: candidates[0].model, thinkingLevel: fallbackLevel };
-  const client = options.client === undefined ? defaultClient() : options.client;
-  if (!client) return null;
-  const criteria = criteriaFor(candidates, allowance);
-  try {
-    const { answers } = await client.systemOne({
-      state: {
-        task: input.task,
-        mentionedFiles: parseFileMentions(input.task, input.directory).map(mention => mention.path),
-        project: path.basename(input.directory),
-      },
-      questions: {
-        model: choice(
-          `A coding agent is delegating this task to a subagent that will carry it out on its own. Which model should the subagent run on? ${WEIGHING} Routine, well-scoped work belongs on a cheaper, faster model.`,
-          criteria,
-        ),
-        thinkingLevel: choice(
-          'How hard should that subagent think about this task? Pick the level the task actually needs: more reasoning costs time and tokens, less risks a shallow or wrong answer.',
-          WORKER_THINKING,
-        ),
-      },
-    }, {
-      ...(options.signal ? { signal: options.signal } : {}),
-      timeout: ROUTING_TIMEOUT_MS,
-      retry: { maxRetries: 0 },
-    });
-    const { choice: model, confidence } = answers.model;
-    if (confidence < ROUTING_CONFIDENCE || !candidates.some(candidate => candidate.model === model)) return null;
-    // A level Jev is unsure of, or one it was not offered, costs the model
-    // pick nothing: the worker takes the owner's level and keeps the model.
-    const answered = answers.thinkingLevel;
-    const level = parseThinkingLevel(answered?.choice);
-    const sure = level !== null && level in WORKER_THINKING && (answered?.confidence ?? 0) >= ROUTING_CONFIDENCE;
-    return { model, thinkingLevel: sure ? level : fallbackLevel };
-  } catch {
-    return null;
-  }
 }

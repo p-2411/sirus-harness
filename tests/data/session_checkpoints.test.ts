@@ -255,7 +255,7 @@ describe('session checkpoint integration', () => {
         if (isWorker(options)) await gate;
         else if (!spawned) {
           spawned = true;
-          await owner.subagentHostFor('sirus')!.spawn('Keep working', 'fresh', { callId: 'spawn' });
+          await owner.subagentHostFor('sirus')!.spawn('Keep working', { context: 'fresh' }, { callId: 'spawn' });
         }
         emit({ type: 'text', text: 'Done' });
       });
@@ -300,7 +300,7 @@ describe('session checkpoint integration', () => {
       if (isWorker(options)) await gate;
       else if (!spawned) {
         spawned = true;
-        await other.subagentHostFor('sirus')!.spawn('Keep working', 'fresh', { callId: 'spawn' });
+        await other.subagentHostFor('sirus')!.spawn('Keep working', { context: 'fresh' }, { callId: 'spawn' });
       }
       emit({ type: 'text', text: 'Done' });
     });
@@ -318,7 +318,7 @@ describe('session checkpoint integration', () => {
     }
   });
 
-  test('a worker in a git project gets its own worktree, which goes when the session does', async () => {
+  test('explicit worktree isolation starts at HEAD and removes unchanged work on completion', async () => {
     const repository = path.join(root, 'repository');
     mkdirSync(repository);
     git(repository, ['init', '--quiet', '-b', 'main']);
@@ -340,7 +340,7 @@ describe('session checkpoint integration', () => {
       }
       if (!spawned) {
         spawned = true;
-        await owner.subagentHostFor('sirus')!.spawn('Work on your own branch', 'fresh', { callId: 'spawn' });
+        await owner.subagentHostFor('sirus')!.spawn('Work on your own branch', { context: 'fresh', isolation: 'worktree' }, { callId: 'spawn' });
       }
       writeFileSync(path.join(options.directory, 'file.txt'), 'agent edit');
       emit({ type: 'text', text: 'Done' });
@@ -370,7 +370,49 @@ describe('session checkpoint integration', () => {
     }
     // The worktree goes with the session; the branch is left to be merged.
     expect(existsSync(worktree)).toBe(false);
-    expect(git(repository, ['branch', '--list', branch])).toContain(branch);
+    expect(git(repository, ['branch', '--list', branch]).trim()).toBe('');
     expect(git(repository, ['worktree', 'list'])).not.toContain(worktree);
   });
+});
+
+test('changed worktrees survive completion and disposal, including committed changes', async () => {
+  const scratch = mkdtempSync(path.join(os.tmpdir(), 'sirus-kept-worktrees-'));
+  const previous = process.env.SIRUS_DATA_DIR;
+  process.env.SIRUS_DATA_DIR = path.join(scratch, 'data');
+  const repository = path.join(scratch, 'repository');
+  mkdirSync(repository);
+  git(repository, ['init', '--quiet', '-b', 'main']);
+  git(repository, ['config', 'user.email', 'worker@example.com']);
+  git(repository, ['config', 'user.name', 'Worker Test']);
+  writeFileSync(path.join(repository, 'file.txt'), 'original');
+  git(repository, ['add', 'file.txt']);
+  git(repository, ['commit', '--quiet', '-m', 'first']);
+  const session = new Session({ id: 'kept-worktrees', name: 'Kept', directory: repository, model });
+  bindScriptedRuntime(model, (input, emit, options) => {
+    writeFileSync(path.join(options.directory, 'file.txt'), input.text);
+    if (input.text === 'commit') {
+      git(options.directory, ['add', 'file.txt']);
+      git(options.directory, ['commit', '--quiet', '-m', 'worker change']);
+    }
+    emit({ type: 'text', text: 'Changed file.txt' });
+  });
+  try {
+    for (const prompt of ['dirty', 'commit']) {
+      const report = await session.subagentHostFor('sirus')!.spawn(prompt, { isolation: 'worktree', runInBackground: false }, { callId: prompt });
+      expect(report).toMatchObject({ status: 'done', branch: expect.stringContaining('sirus/'), worktree: expect.any(String) });
+      expect(report.changes).toContain('Changed file.txt');
+    }
+    await session.dispose();
+    for (const run of session.getWorkers()) {
+      expect(existsSync(run.directory)).toBe(true);
+      expect(readFileSync(path.join(run.directory, 'file.txt'), 'utf8')).toBe(run.prompt);
+    }
+    expect(readFileSync(path.join(repository, 'file.txt'), 'utf8')).toBe('original');
+  } finally {
+    await session.dispose();
+    unbindRuntime(model);
+    if (previous === undefined) delete process.env.SIRUS_DATA_DIR;
+    else process.env.SIRUS_DATA_DIR = previous;
+    rmSync(scratch, { recursive: true, force: true });
+  }
 });

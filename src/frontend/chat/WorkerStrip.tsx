@@ -79,10 +79,11 @@ function WorkerLine({ run, now, selected, position }: {
       <Text color={theme.accent}>{selected ? '› ' : '  '}</Text>
       {position && <Text color={theme.textSubtle}>{position} </Text>}
       <Text color={workerColors[run.status]}>●</Text>
-      <Text color={theme.textMuted}> {run.id}</Text>
+      <Text color={theme.textMuted}> {run.name ?? run.id}</Text>
       <Text color={theme.textSubtle}> · {run.model} {run.thinkingLevel}</Text>
       <Text color={theme.textSubtle}> · {workerAge(run, now)}</Text>
       <Text color={theme.textSubtle}> · {workerActivity(run)}</Text>
+      {run.description && <Text color={theme.textSubtle}> · {run.description}</Text>}
       {run.branch && <Text color={theme.textSubtle}> · {run.branch}</Text>}
     </Text>
   );

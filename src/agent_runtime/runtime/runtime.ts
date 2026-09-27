@@ -52,6 +52,8 @@ export interface RuntimeOptions {
   // A bare runtime answers one question and keeps nothing: no Sirus tools and
   // as few native tools as the vendor allows. Session naming uses one.
   bare?: boolean;
+  tools?: readonly string[];
+  readOnly?: boolean;
   permissionMode: PermissionMode;
   // Whatever the vendor escalates arrives here. A cancelled prompt must
   // answer `{ outcome: 'cancelled' }`; the signal is the prompt's.
@@ -104,7 +106,7 @@ export interface PromptResult {
 // them in its first prompt.
 export type ForkOptions = Pick<RuntimeOptions,
   'directory' | 'model' | 'thinkingLevel' | 'systemPrompt' | 'permissionMode' | 'mcpServer' | 'onPermission'
-  | 'onElicitation' | 'onUpdate'>;
+  | 'onElicitation' | 'onUpdate' | 'tools' | 'readOnly'>;
 
 export interface Runtime {
   readonly vendor: Vendor;

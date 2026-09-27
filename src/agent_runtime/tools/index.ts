@@ -47,7 +47,7 @@ export function availableTools(audience: ToolAudience = {}): Tool[] {
 }
 
 export type {
-  SubagentHandle,
+  SpawnOptions,
   SubagentHost,
   SubagentSpawnCall,
   Tool,

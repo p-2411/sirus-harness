@@ -8,9 +8,8 @@ import { sourceEnvironment } from '../../src/agent_runtime/providers/profiles';
 import { maskApiKey, type Source } from '../../src/agent_runtime/providers/sources';
 import {
   routeSessionModel,
-  routeWorker,
   vendorAllowance,
-  workerCandidates,
+  routingCandidates,
   type RoutingCandidate,
   type RoutingClient,
 } from '../../src/agent_runtime/router';
@@ -211,8 +210,8 @@ describe('credential environments', () => {
   });
 });
 
-// What Jev may give a worker, and what each vendor has left to spend on it.
-describe('worker candidates and allowance', () => {
+// What Jev may choose for a session, and each vendor’s remaining allowance.
+describe('session candidates and allowance', () => {
   let directory: string;
   let previous: Record<string, string | undefined>;
 
@@ -243,16 +242,16 @@ describe('worker candidates and allowance', () => {
       vendor, profile, period: VENDOR_INFO[vendor].limitPeriod, remaining, checkedAt: Date.now(), resetsAt: null,
     }]);
   };
-  const candidateIds = (): string[] => workerCandidates().map(candidate => candidate.model).sort();
+  const candidateIds = (): string[] => routingCandidates().map(candidate => candidate.model).sort();
 
   test('offers every model of a vendor with allowance except the ones kept off the list', () => {
     subscribe('claude', 'default', 80);
     subscribe('gpt', 'default', 60);
-    expect(candidateIds()).toEqual(MODELS.filter(model => model.worker !== false).map(model => model.id).sort());
+    expect(candidateIds()).toEqual(MODELS.filter(model => model.latest).map(model => model.id).sort());
     expect(candidateIds()).not.toContain('claude-haiku-4-5');
     // Every candidate arrives with a whole profile and the vendor whose
     // allowance is rendered alongside it.
-    expect(workerCandidates().every(candidate => candidate.vendor === modelInfo(candidate.model)?.vendor
+    expect(routingCandidates().every(candidate => candidate.vendor === modelInfo(candidate.model)?.vendor
       && candidate.profile.strengths.length > 0
       && candidate.profile.benchmarks.length > 0
       && candidate.profile.reviews.length > 0
@@ -262,17 +261,17 @@ describe('worker candidates and allowance', () => {
   test('drops a vendor whose window is spent and keeps one holding an API key', () => {
     subscribe('claude', 'default', 0);
     process.env.OPENAI_SECRET = 'sk-proj-worker-1234';
-    expect(candidateIds()).not.toContain('claude-opus-5');
-    expect(candidateIds()).toContain('gpt-5.6-terra');
+    expect(candidateIds()).not.toContain('claude-opus-5-5');
+    expect(candidateIds()).toContain('gpt-6-astra');
     providerFor('claude').sources.addApiKey('sk-ant-worker-abcd');
-    expect(candidateIds()).toContain('claude-opus-5');
+    expect(candidateIds()).toContain('claude-opus-5-5');
   });
 
   test('a subscription the sidebar has not read yet is available, and no credential offers nothing', () => {
-    expect(workerCandidates()).toEqual([]);
+    expect(routingCandidates()).toEqual([]);
     expect(vendorAllowance()).toEqual([]);
     providerFor('gpt').sources.addSubscription('default');
-    expect(candidateIds()).toContain('gpt-5.6-sol');
+    expect(candidateIds()).toContain('gpt-6-astra');
     expect(vendorAllowance()).toEqual([{ vendor: 'gpt', remaining: null }]);
   });
 
@@ -287,7 +286,7 @@ describe('worker candidates and allowance', () => {
   });
 });
 
-describe('routing a worker', () => {
+describe('session routing profiles', () => {
   const project = path.resolve(import.meta.dir, '../..');
   const input = { task: 'Rename `count` to `total` in @src/agent_runtime/router.ts', directory: project };
   const candidates: RoutingCandidate[] = [
@@ -339,100 +338,6 @@ describe('routing a worker', () => {
     return { client, asked };
   };
 
-  test('asks for a model and a level, and states the task and the project', async () => {
-    const { client, asked } = fakeClient({
-      model: { choice: 'gpt-5.6-luna', confidence: 0.83 },
-      thinkingLevel: { choice: 'low', confidence: 0.71 },
-    });
-    expect(await routeWorker(input, candidates, allowance, { client }))
-      .toEqual({ model: 'gpt-5.6-luna', thinkingLevel: 'low' });
-    expect(asked).toHaveLength(1);
-    expect(Object.keys(asked[0].questions)).toEqual(['model', 'thinkingLevel']);
-    expect(Object.keys(asked[0].questions.model.criteria)).toEqual(candidates.map(candidate => candidate.model));
-    expect(Object.keys(asked[0].questions.thinkingLevel.criteria)).toEqual(['low', 'medium', 'high', 'xhigh']);
-    expect(asked[0].state.task).toBe(input.task);
-    expect(asked[0].state.mentionedFiles).toEqual(['src/agent_runtime/router.ts']);
-    expect(asked[0].state.project).toBe(path.basename(project));
-    // The allowance is part of each candidate's criteria now, not a list of
-    // its own for Jev to match up with the models itself.
-    expect(asked[0].state.allowance).toBeUndefined();
-  });
-
-  test('renders each candidate as its profile plus the allowance its vendor has left', async () => {
-    const { client, asked } = fakeClient({
-      model: { choice: 'claude-fable-5-1', confidence: 0.9 },
-      thinkingLevel: { choice: 'high', confidence: 0.9 },
-    });
-    await routeWorker(input, candidates, allowance, { client });
-    const criteria = asked[0].questions.model.criteria;
-    expect(criteria['claude-fable-5-1']).toBe([
-      'Strengths: The most demanding reasoning.',
-      'Benchmarks: SWE-bench Pro 81.2 (Sept 2026).',
-      'In practice: Asks before it decides.',
-      'Cost: $10 per million input tokens, $50 per million output (cache reads $0.25).',
-      'Allowance: Anthropic has 47% of the 5-hour window remaining.',
-    ].join('\n'));
-    // Several benchmarks run together on one line, and sub-dollar prices keep
-    // their cents.
-    expect(criteria['claude-sonnet-5']).toContain(
-      'Benchmarks: SWE-bench Pro 63.2 (June 2026); Arena creative writing Elo 1437 (Sept 2026).',
-    );
-    expect(criteria['gpt-5.6-luna']).toContain('Cost: $0.20 per million input tokens, $1.20 per million output.');
-    expect(criteria['gpt-5.6-luna']).toContain('Allowance: OpenAI has API key, no window.');
-  });
-
-  test('a vendor the allowance says nothing about is unread rather than spent', async () => {
-    const { client, asked } = fakeClient({ model: { choice: 'gpt-5.6-luna', confidence: 0.9 } });
-    await routeWorker(input, candidates, [{ vendor: 'claude', remaining: 12 }], { client });
-    expect(asked[0].questions.model.criteria['gpt-5.6-luna']).toContain('Allowance: OpenAI has not read yet.');
-    expect(asked[0].questions.model.criteria['claude-sonnet-5'])
-      .toContain('Allowance: Anthropic has 12% of the 5-hour window remaining.');
-  });
-
-  test('routes nothing when Jev is unsure of the model or names one that was not offered', async () => {
-    const unsure = fakeClient({
-      model: { choice: 'claude-fable-5-1', confidence: 0.42 },
-      thinkingLevel: { choice: 'high', confidence: 0.9 },
-    });
-    expect(await routeWorker(input, candidates, allowance, { client: unsure.client })).toBeNull();
-    const stranger = fakeClient({
-      model: { choice: 'claude-opus-5', confidence: 0.95 },
-      thinkingLevel: { choice: 'high', confidence: 0.9 },
-    });
-    expect(await routeWorker(input, candidates, allowance, { client: stranger.client })).toBeNull();
-  });
-
-  test('an unsure or unoffered level leaves the model pick standing on the owner level', async () => {
-    for (const thinkingLevel of [
-      { choice: 'xhigh', confidence: 0.31 },
-      { choice: 'max', confidence: 0.9 },
-      { choice: 'ludicrous', confidence: 0.9 },
-    ]) {
-      const { client } = fakeClient({ model: { choice: 'claude-fable-5-1', confidence: 0.9 }, thinkingLevel });
-      expect(await routeWorker(input, candidates, allowance, { client, fallbackLevel: 'medium' }))
-        .toEqual({ model: 'claude-fable-5-1', thinkingLevel: 'medium' });
-    }
-    const { client } = fakeClient({ model: { choice: 'claude-sonnet-5', confidence: 0.9 } });
-    expect(await routeWorker(input, candidates, allowance, { client }))
-      .toEqual({ model: 'claude-sonnet-5', thinkingLevel: 'high' });
-  });
-
-  test('a call that fails or times out, and a missing key, route nothing', async () => {
-    const failing: RoutingClient = { systemOne: async () => { throw new Error('request timed out'); } };
-    expect(await routeWorker(input, candidates, allowance, { client: failing })).toBeNull();
-    expect(await routeWorker(input, candidates, allowance, { client: null })).toBeNull();
-  });
-
-  test('one candidate is taken on the owner level without asking, and none routes nothing', async () => {
-    const { client, asked } = fakeClient({ model: { choice: 'claude-sonnet-5', confidence: 1 } });
-    expect(await routeWorker(input, candidates.slice(0, 1), allowance, { client, fallbackLevel: 'xhigh' }))
-      .toEqual({ model: 'claude-sonnet-5', thinkingLevel: 'xhigh' });
-    expect(await routeWorker(input, [], allowance, { client })).toBeNull();
-    expect(asked).toHaveLength(0);
-  });
-
-  // A session's model is chosen from the same profiles, so only the question
-  // and where the allowance comes from differ.
   test('the session router asks one question over the same rendered profiles', async () => {
     const { client, asked } = fakeClient({ model: { choice: 'claude-fable-5-1', confidence: 0.77 } });
     const prompt = 'Work out why @src/agent_runtime/router.ts drops the pick';
@@ -452,4 +357,24 @@ describe('routing a worker', () => {
       'Allowance: Anthropic has 47% of the 5-hour window remaining.',
     ].join('\n'));
   });
+});
+
+test('worker launch policies disable native delegation and apply definition tool restrictions', async () => {
+  const { launchFor } = await import('../../src/agent_runtime/runtime/launch');
+  const options = {
+    vendor: 'claude' as const, model: 'claude-sonnet-5', thinkingLevel: 'low' as const,
+    directory: os.tmpdir(), systemPrompt: 'Worker', env: {}, mcpServer: null,
+    permissionMode: 'bypass' as const, tools: ['Read', 'Grep'], readOnly: true,
+    onPermission: async () => ({ outcome: { outcome: 'cancelled' as const } }), onUpdate: () => {},
+  };
+  const claude = launchFor(options);
+  const session = claude.session(options);
+  const sdk = (session.meta?.claudeCode as { options: { tools: string[]; disallowedTools: string[] } }).options;
+  expect(sdk.tools).toEqual(['Read', 'Grep']);
+  expect(sdk.disallowedTools).toEqual(expect.arrayContaining(['Agent', 'SendMessage', 'ListAgents', 'mcp__*']));
+  const codex = launchFor({ ...options, vendor: 'gpt', model: 'gpt-5.6-luna' });
+  expect(codex.env.INITIAL_AGENT_MODE).toBe('read-only');
+  expect(JSON.parse(codex.env.CODEX_CONFIG!).features.multi_agent).toBe(false);
+  // 1.13.1 unsubscribes forks: a resume is required to receive updates.
+  expect(codex.forkNeedsResume).toBe(true);
 });

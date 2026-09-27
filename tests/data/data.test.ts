@@ -469,7 +469,7 @@ describe('Session model', () => {
       // One worker per session, on that session's first turn; the report
       // turns that follow spawn nothing.
       else if (spawns < sessions.length) {
-        await sessions[spawns].subagentHostFor('sirus')!.spawn('background task', 'fresh', { callId: `spawn-${spawns++}` });
+        await sessions[spawns].subagentHostFor('sirus')!.spawn('background task', { context: 'fresh' }, { callId: `spawn-${spawns++}` });
       }
       emit({ type: 'text', text: 'Done' });
     });
@@ -524,7 +524,7 @@ describe('Session model', () => {
         // entry; the run is tied to it, and the report lands on it.
         const call = { type: 'tool_call' as const, id: 'spawn', title: 'sirus - SpawnAgent', kind: 'other' as const, locations: [], content: [] };
         emit({ type: 'tool_call', call: { ...call, status: 'in_progress' } });
-        await session.subagentHostFor('sirus')!.spawn('Rewrite the parser', 'fresh', { callId: 'spawn' });
+        await session.subagentHostFor('sirus')!.spawn('Rewrite the parser', { context: 'fresh' }, { callId: 'spawn' });
         emit({ type: 'tool_call', call: { ...call, status: 'completed' } });
       }
       emit({ type: 'text', text: 'Noted' });
@@ -542,12 +542,12 @@ describe('Session model', () => {
       expect(worker.status).toBe('done');
       expect(worker.reported).toBe(true);
       // The owner hears it the way it hears any other participant.
-      expect(prompts[1]).toStartWith(`@${worker.id} wrote:`);
+      expect(prompts[1]).toStartWith(`Subagent ${worker.id} done`);
       expect(prompts[1]).toContain(`Subagent ${worker.id} done`);
       expect(prompts[1]).toContain('I rewrote the parser.');
 
-      const report = session.getMessages().find(entry => entry.participant === worker.id);
-      expect(report).toMatchObject({ role: 'assistant', participant: worker.id, model: testModel, to: ['sirus'], hidden: true });
+      const report = session.getMessages().find(entry => entry.hidden && textOf(entry).includes(worker.id));
+      expect(report).toMatchObject({ role: 'user', to: ['sirus'], hidden: true });
       expect(textOf(report!)).toContain('Final message:');
       // The user reads the report under the call that started the worker.
       const call = session.getMessages().flatMap(entry => entry.content)
@@ -583,8 +583,8 @@ describe('Session model', () => {
         }
         const host = session.subagentHostFor('sirus')!;
         await Promise.all([
-          host.spawn('First task', 'fresh', { callId: 'mcp-one' }),
-          host.spawn('Second task', 'fresh', { callId: 'mcp-two' }),
+          host.spawn('First task', { context: 'fresh' }, { callId: 'mcp-one' }),
+          host.spawn('Second task', { context: 'fresh' }, { callId: 'mcp-two' }),
         ]);
         for (const call of calls) {
           emit({ type: 'tool_call', call: {
@@ -604,7 +604,7 @@ describe('Session model', () => {
     }
   });
 
-  test('a report waits behind a busy turn and goes out before the user’s queued prompts', async () => {
+  test('a report steers a busy owner without adding a turn before queued prompts', async () => {
     const prompts: string[] = [];
     let releaseOwner!: () => void;
     let releaseWorker!: () => void;
@@ -621,7 +621,7 @@ describe('Session model', () => {
       prompts.push(input.text);
       if (!spawned) {
         spawned = true;
-        await session.subagentHostFor('sirus')!.spawn('Background task', 'fresh', { callId: 'spawn' });
+        await session.subagentHostFor('sirus')!.spawn('Background task', { context: 'fresh' }, { callId: 'spawn' });
       } else if (prompts.length === 2) {
         await ownerGate;
       }
@@ -636,16 +636,14 @@ describe('Session model', () => {
       await until(() => prompts.length === 2, 'the second turn to start');
       session.queueMessage('Queued prompt');
       releaseWorker();
-      await until(() => worker.status === 'done', 'the worker to finish');
-      // The report cannot interrupt the turn in flight.
-      expect(worker.reported).toBe(false);
+      await until(() => worker.status === 'done' && worker.reported, 'the worker report to arrive');
+      expect(worker.reported).toBe(true);
       expect(session.getQueuedMessageCount()).toBe(1);
 
       releaseOwner();
       await busy;
-      await until(() => prompts.length === 4 && session.getStatus() === 'idle', 'the report and the queued prompt');
-      expect(prompts[2]).toContain(`@${worker.id} wrote:`);
-      expect(prompts[3]).toBe('Queued prompt');
+      await until(() => prompts.length === 3 && session.getStatus() === 'idle', 'the queued prompt');
+      expect(prompts[2]).toBe('Queued prompt');
       expect(session.getQueuedMessageCount()).toBe(0);
     } finally {
       releaseOwner();
@@ -654,7 +652,7 @@ describe('Session model', () => {
     }
   });
 
-  test('messageWorker steers a running worker and refuses one that has ended', async () => {
+  test('messageWorker steers a running worker and resumes one that ended', async () => {
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const steered: string[] = [];
@@ -669,7 +667,7 @@ describe('Session model', () => {
       }
       if (!spawned) {
         spawned = true;
-        await session.subagentHostFor('sirus')!.spawn('Background task', 'fresh', { callId: 'spawn' });
+        await session.subagentHostFor('sirus')!.spawn('Background task', { context: 'fresh' }, { callId: 'spawn' });
       }
       emit({ type: 'text', text: 'Noted' });
     });
@@ -689,7 +687,9 @@ describe('Session model', () => {
 
       release();
       await until(() => worker.status === 'done', 'the worker to finish');
-      await expect(session.messageWorker(worker.id, 'Too late')).rejects.toThrow(`Subagent ${worker.id} is done`);
+      await session.messageWorker(worker.id, 'Follow up');
+      await until(() => worker.status === 'done', 'the resumed worker');
+      expect(worker.transcript.some(entry => textOf(entry) === 'Follow up')).toBe(true);
       await expect(session.messageWorker('sub-nothing', 'Nobody')).rejects.toThrow('has no worker');
     } finally {
       release();
@@ -711,7 +711,7 @@ describe('Session model', () => {
       prompts.push(input.text);
       if (!spawned) {
         spawned = true;
-        await session.subagentHostFor('sirus')!.spawn('Background task', 'fresh', { callId: 'spawn' });
+        await session.subagentHostFor('sirus')!.spawn('Background task', { context: 'fresh' }, { callId: 'spawn' });
       }
       emit({ type: 'text', text: 'Noted' });
     });
@@ -746,7 +746,7 @@ describe('Session model', () => {
       await restored.sendMessage({ role: 'user', content: [{ type: 'text', text: 'What happened?' }] });
       expect(restoredWorker.reported).toBe(true);
       const entries = restored.getMessages();
-      const report = entries.findIndex(entry => entry.participant === worker.id);
+      const report = entries.findIndex(entry => entry.hidden && textOf(entry).includes(worker.id));
       const question = entries.findIndex(entry => entry.role === 'user' && textOf(entry) === 'What happened?');
       // The report is in the record the fresh runtime is seeded with, ahead
       // of the prompt, rather than a turn of its own.
@@ -762,91 +762,30 @@ describe('Session model', () => {
     }
   });
 
-  test('Jev picks the worker’s model and level, and a routing failure keeps the owner’s', async () => {
-    let release!: () => void;
-    const gate = new Promise<void>(resolve => { release = resolve; });
+  test('worker model and thinking follow explicit choices, then owner, with the user pin first', async () => {
     const started: { model: string; thinkingLevel: string }[] = [];
-    let session!: Session;
-    let spawns = 0;
-    // Jev is asked only for an owner on a catalog model, so the owner runs a
-    // scripted runtime bound under a real id, with a key of its own in a data
-    // directory of its own so the vendor has a credential to start it on.
-    const ownerModel = 'gpt-5.6-luna';
-    const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-worker-routing-'));
-    const previous = { SIRUS_DATA_DIR: process.env.SIRUS_DATA_DIR, OPENAI_SECRET: process.env.OPENAI_SECRET };
-    process.env.SIRUS_DATA_DIR = directory;
-    process.env.OPENAI_SECRET = 'sk-test-worker-routing';
-    bindScriptedRuntime(ownerModel, async (_input, emit, options) => {
-      if (isWorker(options)) {
+    for (const model of [testModel, secondTestModel, thirdTestModel]) {
+      bindScriptedRuntime(model, (_input, emit, options) => {
         started.push({ model: options.model, thinkingLevel: options.thinkingLevel });
-        await gate;
-        return;
-      }
-      if (spawns < 2) {
-        spawns++;
-        await session.subagentHostFor('sirus')!.spawn('Background task', 'fresh', { callId: `spawn-${spawns}` });
-      }
-      emit({ type: 'text', text: 'Noted' });
-    });
-    bindScriptedRuntime(secondTestModel, async (_input, _emit, options) => {
-      started.push({ model: options.model, thinkingLevel: options.thinkingLevel });
-      await gate;
-    });
-    const route = spyOn(router, 'routeWorker')
-      .mockResolvedValueOnce({ model: secondTestModel, thinkingLevel: 'low' })
-      .mockRejectedValueOnce(new Error('Jev is unreachable'));
-    session = new Session({ id: 'worker-routing', name: 'Routing', model: ownerModel });
+        emit({ type: 'text', text: 'Done' });
+      });
+    }
+    const session = new Session({ id: 'worker-choice', name: 'Choice', model: testModel });
     session.setThinkingLevel('xhigh');
+    const host = session.subagentHostFor('sirus')!;
     try {
-      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Delegate it' }] });
-      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Delegate another' }] });
-      const [first, second] = session.getWorkers();
-      expect(route).toHaveBeenCalledTimes(2);
-      expect(route.mock.calls[0][0]).toEqual({ task: 'Background task', directory: session.getDirectory() });
-      expect(route.mock.calls[0][3]).toMatchObject({ fallbackLevel: 'xhigh' });
-      expect(first).toMatchObject({ model: secondTestModel, thinkingLevel: 'low' });
-      // A throw is not an answer: the worker stays on its owner's model.
-      expect(second).toMatchObject({ model: ownerModel, thinkingLevel: 'xhigh' });
-      await until(() => started.length === 2, 'both workers to start');
+      await host.spawn('Explicit', { model: secondTestModel, thinkingLevel: 'low', runInBackground: false }, { callId: 'one' });
+      await host.spawn('Inherited', { runInBackground: false }, { callId: 'two' });
+      session.setSubagentModel(thirdTestModel);
+      await host.spawn('Pinned', { model: secondTestModel, thinkingLevel: 'medium', runInBackground: false }, { callId: 'three' });
       expect(started).toEqual([
         { model: secondTestModel, thinkingLevel: 'low' },
-        { model: ownerModel, thinkingLevel: 'xhigh' },
+        { model: testModel, thinkingLevel: 'xhigh' },
+        { model: thirdTestModel, thinkingLevel: 'medium' },
       ]);
+      expect(session.getStatus()).toBe('idle');
+      expect(session.getMessages()).toHaveLength(0);
     } finally {
-      release();
-      route.mockRestore();
-      await session.dispose();
-      unbindRuntime(ownerModel);
-      for (const [name, value] of Object.entries(previous)) {
-        if (value === undefined) delete process.env[name];
-        else process.env[name] = value;
-      }
-      rmSync(directory, { recursive: true, force: true });
-    }
-  });
-
-  test('a worker of an owner outside the catalog never asks Jev', async () => {
-    let release!: () => void;
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    let session!: Session;
-    let spawned = false;
-    bindScriptedRuntime(testModel, async (_input, emit, options) => {
-      if (isWorker(options)) { await gate; return; }
-      if (!spawned) {
-        spawned = true;
-        await session.subagentHostFor('sirus')!.spawn('Background task', 'fresh', { callId: 'spawn' });
-      }
-      emit({ type: 'text', text: 'Noted' });
-    });
-    const route = spyOn(router, 'routeWorker').mockResolvedValue({ model: 'gpt-5.6-terra', thinkingLevel: 'low' });
-    session = new Session({ id: 'worker-unrouted', name: 'Unrouted', model: testModel });
-    try {
-      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Delegate it' }] });
-      expect(route).not.toHaveBeenCalled();
-      expect(session.getWorkers()[0]).toMatchObject({ model: testModel, status: 'working' });
-    } finally {
-      release();
-      route.mockRestore();
       await session.dispose();
     }
   });
@@ -865,7 +804,7 @@ describe('Session model', () => {
       }
       if (!spawned) {
         spawned = true;
-        await session.subagentHostFor('sirus')!.spawn('Carry on from here', 'owner', { callId: 'spawn' });
+        await session.subagentHostFor('sirus')!.spawn('Carry on from here', { context: 'owner' }, { callId: 'spawn' });
       }
       emit({ type: 'text', text: 'Delegated it' });
     });
@@ -885,6 +824,9 @@ describe('Session model', () => {
       expect(workerPrompts[0]).toEndWith('Your task:\nCarry on from here');
       // The conversation itself is already in the forked session.
       expect(workerPrompts[0]).not.toContain('Earlier conversation');
+      // Keep the inherited record too, in case the fork's process is lost.
+      expect(textOf(worker.transcript[0])).toContain('Earlier conversation');
+      expect(textOf(worker.transcript[0])).toContain('Delegate it');
     } finally {
       release();
       await session.dispose();
@@ -904,7 +846,7 @@ describe('Session model', () => {
     const session = new Session({ id: 'worker-fork-fallback', name: 'Fallback', model: testModel });
     session.append({ role: 'user', to: ['sirus'], content: [{ type: 'text', text: 'The parser is in src/parser.ts' }] });
     try {
-      await session.subagentHostFor('sirus')!.spawn('Carry on from here', 'owner', { callId: 'spawn' });
+      await session.subagentHostFor('sirus')!.spawn('Carry on from here', { context: 'owner' }, { callId: 'spawn' });
       await until(() => workerPrompts.length === 1, 'the worker’s first prompt');
       expect(binding.forks).toEqual([]);
       expect(workerPrompts[0]).toStartWith('Earlier conversation of the agent that spawned you, for context:');
@@ -1416,7 +1358,7 @@ describe('session-owned workers', () => {
     bindScriptedRuntime(testModel, async (_input, emit, options) => {
       expect(options.mcpServer?.headers[1].value).toBe('sirus');
       if (spawns < sessions.length) {
-        await sessions[spawns++].subagentHostFor('sirus')!.spawn('Work', 'fresh', { callId: 'spawn' });
+        await sessions[spawns++].subagentHostFor('sirus')!.spawn('Work', { context: 'fresh' }, { callId: 'spawn' });
       }
       emit({ type: 'text', text: 'Worker started' });
     });
@@ -1449,4 +1391,142 @@ describe('session-owned workers', () => {
       await second.dispose();
     }
   });
+});
+
+test('named workers wait, interrupt, resume warm conversations, and recover from failure', async () => {
+  let workerRuntime: import('../support/runtime').ScriptedRuntime | undefined;
+  const ownerPrompts: string[] = [];
+  bindScriptedRuntime(testModel, async (input, emit, options, _signal, runtime) => {
+    if (!isWorker(options)) { ownerPrompts.push(input.text); return; }
+    workerRuntime = runtime;
+    if (input.text === 'Block') await new Promise(() => {});
+    if (input.text === 'Fail now') throw new Error('Deliberate failure');
+    emit({ type: 'text', text: `Result: ${input.text}` });
+  });
+  const session = new Session({ id: 'worker-resume-turns', name: 'Resume', model: testModel });
+  const host = session.subagentHostFor('sirus')!;
+  try {
+    const handle = await host.spawn('Block', { name: 'helper', description: 'Check the lifecycle' }, { callId: 'spawn' });
+    await until(() => workerRuntime !== undefined, 'worker runtime');
+    expect(await host.wait(['helper'], 0)).toEqual([expect.objectContaining({ id: handle.id, status: 'working' })]);
+    await expect(host.spawn('Duplicate', { name: 'helper' }, { callId: 'duplicate' })).rejects.toThrow('already in use');
+    const originalRuntime = workerRuntime!;
+    await host.message('helper', 'Second turn', true);
+    expect(await host.wait(['helper'], 1000)).toEqual([expect.objectContaining({ status: 'done', finalMessage: 'Result: Second turn' })]);
+    expect(ownerPrompts.join('\n')).not.toContain('Interrupted by SendMessage');
+    await host.message('helper', 'Continuation');
+    await host.wait(['helper'], 1000);
+    expect(workerRuntime).toBe(originalRuntime);
+    expect(originalRuntime.prompts.map(prompt => prompt.text)).toEqual(['Block', 'Second turn', 'Continuation']);
+    await host.message('helper', 'Fail now');
+    expect(await host.wait(['helper'], 1000)).toEqual([expect.objectContaining({ status: 'failed' })]);
+    await host.message('helper', 'Recovered');
+    await host.wait(['helper'], 1000);
+    expect(host.check('helper')).toMatchObject({ status: 'done' });
+    expect(workerRuntime!.prompts[0].text).toContain('Second turn');
+    expect(workerRuntime!.prompts[0].text).toContain('Continuation');
+    expect(workerRuntime!.prompts[0].text).toContain('Recovered');
+  } finally {
+    await session.dispose();
+  }
+});
+
+test('foreground workers return their report without a notification and apply agent definitions', async () => {
+  const { mkdirSync, writeFileSync } = await import('fs');
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-agent-definition-'));
+  mkdirSync(path.join(directory, '.claude', 'agents'), { recursive: true });
+  writeFileSync(path.join(directory, '.claude', 'agents', 'reader.md'), `---\nname: reader\ndescription: Reads only\ntools: Read, Grep\nmodel: ${secondTestModel}\nthinkingLevel: low\n---\nFollow the READER_CONTRACT.`);
+  const binding = bindScriptedRuntime(secondTestModel, (_input, emit) => { emit({ type: 'text', text: 'Definition result' }); });
+  bindScriptedRuntime(testModel, textTurn('Owner'));
+  const session = new Session({ id: 'foreground-definition', name: 'Definition', directory, model: testModel });
+  try {
+    const result = await session.subagentHostFor('sirus')!.spawn('Read', { agentType: 'reader', runInBackground: false }, { callId: 'spawn' });
+    expect(result).toMatchObject({ status: 'done', model: secondTestModel, thinkingLevel: 'low', finalMessage: 'Definition result' });
+    expect(binding.starts[0]).toMatchObject({ tools: ['Read', 'Grep'], readOnly: true });
+    expect(binding.starts[0].systemPrompt).toContain('READER_CONTRACT');
+    expect(session.getMessages()).toEqual([]);
+    expect(session.getWorkers()[0]).toMatchObject({ directory, branch: null, reported: true });
+    const restored = Session.fromSnapshot(session.toSnapshot());
+    try {
+      await restored.messageWorker(session.getWorkers()[0].id, 'Read again');
+      await restored.subagentHostFor('sirus')!.wait([session.getWorkers()[0].id], 1000);
+      expect(binding.starts.at(-1)?.systemPrompt).toContain('READER_CONTRACT');
+      expect(binding.runtimes.at(-1)?.prompts[0].text).toContain('Definition result');
+    } finally {
+      await restored.dispose();
+    }
+  } finally {
+    await session.dispose();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('owner context on another vendor seeds a fresh runtime and never attempts a fork', async () => {
+  const previous = { ANTHROPIC_API: process.env.ANTHROPIC_API, OPENAI_SECRET: process.env.OPENAI_SECRET };
+  process.env.ANTHROPIC_API = 'test-anthropic-key';
+  process.env.OPENAI_SECRET = 'test-openai-key';
+  const owner = bindScriptedRuntime('gpt-5.6-luna', textTurn('Remember CROSS_VENDOR_CONTEXT'));
+  const worker = bindScriptedRuntime('claude-sonnet-5', textTurn('I remember'));
+  const session = new Session({ id: 'cross-vendor-worker', name: 'Cross vendor', model: 'gpt-5.6-luna' });
+  try {
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Remember the context' }] });
+    await session.subagentHostFor('sirus')!.spawn('Continue', { context: 'owner', model: 'claude-sonnet-5', runInBackground: false }, { callId: 'spawn' });
+    expect(owner.forks).toHaveLength(0);
+    expect(worker.runtimes[0].prompts[0].text).toContain('CROSS_VENDOR_CONTEXT');
+    expect(worker.starts[0].vendor).toBe('claude');
+  } finally {
+    await session.dispose();
+    unbindRuntime('gpt-5.6-luna');
+    unbindRuntime('claude-sonnet-5');
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test('notifications stay attached to their completed turn when steering acknowledges after a resume', async () => {
+  let releaseOwner!: () => void;
+  const ownerGate = new Promise<void>(resolve => { releaseOwner = resolve; });
+  const acknowledgements: (() => void)[] = [];
+  const steered: string[] = [];
+  bindScriptedRuntime(testModel, async (input, emit, options, _signal, runtime) => {
+    if (isWorker(options)) { emit({ type: 'text', text: input.text }); return; }
+    runtime.steer = text => new Promise<void>(resolve => { steered.push(text); acknowledgements.push(resolve); });
+    emit({ type: 'tool_call', call: {
+      type: 'tool_call', id: 'spawn-delayed', title: 'mcp.sirus.SpawnAgent', kind: 'execute',
+      status: 'completed', locations: [], content: [],
+    } });
+    await ownerGate;
+  });
+  const session = new Session({ id: 'delayed-reports', name: 'Delayed reports', model: testModel });
+  const ownerTurn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Start' }] });
+  try {
+    await until(() => session.getMessages().some(entry => entry.content.some(block => block.type === 'tool_call')), 'owner runtime');
+    const host = session.subagentHostFor('sirus')!;
+    await host.spawn('FIRST_RESULT', { name: 'delayed' }, { callId: 'spawn-delayed' });
+    await host.wait(['delayed'], 1000);
+    expect(acknowledgements).toHaveLength(1);
+    await host.message('delayed', 'SECOND_RESULT');
+    await host.wait(['delayed'], 1000);
+    expect(acknowledgements).toHaveLength(2);
+    acknowledgements[1]();
+    await new Promise(resolve => setImmediate(resolve));
+    acknowledgements[0]();
+    await new Promise(resolve => setImmediate(resolve));
+    const notifications = session.getMessages().filter(entry => entry.hidden).map(textOf);
+    expect(notifications).toHaveLength(2);
+    expect(notifications.some(text => text.includes('Final message:\nFIRST_RESULT'))).toBe(true);
+    expect(notifications.some(text => text.includes('Final message:\nSECOND_RESULT'))).toBe(true);
+    expect(steered[0]).toContain('FIRST_RESULT');
+    expect(steered[1]).toContain('SECOND_RESULT');
+    const call = session.getMessages().flatMap(entry => entry.content).find(block => block.type === 'tool_call');
+    expect(call).toMatchObject({ output: expect.stringContaining('Final message:\nSECOND_RESULT') });
+    expect(session.getWorkers()[0].reported).toBe(true);
+  } finally {
+    for (const acknowledge of acknowledgements) acknowledge();
+    releaseOwner();
+    await ownerTurn;
+    await session.dispose();
+  }
 });

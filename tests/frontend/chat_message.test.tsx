@@ -279,11 +279,11 @@ describe('chat message', () => {
     expect(output).toContain('Subagent sub-5678 done after 45s.');
   });
 
-  test('recognizes the namespaced MCP SpawnAgent title', () => {
+  test('recognizes Codex’s execute-kind MCP SpawnAgent title', () => {
     const spawn = toolCall({
       id: 'mcp-spawn-call',
-      kind: 'other',
-      title: 'mcp__sirus__SpawnAgent',
+      kind: 'execute',
+      title: 'mcp.sirus.SpawnAgent',
       content: [{ type: 'text', text: '{"id":"sub-1234"}' }],
       output: 'Subagent sub-1234 done.',
     });

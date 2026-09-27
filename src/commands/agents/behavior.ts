@@ -113,7 +113,7 @@ export function changeModel(
 // setting of the session. `default` returns them to the spawning
 // participant's own model.
 export function subagentModelCommand(args: readonly string[], session: CommandSession): Feedback {
-  const describe = (model: string | null) => `Subagents run on ${model ?? 'each participant\'s own model'}.`;
+  const describe = (model: string | null) => `Subagents run on ${model ?? 'the caller’s choice, agent definition, or participant’s own model'}.`;
   if (args.length === 0) return { kind: 'info', text: describe(session.getSubagentModel()) };
   if (args.length > 1) throw new Error('Usage: /model subagent [<model>|default]');
   const model = args[0] === 'default' ? null : resolveModelReference(args[0]);
@@ -212,7 +212,7 @@ function taskPreview(prompt: string, limit = 60): string {
 }
 
 function findWorker(id: string, session: CommandSession): SubagentRun {
-  const run = session.getWorkers().find(candidate => candidate.id === id);
+  const run = session.getWorkers().find(candidate => candidate.id === id || candidate.name === id);
   if (!run) throw new Error(`No worker "${id}" in this session. /agents lists them.`);
   return run;
 }
@@ -228,17 +228,12 @@ function workerActions(run: SubagentRun): CommandMenuEntry[] {
       command: `/agents show ${run.id}`,
     },
   ];
-  // Only a working worker can be steered or stopped; only a finished one can
-  // have its line cleared.
+  entries.push({
+    type: 'item', key: 'message', label: 'Send a message',
+    description: run.status === 'working' ? 'steer it while it works' : 'resume its conversation',
+    command: `/agents message ${run.id}`, input: { prompt: `Message for ${run.name ?? run.id}` },
+  });
   if (run.status === 'working') {
-    entries.push({
-      type: 'item',
-      key: 'message',
-      label: 'Send a message',
-      description: 'steer it while it works',
-      command: `/agents message ${run.id}`,
-      input: { prompt: `Message for ${run.id}` },
-    });
     entries.push({
       type: 'item',
       key: 'cancel',
@@ -270,7 +265,7 @@ export function agentsMenuItems(args: readonly string[], session: CommandSession
         type: 'item' as const,
         key: run.id,
         label: `${run.id} · ${run.model} · ${run.status} ${workerAge(run)}`,
-        description: taskPreview(run.prompt),
+        description: taskPreview(run.description || run.prompt),
         command: `/agents ${run.id}`,
       })),
     ];
@@ -312,7 +307,7 @@ function describeWorkers(session: CommandSession): Feedback {
     showIcon: false,
     panel: true,
     text: workers
-      .map(run => `${run.id} · ${run.model} · ${run.status} ${workerAge(run)} · ${taskPreview(run.prompt)}`)
+      .map(run => `${run.id} · ${run.model} · ${run.status} ${workerAge(run)} · ${taskPreview(run.description || run.prompt)}`)
       .join('\n'),
   };
 }
@@ -339,9 +334,6 @@ export function agentsCommand(
       // arrives as one final argument the input bar collected.
       const text = args.slice(2).join(' ').trim();
       if (!text) throw new Error(`Usage: /agents message ${run.id} <message>`);
-      if (run.status !== 'working') {
-        throw new Error(`${run.id} is ${run.status}; only a working worker can be messaged.`);
-      }
       return session.messageWorker(run.id, text).then(() => ({
         kind: 'success' as const,
         text: `Sent to ${run.id}.`,

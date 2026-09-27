@@ -20,7 +20,6 @@ import {
 } from '../tools/subagents';
 import { INTERRUPTED_REASON, workerReport } from '../tools/subagents/report';
 import { cancelSubagent, messageSubagent } from '../tools/subagents/run';
-import { removeWorktree } from '../tools/subagents/worktree';
 import type { SubagentHost } from '../tools/types';
 import { textOf, type Message, type ThinkingLevel, type ToolCallBlock } from '../types';
 import type { ContextUsage } from '../usage';
@@ -241,6 +240,8 @@ export class Session {
       directory: this.directory,
       memoryEnabled: isMemoryAccessEnabled,
       hostFor: name => this.subagentHostFor(name),
+      toolsFor: requester => requester.startsWith('subagent:')
+        ? this.getWorkers().find(run => run.id === requester.slice('subagent:'.length))?.definition?.tools : undefined,
     });
   }
 
@@ -312,7 +313,7 @@ export class Session {
         error: interrupted ? INTERRUPTED_REASON : record.error,
         sessionId: this.id,
         worker: null,
-        content: transcript.find(entry => entry.role === 'assistant')?.content ?? [],
+        content: [...transcript].reverse().find(entry => entry.role === 'assistant')?.content ?? [],
       };
       owner.adoptSubagent(run);
       registerSubagent(run);
@@ -441,19 +442,35 @@ export class Session {
   }
 
   // One participant's delegation port: what its SpawnAgent, CheckAgent,
-  // MessageAgent, CancelAgent and ListAgents calls reach through the tool
+  // SendMessage, WaitAgent, CancelAgent and ListAgents calls reach through the tool
   // server.
   subagentHostFor(participantName: string): SubagentHost | null {
     return this.roster.find(participantName)?.subagentHost() ?? null;
   }
 
-  // A worker of this session ended. Its report goes to the agent that
-  // spawned it and wakes it, the way a message from another participant
-  // does; while the session is busy the report waits, and it goes out ahead
-  // of whatever the user queued behind the turn.
+  // A result decorates its SpawnAgent row. Background completion is a
+  // notification to the owner, steered into a live turn whenever possible.
   private workerFinished(run: SubagentRun): void {
-    if (run.reported || this.pendingReports.includes(run)) return;
-    this.pendingReports.push(run);
+    const owner = this.roster.find(run.owner) ?? this.roster.default;
+    const call = run.callId ? this.toolCallOf(owner, run.callId) : null;
+    if (call) call.output = workerReport(run);
+    this.changes.notify();
+    if (run.runInBackground === false || this.disposed) {
+      run.reported = true;
+      return;
+    }
+    if (run.reported || this.pendingReports.some(report => report.id === run.id && report.content === run.content)) return;
+    const completed = { ...run };
+    if (owner.busy) {
+      void owner.steer(workerReport(completed)).then(() => {
+        this.reportEntry(completed, owner);
+      }).catch(() => {
+        this.pendingReports.push(completed);
+        this.flushReports();
+      });
+      return;
+    }
+    this.pendingReports.push(completed);
     this.flushReports();
   }
 
@@ -514,21 +531,22 @@ export class Session {
     return [...invocations.values()];
   }
 
-  // The report itself: a message from the worker, addressed to its owner and
-  // attributed to the run, so the owner's runtime reads it in the record
-  // like any other participant's message. The chat does not show it as one:
-  // the same text goes onto the SpawnAgent call that started the worker, as
-  // that call's output, which is where the user reads it.
+  // Keep the notification in the owner's record so a rebuilt runtime reads
+  // it too. It has no participant identity and no separate chat row.
   private reportEntry(run: SubagentRun, owner: SessionAgent): Message {
     run.reported = true;
     const report = workerReport(run);
-    const call = run.callId ? this.toolCallOf(owner, run.callId) : null;
-    if (call) call.output = report;
+    const current = owner.listSubagents().find(candidate => candidate.id === run.id);
+    // A resumed worker may already be on another turn by the time steering
+    // acknowledges this report. Keep each notification tied to its own result.
+    if (current?.content === run.content) {
+      current.reported = true;
+      const call = run.callId ? this.toolCallOf(owner, run.callId) : null;
+      if (call) call.output = report;
+    }
     notifySubagents();
     return this.timeline.add({
-      role: 'assistant',
-      participant: run.id,
-      model: run.model,
+      role: 'user',
       content: [{ type: 'text', text: report }],
       to: [owner.name],
       hidden: true,
@@ -854,9 +872,10 @@ export class Session {
     await cancelSubagent(this.requireWorker(id));
   }
 
-  // Sends text into a running worker's turn; rejects for one that has ended.
+  // Steers a running worker or resumes its conversation after it has ended.
   async messageWorker(id: string, text: string): Promise<void> {
-    await messageSubagent(this.requireWorker(id), text);
+    const run = this.requireWorker(id);
+    await messageSubagent(run, this.roster.find(run.owner) ?? this.roster.default, text);
   }
 
   // Clears a finished worker's line from the strip; its record stays.
@@ -869,7 +888,7 @@ export class Session {
   }
 
   private requireWorker(id: string): SubagentRun {
-    const run = this.roster.workers().find(candidate => candidate.id === id);
+    const run = this.roster.workers().find(candidate => candidate.id === id || candidate.name === id);
     if (!run) throw new Error(`This session has no worker "${id}".`);
     return run;
   }
@@ -952,7 +971,7 @@ export class Session {
 
   // A deleted session takes its runtimes, its workers and its tool server
   // binding with it. The workers are the slow part — each one is stopped and
-  // waited for before its worktree can be removed — so this resolves when
+  // waited for before its runtime is closed — so this resolves when
   // the last of them is gone; callers that only need the session out of the
   // way need not wait.
   async dispose(): Promise<void> {
@@ -965,9 +984,8 @@ export class Session {
     await Promise.all(workers.map(run => this.disposeWorker(run)));
   }
 
-  // One worker at the end of the session: stopped if it was still working,
-  // then its worktree removed and its record dropped from the process index.
-  // The branch it worked on stays behind for whoever merges it.
+  // Stop the runtime and drop the live index entry. Changed worktrees stay
+  // available at the path named in the report, including uncommitted work.
   private async disposeWorker(run: SubagentRun): Promise<void> {
     try {
       await cancelSubagent(run);
@@ -975,7 +993,7 @@ export class Session {
       // A worker that refuses to stop must not keep the worktree, or the
       // session, alive.
     }
-    if (run.branch) await removeWorktree(this.directory, run.directory);
+    run.worker?.resetRuntime();
     unregisterSubagent(run.id);
     notifySubagents();
   }

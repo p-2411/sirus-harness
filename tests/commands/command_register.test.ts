@@ -100,7 +100,7 @@ describe('executeCommand', () => {
     expect(other.getModel()).toBe('gpt-5.6-luna');
     expect(loadSirusModelPreference()).toBe('gpt-5.6-terra');
     runCommand('model', ['@sirus', 'sol'], session);
-    expect(session.getModel()).toBe('gpt-5.6-sol');
+    expect(session.getModel()).toBe('gpt-6-sol');
     expect(loadSirusModelPreference()).toBe('gpt-5.6-terra');
   });
 
@@ -108,8 +108,8 @@ describe('executeCommand', () => {
     const session = new Session();
     const other = new Session();
     runCommand('model', ['@Sirus', 'sol'], session);
-    expect(session.getModel()).toBe('gpt-5.6-sol');
-    expect(loadSirusModelPreference()).toBe('gpt-5.6-sol');
+    expect(session.getModel()).toBe('gpt-6-sol');
+    expect(loadSirusModelPreference()).toBe('gpt-6-sol');
     expect(other.getModel()).toBe('gpt-5.6-luna');
   });
 
@@ -161,9 +161,13 @@ describe('executeCommand', () => {
       '/model claude-sonnet-5',
       '/model claude-haiku-4-5',
       '/model claude-fable-5-1',
+      '/model claude-opus-5-5',
+      '/model gpt-5.5',
       '/model gpt-5.6-luna',
       '/model gpt-5.6-terra',
       '/model gpt-5.6-sol',
+      '/model gpt-6-luna',
+      '/model gpt-6-sol',
       '/model gpt-6-astra',
     ]);
     expect(menuItems('model', ['@reviewer'])[0].command).toBe('/model @reviewer claude-opus-5');
@@ -519,7 +523,7 @@ describe('subagent model command', () => {
   test('sets, shows and clears the model spawned subagents run on', () => {
     const session = new Session();
     expect(runCommand('model', ['subagent'], session))
-      .toEqual({ kind: 'info', text: 'Subagents run on each participant\'s own model.' });
+      .toEqual({ kind: 'info', text: 'Subagents run on the caller’s choice, agent definition, or participant’s own model.' });
     expect(runCommand('model', ['subagent', 'haiku'], session))
       .toEqual({ kind: 'success', text: 'Subagents run on claude-haiku-4-5.' });
     expect(session.getSubagentModel()).toBe('claude-haiku-4-5');
@@ -527,7 +531,7 @@ describe('subagent model command', () => {
     expect(runCommand('model', ['subagent'], session))
       .toEqual({ kind: 'info', text: 'Subagents run on claude-haiku-4-5.' });
     expect(runCommand('model', ['subagent', 'default'], session))
-      .toEqual({ kind: 'success', text: 'Subagents run on each participant\'s own model.' });
+      .toEqual({ kind: 'success', text: 'Subagents run on the caller’s choice, agent definition, or participant’s own model.' });
     expect(session.getSubagentModel()).toBeNull();
     expect(() => runCommand('model', ['subagent', 'nope'], session)).toThrow(/unknown model/i);
     expect(() => runCommand('model', ['subagent', 'haiku', 'extra'], session)).toThrow('Usage: /model subagent');
@@ -600,7 +604,7 @@ describe('/agents', () => {
     expect(items(['sub-live'], session).map(item => item.command))
       .toEqual(['/agents show sub-live', '/agents message sub-live', '/agents cancel sub-live']);
     expect(items(['sub-done'], session).map(item => item.command))
-      .toEqual(['/agents show sub-done', '/agents dismiss sub-done']);
+      .toEqual(['/agents show sub-done', '/agents message sub-done', '/agents dismiss sub-done']);
     // The message action asks for the text in the input bar, in the open.
     const message = items(['sub-live'], session).find(item => item.key === 'message')!;
     expect(message.input?.prompt).toMatch(/sub-live/);
@@ -653,11 +657,11 @@ describe('/agents', () => {
       .toThrow('Usage: /agents message sub-live <message>');
   });
 
-  test('refuses to steer a worker that has stopped', () => {
+  test('resumes a worker that has stopped', async () => {
     const { session, asked } = workerSession([worker({ id: 'sub-done', status: 'failed' })]);
-    expect(() => runCommand('agents', ['message', 'sub-done', 'carry on'], session))
-      .toThrow('sub-done is failed; only a working worker can be messaged.');
-    expect(asked).toEqual([]);
+    expect(await runCommand('agents', ['message', 'sub-done', 'carry on'], session))
+      .toEqual({ kind: 'success', text: 'Sent to sub-done.' });
+    expect(asked).toEqual(['message sub-done: carry on']);
   });
 
   test('cancels a working worker and leaves a finished one alone', async () => {
