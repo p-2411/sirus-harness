@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import type { ImageBlock, Message, MessageBlock, ToolCallBlock } from '../../agent_runtime/types';
 import { saveJevKeyRequested } from '../../persistence';
 import { isAutoSendable, Session } from '../../agent_runtime/session';
@@ -218,7 +218,11 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   // started the worker, not as a message of its own.
   const messages = currSession.getMessages().filter(message => !message.hidden);
   const participants = currSession.getParticipants();
-  const participantColors = participantColorMap(participants);
+  // The colours follow the roster's names, so the map changes only when
+  // someone joins or leaves, not on every tick of a turn: the command panel
+  // registers its text for copying again whenever it changes.
+  const roster = participants.map(participant => participant.name).join(' ');
+  const participantColors = useMemo(() => participantColorMap(participants), [roster]);
 
   const [commandIsLoading, setCommandIsLoading] = useState(false);
   const [imageIsLoading, setImageIsLoading] = useState(false);
@@ -563,14 +567,17 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
           <Text color={theme.textMuted}>What shall we build?</Text>
         </Box>
       )}
-      {messages.map((message, i) => {
+      {messages.map(message => {
         const participant = message.role === 'assistant'
           ? participants.find(candidate =>
             candidate.name.toLocaleLowerCase() === (message.participant ?? 'sirus').toLocaleLowerCase())
           : undefined;
         return (
+          // Known by its seq, which the session hands out once per entry: a
+          // reply that joins the history above a peer's in the same round
+          // must not take over the peer's component.
           <ChatMessage
-            key={i}
+            key={message.seq}
             sessionId={currSession.getId()}
             message={message}
             model={message.model ?? participant?.model}

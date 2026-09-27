@@ -506,6 +506,59 @@ test('copying from the history copies the lines on screen after a row was opened
   }
 });
 
+test('a reply that appears ahead of a peer\'s in its round leaves the peer\'s opened row alone', async () => {
+  const writerModel = 'test-chat-order-writer';
+  const peerModel = 'test-chat-order-peer';
+  let releaseWriter!: () => void;
+  const writerGate = new Promise<void>(resolve => { releaseWriter = resolve; });
+  const edit = (id: string, name: string) => ({
+    type: 'tool_call' as const, id, kind: 'edit' as const, title: `${name}.md`, status: 'completed' as const,
+    locations: [], content: [{ type: 'diff' as const, path: `${name}.md`, oldText: null, newText: `${name} line` }],
+  });
+  // The writer speaks first in the round but answers last, so its reply
+  // enters the history above the peer's after the peer's is on screen.
+  bindScriptedRuntime(writerModel, async (_input, emit) => {
+    await writerGate;
+    emit({ type: 'tool_call', call: edit('writer-edit', 'writer') });
+  });
+  bindScriptedRuntime(peerModel, (_input, emit) => {
+    emit({ type: 'tool_call', call: edit('peer-edit', 'peer') });
+  });
+  const session = new Session({ model: writerModel });
+  session.addParticipant('writer', writerModel);
+  session.addParticipant('peer', peerModel);
+  const chat = mountChat(session);
+  const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: '@writer @peer edit' }] });
+  try {
+    for (let tries = 0; tries < 50 && !chat.frame().includes('● Edit peer.md'); tries++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await chat.flush();
+    }
+    const lines = chat.frame().split('\n');
+    const line = lines.findIndex(text => text.includes('● Edit peer.md'));
+    const row = { line, col: lines[line]!.indexOf('● Edit peer.md') };
+    expect(pressAt(row)).toBe(true);
+    expect(releaseAt(row)).toBe(true);
+    await chat.flush();
+    expect(chat.frame()).toContain('+ peer line');
+
+    releaseWriter();
+    await turn;
+    await new Promise(resolve => setTimeout(resolve, 60));
+    await chat.flush();
+    expect(chat.frame().indexOf('● Edit writer.md')).toBeLessThan(chat.frame().indexOf('● Edit peer.md'));
+    expect(chat.frame()).toContain('+ peer line');
+    expect(chat.frame()).not.toContain('+ writer line');
+  } finally {
+    releaseWriter();
+    await turn.catch(() => undefined);
+    await chat.unmount();
+    session.dispose();
+    unbindRuntime(writerModel);
+    unbindRuntime(peerModel);
+  }
+});
+
 describe('chat input history', () => {
   test('collects user prompts in order and removes immediate duplicates', () => {
     const messages: Message[] = [
