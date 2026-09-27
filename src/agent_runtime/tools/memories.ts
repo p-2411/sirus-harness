@@ -1,4 +1,4 @@
-import { memorySearchScope, memoryStoreFor, memoryTarget } from '../../memory/store';
+import { MEMORY_SCOPES, MEMORY_SEARCH_SCOPES, memorySearchScope, memoryStoreFor, memoryTarget } from '../../memory/store';
 import { requiredInteger, requiredString } from './arguments';
 import type { Tool } from './types';
 
@@ -13,7 +13,7 @@ export const memoryTools: Tool[] = [
     args: {
       scope: {
         type: 'string',
-        enum: ['global', 'project'],
+        enum: MEMORY_SCOPES,
         description: 'Use global for cross-project user context or project for facts tied to this session directory.',
       },
       name: { type: 'string', description: 'A stable name unique within the selected scope.' },
@@ -23,7 +23,7 @@ export const memoryTools: Tool[] = [
         items: {
           type: 'object',
           properties: {
-            scope: { type: 'string', enum: ['global', 'project'] },
+            scope: { type: 'string', enum: MEMORY_SCOPES },
             name: { type: 'string' },
           },
           required: ['scope', 'name'],
@@ -46,7 +46,7 @@ export const memoryTools: Tool[] = [
     name: 'GetMemory',
     description: 'Retrieve one global or current-project memory by exact scope and name.',
     args: {
-      scope: { type: 'string', enum: ['global', 'project'], description: 'The scope containing the memory.' },
+      scope: { type: 'string', enum: MEMORY_SCOPES, description: 'The scope containing the memory.' },
       name: { type: 'string', description: 'The exact memory name.' },
     },
     requires: 'memory',
@@ -63,7 +63,7 @@ export const memoryTools: Tool[] = [
     args: {
       scope: {
         type: 'string',
-        enum: ['available', 'global', 'project'],
+        enum: MEMORY_SEARCH_SCOPES,
         description: 'Use available to search global plus this session directory; no other project is accessible.',
       },
       query: { type: 'string', description: 'A natural-language description of the memory to recall.' },
@@ -81,7 +81,7 @@ export const memoryTools: Tool[] = [
     name: 'DeleteMemory',
     description: 'Permanently delete a global or current-project memory by exact scope and name.',
     args: {
-      scope: { type: 'string', enum: ['global', 'project'], description: 'The scope containing the memory.' },
+      scope: { type: 'string', enum: MEMORY_SCOPES, description: 'The scope containing the memory.' },
       name: { type: 'string', description: 'The exact memory name to delete.' },
     },
     requires: 'memory',

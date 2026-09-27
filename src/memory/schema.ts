@@ -1,5 +1,5 @@
 import type { Database } from 'bun:sqlite';
-import type { MemoryLink } from './store';
+import type { MemoryLink, MemoryScope } from './store';
 
 // The shape of the memory tables, the v1 -> v3 migration, and the queries that
 // depend on the column layout. Everything here is schema-level: no embedding,
@@ -13,7 +13,7 @@ export interface SchemaEmbedder {
 export interface MemoryRow {
   id: number;
   scope_id: number;
-  scope: 'global' | 'project';
+  scope: MemoryScope;
   project_directory: string | null;
   name: string;
   content: string;

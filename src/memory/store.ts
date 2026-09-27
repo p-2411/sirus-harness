@@ -9,8 +9,15 @@ import { VectorIndex, type IndexableMemory } from './vectorIndex';
 
 export type { EmbeddingProvider };
 
-export type MemoryScope = 'global' | 'project';
-export type MemorySearchScope = MemoryScope | 'available';
+// Where a memory lives: shared by every project, or tied to one directory.
+export const MEMORY_SCOPES = ['global', 'project'] as const;
+
+export type MemoryScope = typeof MEMORY_SCOPES[number];
+
+// What a search looks through: one scope, or every one the session can see.
+export const MEMORY_SEARCH_SCOPES = ['available', ...MEMORY_SCOPES] as const;
+
+export type MemorySearchScope = typeof MEMORY_SEARCH_SCOPES[number];
 
 export interface MemoryLink {
   scope: MemoryScope;
@@ -305,7 +312,7 @@ export function closeAllMemoryStores(): void {
 // A validated scope/directory pair. Callers hand user- or model-supplied values
 // straight in; every store method re-derives the target from what it is given.
 export function memoryTarget(scope: unknown, directory: string): MemoryTarget {
-  if (scope !== 'global' && scope !== 'project') {
+  if (!isMemoryScope(scope)) {
     throw new TypeError('Memory scope must be global or project');
   }
   return {
@@ -315,10 +322,14 @@ export function memoryTarget(scope: unknown, directory: string): MemoryTarget {
 }
 
 export function memorySearchScope(scope: unknown): MemorySearchScope {
-  if (scope !== 'available' && scope !== 'global' && scope !== 'project') {
+  if (!(MEMORY_SEARCH_SCOPES as readonly unknown[]).includes(scope)) {
     throw new TypeError('Memory search scope must be available, global, or project');
   }
-  return scope;
+  return scope as MemorySearchScope;
+}
+
+function isMemoryScope(value: unknown): value is MemoryScope {
+  return (MEMORY_SCOPES as readonly unknown[]).includes(value);
 }
 
 interface ValidMemoryInput {
@@ -339,11 +350,7 @@ function validateMemoryInput(scope: MemoryScope, input: MemoryInput): ValidMemor
   if (!Array.isArray(links)) throw new TypeError('Memory links must be an array');
   const normalizedLinks = links.map((link: unknown): MemoryLink => {
     const candidate = link as { scope?: unknown; name?: unknown } | null;
-    if (
-      !candidate
-      || typeof candidate !== 'object'
-      || (candidate.scope !== 'global' && candidate.scope !== 'project')
-    ) {
+    if (!candidate || typeof candidate !== 'object' || !isMemoryScope(candidate.scope)) {
       throw new TypeError('Memory links must contain a global or project scope and a non-empty name');
     }
     return { scope: candidate.scope, name: requiredText(candidate.name, 'Memory link name') };
@@ -382,7 +389,7 @@ function memoryFromRow(row: MemoryRow): Memory {
   if (!Array.isArray(links) || links.some(link =>
     !link
     || typeof link !== 'object'
-    || (link.scope !== 'global' && link.scope !== 'project')
+    || !isMemoryScope(link.scope)
     || typeof link.name !== 'string')) {
     throw new Error(`Memory ${row.name} has invalid links`);
   }
