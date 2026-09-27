@@ -4,7 +4,7 @@ import os from 'os';
 import path from 'path';
 import * as naming from '../../src/agent_runtime/session/naming';
 import * as router from '../../src/agent_runtime/router';
-import type { RuntimeOptions } from '../../src/agent_runtime/runtime/runtime';
+import { invalidateAllRuntimes, type RuntimeOptions } from '../../src/agent_runtime/runtime/runtime';
 import type { Draft } from '../../src/agent_runtime/session';
 import { Session } from '../../src/agent_runtime/session';
 import { textOf } from '../../src/agent_runtime/types';
@@ -287,6 +287,33 @@ describe('Session model', () => {
       '',
       'Third',
     ].join('\n'));
+  });
+
+  // /memory on or off changes the system prompt under every runtime. The
+  // turn running then finishes on the one it has; the next turn gets a new one.
+  test('an invalidated runtime finishes its turn and is rebuilt for the next', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let first = true;
+    const binding = bindScriptedRuntime(testModel, async (_input, emit) => {
+      if (first) {
+        first = false;
+        await gate;
+      }
+      emit({ type: 'text', text: 'Done' });
+    });
+    const session = new Session({ id: 'invalidated', name: 'Invalidated', model: testModel });
+    const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'First' }] });
+    await until(() => binding.runtimes[0]?.prompts.length === 1, 'the first prompt');
+    invalidateAllRuntimes();
+    expect(binding.runtimes[0].disposed).toBe(false);
+    release();
+    await turn;
+    expect(session.getMessages().at(-1)).toMatchObject({ content: [{ type: 'text', text: 'Done' }] });
+
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Second' }] });
+    expect(binding.starts).toHaveLength(2);
+    expect(binding.runtimes[0].disposed).toBe(true);
   });
 
   test('makes a streaming assistant response visible before the runtime finishes', async () => {

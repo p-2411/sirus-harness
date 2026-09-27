@@ -185,9 +185,12 @@ export function runtimeGeneration(): number {
   return generation;
 }
 
+// Nothing is disposed here: a runtime may be in the middle of a turn, a
+// worker's included, and ending its process would fail that turn as if its
+// credential had. Each one is rebuilt when its participant next prompts it,
+// and the tool server reads memory access on every request anyway.
 export function invalidateAllRuntimes(): void {
   generation++;
-  disposeAllRuntimes();
 }
 
 // Starts a runtime for the model: a scripted one when the test suite bound
