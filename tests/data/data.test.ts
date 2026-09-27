@@ -1520,6 +1520,36 @@ describe('Session subscriptions', () => {
     expect(binding.runtimes[0].permissionMode).toBe('ask');
     expect(session.getModeNotice()).toBeNull();
   });
+
+  test('switches a working worker’s runtime with the session’s', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let session!: Session;
+    let spawned = false;
+    const binding = bindScriptedRuntime(testModel, async (_input, emit, options) => {
+      if (isWorker(options)) {
+        await gate;
+        return;
+      }
+      if (!spawned) {
+        spawned = true;
+        await session.subagentHostFor('sirus')!.spawn('Background task', 'fresh', { callId: 'spawn' });
+      }
+      emit({ type: 'text', text: 'Noted' });
+    });
+    session = new Session({ id: 'worker-modes', name: 'Worker modes', model: testModel });
+    try {
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Delegate it' }] });
+      const worker = () => binding.runtimes[binding.starts.findIndex(isWorker)];
+      await until(() => worker()?.prompts.length === 1, 'the worker to start its turn');
+      session.setPermissionMode('ask');
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(worker().permissionMode).toBe('ask');
+    } finally {
+      release();
+      await session.dispose();
+    }
+  });
 });
 
 describe('session-owned workers', () => {

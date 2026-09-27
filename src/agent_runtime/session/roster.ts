@@ -175,10 +175,13 @@ export class ParticipantRoster {
     this.changes.notify();
   }
 
-  // Applies to every live runtime now; a runtime started later starts in
-  // the session's mode anyway.
+  // Applies to every live runtime now, the working workers' included; a
+  // runtime started later starts in the session's mode anyway.
   setPermissionMode(mode: PermissionMode): void {
     for (const agent of this.agents) agent.setPermissionMode(mode);
+    for (const run of this.workers()) {
+      if (run.status === 'working') run.worker?.setPermissionMode(mode);
+    }
   }
 
   // Reads the @names out of a user prompt without creating anything, so a
