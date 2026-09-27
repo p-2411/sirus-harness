@@ -425,24 +425,43 @@ function ToolCallRow({ call, sessionId, joinsPrevious = false, joinsNext = false
 	);
 }
 
-// Reasoning the runtime streamed: one dim line until clicked, then the whole
-// thought, laid out like a tool row.
+// A thought that opens with a bold title, as summarised reasoning does, is
+// named by that title; any other by its own opening words, and unfolds in
+// place rather than repeating them underneath.
+function thoughtHeading(text: string): { title: string | null; body: string } {
+	const trimmed = text.trim();
+	const titled = /^\*\*(.+?)\*\*\s*/.exec(trimmed);
+	if (titled) return { title: singleLine(titled[1]!), body: trimmed.slice(titled[0].length) };
+	return { title: null, body: trimmed };
+}
+
+// Reasoning the runtime streamed: its step on one dim line until clicked,
+// then the whole thought, laid out like a tool row.
 function ThoughtRow({ text }: { text: string }) {
 	const [expanded, setExpanded] = useState(false);
 	const toggle = useCallback(() => setExpanded(current => !current), []);
 	const ref = useRef<DOMElement>(null);
 	const hovered = useClickable(ref, toggle);
+	const { title, body } = thoughtHeading(text);
+	if (!title && expanded) {
+		return (
+			<Box flexDirection="column" padding={1}>
+				<Box ref={ref} marginLeft={2}>
+					<Text color={hovered ? theme.textMuted : theme.textSubtle} dimColor={!hovered} wrap="wrap">{body}</Text>
+				</Box>
+			</Box>
+		);
+	}
 	return (
 		<Box flexDirection="column" padding={1}>
 			<Box ref={ref}>
-				<Text wrap="truncate-end">
-					<Text color={hovered ? theme.textMuted : theme.textSubtle}>  thinking</Text>
-					{!expanded && <Text color={theme.textSubtle} dimColor> {singleLine(text)}</Text>}
+				<Text color={hovered ? theme.textMuted : theme.textSubtle} dimColor={!hovered} wrap="truncate-end">
+					{'  '}{title ?? singleLine(body)}
 				</Text>
 			</Box>
-			{expanded && (
+			{expanded && body && (
 				<Box marginLeft={4}>
-					<Text color={theme.textSubtle} dimColor wrap="wrap">{text.trim()}</Text>
+					<Text color={theme.textSubtle} dimColor wrap="wrap">{body}</Text>
 				</Box>
 			)}
 		</Box>

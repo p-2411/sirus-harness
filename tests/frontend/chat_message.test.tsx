@@ -418,14 +418,15 @@ describe('thinking', () => {
     });
     try {
       await app.waitUntilRenderFlush();
-      expect(frames.at(-1)).toContain('thinking Weighing the options carefully.');
+      expect(frames.at(-1)).toContain('Weighing the options carefully.');
+      expect(frames.at(-1)).not.toContain('thinking');
       await new Promise<void>(resolve => setImmediate(resolve));
-      const row = cellOf(frames.at(-1)!, 'thinking');
+      const row = cellOf(frames.at(-1)!, 'Weighing');
       expect(pressAt(row)).toBe(true);
       expect(releaseAt(row)).toBe(true);
       await new Promise<void>(resolve => setImmediate(resolve));
       await app.waitUntilRenderFlush();
-      expect(frames.at(-1)).not.toContain('thinking Weighing');
+      expect(frames.at(-1)).not.toContain('Weighing the options');
       expect(frames.at(-1)).toContain('Weighing');
       expect(frames.at(-1)).toContain('the options carefully.');
     } finally {
