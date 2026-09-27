@@ -133,10 +133,11 @@ function answerText(field: QuestionField, answers: Answers): string {
   return value === undefined ? 'Skipped' : typeof value === 'boolean' ? value ? 'Yes' : 'No' : String(value);
 }
 
-export function QuestionCard({ request, waiting, onAnswer }: {
+export function QuestionCard({ request, waiting, onAnswer, agentArrows = false }: {
   request: QuestionRequest;
   waiting: number;
   onAnswer: (answer: QuestionAnswer) => void;
+  agentArrows?: boolean;
 }) {
   const [index, setIndex] = useState(0);
   const [answers, setAnswers] = useState<Answers>({});
@@ -248,6 +249,7 @@ export function QuestionCard({ request, waiting, onAnswer }: {
   useInput((input, key) => {
     if (isKeyboardProtocolReport(input)) return;
     if (key.eventType === 'release' || (key.ctrl && input === 'c')) return;
+    if (agentArrows && !key.ctrl && !key.meta && !key.shift && (key.leftArrow || key.rightArrow)) return;
     if (isMouseInput(input) || isFocusInput(input) || sent.current
       || (key.meta && (key.upArrow || key.downArrow))) return;
     if (key.escape) {

@@ -106,6 +106,28 @@ function storedImages(): string[] {
 }
 
 describe('chat attachment lifecycle', () => {
+  test('an attached draft stays with its agent across horizontal switches', async () => {
+    const session = new Session({ name: 'Agent image drafts', directory, model: testModel });
+    session.addParticipant('reviewer', testModel);
+    const chat = createChat(session);
+    try {
+      await chat.submit(`/image ${imagePath}`);
+      await chat.waitFor(() => storedImages().length === 1);
+      await chat.press('Describe this');
+      await chat.press('\x1b[C');
+      expect(session.getInputContent()).toBe('');
+      await chat.press('Separate review draft');
+      await chat.press('\x1b[D');
+      await chat.press('\r');
+      await chat.waitFor(() => received.length === 1 && session.getStatus() === 'idle');
+      expect(received[0].images).toHaveLength(1);
+      expect(received[0].text).toContain('Describe this');
+      expect(session.getMessages('reviewer')).toHaveLength(0);
+      expect(session.getInputContent('reviewer')).toBe('Separate review draft');
+      expect(session.getMessages('sirus')[0].content.filter(block => block.type === 'image')).toHaveLength(1);
+    } finally { await chat.close(); await session.dispose(); }
+  });
+
   test.each(['', 'Keep this text'])('Ctrl+C clears pasted images alongside draft text: %s', async text => {
     const clipboard = spyOn(images, 'readClipboard').mockImplementation(async () => images.attachImageFile(imagePath));
     const session = new Session({ name: 'Clear image draft', directory, model: testModel });

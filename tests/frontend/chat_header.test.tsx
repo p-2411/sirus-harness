@@ -17,7 +17,7 @@ describe('chat header', () => {
     expect(output).not.toContain('gpt-5.6-luna');
   });
 
-  test('sits on the first row, flush with the sidebar header', () => {
+  test('keeps the title and highlighted agents on the original single header row', () => {
     const session = new Session({ id: 'session-id', name: 'Project work', directory: '/projects/sirus', model: 'gpt-5.6-luna' });
     const output = stripAnsi(renderToString(
       <ChatHeader session={session} />,
@@ -25,6 +25,7 @@ describe('chat header', () => {
     ));
 
     expect(output.split('\n')[0]).toContain('PROJECT WORK');
+    expect(output.split('\n')).toHaveLength(1);
   });
 
   test('lists participant names without their models', () => {
@@ -32,7 +33,10 @@ describe('chat header', () => {
     session.addParticipant('reviewer', 'claude-sonnet-5');
     const output = stripAnsi(renderToString(<ChatHeader session={session} />, { columns: 100 }));
 
-    expect(output).toContain('sirus · reviewer');
+    expect(output).toContain('sirus');
+    expect(output).not.toContain('·');
+    expect(output).toContain('reviewer');
+    expect(output.split('\n')).toHaveLength(1);
     expect(output).not.toContain('gpt-5.6-luna');
     expect(output).not.toContain('claude-sonnet-5');
   });

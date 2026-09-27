@@ -8,12 +8,13 @@ import {
 import type { Feedback } from '../feedback';
 import type { CommandMenuItem, CommandSession } from '../types';
 
-// /compact asks the default participant's runtime to fold its conversation
+// /compact asks the selected participant's runtime to fold its conversation
 // now. Each runtime also compacts on its own when its window fills; that is
 // the vendor's and has no switch.
-export async function compactCommand(session: CommandSession, signal?: AbortSignal): Promise<Feedback> {
-  await session.compact(signal);
-  const name = session.getParticipants()[0]?.name ?? 'sirus';
+export async function compactCommand(session: CommandSession, signal?: AbortSignal, participant?: string): Promise<Feedback> {
+  if (participant) await session.compact(signal, participant);
+  else await session.compact(signal);
+  const name = participant ?? session.getParticipants()[0]?.name ?? 'sirus';
   return { kind: 'success', text: `Compacted @${name}'s context.` };
 }
 

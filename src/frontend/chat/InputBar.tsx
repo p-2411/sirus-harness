@@ -16,7 +16,7 @@ import { SubagentStatusRow, type StatusRowProps } from './StatusRow';
 import { stripWorkers, WorkerStrip, type WorkerSelection } from './WorkerStrip';
 import { PromptBar, type PromptMode } from './PromptBar';
 import { applyInputEdit, createInputHistory, inputEditForKey, isKeyboardProtocolReport, normalizeNewlines, draftRows, draftCursorRow, moveDraftRow, type InputEdit, type InputState } from './editor';
-import { composeContent, removedPlaceholders, stripPlaceholders, useDraftImages } from './draft';
+import { composeContent, removedPlaceholders, stripPlaceholders, useDraftImages, createDraftImageState, type DraftImageState } from './draft';
 import { MentionText, participantColorMap } from '../MentionText';
 import { isMouseInput } from '../interaction/mouse';
 import { isFocusInput } from '../terminal/window-focus';
@@ -32,6 +32,17 @@ import type { NativeCommand } from '../../agent_runtime/runtime/commands';
 // What the input bar is collecting: a message, or one of the prompts that
 // take the bar over for a moment.
 export type InputMode = { type: 'text' } | PromptMode;
+
+export interface InputDraftState {
+  pastes: Map<string, { text: string; label: string }>;
+  pasteNumber: number;
+  cursor?: number;
+  images: DraftImageState;
+}
+
+export function createInputDraftState(): InputDraftState {
+  return { pastes: new Map(), pasteNumber: 0, images: createDraftImageState() };
+}
 
 interface InputBarProps {
   send: (input: string, attachments?: readonly ImageBlock[], content?: MessageBlock[]) => unknown;
@@ -83,6 +94,9 @@ interface InputBarProps {
   // being typed.
   nativeCommands?: () => readonly NativeCommand[];
   tasksVisible?: boolean;
+  recipient?: string;
+  draftState?: InputDraftState;
+  onSelectAgent?: (direction: -1 | 1) => void;
 }
 
 const TEXT_MODE: InputMode = { type: 'text' };
@@ -127,9 +141,12 @@ export function InputBar({
   contextUsage,
   nativeCommands,
   tasksVisible,
+  recipient = 'sirus',
+  draftState,
+  onSelectAgent,
 }: InputBarProps) {
-  const pastes = useRef(new Map<string, { text: string; label: string }>());
-  const pasteNumber = useRef(0);
+  const memory = useRef(draftState ?? createInputDraftState()).current;
+  const pastes = useRef(memory.pastes);
   const expandPastes = (text: string) => [...text].map(character => pastes.current.get(character)?.text ?? character).join('');
   const [inputContent, setLocalInputContent] = useState(externalInputContent);
   const setInputContent = (text: string) => {
@@ -173,7 +190,8 @@ export function InputBar({
   const selectedQueued = queuedMessages.find(message => message.id === queueSelection);
   const selectedQueueIndex = selectedQueued ? queuedMessages.indexOf(selectedQueued) : null;
   const draftCursor = useRef(inputContent.length);
-  const [cursor, setCursor] = useState(inputContent.length);
+  const [cursor, setCursor] = useState(memory.cursor ?? inputContent.length);
+  useEffect(() => { memory.cursor = cursor; }, [cursor, memory]);
   const previousInputContent = useRef(inputContent);
   useEffect(() => {
     // A rejected attachment restores the cleared draft from Chat. Resume
@@ -220,6 +238,7 @@ export function InputBar({
 
   // ── Attached images ────────────────────────────────────────────────────
   const { imageFor, isKnownPlaceholder, placedImages, trailingImages } = useDraftImages({
+    state: memory.images,
     attachments,
     text: input,
     // The images belong to the draft even while a queued message is showing.
@@ -391,7 +410,7 @@ export function InputBar({
       }
     }
     if (normalized.length > 1000 || normalized.split('\n').length > 10) {
-      const number = ++pasteNumber.current;
+      const number = ++memory.pasteNumber;
       const placeholder = String.fromCodePoint(0xF0000 + number);
       pastes.current.set(placeholder, { text: normalized, label: `[Pasted text #${number} · ${normalized.split('\n').length} lines]` });
       insertText(placeholder);
@@ -412,6 +431,11 @@ export function InputBar({
     if (key.eventType === 'release') return;
     if (isMouseInput(enteredInput) || isFocusInput(enteredInput)) return;
     if (editingExternally) return;
+    if (shortcuts === null && !search && onSelectAgent && !key.ctrl && !key.meta && !key.shift
+      && (key.leftArrow || key.rightArrow)) {
+      onSelectAgent(key.leftArrow ? -1 : 1);
+      return;
+    }
     if (shortcuts !== null) {
       const pageSize = Math.max(1, Math.min(12, Math.floor(((stdout.rows || 24) - 12) / 3)));
       if (key.escape || enteredInput === '?' || (key.ctrl && enteredInput === 'c')) setShortcuts(null);
@@ -660,6 +684,7 @@ export function InputBar({
     return (
       <PromptBar
         mode={mode}
+        agentArrows={Boolean(onSelectAgent)}
         feedback={feedback}
         participantColors={participantColors}
         queuedMessages={queuedMessages.map(message => message.text)}
@@ -704,7 +729,7 @@ export function InputBar({
           <Box flexGrow={1} minWidth={0}>
             {input
               ? <DraftRow cells={cells} cursor={editor.cursor} participantColors={participantColors} />
-              : <Text wrap="truncate-end"><Text inverse> </Text><Text color={theme.textSubtle}> message sirus or <MentionText colors={participantColors}>@mention</MentionText> an agent…</Text></Text>}
+              : <Text wrap="truncate-end"><Text inverse> </Text><Text color={theme.textSubtle}> message {recipient} or <MentionText colors={participantColors}>@mention</MentionText> an agent…</Text></Text>}
           </Box>
           <Box width={hintWidth} flexShrink={0} justifyContent="flex-end">
             {index === 0

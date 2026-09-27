@@ -75,15 +75,25 @@ export function composeContent(
 // image has gone are stripped. `getDraft`/`setDraft` reach the draft itself,
 // which is not always what the input bar is showing — a queued message being
 // edited sits in front of it.
-export function useDraftImages({ attachments, text, getDraft, setDraft }: {
+export interface DraftImageState {
+  paths: Map<string, string>;
+  allocated: number;
+  seen: readonly ImageBlock[] | null;
+}
+
+export function createDraftImageState(): DraftImageState {
+  return { paths: new Map(), allocated: 0, seen: null };
+}
+
+export function useDraftImages({ attachments, text, getDraft, setDraft, state }: {
   attachments: readonly ImageBlock[];
   text: string;
   getDraft: () => InputState;
   setDraft: (state: InputState) => void;
+  state?: DraftImageState;
 }) {
-  const placeholderPaths = useRef(new Map<string, string>());
-  const allocated = useRef(0);
-  const seenAttachments = useRef<readonly ImageBlock[] | null>(null);
+  const memory = useRef(state ?? createDraftImageState()).current;
+  const placeholderPaths = { current: memory.paths };
 
   const imageFor = (placeholder: string): ImageBlock | undefined => {
     const path = placeholderPaths.current.get(placeholder);
@@ -93,16 +103,16 @@ export function useDraftImages({ attachments, text, getDraft, setDraft }: {
   const trailingImages = attachments.filter(image => !placedImages.includes(image));
 
   useEffect(() => {
-    const previous = seenAttachments.current;
-    seenAttachments.current = attachments;
+    const previous = memory.seen;
+    memory.seen = attachments;
     const draft = getDraft();
     let next = stripPlaceholders(draft, placeholder => !placeholderPaths.current.has(placeholder) || imageFor(placeholder) !== undefined);
     const added = previous === null ? [] : attachments.filter(image => !previous.some(item => item.path === image.path));
     if (added.length > 0) {
       const placeholders = added.map(image => {
-        let placeholder = imagePlaceholder(allocated.current++);
+        let placeholder = imagePlaceholder(memory.allocated++);
         while (placeholderPaths.current.has(placeholder) || next.text.includes(placeholder)) {
-          placeholder = imagePlaceholder(allocated.current++);
+          placeholder = imagePlaceholder(memory.allocated++);
         }
         placeholderPaths.current.set(placeholder, image.path);
         return placeholder;

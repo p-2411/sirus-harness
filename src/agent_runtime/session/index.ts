@@ -92,6 +92,8 @@ export interface SessionOptions {
   // when it was saved is restored as interrupted.
   workers?: readonly WorkerRecord[];
   inputContent?: string;
+  selectedParticipant?: string;
+  participantDrafts?: Record<string, string>;
   // A newly-created session may still take its name from its first prompt.
   autoNamePending?: boolean;
   timing?: SessionTiming;
@@ -108,6 +110,8 @@ export interface SessionSnapshot {
   messages: Message[];
   // Absent in snapshots saved before session drafts were supported.
   inputContent?: string;
+  selectedParticipant?: string;
+  participantDrafts?: Record<string, string>;
   // How tool calls are approved in this session; absent in older snapshots.
   permissionMode?: PermissionMode;
   // The model spawned subagents run on; absent for the owner's own.
@@ -196,6 +200,8 @@ export class Session {
   // Drafts typed while a turn is active belong to the session, so switching
   // away and back does not discard them.
   private inputContent: string;
+  private selectedParticipant: string;
+  private readonly participantDrafts = new Map<string, string>();
   private autoNamePending: boolean;
   private namingController: AbortController | null = null;
 
@@ -231,6 +237,10 @@ export class Session {
       participants: resolved.participants,
       host: this.runtimeHost(),
     });
+    this.selectedParticipant = this.roster.find(options.selectedParticipant ?? '')?.name ?? this.roster.default.name;
+    for (const [name, draft] of Object.entries(options.participantDrafts ?? {})) {
+      if (this.roster.find(name)) this.participantDrafts.set(keyOf(name), draft);
+    }
     this.timeline = new Timeline(() => this.roster.transcripts(), this.changes, {
       updatedAt: resolved.updatedAt,
       conversationStartedAt: resolved.conversationStartedAt,
@@ -269,6 +279,8 @@ export class Session {
       workers: snapshot.workers ?? [],
       checkpoints: snapshot.checkpoints ?? [],
       inputContent: snapshot.inputContent ?? '',
+      selectedParticipant: snapshot.selectedParticipant,
+      participantDrafts: snapshot.participantDrafts,
       autoNamePending: snapshot.autoNamePending ?? false,
       ...(snapshot.permissionMode ? { permissionMode: snapshot.permissionMode } : {}),
       ...(snapshot.subagentModel ? { subagentModel: snapshot.subagentModel } : {}),
@@ -373,6 +385,18 @@ export class Session {
 
   addParticipant(name: string, model: string): void {
     this.roster.add(name, model);
+  }
+
+  // Resolve the input's destination at submission time. Explicit mentions
+  // retain their routing (including creating agents); plain text uses the tab.
+  messageForParticipant(message: Draft, participantName: string): Draft {
+    let text = textOf(message);
+    for (const file of parseFileMentions(text, this.directory).reverse()) {
+      text = text.slice(0, file.start) + ' '.repeat(file.end - file.start) + text.slice(file.end);
+    }
+    return message.to?.length || this.roster.readMentions(text).length
+      ? message
+      : { ...message, to: [this.roster.require(participantName).name] };
   }
 
   async sendMessage(message: Draft, queuedMessage?: QueuedMessage): Promise<Message[]> {
@@ -652,16 +676,16 @@ export class Session {
     return cancelled || this.activeSends > 0;
   }
 
-  // Asks the default participant's runtime to fold its own conversation now:
+  // Asks the selected participant's runtime to fold its own conversation now:
   // `/compact` is a slash command both vendors take as a prompt. What the
   // runtime reports lands in the record like any other turn. Like a rewind,
   // it waits for nothing else to be running and nothing else runs meanwhile.
-  async compact(signal?: AbortSignal): Promise<void> {
+  async compact(signal?: AbortSignal, participantName = this.selectedParticipant): Promise<void> {
     if (this.activeSends > 0 || this.rewinding || this.compacting) {
       throw new Error('Wait for the current operation to finish before compacting.');
     }
     if (this.timeline.isEmpty()) throw new Error('There is no history to compact.');
-    const agent = this.roster.default;
+    const agent = this.roster.require(participantName);
     this.compacting = true;
     this.activeSends++;
     this.activeTurnStartedAt = Date.now();
@@ -826,8 +850,8 @@ export class Session {
     this.changes.notify();
   }
 
-  queueMessage(message: string, images?: readonly ImageBlock[], content?: readonly MessageBlock[]): void {
-    this.queue.push(message, images, content);
+  queueMessage(message: string, images?: readonly ImageBlock[], content?: readonly MessageBlock[], to?: readonly string[]): void {
+    this.queue.push(message, images, content, to);
     this.changes.notify();
   }
 
@@ -951,7 +975,8 @@ export class Session {
 
   // How long every participant still answering has gone without a word from
   // its runtime; zero when any of them is producing or waiting on the user.
-  getTurnQuietFor(): number {
+  getTurnQuietFor(participantName?: string): number {
+    if (participantName) return this.roster.require(participantName).quietFor;
     const busy = this.roster.all().filter(agent => agent.busy);
     return busy.length > 0 ? Math.min(...busy.map(agent => agent.quietFor)) : 0;
   }
@@ -977,7 +1002,8 @@ export class Session {
 
   // What a vendor could not honour about the session's mode, if anything:
   // the default participant's word first, then any other participant's.
-  getModeNotice(): string | null {
+  getModeNotice(participantName?: string): string | null {
+    if (participantName) return this.roster.require(participantName).modeNotice;
     return this.roster.default.modeNotice
       ?? this.roster.all().find(agent => agent.modeNotice)?.modeNotice
       ?? null;
@@ -987,8 +1013,24 @@ export class Session {
     return this.notice;
   }
 
-  getMessages(): Message[] {
-    return this.timeline.entries();
+  getMessages(participantName?: string): Message[] {
+    return participantName ? [...this.roster.require(participantName).transcript.entries()] : this.timeline.entries();
+  }
+
+  isParticipantWorking(participantName: string): boolean {
+    const agent = this.roster.require(participantName);
+    return agent.busy || this.starting.has(agent);
+  }
+
+  getSelectedParticipant(): string {
+    return this.selectedParticipant;
+  }
+
+  selectParticipant(name: string): void {
+    const participant = this.roster.require(name);
+    if (participant.name === this.selectedParticipant) return;
+    this.selectedParticipant = participant.name;
+    this.changes.notify();
   }
 
   isMessageLive(message: Message): boolean {
@@ -1012,11 +1054,9 @@ export class Session {
     return this.directory;
   }
 
-  // The vendor's own commands the user can call by name: those of the
-  // participant a prompt with no mention goes to, since that is who `/name`
-  // reaches.
-  getNativeCommands(): NativeCommand[] {
-    const agent = this.roster.default;
+  // Vendor commands follow the selected agent, like an unaddressed prompt.
+  getNativeCommands(participantName = this.selectedParticipant): NativeCommand[] {
+    const agent = this.roster.require(participantName);
     const vendor = vendorOf(agent.model);
     return vendor ? nativeCommands(vendor, agent.directory) : [];
   }
@@ -1139,13 +1179,15 @@ export class Session {
     this.changes.notify();
   }
 
-  getInputContent(): string {
-    return this.inputContent;
+  getInputContent(participantName = this.selectedParticipant): string {
+    return keyOf(participantName) === keyOf(this.roster.default.name)
+      ? this.inputContent : this.participantDrafts.get(keyOf(participantName)) ?? '';
   }
 
-  setInputContent(inputContent: string): void {
-    if (this.inputContent === inputContent) return;
-    this.inputContent = inputContent;
+  setInputContent(inputContent: string, participantName = this.selectedParticipant): void {
+    if (this.getInputContent(participantName) === inputContent) return;
+    if (keyOf(participantName) === keyOf(this.roster.default.name)) this.inputContent = inputContent;
+    else this.participantDrafts.set(keyOf(participantName), inputContent);
     this.changes.notify();
   }
 
@@ -1171,6 +1213,8 @@ export class Session {
       defaultModel: this.roster.default.toParticipant(),
       messages: [...this.timeline.entries()],
       inputContent: this.inputContent,
+      ...(this.selectedParticipant !== this.roster.default.name ? { selectedParticipant: this.selectedParticipant } : {}),
+      ...(this.participantDrafts.size > 0 ? { participantDrafts: Object.fromEntries(this.participantDrafts) } : {}),
       permissionMode: this.permissionMode,
       ...(this.subagentModel ? { subagentModel: this.subagentModel } : {}),
       ...(workers.length > 0 ? { workers } : {}),

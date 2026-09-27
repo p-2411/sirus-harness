@@ -69,7 +69,11 @@ Then address that participant by name:
 @reviewer Check whether the latest fix resolves the issues you found.
 ```
 
-Each participant keeps its own conversation. It reads the prompts you address to it, and whatever another participant says in a message that mentions it, attributed to the sender. A prompt that mentions no known participant goes to `@sirus`. An unknown `@word` stays ordinary text unless a supported model follows it. Matching files take priority in the `@` menu. Set a participant's model with `/model @reviewer <model>` and reasoning depth with `/thinking @reviewer high`. Use `/model` to see the model names supported by your installation.
+Each participant keeps its own conversation. It reads the prompts you address to it, and whatever another participant says in a message that mentions it, attributed to the sender. A prompt that mentions no known participant goes to the selected agent, initially `@sirus`. An unknown `@word` stays ordinary text unless a supported model follows it. Matching files take priority in the `@` menu. Set a participant's model with `/model @reviewer <model>` and reasoning depth with `/thinking @reviewer high`. Use `/model` to see the model names supported by your installation.
+
+The names at the top select which agent’s conversation you see. The selected name has a filled highlight in its own colour. Press **← / →** or click a name to switch agents; each keeps its own draft and scroll position. Other agents continue working without moving the conversation you are reading. While an agent works, a single column of dots moves across its name with constant height and density. A period after the name marks unread output (`reviewer.`); an exclamation mark (`!`) marks a request needing your attention. Requests from another agent appear with its name and destination in both conversations.
+
+The model, reasoning depth, context usage, unfinished plan, and approval prompts belong to the selected agent. `/model`, `/thinking`, and `/compact` act on that agent; explicit agent names still work. Plain horizontal arrows switch agents when there is more than one; Alt+←/→ still moves by words in the draft. Esc and Ctrl+C retain their task-wide interruption behavior.
 
 ### Delegate work, follow the results
 
@@ -137,7 +141,7 @@ Automatic discovery is limited to the session directory. Ancestor/git-root looku
 
 Each agent uses its own vendor's skills: Claude through Claude Code's Skill tool, GPT through Codex's skill list. A skill is a folder holding a `SKILL.md`, and the agent loads it when the task fits or when you name it.
 
-Type `/` to find a skill: the menu lists `@sirus`'s skills after Sirus's own commands, with what each takes and where it comes from. `Tab` completes the name so you can add arguments, including `@file` mentions, and `Enter` sends it. Sirus hands it to the agent in its vendor's own form, `/project:deploy prod` for Claude or `$deploy prod` for Codex, so the skill runs as it would in Claude Code or Codex. A skill marked `user-invocable: false` stays out of the menu, and a Sirus command of the same name takes precedence.
+Type `/` to find a skill: the menu lists the selected agent's skills after Sirus's own commands, with what each takes and where it comes from. `Tab` completes the name so you can add arguments, including `@file` mentions, and `Enter` sends it. Sirus hands it to the agent in its vendor's own form, `/project:deploy prod` for Claude or `$deploy prod` for Codex, so the skill runs as it would in Claude Code or Codex. A skill marked `user-invocable: false` stays out of the menu, and a Sirus command of the same name takes precedence.
 
 | Put a skill in… | Claude sees it | GPT sees it |
 | --- | --- | --- |
@@ -183,6 +187,7 @@ Use `/usage` to see reported subscription allowance and how full each participan
 | --- | --- |
 | `Ctrl+N` | Start a new session. |
 | `Option+↑` / `Option+↓` | Switch sessions. |
+| `←` / `→` | Switch agents within the current task. |
 | `Ctrl+K` | Collapse or expand the sidebar. |
 | `Enter` | Send a message, or queue it while agents are busy. |
 | `Ctrl+Enter` / `Ctrl+X Ctrl+S` | Send waiting messages and the draft now. |

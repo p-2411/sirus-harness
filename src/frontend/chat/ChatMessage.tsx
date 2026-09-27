@@ -675,12 +675,13 @@ function sameColors(left?: ParticipantColors, right?: ParticipantColors): boolea
 }
 
 function messageSnapshot(message: Message): Message {
-	return { ...message, content: message.content.map(block => ({ ...block })) };
+	return { ...message, to: message.to ? [...message.to] : undefined, content: message.content.map(block => ({ ...block })) };
 }
 
 function sameMessage(previous: Message, next: Message): boolean {
 	return previous.seq === next.seq && previous.role === next.role
 		&& previous.participant === next.participant
+		&& (previous.to ?? []).join('\0') === (next.to ?? []).join('\0')
 		&& previous.content.length === next.content.length
 		&& previous.content.every((block, index) => sameFields(block, next.content[index]!));
 }
@@ -783,6 +784,7 @@ const MessageBody = memo(function MessageBody({
 					{isUser ? "you" : participantName}
 				</Text>
 				{!isUser && model && <Text color={theme.textSubtle} dimColor> {model}</Text>}
+				{!isUser && message.to?.length ? <Text color={theme.textMuted}> → {message.to.map(name => `@${name}`).join(', ')}</Text> : null}
 			</Text>
 			{segments.map((block, index) => {
 				const row = <SegmentView key={index} block={block} participantColors={participantColors} sessionId={sessionId} />;

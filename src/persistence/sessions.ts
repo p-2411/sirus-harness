@@ -215,6 +215,8 @@ const sessionSchema = z.object({
   defaultModel: participantSchema.optional(),
   messages: z.array(messageSchema),
   inputContent: z.string().optional(),
+  selectedParticipant: z.string().optional(),
+  participantDrafts: z.record(z.string(), z.string()).optional(),
   // Unknown values fail the parse of that file; an absent one means the
   // default (auto approve).
   permissionMode: z.enum(['ask', 'auto', 'bypass']).optional(),
@@ -348,6 +350,8 @@ function toSnapshot(stored: StoredSession, fallbackSessionDirectory: string): Se
     defaultModel,
     messages: stored.messages.map((message, index) => toMessage(message, index, defaultModel.name)),
     inputContent: stored.inputContent ?? '',
+    selectedParticipant: stored.selectedParticipant,
+    participantDrafts: stored.participantDrafts,
     checkpoints: (stored.checkpoints ?? []).map(({ messageIndex, seq, ...checkpoint }) => ({
       ...checkpoint,
       seq: seq ?? messageIndex ?? 0,

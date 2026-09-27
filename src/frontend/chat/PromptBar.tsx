@@ -52,13 +52,14 @@ export type PromptMode =
     onCancel: () => void;
   };
 
-export function PromptBar({ mode, feedback, participantColors, queuedMessages, workers, status }: {
+export function PromptBar({ mode, feedback, participantColors, queuedMessages, workers, status, agentArrows = false }: {
   mode: PromptMode;
   feedback: Feedback | null;
   participantColors?: ParticipantColors;
   queuedMessages: readonly string[];
   workers: readonly SubagentRun[];
   status: StatusRowProps;
+  agentArrows?: boolean;
 }) {
   const [selected, setSelected] = useState(0);
   const [entry, setEntry] = useState('');
@@ -84,6 +85,7 @@ export function PromptBar({ mode, feedback, participantColors, queuedMessages, w
     if (key.eventType === 'release' || (key.ctrl && enteredInput === 'c')) return;
     // Mouse and window-focus reports are not typing.
     if (isMouseInput(enteredInput) || isFocusInput(enteredInput)) return;
+    if (agentArrows && !key.ctrl && !key.meta && !key.shift && (key.leftArrow || key.rightArrow)) return;
     // Session switching belongs to the sidebar in every input mode.
     if (key.meta && (key.upArrow || key.downArrow)) return;
     // The question card takes its own keys.
@@ -152,7 +154,7 @@ export function PromptBar({ mode, feedback, participantColors, queuedMessages, w
         <QueuedRow messages={queuedMessages} participantColors={participantColors} />
         {mode.type === 'approval'
           ? <ApprovalPrompt request={mode.request} waiting={mode.waiting} selected={selected} requesterName={mode.requesterName} feedback={approvalFeedback ?? undefined} />
-          : <QuestionCard key={mode.request.id} request={mode.request} waiting={mode.waiting} onAnswer={mode.onAnswer} />}
+          : <QuestionCard key={mode.request.id} request={mode.request} waiting={mode.waiting} onAnswer={mode.onAnswer} agentArrows={agentArrows} />}
         <WorkerStrip workers={workers} />
         <SubagentStatusRow {...status} />
       </>

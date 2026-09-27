@@ -19,7 +19,7 @@ export const compactCommandSpec: CommandSpec = {
   description: 'ask the agent to compact its context now',
   run: (args, context) => {
     if (args.length > 0) throw new Error('Usage: /compact');
-    return compactCommand(context.session, context.signal);
+    return compactCommand(context.session, context.signal, context.participant);
   },
 };
 

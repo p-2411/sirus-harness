@@ -291,6 +291,7 @@ describe('file mentions through the terminal', () => {
       expect(session.getInputContent()).toBe('@reviewer Read @notes.txt ');
       expect(calls).toHaveLength(0);
       await ui.type('\r');
+      await ui.type('\x1b[C'); // Open the addressed agent's conversation.
       await ui.until(() => ui.output().includes('Reviewed the attachment.'));
       expect(calls.map(call => call.participant)).toEqual(['reviewer']);
       expect(calls[0]!.prompt.text).toContain(contents);

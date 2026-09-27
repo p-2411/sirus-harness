@@ -396,7 +396,7 @@ describe('pinned plans', () => {
     expect(currentPlans(messages.slice(0, 2), [{ name: 'sirus' }, { name: 'reviewer' }])).toHaveLength(2);
   });
 
-  test('restores each participant’s list, naming the lists only when more than one remains', async () => {
+  test('shows only the selected participant’s restored plan', async () => {
     const original = new Session({ name: 'Restored plans' });
     original.addParticipant('reviewer', 'gpt-5.6-luna');
     original.append({ role: 'assistant', participant: 'sirus', content: [planCall(entries)] });
@@ -408,17 +408,20 @@ describe('pinned plans', () => {
     try {
       await chat.flush();
       expect(chat.output()).toContain('▸ Update the source');
+      expect(chat.output()).not.toContain('○ Review the change');
+      session.selectParticipant('reviewer');
+      await chat.flush();
       expect(chat.output()).toContain('○ Review the change');
-      expect(chat.output()).toContain('@sirus');
-      expect(chat.output()).toContain('@reviewer');
+      expect(chat.output()).not.toContain('Update the source');
+      session.selectParticipant('sirus');
+      await chat.flush();
       expect(chat.output()).toContain('ctrl+t to hide tasks');
 
       session.append({ role: 'assistant', participant: 'reviewer', content: [planCall([])] });
       await chat.flush();
       expect(chat.output()).toContain('▸ Update the source');
       expect(chat.output()).not.toContain('Review the change');
-      expect(chat.output()).not.toContain('@sirus');
-      expect(chat.output()).not.toContain('@reviewer');
+      expect(chat.output()).not.toContain('○ Review the change');
 
       session.append({ role: 'assistant', participant: 'sirus', content: [planCall([])] });
       await chat.flush();

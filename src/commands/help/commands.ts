@@ -9,6 +9,7 @@ export const KEY_BINDINGS: ReadonlyArray<readonly [keys: string, action: string]
   ['↑ / ↓', 'visual rows, then queue and directory history'],
   ['enter / esc in queue edit', 'save / restore the original'],
   ['option+↑ / ↓', 'switch session'],
+  ['← / →', 'switch agent when a task has multiple agents'],
   ['ctrl+n', 'focus the empty draft'],
   ['sidebar: search · ctrl+a', 'find sessions · archive selected session'],
   ['resume: tab', 'toggle this project / all projects'],

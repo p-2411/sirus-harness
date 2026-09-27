@@ -42,9 +42,9 @@ export interface CommandSession {
   getModel(): string;
   fork(): SessionSnapshot;
   previewRewind(checkpointId: string, options: RewindOptions): Promise<RewindPreview>;
-  // Sends /compact to the default participant's runtime as a turn. Rejects
+  // Sends /compact to the selected participant's runtime as a turn. Rejects
   // while the session is busy.
-  compact(signal?: AbortSignal): Promise<void>;
+  compact(signal?: AbortSignal, participantName?: string): Promise<void>;
   getCheckpoints(): Checkpoint[];
   getContextUsage(participantName?: string): ContextUsage | null;
   getParticipants(): Participant[];
@@ -74,6 +74,7 @@ export interface CommandSession {
 // progress while it is still going, and the turn's cancellation.
 export interface CommandContext {
   session: CommandSession;
+  participant?: string;
   signal: AbortSignal;
   notify(text: string): void;
 }
