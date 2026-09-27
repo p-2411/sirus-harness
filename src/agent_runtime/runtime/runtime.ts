@@ -8,6 +8,7 @@ import type {
   ToolCall,
   ToolCallUpdate,
 } from '@agentclientprotocol/sdk';
+import { abortable, abortReason, throwIfAborted } from '../../abort';
 import type { PermissionMode } from '../permissions/policy';
 import type { ListedModel, Vendor } from '../providers/catalog';
 import type {
@@ -35,6 +36,8 @@ import type { NativeCommand } from './commands';
 export type ModeKind = 'standard' | 'auto_review' | 'full_access';
 
 export interface RuntimeOptions {
+  // Cancels startup only; the prompt has its own signal once the runtime is ready.
+  signal?: AbortSignal;
   vendor: Vendor;
   model: string;
   thinkingLevel: ThinkingLevel;
@@ -67,7 +70,41 @@ export interface RuntimeOptions {
   onUpdate: (update: RuntimeUpdate) => void;
 }
 
+export interface BackgroundTask {
+  id: string;
+  name: string;
+  description?: string;
+  state: 'running' | 'paused' | 'completed' | 'failed' | 'stopped';
+  canStop: boolean;
+  toolCallId?: string;
+  summary?: string;
+  outputFilePath?: string;
+}
+
+// AIR task updates are extensions to ACP, shared by both adapters. Keep a
+// complete task when a progress update carries only one changed field.
+export function backgroundTaskFrom(update: unknown, previous?: BackgroundTask): BackgroundTask | null {
+  if (!update || typeof update !== 'object') return null;
+  const value = update as Record<string, unknown>;
+  if (!['async_task_spawned', 'async_task_progress', 'async_task_state_update'].includes(String(value.sessionUpdate))
+    || typeof value.asyncTaskId !== 'string') return null;
+  const task: BackgroundTask = previous ? { ...previous } : {
+    id: value.asyncTaskId, name: 'Background task', state: 'running', canStop: false,
+  };
+  for (const field of ['name', 'description', 'toolCallId', 'summary', 'outputFilePath'] as const) {
+    if (typeof value[field] === 'string') task[field] = value[field];
+  }
+  if (typeof value.canStop === 'boolean') task.canStop = value.canStop;
+  if (['running', 'paused', 'completed', 'failed', 'stopped'].includes(String(value.state))) {
+    task.state = value.state as BackgroundTask['state'];
+  }
+  if (task.state !== 'running' && task.state !== 'paused') task.canStop = false;
+  return task;
+}
+
 export type RuntimeUpdate =
+  | { type: 'async_task'; task: BackgroundTask }
+  | { type: 'rate_limit'; resetsAt?: number }
   | { type: 'text'; text: string }
   | { type: 'thought'; text: string }
   | NoticeBlock
@@ -148,6 +185,8 @@ export interface Runtime {
   // instead. Resolving means the text reached the turn, not that the turn
   // acted on it.
   steer(text: string): Promise<void>;
+  // Stops one background shell without cancelling the participant’s turn.
+  stopTask(id: string): Promise<boolean>;
   // Ends the process, or for a fork just its session, leaving the process up
   // for the runtime it was forked from. Idempotent.
   dispose(): void;
@@ -197,9 +236,17 @@ export function invalidateAllRuntimes(): void {
 // Starts a runtime for the model: a scripted one when the test suite bound
 // it, otherwise the vendor's adapter process.
 export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
+  throwIfAborted(options.signal);
   const bound = boundRuntimes[options.model];
-  const runtime = bound ? await bound(options) : await startAcpRuntime(options);
-  return trackRuntime(runtime);
+  const started = Promise.resolve().then(async () => {
+    const runtime = bound ? await bound(options) : await startAcpRuntime(options);
+    if (options.signal?.aborted) {
+      runtime.dispose();
+      throw abortReason(options.signal);
+    }
+    return trackRuntime(runtime);
+  });
+  return abortable(started, options.signal);
 }
 
 // The first vendor mode of the kind Sirus's mode maps onto, in the vendor's

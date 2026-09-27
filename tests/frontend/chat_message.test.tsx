@@ -1,21 +1,24 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import { render, renderToString } from 'ink';
 import { PassThrough } from 'node:stream';
 import { pressAt, releaseAt } from '../../src/frontend/interaction/clickable';
 import stripAnsi from 'strip-ansi';
+import * as markdown from '../../src/frontend/markdown/Markdown';
 import {
   callDetail,
   ChatMessage,
+  ChatHistory,
   messageSegments,
   toolLine,
   ToolRunGroup,
 } from '../../src/frontend/chat/ChatMessage';
 import {
   registerSubagent,
+  notifySubagents,
   unregisterSubagent,
   type SubagentRun,
 } from '../../src/agent_runtime/tools/subagents';
-import { planCall, type MessageBlock, type PlanEntry, type ToolCallBlock } from '../../src/agent_runtime/types';
+import { planCall, type Message, type MessageBlock, type PlanEntry, type ToolCallBlock } from '../../src/agent_runtime/types';
 
 // Everything ACP guarantees on a tool call, so each case writes only the
 // fields it is about.
@@ -46,6 +49,59 @@ function cellOf(frame: string, marker: string): { col: number; line: number } {
 }
 
 describe('chat message', () => {
+  test('memoises finished content without hiding streamed edits or late worker reports', async () => {
+    const text = { type: 'text' as const, text: 'Initial reply' };
+    const call = toolCall({ id: 'memo-worker', title: 'SpawnAgent' });
+    const message: Message = { seq: 0, role: 'assistant', content: [text, call] };
+    const markdownRender = spyOn(markdown, 'Markdown');
+    const stdout = Object.assign(new PassThrough(), { columns: 120 }) as unknown as NodeJS.WriteStream;
+    const frames: string[] = [];
+    stdout.on('data', data => frames.push(stripAnsi(data.toString())));
+    const history: Message = { seq: -1, role: 'user', content: [{ type: 'text', text: 'Earlier prompt' }] };
+    const view = (live = false) => <ChatHistory messages={[history, message]} sessionId="session"
+      participants={[{ name: 'sirus', model: 'gpt-5.6-luna' }]} isMessageLive={entry => entry === message && live}
+      participantColors={new Map([['sirus', '#aaaaaa']])} />;
+    const app = render(view(), { stdout, debug: true, patchConsole: false, exitOnCtrlC: false });
+    try {
+      await app.waitUntilRenderFlush();
+      const initialRenders = markdownRender.mock.calls.length;
+      app.rerender(view());
+      await app.waitUntilRenderFlush();
+      expect(markdownRender.mock.calls.length).toBe(initialRenders);
+
+      text.text = 'Streamed reply';
+      app.rerender(view(true));
+      await app.waitUntilRenderFlush();
+      expect(frames.at(-1)).toContain('Streamed reply');
+      expect(markdownRender.mock.calls.length).toBe(initialRenders + 1);
+      text.text += ' continues';
+      app.rerender(view(true));
+      await app.waitUntilRenderFlush();
+      expect(frames.at(-1)).toContain('Streamed reply continues');
+
+      message.content.push({ type: 'thought', text: 'Still thinking' });
+      app.rerender(view(true));
+      await app.waitUntilRenderFlush();
+      expect(frames.at(-1)).toContain('Still thinking');
+      app.rerender(view());
+      await app.waitUntilRenderFlush();
+      expect(frames.at(-1)).not.toContain('Still thinking');
+
+      call.output = 'Worker finished the review';
+      app.rerender(view());
+      await app.waitUntilRenderFlush();
+      expect(frames.at(-1)).toContain('Worker finished the review');
+      message.content.push({ type: 'notice', severity: 'error', title: 'Connection lost' });
+      app.rerender(view());
+      await app.waitUntilRenderFlush();
+      expect(frames.at(-1)).toContain('Connection lost');
+    } finally {
+      markdownRender.mockRestore();
+      app.unmount();
+      await app.waitUntilExit();
+    }
+  });
+
   test('renders the participant that produced an assistant message', () => {
     const output = stripAnsi(renderToString(
       <ChatMessage message={{
@@ -643,6 +699,30 @@ describe('the SpawnAgent row', () => {
       // A run of another session never decorates this one's row.
       expect(stripAnsi(row('elsewhere'))).not.toContain('sub-1234');
     } finally {
+      unregisterSubagent(run.id);
+    }
+  });
+
+  test('updates a worker inside memoised history without a parent repaint', async () => {
+    const run = workerRun({ id: 'sub-memo', callId: call.id });
+    registerSubagent(run);
+    const stdout = Object.assign(new PassThrough(), { columns: 140 }) as unknown as NodeJS.WriteStream;
+    const frames: string[] = [];
+    stdout.on('data', data => frames.push(stripAnsi(data.toString())));
+    const app = render(<ChatHistory
+      messages={[{ seq: 0, role: 'assistant', content: [call] }]}
+      participants={[]} sessionId="session" participantColors={new Map()} isMessageLive={() => false}
+    />, { stdout, debug: true, patchConsole: false, exitOnCtrlC: false });
+    try {
+      await app.waitUntilRenderFlush();
+      expect(frames.at(-1)).toContain('sub-memo · working');
+      run.status = 'done';
+      notifySubagents();
+      await app.waitUntilRenderFlush();
+      expect(frames.at(-1)).toContain('sub-memo · done');
+    } finally {
+      app.unmount();
+      await app.waitUntilExit();
       unregisterSubagent(run.id);
     }
   });

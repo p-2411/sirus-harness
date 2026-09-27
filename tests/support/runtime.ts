@@ -38,6 +38,7 @@ export interface ScriptedRuntime extends Omit<Runtime, 'context' | 'model' | 'fo
   thinkingLevel: string;
   // Every text `steer` took, in order.
   steers: string[];
+  stoppedTasks: string[];
   // Called by `steer` while the prompt is still running, so a scripted turn
   // can react to being steered: set it from inside the turn, on the runtime
   // the turn was handed, and emit whatever the vendor would have folded into
@@ -69,6 +70,7 @@ function scriptedRuntime(model: string, options: RuntimeOptions, binding: Script
     permissionMode: options.permissionMode,
     thinkingLevel: options.thinkingLevel,
     steers: [],
+    stoppedTasks: [],
     async prompt(input, signal) {
       runtime.prompts.push(input);
       if (signal.aborted) throw signal.reason;
@@ -115,6 +117,11 @@ function scriptedRuntime(model: string, options: RuntimeOptions, binding: Script
       if (!running) throw new Error(`The scripted ${model} runtime is not running a prompt`);
       runtime.steers.push(text);
       runtime.onSteer?.(text);
+    },
+    async stopTask(id) {
+      if (runtime.disposed) throw new Error(`The scripted ${model} runtime was disposed`);
+      runtime.stoppedTasks.push(id);
+      return true;
     },
     dispose() {
       runtime.disposed = true;

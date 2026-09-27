@@ -91,9 +91,9 @@ describe('Session rounds', () => {
     }
   });
 
-  // Streamed text and finished tool work stay in history after a failure, but
-  // a participant that failed before producing anything leaves no empty entry.
-  test('discards the entry of a participant that failed before streaming anything', async () => {
+  // Every failed participant keeps a readable error, including a failure
+  // before the first streamed word.
+  test('records an error for a participant that failed before streaming anything', async () => {
     bindScriptedRuntime(streamingModel, (_input, emit) => { emit({ type: 'text', text: 'partial answer' }); });
     bindScriptedRuntime(failingModel, () => { throw new Error('runtime failed before streaming'); });
 
@@ -105,10 +105,10 @@ describe('Session rounds', () => {
       role: 'user',
       content: [{ type: 'text', text: '@writer @breaker take a look' }],
     });
-    await expect(turn).rejects.toThrow('runtime failed before streaming');
+    await expect(turn).rejects.toThrow('refused or could not complete');
 
     const messages = session.getMessages();
-    expect(messages.map(message => message.role)).toEqual(['user', 'assistant']);
+    expect(messages.map(message => message.role)).toEqual(['user', 'assistant', 'assistant']);
     expect(messages[1]).toEqual({
       seq: 1,
       role: 'assistant',
@@ -116,7 +116,7 @@ describe('Session rounds', () => {
       model: streamingModel,
       content: [{ type: 'text', text: 'partial answer' }],
     });
-    expect(messages.some(message => message.participant === 'breaker')).toBe(false);
+    expect(messages[2]).toMatchObject({ participant: 'breaker', content: [{ type: 'notice', severity: 'error' }] });
   });
 
   test('steers addressed busy participants and prompts idle peers without duplicating delivery', async () => {

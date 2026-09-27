@@ -1,5 +1,5 @@
 import path from 'path';
-import { isPlanCall, textOf, type Message, type ToolCallBlock } from '../types';
+import { isPlanCall, textOf, type Message, type MessageBlock, type ToolCallBlock } from '../types';
 
 export { textOf };
 
@@ -53,8 +53,8 @@ export class Transcript {
   }
 
   // The record as plain text, for a new runtime's first prompt. From the
-  // last compaction the runtime reported a summary for, since that is all
-  // the vendor's own context held from then on; the whole record otherwise.
+  // last compaction summary and the most recent entries, within the recap
+  // budget so a long record cannot fill the new runtime's context.
   text(): string {
     return transcriptText(this.items);
   }
@@ -73,38 +73,78 @@ const VERBS: Record<ToolCallBlock['kind'], string> = {
   other: 'used',
 };
 
-function compactionCut(entries: readonly Message[]): { from: number; summary: string | null } {
+// UTF-8 bytes also bound byte-based tokens, including non-English text.
+// Leave the rest of even the smallest supported context for the current
+// prompt, system instructions, tools and the model's reply.
+export const RECAP_MAX_BYTES = 24 * 1024;
+
+function compactionCut(entries: readonly Message[]): { from: number; block: number; summary: string | null } {
   for (let index = entries.length - 1; index >= 0; index--) {
-    for (const block of entries[index].content) {
-      if (block.type === 'compaction' && block.summary) return { from: index, summary: block.summary };
+    const content = entries[index].content;
+    for (let at = content.length - 1; at >= 0; at--) {
+      const block = content[at];
+      if (block.type === 'compaction' && block.summary) return { from: index, block: at + 1, summary: block.summary };
     }
   }
-  return { from: 0, summary: null };
+  return { from: 0, block: 0, summary: null };
+}
+
+function blockText(speaker: string, block: MessageBlock): string {
+  if (block.type === 'text') return block.text ? `${speaker}: ${block.text}` : '';
+  if (block.type === 'image') return `${speaker}: [attached image ${path.basename(block.path)}]`;
+  if (block.type === 'tool_call' && isPlanCall(block)) {
+    const checklist = block.content.flatMap(item => item.type === 'text' ? [item.text] : []).join('\n');
+    return `${speaker} plan:\n${checklist}`;
+  }
+  if (block.type === 'tool_call') {
+    const outcome = block.status === 'failed' ? ' (failed)' : block.status === 'completed' ? '' : ` (${block.status})`;
+    return `${speaker} ${VERBS[block.kind]}: ${block.title}${outcome}`;
+  }
+  return '';
+}
+
+function byteSlice(text: string, budget: number, tail = false): string {
+  const bytes = Buffer.from(text);
+  if (bytes.length <= budget) return text;
+  if (tail) {
+    let start = Math.max(0, bytes.length - budget);
+    while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start++;
+    return bytes.subarray(start).toString();
+  }
+  let end = Math.max(0, budget);
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
+  return bytes.subarray(0, end).toString();
 }
 
 export function transcriptText(entries: readonly Message[]): string {
-  const { from, summary } = compactionCut(entries);
-  const lines: string[] = [];
-  if (summary) lines.push('Summary of the earlier conversation:', summary, '');
-  for (const entry of entries.slice(from)) {
+  const cut = compactionCut(entries);
+  const summary = cut.summary ? byteSlice(cut.summary, RECAP_MAX_BYTES / 2) : '';
+  const summaryOmitted = summary !== (cut.summary ?? '');
+  const prefix = summary ? `Summary of the earlier conversation:\n${summary}\n\n` : '';
+  const omission = '[Recap shortened: older conversation text omitted; the earliest included message may be partial.'
+    + (summaryOmitted ? ' The compaction summary was also shortened.' : '') + ']\n';
+  const budget = RECAP_MAX_BYTES - Buffer.byteLength(prefix) - Buffer.byteLength(omission);
+  const recent: string[] = [];
+  let remaining = budget;
+  let omitted = false;
+  outer: for (let index = entries.length - 1; index >= cut.from; index--) {
+    const entry = entries[index];
     const speaker = entry.role === 'user' ? 'User' : `@${entry.participant ?? 'sirus'}`;
-    for (const block of entry.content) {
-      if (block.type === 'notice') continue;
-      if (block.type === 'text') {
-        if (block.text) lines.push(`${speaker}: ${block.text}`);
-      } else if (block.type === 'image') {
-        lines.push(`${speaker}: [attached image ${path.basename(block.path)}]`);
-      } else if (block.type === 'tool_call' && isPlanCall(block)) {
-        const checklist = block.content.flatMap(item => item.type === 'text' ? [item.text] : []).join('\n');
-        lines.push(`${speaker} plan:`, checklist);
-      } else if (block.type === 'tool_call') {
-        const outcome = block.status === 'failed' ? ' (failed)' : block.status === 'completed' ? '' : ` (${block.status})`;
-        lines.push(`${speaker} ${VERBS[block.kind]}: ${block.title}${outcome}`);
+    for (let at = entry.content.length - 1; at >= (index === cut.from ? cut.block : 0); at--) {
+      const text = blockText(speaker, entry.content[at]);
+      if (!text) continue;
+      const length = Buffer.byteLength(text) + (recent.length ? 1 : 0);
+      if (length > remaining) {
+        const tail = byteSlice(text, remaining - (recent.length ? 1 : 0), true);
+        if (tail) recent.push(tail);
+        omitted = true;
+        break outer;
       }
-      // Thoughts are the runtime's own; a compaction without a summary changes nothing.
+      recent.push(text);
+      remaining -= length;
     }
   }
-  return lines.join('\n');
+  return prefix + (omitted || summaryOmitted ? omission : '') + recent.reverse().join('\n');
 }
 
 // Every entry of every transcript, once, in seq order: what the UI shows and

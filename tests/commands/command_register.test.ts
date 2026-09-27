@@ -20,6 +20,7 @@ import type { SubagentRun } from '../../src/agent_runtime/tools/subagents';
 import type { Feedback } from '../../src/commands/feedback';
 import { loadSirusModelPreference, saveSirusModelPreference } from '../../src/persistence';
 import { bindScriptedRuntime, textTurn, unbindRuntime } from '../support/runtime';
+import { backgroundTaskFrom, type BackgroundTask } from '../../src/agent_runtime/runtime/runtime';
 
 function runCommand(
   command: string,
@@ -87,14 +88,28 @@ describe('executeCommand', () => {
     rmSync(settingsDirectory, { recursive: true, force: true });
   });
 
+  test('permissions ask explains what each vendor approves', () => {
+    const description = 'Claude asks before writes. Codex asks before leaving the workspace; edits inside it are not asked.';
+    expect(menuItems('permissions', []).find(item => item.key === 'ask')?.description).toBe(description);
+    const session = new Session();
+    expect(runCommand('permissions', ['ask'], session)).toEqual({
+      kind: 'success',
+      text: `Permission mode set to ask for approval. ${description}`,
+    });
+    expect(runCommand('permissions', [], session)).toEqual({
+      kind: 'info',
+      text: `Permission mode is ask for approval. ${description}`,
+    });
+  });
+
   test('model command changes only the active populated session', () => {
     const session = new Session();
     const other = new Session();
     session.append({ role: 'user', content: [{ type: 'text', text: 'Hello' }] });
     saveSirusModelPreference('gpt-5.6-terra');
     expect(runCommand('model', ['claude-fable-5-1'], session)).toEqual({
-      kind: 'success',
-      text: '@sirus model set to claude-fable-5-1.',
+      kind: 'warning',
+      text: 'Switching @sirus to claude-fable-5-1 restarts its session; it keeps the conversation as text.',
     });
     expect(session.getModel()).toBe('claude-fable-5-1');
     expect(other.getModel()).toBe('gpt-5.6-luna');
@@ -102,6 +117,27 @@ describe('executeCommand', () => {
     runCommand('model', ['@sirus', 'sol'], session);
     expect(session.getModel()).toBe('gpt-6-sol');
     expect(loadSirusModelPreference()).toBe('gpt-5.6-terra');
+  });
+
+  test('warns before a cross-vendor model change and in the model picker', () => {
+    const session = new Session();
+    session.append({ role: 'user', content: [{ type: 'text', text: 'Keep this context' }] });
+    const menu = commandMenu('model', [], session)!;
+    expect(menu.find((item): item is CommandMenuItem => item.type === 'item' && item.key === 'claude-sonnet-5')?.description)
+      .toContain('restarts its session; it keeps the conversation as text');
+    expect(menu.find((item): item is CommandMenuItem => item.type === 'item' && item.key === 'gpt-6-sol')?.description ?? '')
+      .not.toContain('restarts its session');
+    const notices: string[] = [];
+    executeCommand('model', ['claude-sonnet-5'], {
+      session,
+      notify: text => {
+        expect(session.getModel()).toBe('gpt-5.6-luna');
+        notices.push(text);
+      },
+      signal: new AbortController().signal,
+    });
+    expect(notices).toEqual(['Switching @sirus to claude-sonnet-5 restarts its session; it keeps the conversation as text.']);
+    expect(session.getModel()).toBe('claude-sonnet-5');
   });
 
   test('choosing Sirus in an empty session saves the default without changing peers', () => {
@@ -716,4 +752,63 @@ test('/quit calls the app exit capability and rejects arguments', () => {
     signal: new AbortController().signal, exit: () => { exited = true; } });
   expect(exited).toBe(true);
   expect(() => runCommand('quit', ['extra'])).toThrow('Usage: /quit');
+});
+
+describe('background tasks', () => {
+  test('merges AIR task progress and terminal metadata without reopening a finished task', () => {
+    const spawned = backgroundTaskFrom({
+      sessionUpdate: 'async_task_spawned', asyncTaskId: 'shell-1', name: 'sleep 20',
+      canStop: true, toolCallId: 'tool-1',
+    })!;
+    const progress = backgroundTaskFrom({
+      sessionUpdate: 'async_task_progress', asyncTaskId: 'shell-1', outputFilePath: '/tmp/output',
+    }, spawned)!;
+    expect(progress).toMatchObject({ name: 'sleep 20', toolCallId: 'tool-1', state: 'running', canStop: true });
+    const finished = backgroundTaskFrom({
+      sessionUpdate: 'async_task_state_update', asyncTaskId: 'shell-1', state: 'completed', summary: 'Done',
+    }, progress)!;
+    expect(finished).toMatchObject({ state: 'completed', canStop: false, outputFilePath: '/tmp/output', summary: 'Done' });
+    expect(backgroundTaskFrom({
+      sessionUpdate: 'async_task_progress', asyncTaskId: 'shell-1', outputFilePath: '/tmp/final',
+    }, finished)).toMatchObject({ state: 'completed', canStop: false, outputFilePath: '/tmp/final' });
+    expect(backgroundTaskFrom({ sessionUpdate: 'agent_message_chunk' })).toBeNull();
+  });
+
+  test('/tasks separates participant task ids and routes stop to the chosen runtime', async () => {
+    const models = ['tasks-owner-test', 'tasks-reviewer-test'];
+    const task: BackgroundTask = { id: 'shell-1', name: 'sleep 20', state: 'running', canStop: true };
+    const bindings = models.map(model => bindScriptedRuntime(model, (_input, emit) => {
+      emit({ type: 'async_task', task });
+      emit({ type: 'text', text: 'Started.' });
+    }));
+    const session = new Session({ id: 'tasks-routing', name: 'Tasks', model: models[0] });
+    try {
+      session.addParticipant('reviewer', models[1]);
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: '@sirus @reviewer start' }] });
+      expect(session.getBackgroundTasks().map(task => task.participant)).toEqual(['sirus', 'reviewer']);
+      const menu = commandMenu('tasks', [], session)!;
+      expect(menu).toHaveLength(2);
+      expect(menu.map(entry => entry.type === 'item' ? entry.command : '')).toEqual([
+        '/tasks @sirus shell-1', '/tasks @reviewer shell-1',
+      ]);
+      expect(commandMenu('tasks', ['@reviewer', 'shell-1'], session)).toMatchObject([
+        { command: '/tasks stop @reviewer shell-1' },
+      ]);
+      expect(await runCommand('tasks', ['stop', '@reviewer', 'shell-1'], session)).toMatchObject({ kind: 'success' });
+      expect(bindings[0].runtimes[0].stoppedTasks).toEqual([]);
+      expect(bindings[1].runtimes[0].stoppedTasks).toEqual(['shell-1']);
+      bindings[0].starts[0].onUpdate({ type: 'async_task', task: { ...task, state: 'completed', canStop: false } });
+      expect(session.getBackgroundTasks().find(task => task.participant === 'sirus')?.state).toBe('completed');
+      expect(session.getNotice()?.notice.title).toContain('completed');
+      bindings[0].starts[0].onUpdate({ type: 'async_task', task: { ...task, state: 'completed', canStop: false, outputFilePath: '/tmp/final' } });
+      expect(session.getMessages().flatMap(entry => entry.content).filter(block =>
+        block.type === 'notice' && block.title.includes('shell-1 completed'))).toHaveLength(1);
+      expect(JSON.stringify(session.toSnapshot())).toContain('shell-1 completed');
+      expect(await runCommand('tasks', ['stop', '@sirus', 'shell-1'], session)).toMatchObject({ kind: 'info' });
+      expect(bindings[0].runtimes[0].stoppedTasks).toEqual([]);
+    } finally {
+      await session.dispose();
+      for (const model of models) unbindRuntime(model);
+    }
+  });
 });

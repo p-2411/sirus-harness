@@ -1404,14 +1404,14 @@ describe('Session subscriptions', () => {
     expect(session.getStatus()).toBe('working');
     while (!finish) await new Promise(resolve => setTimeout(resolve, 0));
     finish();
-    await expect(failedTurn).rejects.toThrow('runtime failed');
+    await expect(failedTurn).rejects.toThrow('refused or could not complete');
     expect(session.getStatus()).toBe('error');
     expect(session.getMessages().at(-1)).toEqual({
       seq: 3,
       role: 'assistant',
       participant: 'sirus',
       model: testModel,
-      content: [{ type: 'text', text: 'Partial before failure' }],
+      content: [{ type: 'text', text: 'Partial before failure' }, { type: 'notice', severity: 'error', title: 'OpenAI refused or could not complete this request. Try again or revise the prompt.' }],
     });
   });
 
@@ -1664,5 +1664,335 @@ test('notifications stay attached to their completed turn when steering acknowle
     releaseOwner();
     await ownerTurn;
     await session.dispose();
+  }
+});
+
+test('retries an adapter crash once, carries completed work, and records the final error', async () => {
+  const { AdapterLostError } = await import('../../src/agent_runtime/runtime/errors');
+  let attempts = 0;
+  const binding = bindScriptedRuntime(testModel, (_input, emit) => {
+    attempts++;
+    emit({ type: 'text', text: 'Inspected the project.' });
+    throw new AdapterLostError('claude adapter closed the connection: sessionId=secret phase=validate-cwd');
+  });
+  const session = new Session({ model: testModel });
+  try {
+    await expect(session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Continue' }] })).rejects.toThrow('adapter stopped unexpectedly');
+    expect(attempts).toBe(2);
+    expect(binding.runtimes[1].prompts[0].text).toContain('Inspected the project.');
+    expect(binding.runtimes[1].prompts[0].text).toContain('without repeating it');
+    const errors = session.getMessages().flatMap(entry => entry.content).filter(block => block.type === 'notice' && block.severity === 'error');
+    expect(errors).toHaveLength(1);
+    expect(JSON.stringify(errors)).not.toContain('sessionId');
+    bindScriptedRuntime(testModel, textTurn('Recovered'));
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Next' }] });
+    expect(Session.fromSnapshot(session.toSnapshot()).getMessages().flatMap(entry => entry.content)).toContainEqual(errors[0]);
+  } finally { await session.dispose(); }
+});
+
+test('a single credential recovers automatically after its adapter crashes', async () => {
+  const { providerFor } = await import('../../src/agent_runtime/providers');
+  const { AdapterLostError } = await import('../../src/agent_runtime/runtime/errors');
+  const model = 'gpt-5.6-luna';
+  const credentials = spyOn(providerFor('gpt').sources, 'list').mockReturnValue([{ id: 'only', kind: 'subscription', profile: 'default' }]);
+  let attempts = 0;
+  const binding = bindScriptedRuntime(model, (_input, emit) => {
+    if (++attempts === 1) throw new AdapterLostError('closed');
+    emit({ type: 'text', text: 'Recovered' });
+  });
+  const session = new Session({ model });
+  try {
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'hello' }] });
+    expect(binding.starts).toHaveLength(2);
+    expect(textOf(session.getMessages().at(-1)!)).toBe('Recovered');
+  } finally { await session.dispose(); credentials.mockRestore(); unbindRuntime(model); }
+});
+
+test.each([
+  ['429 rate limit. Resets at 18:30 UTC', 'limit', 'Resets at 18:30 UTC'],
+  ['usage_limit_reached: allowance spent, try again in 12 hours', 'limit', 'try again in 12 hours'],
+  ['401 authentication token expired', 'login', '/login'],
+  ['policy denied', 'refused', 'refused'],
+] as const)('classifies %s without retrying a live vendor refusal', async (raw, kind, expected) => {
+  const { turnFailure } = await import('../../src/agent_runtime/runtime/errors');
+  const failure = turnFailure(new Error(raw), 'claude', 'reviewer');
+  expect(failure.kind).toBe(kind);
+  expect(failure.message).toContain(expected);
+  if (kind === 'limit') expect(failure.message).toContain('/model @reviewer gpt-5.6-luna');
+  let attempts = 0;
+  bindScriptedRuntime(testModel, () => { attempts++; throw new Error(raw); });
+  const session = new Session({ model: testModel });
+  try {
+    await expect(session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'hello' }] })).rejects.toThrow(expected);
+    expect(attempts).toBe(1);
+    expect(session.getMessages().at(-1)?.content).toMatchObject([{ type: 'notice', severity: 'error' }]);
+  } finally { await session.dispose(); }
+});
+
+test('draft warmup is shared with the first turn and is disposed if unused', async () => {
+  const binding = bindScriptedRuntime(testModel, textTurn('Ready'));
+  const session = new Session({ model: testModel });
+  await Promise.all([session.warmup(), session.warmup()]);
+  expect(binding.starts).toHaveLength(1);
+  expect(binding.runtimes[0].prompts).toHaveLength(0);
+  expect(session.isEmpty()).toBe(true);
+  await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'hello' }] });
+  expect(binding.starts).toHaveLength(1);
+  expect(binding.runtimes[0].prompts[0].text).toBe('hello');
+  session.releaseWarmup();
+  expect(binding.runtimes[0].disposed).toBe(false);
+  await session.dispose();
+  const draft = new Session({ model: testModel });
+  await draft.warmup();
+  draft.releaseWarmup();
+  expect(binding.runtimes.at(-1)?.disposed).toBe(true);
+  await draft.dispose();
+});
+
+test('a pending warmup cannot survive a model change or draft disposal', async () => {
+  const { boundRuntimes } = await import('../../src/agent_runtime/runtime/runtime');
+  const binding = bindScriptedRuntime(testModel, textTurn('Old'));
+  const oldFactory = boundRuntimes[testModel];
+  let finish!: () => void;
+  let started!: () => void;
+  const opening = new Promise<void>(resolve => { started = resolve; });
+  const gate = new Promise<void>(resolve => { finish = resolve; });
+  boundRuntimes[testModel] = async options => { started(); await gate; return oldFactory(options); };
+  const next = bindScriptedRuntime(secondTestModel, textTurn('New'));
+  const session = new Session({ model: testModel });
+  const warm = session.warmup().catch(() => undefined);
+  await opening;
+  session.changeParticipantModel('sirus', secondTestModel);
+  await session.warmup();
+  finish();
+  await warm;
+  await until(() => binding.runtimes[0]?.disposed === true, 'superseded warmup disposal');
+  expect(binding.runtimes[0].disposed).toBe(true);
+  await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'hello' }] });
+  expect(next.starts).toHaveLength(1);
+  expect(textOf(session.getMessages().at(-1)!)).toBe('New');
+  await session.dispose();
+});
+
+test.each(['gpt', 'claude'] as const)('ACP %s advertises async tasks and stops cancelled shells including late announcements', async vendor => {
+  const adapter = `
+    import { createInterface } from 'node:readline';
+    const send = value => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\\n');
+    const update = (sessionId, update) => send({ method: 'session/update', params: { sessionId, update } });
+    const task = (sessionId, id) => update(sessionId, {
+      sessionUpdate: 'async_task_spawned', asyncTaskId: id, name: 'sleep 20', canStop: true, toolCallId: 'tool-' + id
+    });
+    const turns = new Map();
+    for await (const line of createInterface({ input: process.stdin })) {
+      const request = JSON.parse(line);
+      const reply = result => send({ id: request.id, result });
+      const sessionId = request.params?.sessionId;
+      if (request.method === 'initialize') {
+        const air = request.params.clientCapabilities._meta?.jetbrains?.air;
+        if (air?.version !== 1 || !air.capabilities.includes('asyncTasks')) throw new Error('Async tasks were not advertised');
+        reply({ protocolVersion: 1, agentCapabilities: { sessionCapabilities: { fork: {} } } });
+      } else if (request.method === 'session/new' || request.method === 'session/fork') {
+        const id = request.method === 'session/new' ? 'owner' : 'worker';
+        task(id, 'early');
+        reply({ sessionId: id });
+      } else if (request.method === 'session/prompt') {
+        if (request.params.prompt.at(-1).text === 'Next') {
+          update(sessionId, { sessionUpdate: 'usage_update', used: 100, size: 200000,
+            _meta: { '_claude/rateLimit': { resetsAt: 2000000000 } } });
+          task(sessionId, 'next');
+          reply({ stopReason: 'end_turn' });
+        } else {
+          turns.set(sessionId, request.id);
+          task(sessionId, 'running');
+        }
+      } else if (request.method === 'session/cancel') {
+        send({ id: turns.get(sessionId), result: { stopReason: 'cancelled' } });
+        setTimeout(() => task(sessionId, 'late'), 20);
+      } else if (request.method === '_session/async_task/stop') {
+        const id = request.params.asyncTaskId;
+        update(sessionId, { sessionUpdate: 'notice', severity: 'info', title: 'stop received', description: id });
+        update(sessionId, { sessionUpdate: 'async_task_progress', asyncTaskId: id, outputFilePath: '/tmp/' + id });
+        setTimeout(() => {
+          update(sessionId, { sessionUpdate: 'async_task_state_update', asyncTaskId: id, state: 'stopped' });
+          reply({ stopped: true });
+        }, 10);
+      } else if (request.id !== undefined) reply({});
+    }
+  `;
+  const spec = spyOn(launch, 'launchFor').mockImplementation(options => ({
+    command: process.execPath, args: ['-e', adapter], env: options.env,
+    mode: options.permissionMode, session: () => ({ mcpServers: [] }), forkNeedsResume: false,
+  }));
+  const updates: RuntimeUpdate[] = [];
+  const workerUpdates: RuntimeUpdate[] = [];
+  const startup = new AbortController();
+  const options: RuntimeOptions = {
+    signal: startup.signal,
+    vendor, model: vendor === 'gpt' ? 'gpt-5.6-luna' : 'claude-sonnet-5', thinkingLevel: 'high',
+    directory: process.cwd(), systemPrompt: '', env: { ...process.env }, mcpServer: null, permissionMode: 'auto',
+    onPermission: async () => ({ outcome: { outcome: 'cancelled' } }),
+    onUpdate: update => { updates.push(update); },
+  };
+  const stopped = () => updates.flatMap(update => update.type === 'notice' && update.title === 'stop received'
+    ? [update.description] : []);
+  const terminal = (id: string) => updates.some(update =>
+    update.type === 'async_task' && update.task.id === id && update.task.state === 'stopped');
+  const controller = new AbortController();
+  let runtime: Runtime | undefined;
+  let turn: Promise<unknown> | undefined;
+  try {
+    runtime = await startAcpRuntime(options);
+    expect(updates).toMatchObject([{ type: 'async_task', task: { id: 'early', state: 'running', canStop: true } }]);
+    startup.abort(new Error('Startup already finished'));
+    expect(runtime.lost).toBe(false);
+    const worker = await runtime.fork({ ...options, onUpdate: update => { workerUpdates.push(update); } });
+    expect(workerUpdates).toHaveLength(1);
+    turn = runtime.prompt({ text: 'Start', images: [] }, controller.signal).catch(error => error);
+    await until(() => updates.some(update => update.type === 'async_task' && update.task.id === 'running'), 'running shell');
+    controller.abort(new Error('Stopped by Esc'));
+    expect(await turn).toMatchObject({ message: 'Stopped by Esc' });
+    await until(() => ['early', 'running', 'late'].every(terminal), 'known and late shell cancellation');
+    expect(stopped().sort()).toEqual(['early', 'late', 'running']);
+    expect(workerUpdates).toHaveLength(1);
+    expect(workerUpdates[0]).toMatchObject({ type: 'async_task', task: { id: 'early', state: 'running' } });
+    expect(updates.find(update => update.type === 'async_task' && update.task.id === 'late' && update.task.state === 'stopped'))
+      .toMatchObject({ task: { name: 'sleep 20', toolCallId: 'tool-late', outputFilePath: '/tmp/late', canStop: false } });
+    await runtime.prompt({ text: 'Next', images: [] }, new AbortController().signal);
+    expect(stopped()).not.toContain('next');
+    expect(updates).toContainEqual({ type: 'rate_limit', resetsAt: 2000000000 });
+    expect(updates).toContainEqual({ type: 'context', usage: { tokens: 100, window: 200000 } });
+    expect(await runtime.stopTask('next')).toBe(true);
+    expect(stopped()).toContain('next');
+    expect(await runtime.stopTask('next')).toBe(false);
+    expect(await runtime.stopTask('missing')).toBe(false);
+    worker.dispose();
+  } finally {
+    controller.abort();
+    runtime?.dispose();
+    await turn;
+    spec.mockRestore();
+  }
+});
+
+test('warming a draft again follows a changed preferred credential', async () => {
+  const { providerFor } = await import('../../src/agent_runtime/providers');
+  const model = 'gpt-5.6-luna';
+  const credentials = spyOn(providerFor('gpt').sources, 'list').mockReturnValue([{ id: 'old', kind: 'subscription', profile: 'default' }]);
+  const binding = bindScriptedRuntime(model, textTurn('Ready'));
+  const session = new Session({ model });
+  try {
+    await session.warmup();
+    credentials.mockReturnValue([{ id: 'new', kind: 'subscription', profile: 'default' }]);
+    await session.warmup();
+    expect(binding.starts).toHaveLength(2);
+    expect(binding.runtimes[0].disposed).toBe(true);
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'hello' }] });
+    expect(binding.starts).toHaveLength(2);
+  } finally { await session.dispose(); credentials.mockRestore(); unbindRuntime(model); }
+});
+
+test('pending warmup adopts the latest permission mode and thinking level', async () => {
+  const { boundRuntimes } = await import('../../src/agent_runtime/runtime/runtime');
+  const binding = bindScriptedRuntime(testModel, textTurn('Ready'));
+  const factory = boundRuntimes[testModel];
+  let finish!: () => void;
+  let started!: () => void;
+  const opening = new Promise<void>(resolve => { started = resolve; });
+  const gate = new Promise<void>(resolve => { finish = resolve; });
+  boundRuntimes[testModel] = async options => { started(); await gate; return factory(options); };
+  const session = new Session({ model: testModel, permissionMode: 'bypass' });
+  const warm = session.warmup();
+  await opening;
+  session.setPermissionMode('ask');
+  session.setThinkingLevel('low');
+  finish();
+  await warm;
+  expect(binding.runtimes[0].permissionMode).toBe('ask');
+  expect(binding.runtimes[0].thinkingLevel).toBe('low');
+  await session.dispose();
+});
+
+test('limit errors preserve structured reset times without copying debug credentials', async () => {
+  const { turnFailure } = await import('../../src/agent_runtime/runtime/errors');
+  const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+  const cause = Object.assign(new Error('Internal error'), { data: { details: 'rate_limit_exceeded', resetsAt } });
+  const failure = turnFailure(new Error('Internal error', { cause }), 'gpt', 'sirus');
+  expect(failure.message).toContain(new Date(resetsAt * 1000).toLocaleString());
+  expect(failure.message).toContain('/model claude-sonnet-5');
+  const debug = turnFailure(new Error('Rate limit exceeded. Resets at 18:30 UTC. Request Authorization: Bearer test-secret-key'), 'gpt', 'sirus');
+  expect(debug.message).toContain('Resets at 18:30 UTC');
+  expect(debug.message).not.toContain('test-secret-key');
+});
+
+test.each(['initialize', 'session/new'])('cancelling ACP startup terminates an adapter hung in %s', async phase => {
+  const { existsSync, readFileSync } = await import('fs');
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-startup-cancel-'));
+  const pidFile = path.join(directory, 'adapter.pid');
+  const adapter = `
+    import { createInterface } from 'node:readline';
+    import { writeFileSync } from 'node:fs';
+    for await (const line of createInterface({ input: process.stdin })) {
+      const request = JSON.parse(line);
+      if (request.method === process.env.HANG_PHASE) {
+        writeFileSync(process.env.PID_FILE, String(process.pid));
+      } else if (request.method === 'initialize') {
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { protocolVersion: 1 } }) + '\\n');
+      }
+    }
+  `;
+  const spec = spyOn(launch, 'launchFor').mockImplementation(options => ({
+    command: process.execPath, args: ['-e', adapter], env: { ...options.env, HANG_PHASE: phase, PID_FILE: pidFile },
+    mode: options.permissionMode, session: () => ({ mcpServers: [] }), forkNeedsResume: false,
+  }));
+  const controller = new AbortController();
+  const opening = startAcpRuntime({
+    vendor: 'gpt', model: 'gpt-5.6-luna', thinkingLevel: 'high', directory,
+    systemPrompt: '', env: { ...process.env }, mcpServer: null, permissionMode: 'auto', signal: controller.signal,
+    onPermission: async () => ({ outcome: { outcome: 'cancelled' } }), onUpdate: () => {},
+  }).catch(error => error);
+  let pid: number | undefined;
+  try {
+    await until(() => existsSync(pidFile), 'adapter startup request');
+    pid = Number(readFileSync(pidFile, 'utf8'));
+    controller.abort(new Error('Draft closed'));
+    expect(await opening).toMatchObject({ message: 'Draft closed' });
+    await until(() => {
+      try { process.kill(pid!, 0); return false; }
+      catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
+    }, 'adapter exit after startup cancellation');
+  } finally {
+    controller.abort();
+    await opening;
+    if (pid) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+    spec.mockRestore();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a bound runtime resolving after startup cancellation is disposed before it can be adopted', async () => {
+  const { boundRuntimes, createRuntime } = await import('../../src/agent_runtime/runtime/runtime');
+  const model = 'late-startup-runtime';
+  const binding = bindScriptedRuntime(model, textTurn('Unused'));
+  const start = boundRuntimes[model]!;
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  boundRuntimes[model] = async options => { await gate; return start(options); };
+  const controller = new AbortController();
+  const opening = createRuntime({
+    vendor: 'gpt', model, thinkingLevel: 'high', directory: process.cwd(), systemPrompt: '',
+    env: { ...process.env }, mcpServer: null, permissionMode: 'auto', signal: controller.signal,
+    onPermission: async () => ({ outcome: { outcome: 'cancelled' } }), onUpdate: () => {},
+  }).catch(error => error);
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    controller.abort(new Error('Draft replaced'));
+    expect(await opening).toMatchObject({ message: 'Draft replaced' });
+    release();
+    await until(() => binding.runtimes.length === 1, 'late runtime');
+    expect(binding.runtimes[0].disposed).toBe(true);
+  } finally {
+    release();
+    await opening;
+    unbindRuntime(model);
   }
 });

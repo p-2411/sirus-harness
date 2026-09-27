@@ -1,4 +1,5 @@
 import {
+  ASK_MODE_DESCRIPTION,
   PERMISSION_MODE_NAMES,
   PERMISSION_MODES,
   parsePermissionMode,
@@ -29,7 +30,7 @@ export function renameSession(name: string, session: CommandSession): Feedback {
 }
 
 const PERMISSION_MODE_DESCRIPTIONS: Record<PermissionMode, string> = {
-  ask: 'the agent asks before every action that is not a read',
+  ask: ASK_MODE_DESCRIPTION,
   auto: 'the agent\'s own reviewer decides and asks only about what it judges unsafe',
   bypass: 'nothing is asked',
 };
@@ -46,9 +47,10 @@ export function permissionsMenuItems(): CommandMenuItem[] {
 
 export function permissionsCommand(mode: string | undefined, session: CommandSession): Feedback {
   if (mode === undefined) {
+    const current = session.getPermissionMode();
     return {
       kind: 'info',
-      text: `Permission mode is ${PERMISSION_MODE_NAMES[session.getPermissionMode()]}.`,
+      text: `Permission mode is ${PERMISSION_MODE_NAMES[current]}.${current === 'ask' ? ` ${ASK_MODE_DESCRIPTION}` : ''}`,
     };
   }
   const parsed = parsePermissionMode(mode);
@@ -56,6 +58,6 @@ export function permissionsCommand(mode: string | undefined, session: CommandSes
   session.setPermissionMode(parsed);
   return {
     kind: 'success',
-    text: `Permission mode set to ${PERMISSION_MODE_NAMES[parsed]}.`,
+    text: `Permission mode set to ${PERMISSION_MODE_NAMES[parsed]}.${parsed === 'ask' ? ` ${ASK_MODE_DESCRIPTION}` : ''}`,
   };
 }

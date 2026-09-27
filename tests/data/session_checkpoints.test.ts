@@ -173,7 +173,7 @@ describe('session checkpoint integration', () => {
   test.each([new Error('runtime failed'), new TurnCancelledError()])(
     'settles a snapshot before a failed or cancelled turn can be cleared: %s', async error => {
       bindScriptedRuntime(model, () => { throw error; });
-      await expect(session.sendMessage(prompt)).rejects.toThrow(error.message);
+      await expect(session.sendMessage(prompt)).rejects.toThrow(error instanceof TurnCancelledError ? error.message : 'refused or could not complete');
       expect(session.getCheckpoints()).toHaveLength(1);
       expect(session.getStatus()).toBe(error.name === 'AbortError' ? 'idle' : 'error');
       expect(session.wasLastTurnCancelled()).toBe(error.name === 'AbortError');

@@ -18,10 +18,10 @@ export const modelCommand: CommandSpec = {
       return subagentModelCommand(args.slice(1), context.session);
     }
     if (args.length === 1) {
-      return changeModel('sirus', args[0], context.session);
+      return changeModel('sirus', args[0], context.session, context.notify);
     }
     if (args.length === 2) {
-      return changeModel(args[0], args[1], context.session);
+      return changeModel(args[0], args[1], context.session, context.notify);
     }
     throw new Error('Usage: /model [name|subagent] <model>');
   },

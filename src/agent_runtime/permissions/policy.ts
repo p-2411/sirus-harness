@@ -2,7 +2,8 @@ import type { Requester } from './approvals';
 
 // Sirus's three modes are the vendor's. Setting one switches each participant's
 // session with `session/set_mode` to the vendor mode of the matching kind:
-//   ask    — standard: the vendor asks about every action that is not a read
+//   ask    — standard: Claude asks before writes; Codex asks before leaving
+//            its sandbox and allows workspace edits without asking
 //   auto   — auto_review: the vendor's own reviewer decides and escalates only
 //            what it judges unsafe
 //   bypass — full_access: nothing is asked
@@ -19,6 +20,8 @@ export const PERMISSION_MODE_NAMES: Record<PermissionMode, string> = {
   auto: 'auto approve',
   bypass: 'bypass permissions',
 };
+
+export const ASK_MODE_DESCRIPTION = 'Claude asks before writes. Codex asks before leaving the workspace; edits inside it are not asked.';
 
 export const DEFAULT_PERMISSION_MODE: PermissionMode = 'auto';
 

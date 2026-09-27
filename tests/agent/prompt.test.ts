@@ -4,6 +4,59 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { FORKED_WORKER_HANDOVER, sirusPrompt } from '../../src/agent_runtime/prompt';
 import { saveMemoryAccessPreference } from '../../src/persistence';
+import { RECAP_MAX_BYTES, transcriptText } from '../../src/agent_runtime/session/transcript';
+import type { Message } from '../../src/agent_runtime/types';
+
+describe('runtime recap', () => {
+  test('keeps recent conversation and the latest compaction summary within a byte budget', () => {
+    const entries: Message[] = [
+      { seq: 0, role: 'user', content: [{ type: 'text', text: 'Discarded before compaction' }] },
+      { seq: 1, role: 'assistant', content: [
+        { type: 'compaction', summary: 'Superseded summary' },
+        { type: 'text', text: 'Already represented in the summary' },
+        { type: 'compaction', summary: 'Latest summary: preserve the migration plan.' },
+      ] },
+      ...Array.from({ length: 200 }, (_, index): Message => ({
+        seq: index + 2, role: 'user', content: [{ type: 'text', text: `message-${index}: ${'界🌍'.repeat(80)}` }],
+      })),
+      { seq: 202, role: 'assistant', participant: 'reviewer', content: [{ type: 'text', text: 'Latest answer' }] },
+    ];
+    const recap = transcriptText(entries);
+    expect(Buffer.byteLength(recap)).toBeLessThanOrEqual(RECAP_MAX_BYTES);
+    expect(recap).toContain('Latest summary: preserve the migration plan.');
+    expect(recap).toContain('message-199:');
+    expect(recap).toEndWith('@reviewer: Latest answer');
+    expect(recap).toContain('older conversation text omitted');
+    for (const omitted of ['Discarded before compaction', 'Superseded summary', 'Already represented in the summary', 'message-0:', '\uFFFD']) {
+      expect(recap).not.toContain(omitted);
+    }
+  });
+
+  test('bounds an oversized summary and message without losing the newest text', () => {
+    const recap = transcriptText([
+      { seq: 0, role: 'assistant', content: [{ type: 'compaction', summary: `Summary starts here. ${'🌍'.repeat(RECAP_MAX_BYTES)}` }] },
+      { seq: 1, role: 'user', content: [{ type: 'text', text: `${'界'.repeat(RECAP_MAX_BYTES)} Latest request.` }] },
+    ]);
+    expect(Buffer.byteLength(recap)).toBeLessThanOrEqual(RECAP_MAX_BYTES);
+    expect(recap).toContain('Summary starts here.');
+    expect(recap).toContain('compaction summary was also shortened');
+    expect(recap).toEndWith('Latest request.');
+    expect(recap).not.toContain('\uFFFD');
+  });
+
+  test('leaves short recaps intact and excludes notices and private thoughts', () => {
+    expect(transcriptText([
+      { seq: 0, role: 'user', content: [{ type: 'text', text: 'Hello' }] },
+      { seq: 1, role: 'assistant', participant: 'reviewer', content: [
+        { type: 'thought', text: 'Private thought' },
+        { type: 'notice', severity: 'error', title: 'Adapter stopped' },
+        { type: 'compaction' },
+        { type: 'text', text: 'Hi' },
+      ] },
+    ])).toBe('User: Hello\n@reviewer: Hi');
+    expect(transcriptText([])).toBe('');
+  });
+});
 
 describe('system prompt', () => {
   test('adds only what the vendor cannot know to its own prompt', () => {

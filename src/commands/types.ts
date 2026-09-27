@@ -1,3 +1,4 @@
+import type { BackgroundTask } from '../agent_runtime/runtime/runtime';
 import type { PermissionMode } from '../agent_runtime/permissions/policy';
 import type { Checkpoint, Participant, RewindOptions, RewindResult } from '../agent_runtime/session';
 import type { SubagentRun } from '../agent_runtime/tools/subagents';
@@ -58,6 +59,8 @@ export interface CommandSession {
   setSubagentModel(model: string | null): void;
   // The session's workers, oldest first, and what the user can do to one.
   getWorkers(): SubagentRun[];
+  getBackgroundTasks(): (BackgroundTask & { participant: string })[];
+  stopBackgroundTask(participant: string, id: string): Promise<boolean>;
   cancelWorker(id: string): Promise<void>;
   messageWorker(id: string, text: string): Promise<void>;
   dismissWorker(id: string): void;

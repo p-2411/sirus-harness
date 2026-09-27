@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import {
 	isPlanCall,
 	planEntriesOf,
@@ -544,20 +544,84 @@ export function ImageLine({ image }: { image: ImageBlock }) {
 	return <Text color={theme.textMuted}>▣ {describeImage(image)}</Text>;
 }
 
-export function ChatMessage({
-	message,
-	model,
-	participantColors,
-	sessionId,
-	live = false,
-}: {
+interface ChatMessageProps {
 	sessionId?: string;
 	message: Message;
 	model?: string;
 	participantColors?: ParticipantColors;
 	// The reply is still being written.
 	live?: boolean;
+}
+
+function sameFields<T extends object>(left: T, right: T): boolean {
+	const keys = Object.keys(left) as (keyof T)[];
+	return keys.length === Object.keys(right).length
+		&& keys.every(key => Object.is(left[key], right[key]));
+}
+
+function sameColors(left?: ParticipantColors, right?: ParticipantColors): boolean {
+	if (left === right) return true;
+	return left !== undefined && right !== undefined && left.size === right.size
+		&& [...left].every(([name, color]) => right.get(name) === color);
+}
+
+function messageSnapshot(message: Message): Message {
+	return { ...message, content: message.content.map(block => ({ ...block })) };
+}
+
+function sameMessage(previous: Message, next: Message): boolean {
+	return previous.seq === next.seq && previous.role === next.role
+		&& previous.participant === next.participant
+		&& previous.content.length === next.content.length
+		&& previous.content.every((block, index) => sameFields(block, next.content[index]!));
+}
+
+// Entries and their text blocks are mutated in place. Capture their fields
+// before memoising, including tool outputs that arrive after a turn finishes.
+// Nested tool data is replaced by the runtime reducer, so it keeps its identity.
+export function ChatMessage(props: ChatMessageProps) {
+	return <MessageBody {...props} message={messageSnapshot(props.message)} />;
+}
+
+export function ChatHistory({ messages, participants, isMessageLive, ...props }: {
+	messages: readonly Message[];
+	participants: readonly { name: string; model: string }[];
+	isMessageLive: (message: Message) => boolean;
+	sessionId: string;
+	participantColors: ParticipantColors;
 }) {
+	const models = new Map(participants.map(participant => [participant.name.toLocaleLowerCase(), participant.model]));
+	const entries = messages.map(message => ({
+		message: messageSnapshot(message),
+		model: message.model ?? (message.role === 'assistant' ? models.get((message.participant ?? 'sirus').toLocaleLowerCase()) : undefined),
+		live: isMessageLive(message),
+	}));
+	return <HistoryBody {...props} entries={entries} />;
+}
+
+// A draft edit leaves the entire history subtree alone; streaming only
+// passes the changed entries through the message-level boundary below.
+const HistoryBody = memo(function HistoryBody({ entries, ...props }: {
+	entries: readonly Pick<ChatMessageProps, 'message' | 'model' | 'live'>[];
+	sessionId: string;
+	participantColors: ParticipantColors;
+}) {
+	return entries.map(entry => <MessageBody key={entry.message.seq} {...props} {...entry} />);
+}, (previous, next) => previous.sessionId === next.sessionId
+	&& sameColors(previous.participantColors, next.participantColors)
+	&& previous.entries.length === next.entries.length
+	&& previous.entries.every((entry, index) => {
+		const other = next.entries[index]!;
+		return entry.model === other.model && entry.live === other.live && sameMessage(entry.message, other.message);
+	}));
+
+const MessageBody = memo(function MessageBody({
+	message,
+	model,
+	participantColors,
+	sessionId,
+	live = false,
+}: ChatMessageProps) {
 	const isUser = message.role === "user";
 	const participantName = message.participant ?? 'sirus';
 	const segments = messageSegments(visibleContent(message.content, live));
@@ -612,4 +676,8 @@ export function ChatMessage({
 			})}
 		</Box>
 	);
-}
+}, (previous, next) => previous.sessionId === next.sessionId
+	&& previous.model === next.model
+	&& previous.live === next.live
+	&& sameColors(previous.participantColors, next.participantColors)
+	&& sameMessage(previous.message, next.message));

@@ -156,6 +156,19 @@ describe('input feedback', () => {
 });
 
 describe('input status', () => {
+  test('makes the vendor difference in ask mode visible', () => {
+    const codex = stripAnsi(renderToString(
+      <SubagentStatusRow permissionMode="ask" model="gpt-5.6-luna" />,
+      { columns: 120 },
+    ));
+    expect(codex).toContain('ask for approval (workspace edits allowed)');
+    const claude = stripAnsi(renderToString(
+      <SubagentStatusRow permissionMode="ask" model="claude-sonnet-5" />,
+      { columns: 120 },
+    ));
+    expect(claude).toContain('ask for approval (asks before writes)');
+  });
+
   test('shows the active model and thinking level together', () => {
     const output = stripAnsi(renderToString(
       <SubagentStatusRow model="gpt-5.6-sol" thinkingLevel="high" />,

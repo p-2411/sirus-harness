@@ -5,7 +5,7 @@ import { attachClipboardImage, describeImage, removeStoredImage } from '../../im
 import { Box, Text, measureElement, renderToString, useApp, useBoxMetrics, useInput, useStdout, type DOMElement } from 'ink';
 import { theme } from '../styles/theme';
 import { HORSE } from '../branding/horse';
-import { ChatMessage, PlanChecklist, toolLine } from './ChatMessage';
+import { ChatHistory, PlanChecklist, toolLine } from './ChatMessage';
 import { Spinner } from './Spinner';
 import { InputBar, type InputMode } from './InputBar';
 import { InputFeedback } from './InputRows';
@@ -598,22 +598,13 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
           <Text color={theme.textMuted}>What shall we build?</Text>
         </Box>
       )}
-      {messages.map((message, i) => {
-        const participant = message.role === 'assistant'
-          ? participants.find(candidate =>
-            candidate.name.toLocaleLowerCase() === (message.participant ?? 'sirus').toLocaleLowerCase())
-          : undefined;
-        return (
-          <ChatMessage
-            key={i}
-            sessionId={currSession.getId()}
-            message={message}
-            model={message.model ?? participant?.model}
-            participantColors={participantColors}
-            live={currSession.isMessageLive(message)}
-          />
-        );
-      })}
+      <ChatHistory
+        messages={messages}
+        participants={participants}
+        sessionId={currSession.getId()}
+        participantColors={participantColors}
+        isMessageLive={message => currSession.isMessageLive(message)}
+      />
       {isLoading && (
         <TurnStatus
           messages={messages}

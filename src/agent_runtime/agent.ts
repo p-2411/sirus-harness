@@ -11,11 +11,13 @@ import { providerFor } from './providers';
 import { DEFAULT_MODEL, rememberListedModels, VENDOR_INFO, vendorOf, type Vendor } from './providers/catalog';
 import { sourceEnvironment } from './providers/profiles';
 import { maskApiKey, type Source } from './providers/sources';
+import { turnFailure, type TurnFailure } from './runtime/errors';
 import {
   createRuntime,
   MODE_KINDS,
   runtimeGeneration,
   trackRuntime,
+  type BackgroundTask,
   type ModeKind,
   type Runtime,
   type RuntimeOptions,
@@ -126,6 +128,8 @@ export class SessionAgent {
   private readonly pendingNames = new Set<string>();
   private level?: ThinkingLevel;
   private runtime: Runtime | null = null;
+  private opening: { controller: AbortController; promise: Promise<Runtime>; model: string; source: string } | null = null;
+  private seededRuntime = false;
   private generation = -1;
   // The credential the runtime is on; a source that worked stays first.
   private source: Source | null = null;
@@ -135,12 +139,14 @@ export class SessionAgent {
   // while one is.
   private heardAt = 0;
   private asking = 0;
+  private limitResetsAt: number | undefined;
   // Where the runtime's updates go: the recorder of the turn in flight, and
   // the entry it fills. The runtime outlives turns, so it is handed one
   // stable callback and this is what that callback reads.
   private record: ((update: RuntimeUpdate) => void) | null = null;
   private entry: Message | null = null;
   private readonly subagents = new Map<string, SubagentRun>();
+  private readonly backgroundTasks = new Map<string, BackgroundTask>();
   // Rows claimed by a SpawnAgent request whose worker is still being set up,
   // so two parallel requests never choose the same row.
   private readonly claimedSpawnCallIds = new Set<string>();
@@ -206,8 +212,8 @@ export class SessionAgent {
 
   // Runs one turn: the vendor runtime is prompted and everything it reports
   // lands in the entry as it arrives. Credentials are tried in order; a
-  // runtime lost mid-turn is rebuilt on the next credential and reseeded from
-  // this agent's own record, which already holds the work completed so far.
+  // runtime lost mid-turn is retried once on the same credential, reseeded
+  // from this agent's record, before falling back to the next credential.
   async respond(input: TurnInput, options: RespondOptions): Promise<void> {
     if (this.turn) throw new Error(`@${this.name} is already responding`);
     const controller = new AbortController();
@@ -223,39 +229,59 @@ export class SessionAgent {
     let answered = false;
     try {
       throwIfAborted(signal);
-      const failures: string[] = [];
+      let failure: TurnFailure | undefined;
+      let retried = false;
       let text = input.text;
       for (const source of this.candidateSources()) {
-        throwIfAborted(signal);
-        try {
-          const { runtime, fresh } = await this.ensureRuntime(source, signal);
-          const prompt = fresh ? this.seeded(text, options.carried ?? []) : { text };
-          await runtime.prompt({ ...prompt, images: input.images ?? [] }, signal);
-          this.source = source;
-          answered = true;
-          return;
-        } catch (error) {
+        let retry: boolean;
+        do {
+          retry = false;
           throwIfAborted(signal);
-          if (isAbortError(error)) throw error;
-          this.resetRuntime();
-          // A scripted runtime has no credentials to fall back to; its
-          // failure is the turn's failure.
-          if (!source) throw error;
-          failures.push(`${describeSource(source)}: ${maskSecrets(error, this.candidateSources())}`);
-          // The next attempt reads the record, partial response included.
-          text = `${input.text}\n\nThe previous attempt was interrupted. Continue from the completed work above without repeating it.`;
-        }
+          try {
+            const { runtime, fresh } = await this.ensureRuntime(source, signal);
+            const prompt = fresh ? this.seeded(text, options.carried ?? []) : { text };
+            this.seededRuntime = true;
+            const result = await runtime.prompt({ ...prompt, images: input.images ?? [] }, signal);
+            if (result.stopReason === 'refusal') throw new Error('Vendor refused the request');
+            this.source = source;
+            answered = true;
+            return;
+          } catch (error) {
+            throwIfAborted(signal);
+            if (isAbortError(error)) throw error;
+            failure = turnFailure(error, this.vendor, this.name, this.limitResetsAt);
+            for (const credential of [source, ...this.candidateSources()]) {
+              if (credential?.kind === 'api') failure.message = failure.message.replaceAll(credential.key, maskApiKey(credential.key));
+            }
+            this.resetRuntime();
+            failOpenToolCalls(options.entry.content);
+            if (failure.kind === 'crash' && !retried) {
+              retried = true;
+              retry = true;
+              this.record?.({ type: 'notice', severity: 'info', title: `${VENDOR_INFO[this.vendor].displayName} adapter stopped; retrying once.` });
+            }
+            // The next attempt reads the record, partial response included.
+            text = `${input.text}\n\nThe previous attempt was interrupted. Continue from the completed work above without repeating it.`;
+          }
+        } while (retry);
       }
       const vendor = this.vendor;
-      if (failures.length === 0) {
+      if (!failure) {
         throw new Error(`No ${VENDOR_INFO[vendor].displayName} API key. Run /login to sign in or paste a key.`);
       }
-      throw new Error(`All ${VENDOR_INFO[vendor].displayName} sources failed (${failures.length}): ${failures.join('; ')}`);
+      throw new Error(failure.message);
+    } catch (error) {
+      if (!signal.aborted && !isAbortError(error)) {
+        const title = error instanceof Error ? error.message : String(error);
+        this.record?.({ type: 'notice', severity: 'error', title });
+      }
+      throw error;
     } finally {
       outer?.removeEventListener('abort', follow);
       // A turn that was cancelled or failed reports nothing more: updates
       // arriving after this are dropped, so a call it left open would read
       // as running for good.
+      if (!answered && this.opening) this.resetRuntime();
       if (!answered && failOpenToolCalls(options.entry.content)) options.onUpdate?.();
       this.turn = null;
       this.record = null;
@@ -306,6 +332,7 @@ export class SessionAgent {
       // so the next turn does not mistake it for a runtime on another one.
       this.source = owner.source;
       this.context = forked.context;
+      this.seededRuntime = true;
       return true;
     } catch {
       return false;
@@ -323,8 +350,18 @@ export class SessionAgent {
   // from this agent's record: after a rewind, a cleared history, or a change
   // the running session cannot take.
   resetRuntime(): void {
+    this.opening?.controller.abort(new TurnCancelledError());
+    this.opening = null;
     const runtime = this.runtime;
     this.runtime = null;
+    this.seededRuntime = false;
+    this.context = null;
+    this.limitResetsAt = undefined;
+    for (const task of this.backgroundTasks.values()) {
+      if (task.state === 'running' || task.state === 'paused') {
+        this.hear({ type: 'async_task', task: { ...task, state: 'stopped', canStop: false } });
+      }
+    }
     if (runtime) {
       runtime.dispose();
       this.provider?.clearActive(this.runtimeId);
@@ -335,13 +372,24 @@ export class SessionAgent {
   // it; otherwise the next turn starts a runtime on the new model.
   setModel(model: string): void {
     if (this.model === model) return;
+    const previousVendor = this.vendor;
+    const warn = () => {
+      if (this.transcript.entries().length) this.host.notice(this, {
+        type: 'notice', severity: 'warning',
+        title: `Switching @${this.name} to ${model} restarts its session; it keeps the conversation as text.`,
+      });
+    };
+    if (this.opening || vendorOf(model) !== previousVendor) {
+      if (this.runtime) warn();
+      this.resetRuntime();
+    }
     this.model = model;
     const runtime = this.runtime;
     if (!runtime) return;
     void runtime.setModel(model).then(applied => {
-      if (!applied && this.runtime === runtime) this.resetRuntime();
+      if (!applied && this.runtime === runtime && this.model === model) { warn(); this.resetRuntime(); }
     }).catch(() => {
-      if (this.runtime === runtime) this.resetRuntime();
+      if (this.runtime === runtime && this.model === model) { warn(); this.resetRuntime(); }
     });
   }
 
@@ -378,48 +426,112 @@ export class SessionAgent {
     return [...sources.filter(source => source.id === current.id), ...sources.filter(source => source.id !== current.id)];
   }
 
+  // Opening is shared with the first prompt. A replaced draft cannot adopt
+  // a late runtime from its old model or credential.
+  async warmup(): Promise<void> {
+    if (this.busy) return;
+    const source = (this.provider?.sources.list() ?? this.candidateSources())[0];
+    if (source === undefined) { this.resetRuntime(); return; }
+    await this.ensureRuntime(source, new AbortController().signal);
+  }
+
+  releaseWarmup(): void {
+    if (!this.busy && !this.seededRuntime) this.resetRuntime();
+  }
+
   private async ensureRuntime(
     source: Source | null,
     signal: AbortSignal,
   ): Promise<{ runtime: Runtime; fresh: boolean }> {
+    const identity = JSON.stringify(source);
+    if (this.opening && (this.opening.model !== this.model || this.opening.source !== identity)) this.resetRuntime();
     const stale = this.runtime !== null
       && (this.runtime.lost
         || this.generation !== runtimeGeneration()
-        || this.source?.id !== source?.id
+        || JSON.stringify(this.source) !== identity
         || this.runtime.model !== this.model);
     if (stale) this.resetRuntime();
-    if (this.runtime) return { runtime: this.runtime, fresh: false };
-    const env = source && vendorOf(this.model) ? sourceEnvironment(this.vendor, source) : { ...process.env };
-    const generation = runtimeGeneration();
-    const runtime = await createRuntime({
-      vendor: this.vendor,
-      model: this.model,
-      thinkingLevel: this.thinkingLevel,
-      directory: this.host.directory,
-      systemPrompt: this.systemPrompt(),
-      tools: this.definition?.tools,
-      readOnly: readOnlyTools(this.definition?.tools),
-      env,
-      mcpServer: await this.host.mcpServer(this),
-      permissionMode: this.host.permissionMode(),
-      onPermission: (request, promptSignal) => this.askPermission(request, promptSignal),
-      onElicitation: (request, promptSignal) => this.askUser(request, promptSignal),
-      onUpdate: update => this.hear(update),
-    });
-    if (signal.aborted) {
-      runtime.dispose();
-      throw abortReason(signal);
+    if (this.runtime) return { runtime: this.runtime, fresh: !this.seededRuntime };
+    if (!this.opening) {
+      const controller = new AbortController();
+      const model = this.model;
+      const vendor = this.vendor;
+      const generation = runtimeGeneration();
+      const opening = {
+        controller, model, source: identity,
+        promise: null as unknown as Promise<Runtime>,
+      };
+      this.opening = opening;
+      opening.promise = (async () => {
+        const mcpServer = await this.host.mcpServer(this);
+        throwIfAborted(controller.signal);
+        const thinkingLevel = this.thinkingLevel;
+        const permissionMode = this.host.permissionMode();
+        const runtime = await createRuntime({
+          vendor, model,
+          signal: controller.signal,
+          thinkingLevel,
+          directory: this.host.directory,
+          systemPrompt: this.systemPrompt(),
+          tools: this.definition?.tools,
+          readOnly: readOnlyTools(this.definition?.tools),
+          env: source && vendorOf(model) ? sourceEnvironment(vendor, source) : { ...process.env },
+          mcpServer,
+          permissionMode,
+          onPermission: (request, promptSignal) => this.askPermission(request, promptSignal),
+          onElicitation: (request, promptSignal) => this.askUser(request, promptSignal),
+          onUpdate: update => { if (!controller.signal.aborted) this.hear(update); },
+        });
+        try {
+          if (permissionMode !== this.host.permissionMode()) {
+            const mode = vendor === 'gpt' && readOnlyTools(this.definition?.tools) ? 'ask' : this.host.permissionMode();
+            this.noteMode(mode, await runtime.setPermissionMode(mode), false);
+          }
+          if (thinkingLevel !== this.thinkingLevel) await runtime.setThinkingLevel(this.thinkingLevel);
+        } catch (error) {
+          runtime.dispose();
+          throw error;
+        }
+        if (controller.signal.aborted || generation !== runtimeGeneration()) {
+          runtime.dispose();
+          throw abortReason(controller.signal);
+        }
+        this.runtime = runtime;
+        this.generation = generation;
+        this.source = source;
+        this.context = runtime.context;
+        if (source) this.provider?.markActive(this.runtimeId, source);
+        return runtime;
+      })().finally(() => { if (this.opening === opening) this.opening = null; });
     }
-    this.runtime = runtime;
-    this.generation = generation;
-    this.source = source;
-    this.context = runtime.context;
-    if (source) this.provider?.markActive(this.runtimeId, source);
-    return { runtime, fresh: true };
+    const runtime = await abortable(this.opening.promise, signal);
+    return { runtime, fresh: !this.seededRuntime };
   }
 
   private hear(update: RuntimeUpdate): void {
     this.heardAt = Date.now();
+    if (update.type === 'rate_limit') {
+      this.limitResetsAt = update.resetsAt;
+      return;
+    }
+    if (update.type === 'async_task') {
+      const task = update.task;
+      const previous = this.backgroundTasks.get(task.id);
+      this.backgroundTasks.set(task.id, task);
+      if (!previous || previous.state !== task.state) {
+        const notice: NoticeBlock = {
+          type: 'notice', severity: task.state === 'failed' ? 'error' : 'info',
+          title: `Background task ${task.id} ${task.state}: ${task.name}`,
+          description: task.summary ?? `Use /tasks @${this.subagentId ?? this.name} ${task.id} to inspect it.`,
+        };
+        if (!this.record) {
+          const reply = [...this.transcript.entries()].reverse().find(entry => entry.role === 'assistant' && entry.participant === this.name);
+          reply?.content.push(notice);
+        }
+        this.hear(notice);
+      }
+      return;
+    }
     // The vendor's commands are the menu's, whether or not a turn is running.
     // A worker's are its worktree's, which the menu never asks about.
     if (update.type === 'commands') {
@@ -584,6 +696,20 @@ export class SessionAgent {
     return [...this.subagents.values()];
   }
 
+  listBackgroundTasks(): BackgroundTask[] {
+    return [...this.backgroundTasks.values()];
+  }
+
+  async stopBackgroundTask(id: string): Promise<boolean> {
+    const task = this.backgroundTasks.get(id);
+    if (!task?.canStop || !this.runtime) return false;
+    const stopped = await this.runtime.stopTask(id);
+    if (stopped && this.backgroundTasks.get(id)?.canStop) {
+      this.hear({ type: 'async_task', task: { ...task, state: 'stopped', canStop: false } });
+    }
+    return stopped;
+  }
+
   describeSubagents(): Record<string, unknown>[] {
     return describeSubagents(this.listSubagents());
   }
@@ -666,17 +792,4 @@ export class SessionAgent {
       ? `Unknown subagent "${id}". Known subagents: ${known.join(', ')}`
       : `Unknown subagent "${id}". No subagent has been spawned yet.`);
   }
-}
-
-function describeSource(source: Source | null): string {
-  if (!source) return 'process environment';
-  return source.kind === 'api' ? `API ${maskApiKey(source.key)}` : `subscription ${source.label ?? source.id}`;
-}
-
-// A failure message must not carry a key it was handed.
-function maskSecrets(error: unknown, sources: readonly (Source | null)[]): string {
-  const detail = error instanceof Error ? error.message : String(error);
-  return sources.reduce((text, source) => source?.kind === 'api'
-    ? text.replaceAll(source.key, maskApiKey(source.key))
-    : text, detail);
 }

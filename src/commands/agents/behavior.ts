@@ -1,5 +1,5 @@
 import { saveSirusModelPreference } from '../../persistence';
-import { listedDescription, modelIds, modelsOf, VENDOR_INFO, VENDORS } from '../../agent_runtime/providers/catalog';
+import { listedDescription, modelIds, modelsOf, vendorOf, VENDOR_INFO, VENDORS } from '../../agent_runtime/providers/catalog';
 import type { SubagentRun } from '../../agent_runtime/tools/subagents';
 import { renderTranscript } from '../../agent_runtime/tools/subagents/report';
 import {
@@ -63,7 +63,14 @@ export function resolveModelReference(
   throw new Error(`Ambiguous model "${reference}". Matches: ${matches.join(', ')}`);
 }
 
-export function modelMenuItems(args: readonly string[] = []): CommandMenuEntry[] | null {
+function modelRestartWarning(participantName: string, model: string, session?: CommandSession): string | null {
+  if (!session || session.isEmpty()) return null;
+  const participant = session.getParticipants().find(candidate => candidate.name.toLocaleLowerCase() === participantName.toLocaleLowerCase());
+  if (!participant || !vendorOf(participant.model) || vendorOf(participant.model) === vendorOf(model)) return null;
+  return `Switching @${participant.name} to ${model} restarts its session; it keeps the conversation as text.`;
+}
+
+export function modelMenuItems(args: readonly string[] = [], session?: CommandSession): CommandMenuEntry[] | null {
   if (args.length > 1 || (args.length === 1 && !args[0].startsWith('@'))) return null;
   const participant = args[0]?.replace(/^@/, '');
 
@@ -74,7 +81,7 @@ export function modelMenuItems(args: readonly string[] = []): CommandMenuEntry[]
       label: VENDOR_INFO[vendor].displayName,
     },
     ...modelsOf(vendor).map(model => {
-      const description = listedDescription(model);
+      const description = [modelRestartWarning(participant ?? 'sirus', model, session), listedDescription(model)].filter(Boolean).join(' ');
       return {
         type: 'item' as const,
         key: model,
@@ -90,9 +97,12 @@ export function changeModel(
   participantName: string = 'sirus',
   model: string,
   session: CommandSession,
+  notify?: (text: string) => void,
 ): Feedback {
   const resolvedModel = resolveModelReference(model);
   const normalizedParticipantName = participantName.replace(/^@/, '');
+  const warning = modelRestartWarning(normalizedParticipantName, resolvedModel, session);
+  if (warning) notify?.(warning);
   session.changeParticipantModel(participantName, resolvedModel);
   // Choosing Sirus before a conversation starts also chooses the default for
   // future sessions. Existing sessions retain their own participant models.
@@ -104,8 +114,8 @@ export function changeModel(
     };
   }
   return {
-    kind: 'success',
-    text: `@${normalizedParticipantName} model set to ${resolvedModel}.`,
+    kind: warning ? 'warning' : 'success',
+    text: warning ?? `@${normalizedParticipantName} model set to ${resolvedModel}.`,
   };
 }
 

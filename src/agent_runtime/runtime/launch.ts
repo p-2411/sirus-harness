@@ -159,6 +159,9 @@ function claudeLaunch(options: RuntimeOptions, mode: PermissionMode): Launch {
 
 // codex-acp's mode ids by the kind Sirus's modes map onto (`_AgentMode` in
 // its source). The adapter reads the initial one from the environment.
+// In 1.13.1, "read-only" still permits workspace writes. Its fixed turn
+// policies override CODEX_CONFIG; neither metadata nor set_config_option
+// exposes a stricter policy. The UI explains this vendor difference.
 const CODEX_MODES: Record<PermissionMode, string> = {
   ask: 'read-only',
   auto: 'agent',

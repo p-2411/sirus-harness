@@ -14,6 +14,7 @@ import { useTerminalFocus } from "./interaction/useTerminalFocus";
 import { useNotifications } from "./useNotifications";
 import { isKnownModel } from '../agent_runtime/providers/catalog';
 import { checkSirusUpdate } from '../updater';
+import { onProviderChange } from '../agent_runtime/providers';
 
 export function nextSessionName(sessions: readonly Session[]): string {
   let sessionCount = sessions.length + 1;
@@ -82,6 +83,22 @@ export default function App({ launchDirectory = process.cwd() }: { launchDirecto
   // focus reporting and the notifications that depend on it, likewise
   useTerminalFocus();
   useNotifications(useMemo(() => [...sessions, draftSession], [sessions, draftSession]));
+
+  useEffect(() => {
+    let mounted = true;
+    const warm = () => queueMicrotask(() => {
+      if (mounted) void activeSession.warmup().catch(() => { /* The first turn reports a failed startup. */ });
+    });
+    warm();
+    const stopSession = activeSession.subscribe(warm);
+    const stopSources = onProviderChange(warm);
+    return () => {
+      mounted = false;
+      stopSession();
+      stopSources();
+      activeSession.releaseWarmup();
+    };
+  }, [activeSession]);
 
   useInput((input, key) => {
     if (key.ctrl && input === 'b' && key.eventType !== 'release') setSidebarCollapsed(collapsed => !collapsed);

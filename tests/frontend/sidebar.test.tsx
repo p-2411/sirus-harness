@@ -288,7 +288,7 @@ describe('sidebar session status', () => {
     expect(render(session)).toContain('○ Active');
 
     finish();
-    await expect(turn).rejects.toThrow('runtime failed');
+    await expect(turn).rejects.toThrow('refused or could not complete');
     expect(render(session)).toContain('● Active');
 
     session.dispose();

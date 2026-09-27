@@ -8,6 +8,7 @@ import { sirusPrompt } from '../prompt';
 import { servableModelIds, servesModel } from '../providers';
 import { DEFAULT_MODEL, vendorOf } from '../providers/catalog';
 import { nativeCommands, type NativeCommand } from '../runtime/commands';
+import type { BackgroundTask } from '../runtime/runtime';
 import { registerToolSession, sirusMcpServerEntry, unregisterToolSession } from '../tools/server';
 import {
   notifySubagents,
@@ -921,6 +922,14 @@ export class Session {
     return this.roster.default.model;
   }
 
+  async warmup(): Promise<void> {
+    if (!this.disposed && this.isEmpty()) await this.roster.default.warmup();
+  }
+
+  releaseWarmup(): void {
+    this.roster.default.releaseWarmup();
+  }
+
   getThinkingLevel(participantName?: string): ThinkingLevel {
     return this.roster.thinkingLevel(participantName);
   }
@@ -935,6 +944,21 @@ export class Session {
 
   getSubagentModel(): string | null {
     return this.subagentModel;
+  }
+
+  getBackgroundTasks(): (BackgroundTask & { participant: string })[] {
+    return [
+      ...this.roster.all().flatMap(agent =>
+        agent.listBackgroundTasks().map(task => ({ ...task, participant: agent.name }))),
+      ...this.getWorkers().flatMap(run =>
+        (run.worker?.listBackgroundTasks() ?? []).map(task => ({ ...task, participant: run.id }))),
+    ];
+  }
+
+  async stopBackgroundTask(participant: string, id: string): Promise<boolean> {
+    const name = participant.replace(/^@/, '');
+    const agent = this.getWorkers().find(run => run.id === name)?.worker ?? this.roster.require(name);
+    return agent.stopBackgroundTask(id);
   }
 
   // The session's workers, oldest first, restored records included.
