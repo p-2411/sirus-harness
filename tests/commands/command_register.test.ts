@@ -183,6 +183,9 @@ describe('executeCommand', () => {
     });
     expect(current.getMessages()).toEqual([]);
     expect(other.getMessages()).toHaveLength(1);
+    // A command that takes no arguments turns them away instead of running.
+    expect(() => runCommand('clear', ['junk'], other)).toThrow('Usage: /clear');
+    expect(other.getMessages()).toHaveLength(1);
   });
 
   test('rename command updates the current session and rejects an empty name', () => {

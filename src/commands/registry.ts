@@ -13,13 +13,14 @@ import { rewindCommandSpec, undoCommandSpec } from './checkpoints/commands';
 import { imageCommandSpec } from './images/commands';
 import { notifyCommandSpec } from './notifications/commands';
 import type { NativeCommand } from '../agent_runtime/runtime/commands';
-import type {
-  CommandCapabilities,
-  CommandContext,
-  CommandMenuEntry,
-  CommandResult,
-  CommandSession,
-  CommandSpec,
+import {
+  commandUsage,
+  type CommandCapabilities,
+  type CommandContext,
+  type CommandMenuEntry,
+  type CommandResult,
+  type CommandSession,
+  type CommandSpec,
 } from './types';
 
 export type {
@@ -127,5 +128,8 @@ export function executeCommand(
 ): CommandResult {
   const spec = commandRegistry.find(spec => spec.name === command);
   if (!spec) throw new Error(`Unknown command: /${command}`);
+  // A command that declares no arguments takes none, so `/clear now` is a
+  // mistake to point out rather than a /clear.
+  if (!spec.args && args.length > 0) throw new Error(`Usage: ${commandUsage(spec)}`);
   return spec.run(args, context);
 }

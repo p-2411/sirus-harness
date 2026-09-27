@@ -94,6 +94,8 @@ export type CommandCapabilities = Partial<AttachesImages & QuitsApp>;
 
 export interface CommandSpec {
   name: string;
+  // The arguments it takes, as the menu and /help write them. A spec without
+  // them takes none, and executeCommand turns any away with its usage.
   args?: string;
   description: string;
   // Returned feedback is shown after completion; notify shows interim info

@@ -38,9 +38,6 @@ export function helpCommand(commands: () => readonly CommandSpec[]): CommandSpec
   return {
     name: 'help',
     description: 'list commands and keys',
-    run: args => {
-      if (args.length > 0) throw new Error('Usage: /help');
-      return { kind: 'info', text: helpText(commands()), showIcon: false, panel: true };
-    },
+    run: () => ({ kind: 'info', text: helpText(commands()), showIcon: false, panel: true }),
   };
 }

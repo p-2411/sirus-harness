@@ -13,17 +13,11 @@ async function updateCommand(notify: Notify, signal?: AbortSignal): Promise<Feed
 export const updateCommandSpec: CommandSpec = {
   name: 'update',
   description: 'install the latest release',
-  run: (args, context) => {
-    if (args.length > 0) throw new Error('Usage: /update');
-    return updateCommand(context.notify, context.signal);
-  },
+  run: (_args, context) => updateCommand(context.notify, context.signal),
 };
 
 export const versionCommandSpec: CommandSpec = {
   name: 'version',
   description: 'show the installed version',
-  run: args => {
-    if (args.length > 0) throw new Error('Usage: /version');
-    return { kind: 'info', text: `sirus ${SIRUS_VERSION}`, showIcon: false };
-  },
+  run: () => ({ kind: 'info', text: `sirus ${SIRUS_VERSION}`, showIcon: false }),
 };

@@ -10,10 +10,7 @@ export const clearCommand: CommandSpec = {
 export const compactCommandSpec: CommandSpec = {
   name: 'compact',
   description: 'ask the agent to compact its context now',
-  run: (args, context) => {
-    if (args.length > 0) throw new Error('Usage: /compact');
-    return compactCommand(context.session, context.signal);
-  },
+  run: (_args, context) => compactCommand(context.session, context.signal),
 };
 
 export const renameCommand: CommandSpec = {
@@ -27,8 +24,7 @@ export const exitCommand: CommandSpec = {
   name: 'exit',
   description: 'quit sirus',
   // Only a caller that owns the app can quit it.
-  run: (args, context) => {
-    if (args.length > 0) throw new Error('Usage: /exit');
+  run: (_args, context) => {
     if (!context.exit) throw new Error('/exit is not available here.');
     context.exit();
   },
