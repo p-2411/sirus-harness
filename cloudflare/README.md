@@ -6,14 +6,13 @@ The numbers are estimates. A public endpoint cannot prevent someone from submitt
 
 ## Deploy
 
-From this directory:
+`wrangler.toml` holds the project's own deployment: its D1 `database_id` and, under `[vars]`, the dashboard origin in `ALLOWED_ORIGIN`. For a deployment of your own, replace both. From this directory:
 
 ```sh
-# Create the D1 database and copy its id into wrangler.toml.
+# Create the D1 database and put its id in database_id in wrangler.toml.
 npx wrangler d1 create sirus-installations
 
-# Replace YOUR_D1_DATABASE_ID in wrangler.toml, and set the dashboard origin
-# in [vars] ALLOWED_ORIGIN when the GitHub Pages URL is known.
+# Set ALLOWED_ORIGIN in wrangler.toml to the origin that serves the dashboard.
 npx wrangler d1 execute sirus-installations --remote --file=schema.sql
 
 # Use a long random value. It is not stored in D1.
@@ -29,7 +28,7 @@ The deployed Worker has:
 - `OPTIONS` responses for browser CORS preflight; and
 - a daily scheduled cleanup that removes records older than 35 days.
 
-Released Sirus builds use the deployed Worker URL by default. Set `SIRUS_HEARTBEAT_URL` to override it, or set it to an empty value to disable heartbeats:
+Every Sirus build, released or run from source, sends its heartbeat to the deployed Worker's `/heartbeat` by default. Set `SIRUS_HEARTBEAT_URL` to send it elsewhere, or set it to an empty value to disable heartbeats; a URL that is not HTTPS, other than plain HTTP to localhost, disables them too:
 
 ```sh
 export SIRUS_HEARTBEAT_URL=https://your-worker.your-subdomain.workers.dev/heartbeat
@@ -41,7 +40,7 @@ The client creates one random 128-bit ID in its local Sirus data directory, send
 
 ## Dashboard
 
-`../stats-dashboard/index.html` is a dependency-free GitHub Pages dashboard. The repository workflow publishes that directory; set the repository's Pages source to **GitHub Actions** before the first deployment. Open it with the Worker stats URL in the `api` query parameter, for example:
+`../stats-dashboard/index.html` is a dependency-free GitHub Pages dashboard. The repository workflow publishes that directory; set the repository's Pages source to **GitHub Actions** before the first deployment. The page reads from the deployed Worker by default. To point it at another, give that Worker's base URL in the `api` query parameter, or set `window.SIRUS_STATS_API_URL` before the page's script runs, for example:
 
 ```text
 https://your-user.github.io/your-repo/?api=https%3A%2F%2Fyour-worker.your-subdomain.workers.dev
