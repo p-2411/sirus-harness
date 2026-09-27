@@ -1,3 +1,4 @@
+import { PERMISSION_MODES, type PermissionMode } from '../types';
 import type { Requester } from './approvals';
 
 // Sirus's three modes are the vendor's. Setting one switches each participant's
@@ -10,9 +11,9 @@ import type { Requester } from './approvals';
 // also picks the vendor mode. Whatever the vendor escalates arrives as
 // `session/request_permission` and is answered by `./approvals`.
 
-export type PermissionMode = 'ask' | 'auto' | 'bypass';
-
-export const PERMISSION_MODES: readonly PermissionMode[] = ['ask', 'auto', 'bypass'];
+// The list of modes lives in the zero-dependency type module, where the
+// session file validates against it; this is still where it is imported from.
+export { PERMISSION_MODES, type PermissionMode };
 
 export const PERMISSION_MODE_NAMES: Record<PermissionMode, string> = {
   ask: 'ask for approval',
@@ -23,7 +24,7 @@ export const PERMISSION_MODE_NAMES: Record<PermissionMode, string> = {
 export const DEFAULT_PERMISSION_MODE: PermissionMode = 'auto';
 
 export function parsePermissionMode(value: unknown): PermissionMode | null {
-  return value === 'ask' || value === 'auto' || value === 'bypass' ? value : null;
+  return PERMISSION_MODES.includes(value as PermissionMode) ? value as PermissionMode : null;
 }
 
 export function nextPermissionMode(mode: PermissionMode): PermissionMode {

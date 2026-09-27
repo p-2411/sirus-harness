@@ -182,6 +182,30 @@ export function parseThinkingLevel(value: unknown): ThinkingLevel | null {
     : null;
 }
 
+// The lists below belong to the permission policy and the subagents, which
+// export them as their own. They are declared here because the session file
+// validates against them and persistence imports nothing else of the runtime,
+// so a value added to one is a value the file can read back.
+
+// Sirus's three permission modes, in the order the mode switch cycles them;
+// `permissions/policy.ts` says what each one does.
+export const PERMISSION_MODES = ['ask', 'auto', 'bypass'] as const;
+
+export type PermissionMode = typeof PERMISSION_MODES[number];
+
+// How a worker's conversation starts: from nothing, or as a fork of the
+// conversation of the agent that spawned it.
+export const WORKER_CONTEXTS = ['fresh', 'owner'] as const;
+
+export type WorkerContext = typeof WORKER_CONTEXTS[number];
+
+// Where a delegated run stands. `interrupted` is a run that was still working
+// when the process it lived in ended: its record survives in the session
+// file, nothing restarts it.
+export const SUBAGENT_STATUSES = ['working', 'done', 'failed', 'cancelled', 'interrupted'] as const;
+
+export type SubagentStatus = typeof SUBAGENT_STATUSES[number];
+
 // The prose of a message: its text blocks joined with exactly one newline.
 export function textOf(message: Pick<Message, 'content'>): string {
   return message.content

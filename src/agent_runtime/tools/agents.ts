@@ -1,5 +1,6 @@
+import { WORKER_CONTEXTS, type WorkerContext } from '../types';
 import { requiredString } from './arguments';
-import type { SubagentHost, Tool, ToolContext, WorkerContext } from './types';
+import type { SubagentHost, Tool, ToolContext } from './types';
 
 // Delegation: starting, watching, steering and stopping subagents. Only a
 // participant with a subagent host can use these, which is why the server
@@ -9,8 +10,6 @@ function host(ctx: ToolContext, toolName: string): SubagentHost {
   if (!ctx.subagents) throw new Error(`${toolName} needs the calling agent`);
   return ctx.subagents;
 }
-
-const WORKER_CONTEXTS: readonly WorkerContext[] = ['fresh', 'owner'];
 
 function workerContext(args: Record<string, unknown>): WorkerContext {
   const value = args.context;

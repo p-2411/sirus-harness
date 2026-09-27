@@ -5,9 +5,12 @@ import { dataDirectory } from '../dataDirectory';
 import {
   failOpenToolCalls,
   IMAGE_MEDIA_TYPES,
+  PERMISSION_MODES,
+  SUBAGENT_STATUSES,
   THINKING_LEVELS,
   TOOL_CALL_STATUSES,
   TOOL_KINDS,
+  WORKER_CONTEXTS,
   type Message,
   type MessageBlock,
   type ToolCallBlock,
@@ -122,11 +125,11 @@ const workerSchema = z.object({
   owner: z.string().min(1),
   model: z.string().min(1),
   thinkingLevel: z.enum(THINKING_LEVELS),
-  context: z.enum(['fresh', 'owner']),
+  context: z.enum(WORKER_CONTEXTS),
   prompt: z.string(),
   directory: z.string().min(1),
   branch: z.string().min(1).nullable(),
-  status: z.enum(['working', 'done', 'failed', 'cancelled', 'interrupted']),
+  status: z.enum(SUBAGENT_STATUSES),
   startedAt: z.number(),
   finishedAt: z.number().nullable(),
   // Absent in files written before the strip ordered runs by freshness.
@@ -165,7 +168,7 @@ const sessionSchema = z.object({
   inputContent: z.string().optional(),
   // Unknown values fail the parse of that session; an absent one means the
   // default (auto approve).
-  permissionMode: z.enum(['ask', 'auto', 'bypass']).optional(),
+  permissionMode: z.enum(PERMISSION_MODES).optional(),
   subagentModel: z.string().min(1).optional(),
   // Every worker the session's participants spawned; absent for a session
   // that never delegated and in files written before workers were kept.
