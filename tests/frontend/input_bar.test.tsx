@@ -566,6 +566,14 @@ describe('entry input', () => {
     expect(output).not.toContain('sk-ant');
   });
 
+  test('gives a secret one dot per character, however many code points each takes', () => {
+    const output = stripAnsi(renderToString(
+      <EntryInput prompt="Key" value="a👍🏽b" masked />,
+      { columns: 80 },
+    ));
+    expect(output).toContain('Key: •••▌');
+  });
+
   test('shows an ordinary value as it is typed', () => {
     const output = stripAnsi(renderToString(
       <EntryInput prompt="Message for sub-1234" value="check the tests too" masked={false} />,

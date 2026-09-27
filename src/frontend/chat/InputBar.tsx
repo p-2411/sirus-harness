@@ -9,11 +9,18 @@ import { InputFeedback, QueuedRow } from './InputRows';
 import { SubagentStatusRow, type StatusRowProps } from './StatusRow';
 import { stripWorkers, WorkerStrip, type WorkerSelection } from './WorkerStrip';
 import { PromptBar, type PromptMode } from './PromptBar';
-import { applyInputEdit, normalizeNewlines, onFirstLine, onLastLine, type InputEdit, type InputState } from './editor';
+import {
+  applyInputEdit,
+  isForeignInput,
+  isTypedText,
+  normalizeNewlines,
+  onFirstLine,
+  onLastLine,
+  type InputEdit,
+  type InputState,
+} from './editor';
 import { composeContent, removedPlaceholders, useDraftImages } from './draft';
 import { MentionText, participantColorMap } from '../MentionText';
-import { isMouseInput } from '../interaction/mouse';
-import { isFocusInput } from '../terminal/window-focus';
 import { getSelectionSnapshot, subscribeSelection } from '../interaction/selection';
 import type { Feedback } from '../../commands/feedback';
 import type { Participant, QueuedMessage } from '../../agent_runtime/session';
@@ -285,10 +292,7 @@ export function InputBar({
   useInput((enteredInput, key) => {
     // The prompt modes read the keyboard themselves.
     if (mode.type !== 'text') return;
-    // Mouse and window-focus reports are not typing.
-    if (isMouseInput(enteredInput) || isFocusInput(enteredInput)) return;
-    // Session switching belongs to the sidebar in every input mode.
-    if (key.meta && (key.upArrow || key.downArrow)) return;
+    if (isForeignInput(enteredInput, key)) return;
 
     // Most terminals (macOS included) send DEL for the backspace key, which
     // Ink reports as key.delete rather than key.backspace.
@@ -313,9 +317,7 @@ export function InputBar({
         setWorkerSelection(null);
         return;
       }
-      if (!enteredInput || isBackspace || key.ctrl || key.meta || key.tab
-        || key.leftArrow || key.rightArrow
-        || key.pageUp || key.pageDown || key.home || key.end) return;
+      if (!enteredInput || !isTypedText(key)) return;
       setWorkerSelection(null);
     }
 
@@ -453,11 +455,7 @@ export function InputBar({
       return;
     }
 
-    if (!key.ctrl && !key.meta && !key.escape && !key.tab
-      && !key.upArrow && !key.downArrow && !key.leftArrow && !key.rightArrow
-      && !key.pageUp && !key.pageDown && !key.home && !key.end) {
-      insertText(enteredInput);
-    }
+    if (isTypedText(key)) insertText(enteredInput);
   });
 
   if (mode.type !== 'text') {

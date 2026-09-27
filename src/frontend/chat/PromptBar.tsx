@@ -11,9 +11,7 @@ import { QuestionCard } from './QuestionCard';
 import { EntryInput, InputFeedback, QueuedRow } from './InputRows';
 import { SubagentStatusRow, type StatusRowProps } from './StatusRow';
 import { WorkerStrip } from './WorkerStrip';
-import { isMouseInput } from '../interaction/mouse';
-import { isFocusInput } from '../terminal/window-focus';
-import { backspaceAtEnd } from './editor';
+import { backspaceAtEnd, isForeignInput, isTypedText } from './editor';
 import type { ParticipantColors } from '../MentionText';
 import type { Feedback } from '../../commands/feedback';
 import type { CommandMenuEntry, CommandMenuItem } from '../../commands/registry';
@@ -76,10 +74,7 @@ export function PromptBar({ mode, feedback, participantColors, queuedMessages, w
   });
 
   useInput((enteredInput, key) => {
-    // Mouse and window-focus reports are not typing.
-    if (isMouseInput(enteredInput) || isFocusInput(enteredInput)) return;
-    // Session switching belongs to the sidebar in every input mode.
-    if (key.meta && (key.upArrow || key.downArrow)) return;
+    if (isForeignInput(enteredInput, key)) return;
     // The question card takes its own keys.
     if (mode.type === 'question') return;
 
@@ -112,11 +107,7 @@ export function PromptBar({ mode, feedback, participantColors, queuedMessages, w
       if (value) mode.onSubmit(value);
     } else if (key.ctrl && enteredInput === 'u') setEntry('');
     else if (isBackspace) setEntry(backspaceAtEnd);
-    else if (!key.ctrl && !key.meta && !key.tab
-      && !key.upArrow && !key.downArrow && !key.leftArrow && !key.rightArrow
-      && !key.pageUp && !key.pageDown && !key.home && !key.end) {
-      setEntry(current => current + enteredInput);
-    }
+    else if (isTypedText(key)) setEntry(current => current + enteredInput);
   });
 
   // A permission or question card stands where the input box stands.
