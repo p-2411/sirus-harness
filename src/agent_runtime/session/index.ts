@@ -627,8 +627,11 @@ export class Session {
 
   // A vendor runtime's conversation must not outlive the record it mirrors.
   // Checkpoints go with it: they point into the history that was cleared.
+  // Like a chat rewind, it waits for the workers: a report landing in the
+  // emptied history would wake its owner to answer a call that is gone.
   clear(): void {
     if (this.activeSends > 0 || this.rewinding) throw new Error('Wait for the current operation to finish before clearing the session.');
+    if (this.roster.hasWorkingSubagents()) throw new Error('Wait for this session’s subagents to finish before clearing it.');
     if (this.timeline.isEmpty()) return;
     this.stopNaming();
     this.timeline.clear();

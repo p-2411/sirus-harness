@@ -679,6 +679,39 @@ describe('Session model', () => {
     }
   });
 
+  test('clearing waits for the session’s workers, whose reports belong to the history it drops', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let session!: Session;
+    let spawned = false;
+    bindScriptedRuntime(testModel, async (_input, emit, options) => {
+      if (isWorker(options)) {
+        await gate;
+        return;
+      }
+      if (!spawned) {
+        spawned = true;
+        await session.subagentHostFor('sirus')!.spawn('Background task', 'fresh', { callId: 'spawn' });
+      }
+      emit({ type: 'text', text: 'Noted' });
+    });
+    session = new Session({ id: 'clear-with-workers', name: 'Clear', model: testModel });
+    try {
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Delegate it' }] });
+      const [worker] = session.getWorkers();
+      expect(() => session.clear()).toThrow('Wait for this session’s subagents to finish before clearing it.');
+      expect(session.isEmpty()).toBe(false);
+
+      release();
+      await until(() => worker.reported && session.getStatus() === 'idle', 'the report turn');
+      session.clear();
+      expect(session.isEmpty()).toBe(true);
+    } finally {
+      release();
+      await session.dispose();
+    }
+  });
+
   test('messageWorker steers a running worker and refuses one that has ended', async () => {
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
