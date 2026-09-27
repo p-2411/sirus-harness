@@ -28,6 +28,7 @@ const {
   sirusMcpServerEntry,
   stopSirusMcpServer,
   unregisterToolSession,
+  workerRequester,
 } = await import('../../src/agent_runtime/tools/server');
 const { closeAllMemoryStores } = await import('../../src/memory/store');
 const { openSettings } = await import('../../src/persistence/settings');
@@ -188,7 +189,7 @@ describe('tool registry', () => {
 describe('Sirus MCP server', () => {
   test('lists every tool to a participant and only the memory tools to a worker', async () => {
     const participant = await connect('sirus');
-    const worker = await connect('subagent:run-1');
+    const worker = await connect(workerRequester('run-1'));
     try {
       expect(await toolNames(participant)).toEqual([...MEMORY_TOOLS, ...AGENT_TOOLS]);
       expect(await toolNames(worker)).toEqual(MEMORY_TOOLS);
@@ -305,7 +306,7 @@ describe('Sirus MCP server', () => {
   });
 
   test('a worker is refused SpawnAgent by name and a participant without a host by the tool', async () => {
-    const worker = await connect('subagent:run-1');
+    const worker = await connect(workerRequester('run-1'));
     const reviewer = await connect('reviewer');
     try {
       const refused = await call(worker, 'SpawnAgent', { prompt: 'Do the work' });

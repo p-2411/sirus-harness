@@ -1,4 +1,5 @@
 import { isMemoryAccessEnabled } from './memory-access';
+import { agentTools } from './tools/agents';
 import { DEFAULT_PARTICIPANT } from './types';
 
 // What Sirus adds to the vendor's own system prompt. Claude Code and Codex
@@ -76,7 +77,7 @@ function identity(participantName: string, subagent: boolean): string {
 // Sirus's tools reach every runtime through its MCP server; a worker gets
 // the memory tools and nothing that delegates.
 function toolsLine(subagent: boolean): string {
-  const tools = subagent ? 'the memory tools' : 'SpawnAgent, CheckAgent, MessageAgent, CancelAgent, ListAgents, and the memory tools';
+  const tools = subagent ? 'the memory tools' : `${agentTools.map(tool => tool.name).join(', ')}, and the memory tools`;
   return `Sirus's own tools reach you through the "sirus" tool server: ${tools}. Use them by name; the server prefix, if your harness shows one, is part of the name.`;
 }
 

@@ -45,9 +45,16 @@ export function unregisterToolSession(sessionId: string): void {
 let server: http.Server | null = null;
 let listening: Promise<string> | null = null;
 
+// The requester a worker's runtime is known by; a participant's is its name.
+const WORKER_REQUESTER_PREFIX = 'subagent:';
+
+export function workerRequester(id: string): string {
+  return `${WORKER_REQUESTER_PREFIX}${id}`;
+}
+
 // What a runtime lists in `session/new`: the URL and the two headers that
 // identify the caller. The requester is the participant's name, or
-// `subagent:<id>` for a worker. Starts the server on first use.
+// `workerRequester(id)` for a worker. Starts the server on first use.
 export async function sirusMcpServerEntry(
   sessionId: string,
   requester: string,
@@ -151,7 +158,7 @@ const MEMORY_DISABLED = 'Memory access is disabled. Use /memory on to enable it.
 function serverFor(binding: ToolSessionBinding, requester: string): Server {
   // A worker gets the subagent audience and no delegation port, whoever
   // spawned it: a subagent cannot spawn a grandchild.
-  const worker = requester.startsWith('subagent:');
+  const worker = requester.startsWith(WORKER_REQUESTER_PREFIX);
   const audience: ToolAudience = worker ? { subagent: true } : {};
   const subagents = worker ? null : binding.hostFor(requester);
 

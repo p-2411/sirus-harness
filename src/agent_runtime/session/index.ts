@@ -9,7 +9,7 @@ import { jevApiKey, routeSessionModel, routingCandidates } from '../router';
 import { requireKnownModel } from '../providers';
 import { DEFAULT_MODEL, vendorOf } from '../providers/catalog';
 import { nativeCommands, type NativeCommand } from '../runtime/commands';
-import { registerToolSession, sirusMcpServerEntry, unregisterToolSession } from '../tools/server';
+import { registerToolSession, sirusMcpServerEntry, unregisterToolSession, workerRequester } from '../tools/server';
 import {
   notifySubagents,
   registerSubagent,
@@ -270,7 +270,7 @@ export class Session {
         ...host,
         directory,
         systemPrompt: () => sirusPrompt(DEFAULT_PARTICIPANT, true),
-        mcpServer: () => this.mcpServerEntry(`subagent:${id}`),
+        mcpServer: () => this.mcpServerEntry(workerRequester(id)),
         forWorker: () => { throw new Error('A subagent cannot spawn a subagent'); },
       }),
       workerFinished: run => this.workerFinished(run),
@@ -462,11 +462,12 @@ export class Session {
   }
 
   // The Sirus MCP server entry a runtime of this session lists; the
-  // requester is a participant's name, or `subagent:<id>` for a worker. The
-  // session joins the tool server here, when a runtime first asks, rather
-  // than when it is made: a draft nobody sent to is dropped without being
-  // disposed, and the server's map would otherwise hold on to it. Joining
-  // again only replaces the binding, and a deleted session stays out.
+  // requester is a participant's name, or `workerRequester(id)` for a
+  // worker. The session joins the tool server here, when a runtime first
+  // asks, rather than when it is made: a draft nobody sent to is dropped
+  // without being disposed, and the server's map would otherwise hold on to
+  // it. Joining again only replaces the binding, and a deleted session stays
+  // out.
   mcpServerEntry(requester: string): ReturnType<typeof sirusMcpServerEntry> {
     if (!this.disposed) {
       registerToolSession(this.id, {
