@@ -1,4 +1,4 @@
-import { attachClipboardImage, attachImageFile, describeImage } from '../../images';
+import { attachClipboardImage, attachImageFile } from '../../images';
 import type { CommandSpec } from '../types';
 
 // The same attachment ctrl+v makes, for terminals where ctrl+v is taken and
@@ -15,6 +15,5 @@ export const imageCommandSpec: CommandSpec = {
       ? await attachClipboardImage()
       : attachImageFile(args.join(' '), context.session.getDirectory());
     attachImage(image);
-    return { kind: 'success', text: `Attached ${describeImage(image)}.` };
   },
 };

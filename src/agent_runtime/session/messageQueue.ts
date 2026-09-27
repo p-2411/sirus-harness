@@ -13,7 +13,7 @@ export interface QueuedMessage {
 // Commands can open pickers or secret entry, so leave them (and anything
 // following them) queued for the visible Chat to handle in order.
 export function isAutoSendable(text: string): boolean {
-  return !/^\/[^/\s]+(?:\s|$)/.test(text);
+  return !/^(?:\/[^/\s]+(?:\s|$)|!)/.test(text);
 }
 
 // The original stays in its slot while the input bar edits a private copy.
@@ -37,6 +37,13 @@ export class MessageQueue {
   shift(): QueuedMessage | undefined {
     const index = this.items.findIndex(message => !message.editing);
     return index < 0 ? undefined : this.items.splice(index, 1)[0];
+  }
+
+  prepend(message: QueuedMessage): void {
+    const index = this.items.findIndex(item => item.id === message.id);
+    if (index < 0) this.items.unshift(message);
+    else this.items[index] = { ...message,
+      to: [...new Set([...(this.items[index].to ?? []), ...(message.to ?? [])])] };
   }
 
   take(): QueuedMessage | undefined {

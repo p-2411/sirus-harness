@@ -8,7 +8,7 @@ import type {
   ToolCall,
   ToolCallUpdate,
 } from '@agentclientprotocol/sdk';
-import { abortable, abortReason, throwIfAborted } from '../../abort';
+import { abortable, abortReason, throwIfAborted, TurnCancelledError } from '../../abort';
 import type { PermissionMode } from '../permissions/policy';
 import type { ListedModel, Vendor } from '../providers/catalog';
 import type {
@@ -59,6 +59,8 @@ export interface RuntimeOptions {
   // A bare runtime answers one question and keeps nothing: no Sirus tools and
   // as few native tools as the vendor allows. Session naming uses one.
   bare?: boolean;
+  // Read session metadata without selecting a model or preparing a turn.
+  discoverModelsOnly?: boolean;
   tools?: readonly string[];
   readOnly?: boolean;
   permissionMode: PermissionMode;
@@ -203,6 +205,7 @@ export interface Runtime {
 export const boundRuntimes: Record<string, (options: RuntimeOptions) => Runtime | Promise<Runtime>> = {};
 
 const live = new Set<Runtime>();
+const starting = new Set<AbortController>();
 
 // Every runtime the process started and has not yet disposed. The app tears
 // them all down when Ink exits, so their stdio cannot keep the CLI alive; an
@@ -220,6 +223,7 @@ export function trackRuntime(runtime: Runtime): Runtime {
 }
 
 export function disposeAllRuntimes(): void {
+  for (const controller of starting) controller.abort(new TurnCancelledError('Runtimes stopped'));
   for (const runtime of [...live]) runtime.dispose();
   live.clear();
 }
@@ -242,16 +246,21 @@ export function invalidateAllRuntimes(): void {
 // it, otherwise the vendor's adapter process.
 export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
   throwIfAborted(options.signal);
+  const controller = new AbortController();
+  const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
+  options = { ...options, signal };
+  starting.add(controller);
   const bound = boundRuntimes[options.model];
   const started = Promise.resolve().then(async () => {
+    throwIfAborted(signal);
     const runtime = bound ? await bound(options) : await startAcpRuntime(options);
-    if (options.signal?.aborted) {
+    if (signal.aborted) {
       runtime.dispose();
-      throw abortReason(options.signal);
+      throw abortReason(signal);
     }
     return trackRuntime(runtime);
-  });
-  return abortable(started, options.signal);
+  }).finally(() => starting.delete(controller));
+  return abortable(started, signal);
 }
 
 // The first vendor mode of the kind Sirus's mode maps onto, in the vendor's

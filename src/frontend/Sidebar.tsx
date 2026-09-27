@@ -1,7 +1,8 @@
 import path from 'node:path';
 import { Session, type SessionStatus } from '../agent_runtime/session';
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { Box, Text, measureElement, useBoxMetrics, useInput, type DOMElement } from 'ink';
+import { Box, Text, measureElement, useBoxMetrics, useInput, usePaste, type DOMElement } from 'ink';
+import stringWidth from 'string-width';
 import { theme } from './styles/theme';
 import { useSelectionRegion } from './interaction/useTextSelection';
 import { useClickable } from './interaction/clickable';
@@ -12,6 +13,7 @@ import { isFocusInput } from './terminal/window-focus';
 import { isMouseInput, parseMouseWheel } from './interaction/mouse';
 import { rowToLine } from './terminal/screen';
 import SubscriptionLimits from './SubscriptionLimits';
+import { applyInputEdit, createInputHistory, inputEditForKey, type InputState } from './chat/editor';
 
 export const SIDEBAR_WIDTH = 26;
 // Left padding, the status dot, right padding, and the divider.
@@ -102,24 +104,45 @@ export function sessionStatusAppearance(status: SessionStatus, hasUnread: boolea
   return SESSION_STATUS_APPEARANCE[status === 'idle' && hasUnread ? 'unread' : status];
 }
 
-export function SessionItem({ session, isSelected, onSelect, onDelete, now = Date.now(), collapsed = false, visible = true, showDirectory = false }: {
+export function SessionItem({ session, isSelected, onSelect, onDelete, onRename, onConfirmDelete, onCancelEdit, managing = false, rename, confirmingDelete = false, now = Date.now(), collapsed = false, visible = true, showDirectory = false }: {
   session: Session;
   isSelected: boolean;
   onSelect: (session: Session) => void;
   onDelete: (session: Session) => void;
+  onRename?: (session: Session) => void;
+  onConfirmDelete?: () => void;
+  onCancelEdit?: () => void;
+  managing?: boolean;
+  rename?: InputState & { selected: boolean };
+  confirmingDelete?: boolean;
   now?: number;
   collapsed?: boolean;
   visible?: boolean;
   showDirectory?: boolean;
 }) {
   const ref = useRef<DOMElement>(null);
-  const select = useCallback(() => onSelect(session), [onSelect, session]);
+  const lastClick = useRef(0);
+  const select = useCallback(() => {
+    if (rename || confirmingDelete) return;
+    const now = Date.now();
+    if (onRename && now - lastClick.current < 400) {
+      lastClick.current = 0;
+      onRename(session);
+    } else {
+      lastClick.current = now;
+      onSelect(session);
+    }
+  }, [onSelect, onRename, session, rename, confirmingDelete]);
   const hovered = useClickable(ref, select);
   // the delete control only exists while the row is hovered; unmounted, its
   // ref is null and it cannot be hit
   const deleteRef = useRef<DOMElement>(null);
   const remove = useCallback(() => onDelete(session), [onDelete, session]);
   useClickable(deleteRef, remove);
+  const yesRef = useRef<DOMElement>(null);
+  const noRef = useRef<DOMElement>(null);
+  useClickable(yesRef, () => onConfirmDelete?.());
+  useClickable(noRef, () => onCancelEdit?.());
   const subscribe = useCallback((listener: () => void) => session.subscribe(listener), [session]);
   const getSnapshot = useCallback(() => session.getVersion(), [session]);
   useSyncExternalStore(subscribe, getSnapshot);
@@ -153,15 +176,21 @@ export function SessionItem({ session, isSelected, onSelect, onDelete, now = Dat
           <Box width={1} flexShrink={0}>
             {session.getStatus() === 'working' && !needsYou ? <Spinner /> : <Text color={status.color}>{status.symbol}</Text>}
           </Box>
-          {!collapsed && <Text color={hovered ? theme.highlight : isSelected ? theme.text : theme.textMuted} bold={isSelected} wrap="truncate-end"> {showDirectory ? `${path.basename(session.getDirectory()) || session.getDirectory()} · ` : ''}{session.getName()}</Text>}
+          {!collapsed && (rename ? <Text wrap="truncate-start"> <Text inverse={rename.selected}>
+            {rename.text.slice(0, rename.cursor)}{!rename.selected && <Text inverse>{rename.text[rename.cursor] ?? ' '}</Text>}{rename.text.slice(rename.cursor + (rename.selected ? 0 : 1))}
+          </Text></Text> : <Text color={hovered ? theme.highlight : isSelected ? theme.text : theme.textMuted} bold={isSelected} wrap="truncate-end"> {showDirectory ? `${path.basename(session.getDirectory()) || session.getDirectory()} · ` : ''}{session.getName()}</Text>)}
         </Box>
-        {!collapsed && needsYou && <Text color={theme.pending}> needs you</Text>}
-        {!collapsed && !needsYou && !hovered && activity && (
+        {!collapsed && needsYou && !rename && !confirmingDelete && <Text color={theme.pending}> needs you</Text>}
+        {!collapsed && !needsYou && !(managing && hovered) && !rename && !confirmingDelete && activity && (
           <Box marginLeft={1} flexShrink={0}>
             <Text color={theme.textSubtle} dimColor>{activity}</Text>
           </Box>
         )}
-        {!collapsed && hovered && (
+        {!collapsed && confirmingDelete ? <Box marginLeft={1} flexShrink={0}>
+          <Box ref={yesRef}><Text color={theme.danger}>y</Text></Box>
+          <Text color={theme.textSubtle}>/</Text>
+          <Box ref={noRef}><Text color={theme.textMuted}>n</Text></Box>
+        </Box> : !collapsed && managing && hovered && !rename && (
           <Box ref={deleteRef} marginLeft={1} flexShrink={0}>
             <Text color={theme.textSubtle}>×</Text>
           </Box>
@@ -192,19 +221,38 @@ export default function SideBar({ sessions, currSession, selectSession, addSessi
   const [focused, setFocused] = useState(false);
   const [query, setQuery] = useState('');
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
-  const [editing, setEditing] = useState<{ session: Session; kind: 'rename' | 'delete'; text: string } | null>(null);
+  const [editing, setEditing] = useState<
+    { session: Session; kind: 'rename'; draft: InputState; selected: boolean }
+    | { session: Session; kind: 'delete' } | null>(null);
+  const editHistory = useRef(createInputHistory());
   const focus = (next: boolean) => {
     setFocused(next);
     onFocusChange?.(next);
     if (!next) { setEditing(null); setQuery(''); }
   };
   const filterRef = useRef<DOMElement>(null);
-  const filterHovered = useClickable(filterRef, () => { if (isActive) focus(!focused); });
+  useClickable(filterRef, () => { if (isActive) { focus(true); setEditing(null); } });
   const requestDelete = (session: Session) => {
     if (!isActive) return;
     focus(true);
-    setEditing({ session, kind: 'delete', text: '' });
+    setHighlightedId(session.getId());
+    setEditing({ session, kind: 'delete' });
   };
+  const renameSession = (session: Session) => {
+    if (!isActive) return;
+    focus(true);
+    setHighlightedId(session.getId());
+    editHistory.current = createInputHistory();
+    setEditing({ session, kind: 'rename', draft: { text: session.getName(), cursor: session.getName().length }, selected: true });
+  };
+  const paste = (text: string) => {
+    const line = text.replace(/[\r\n]+/g, ' ');
+    if (editing?.kind === 'rename') {
+      const draft = editing.selected ? { text: '', cursor: 0 } : editing.draft;
+      setEditing({ ...editing, draft: applyInputEdit(draft, { type: 'insert', text: line }, editHistory.current), selected: false });
+    } else if (!editing) { setQuery(previous => previous + line); setHighlightedId(null); }
+  };
+  usePaste(paste, { isActive: isActive && focused });
   const ordered = sessionsByRecency(sessions, directory).filter(session => matchesSession(session, query));
   const highlighted = ordered.find(session => session.getId() === highlightedId) ?? ordered[0];
   const listRef = useRef<DOMElement>(null);
@@ -252,15 +300,20 @@ export default function SideBar({ sessions, currSession, selectSession, addSessi
           if (input.toLowerCase() === 'y' && !key.ctrl && !key.meta) { deleteSession(editing.session); setEditing(null); }
           else if (input.toLowerCase() === 'n' || key.return) setEditing(null);
         } else if (key.return) {
-          if (editing.text.trim()) { editing.session.setName(editing.text); setEditing(null); }
-        } else if (key.backspace || key.delete) setEditing({ ...editing, text: [...editing.text].slice(0, -1).join('') });
-        else if (key.ctrl && input === 'u') setEditing({ ...editing, text: '' });
-        else if (!key.ctrl && !key.meta && !key.upArrow && !key.downArrow && !key.leftArrow && !key.rightArrow && !key.tab) setEditing({ ...editing, text: editing.text + input });
+          if (editing.draft.text.trim()) { editing.session.setName(editing.draft.text); setEditing(null); }
+        } else {
+          const edit = inputEditForKey(input, key);
+          if (edit) {
+            const draft = editing.selected && (edit.type === 'backspace' || edit.type === 'delete')
+              ? { text: '', cursor: 0 } : applyInputEdit(editing.draft, edit, editHistory.current);
+            setEditing({ ...editing, draft, selected: false });
+          } else if (!key.ctrl && !key.meta && !key.super && !key.upArrow && !key.downArrow && !key.tab) paste(input);
+        }
         return;
       }
       if (key.ctrl && input === 'd' && highlighted) requestDelete(highlighted);
       else if (key.ctrl && input === 'a' && highlighted) onArchive?.(highlighted);
-      else if (key.ctrl && input === 'r' && highlighted) setEditing({ session: highlighted, kind: 'rename', text: highlighted.getName() });
+      else if (key.ctrl && input === 'r' && highlighted) renameSession(highlighted);
       else if (key.upArrow || key.downArrow) {
         if (ordered.length) setHighlightedId(ordered[(ordered.indexOf(highlighted!) + (key.upArrow ? -1 : 1) + ordered.length) % ordered.length]!.getId());
       } else if (key.return && highlighted) { selectSession(highlighted); focus(false); }
@@ -302,7 +355,6 @@ export default function SideBar({ sessions, currSession, selectSession, addSessi
           {!collapsed && <SidebarHeader />}
         </Box>
         {!collapsed && <SubscriptionLimits />}
-        {!collapsed && focused && <Text color={theme.accent} wrap="truncate-start">filter: {query}▌</Text>}
       </Box>
       <Box ref={listRef} flexGrow={1} minHeight={0} overflow="hidden" marginTop={2}>
         <Box flexDirection="column" flexGrow={1} minWidth={0}>
@@ -314,6 +366,12 @@ export default function SideBar({ sessions, currSession, selectSession, addSessi
               isSelected={selectedId === session.getId()}
               onSelect={session => { if (!isActive) return; if (focused) setHighlightedId(session.getId()); else selectSession(session); }}
               onDelete={requestDelete}
+              onRename={renameSession}
+              managing={focused}
+              rename={editing?.session === session && editing.kind === 'rename' ? { ...editing.draft, selected: editing.selected } : undefined}
+              confirmingDelete={editing?.session === session && editing.kind === 'delete'}
+              onConfirmDelete={() => { if (isActive) { deleteSession(session); setEditing(null); } }}
+              onCancelEdit={() => setEditing(null)}
               showDirectory={session.getDirectory() !== directory}
               now={now}
               collapsed={collapsed}
@@ -332,16 +390,12 @@ export default function SideBar({ sessions, currSession, selectSession, addSessi
         )}
       </Box>
       {!collapsed && <Box flexDirection="column" flexShrink={0}>
-        {editing ? <Box flexDirection="column">
-          <Text color={editing.kind === 'delete' ? theme.danger : theme.accent}>{editing.kind === 'delete' ? 'Delete session?' : 'Rename session'}</Text>
-          <Text wrap="truncate-start">{editing.kind === 'delete' ? editing.session.getName() : `${editing.text}▌`}</Text>
-          <Text color={theme.textMuted}>{editing.kind === 'delete' ? 'y delete · n/esc cancel' : 'enter save · esc cancel'}</Text>
-        </Box> : focused ? <Box flexDirection="column">
-          <Text color={theme.textMuted}>↑↓ select · enter open</Text>
-          <Text color={theme.textMuted}>^r rename · ^a archive</Text>
-          <Text color={theme.textMuted}>^d delete · esc back</Text>
-        </Box> : null}
-        <Box ref={filterRef}><Text color={filterHovered || focused ? theme.highlight : theme.textMuted}>filter / manage</Text></Box>
+        {focused && <Text color={theme.textMuted}>^a archive · esc back</Text>}
+        <Box ref={filterRef} height={1}>
+          <Text color={theme.textMuted}>search: </Text>
+          <Text wrap="truncate-start">{query.slice(-14)}{focused && !editing ? '▌' : ''}</Text>
+          <Text color={theme.textSubtle} dimColor>{'_'.repeat(Math.max(0, 15 - stringWidth(query.slice(-14)) - (focused && !editing ? 1 : 0)))}</Text>
+        </Box>
         <Box ref={newSessionRef} justifyContent="space-between">
           <Text color={newSessionHovered ? theme.highlight : theme.textMuted}>new session</Text>
           <Text color={theme.textSubtle}>ctrl+n</Text>

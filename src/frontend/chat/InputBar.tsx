@@ -55,8 +55,8 @@ interface InputBarProps {
   onOverlayChange?: (open: boolean) => void;
   // images waiting to go with the next message, oldest first
   attachments?: readonly ImageBlock[];
-  // ctrl+v in text mode
-  onPasteImage?: () => void;
+  // A paste shortcut forwarded by the terminal: text or image, one action.
+  onPasteClipboard?: () => string | void | Promise<string | void>;
   onAttachImage?: (image: ImageBlock) => void;
   // backspace over an image in the draft drops it
   onRemoveAttachment?: (image: ImageBlock) => void;
@@ -67,8 +67,8 @@ interface InputBarProps {
   history?: readonly string[];
   // messages waiting to go out once the agents are free, oldest first
   queuedMessages?: readonly QueuedMessage[];
-  // Tab queues the complete draft for after the running turn.
-  onQueue?: (text: string, images?: readonly ImageBlock[], content?: MessageBlock[]) => void;
+  // Ctrl+Enter (or Ctrl+X Ctrl+S) delivers the waiting messages now.
+  onSendNow?: (text?: string, images?: readonly ImageBlock[], content?: MessageBlock[]) => void;
   onBeginQueuedEdit?: (id: string) => void;
   onCancelQueuedEdit?: (id: string) => void;
   onEscape?: () => void;
@@ -108,14 +108,14 @@ export function InputBar({
   onWorkerFocusChange,
   onOverlayChange,
   attachments = NO_ATTACHMENTS,
-  onPasteImage,
+  onPasteClipboard,
   onAttachImage,
   onRemoveAttachment,
   model,
   thinkingLevel,
   history = NO_HISTORY,
   queuedMessages = NO_QUEUE,
-  onQueue,
+  onSendNow,
   onBeginQueuedEdit,
   onCancelQueuedEdit,
   onEscape,
@@ -332,7 +332,7 @@ export function InputBar({
   const insertText = (text: string) => edit({ type: 'insert', text: normalizeNewlines(text) });
   // What Enter does sits at the right of the draft's first line, and the
   // draft wraps short of it; a long draft's position shows on its last line.
-  const enterHint = selectedQueued ? 'enter saves · esc restores' : disabled ? 'enter steers · tab queues' : 'enter ↵';
+  const enterHint = selectedQueued ? 'enter saves · esc restores' : disabled ? '' : 'enter ↵';
   const hintWidth = Math.max(stringWidth(enterHint), stringWidth('copied ✓'), 11) + 1;
   const rows = draftRows(input, Math.max(1, (boxWidth || stdout.columns || 80) - 6 - hintWidth), character => {
     const image = imageFor(character);
@@ -377,6 +377,8 @@ export function InputBar({
   const pasteText = (text: string) => {
     if (mode.type !== 'text' || editingExternally || shortcuts !== null) return;
     if (search) { setSearch({ ...search, query: search.query + normalizeNewlines(text), index: 0 }); return; }
+    // Some terminals bracket an image-only paste without textual content.
+    if (text.length === 0) { pasteClipboard(); return; }
     const normalized = normalizeNewlines(text);
     // Terminals drop files as quoted or shell-escaped paths.
     const file = normalized.trim().replace(/^(['"])(.*)\1$/s, '$2').replace(/\\(.)/g, '$1');
@@ -394,6 +396,14 @@ export function InputBar({
       pastes.current.set(placeholder, { text: normalized, label: `[Pasted text #${number} · ${normalized.split('\n').length} lines]` });
       insertText(placeholder);
     } else insertText(normalized);
+  };
+  const pasteTextRef = useRef(pasteText);
+  pasteTextRef.current = pasteText;
+  const pasteClipboard = () => {
+    if (selectedQueued) leaveQueue();
+    void Promise.resolve(onPasteClipboard?.()).then(text => {
+      if (text) pasteTextRef.current(text);
+    });
   };
   usePaste(pasteText);
 
@@ -425,13 +435,15 @@ export function InputBar({
         return;
       }
       const now = Date.now();
-      if (!input && now - lastInterrupt.current < 1000) {
+      if (!input && attachments.length === 0 && now - lastInterrupt.current < 1000) {
         onExit?.();
         return;
       }
-      if (input) {
-        clearedPrompts.current.push({ text: draftMessage().text, after: history.length });
+      if (input || attachments.length > 0) {
+        const text = draftMessage().text;
+        if (text) clearedPrompts.current.push({ text, after: history.length });
         if (selectedQueued) leaveQueue();
+        for (const image of attachments) onRemoveAttachment?.(image);
         setInputContent('');
         setCursor(0);
         setRecall(null);
@@ -449,6 +461,8 @@ export function InputBar({
     // Session switching belongs to the sidebar in every input mode.
     if (key.meta && (key.upArrow || key.downArrow)) return;
 
+    const sendImmediately = (key.return && key.ctrl)
+      || (editorPrefix.current && key.ctrl && enteredInput === 's');
     if (key.ctrl && enteredInput === 'r') {
       setSearch({ query: '', index: 0, draft: editor });
       return;
@@ -519,7 +533,7 @@ export function InputBar({
       return;
     }
     if (mentionActive && fileSuggestions.loading && mentions.items[mentions.selected]?.kind !== 'participant'
-      && (key.tab || key.return) && !key.shift && !key.meta) return;
+      && (key.tab || key.return) && !key.ctrl && !key.shift && !key.meta) return;
     if (mentionActive && fileSuggestions.mention && mentions.items.length > 0 && !key.ctrl && !key.meta && !key.shift) {
       if (key.upArrow || key.downArrow) {
         mentions.move(key.upArrow ? -1 : 1);
@@ -540,11 +554,10 @@ export function InputBar({
       setEditor({ text: completed, cursor: completed.length });
       return;
     }
-    // ctrl+v (not cmd+v, which the terminal keeps for text) attaches the
-    // clipboard image
-    if (key.ctrl && enteredInput === 'v') {
-      if (selectedQueued) leaveQueue();
-      onPasteImage?.();
+    // Cmd+V / Ctrl+V use the same clipboard handler when forwarded; native
+    // terminal paste actions arrive through usePaste above.
+    if ((key.ctrl || key.super || key.meta) && enteredInput.toLowerCase() === 'v') {
+      pasteClipboard();
       return;
     }
     if (key.upArrow || key.downArrow) {
@@ -597,7 +610,7 @@ export function InputBar({
       return;
     }
 
-    if (key.return || (key.tab && !key.shift && onQueue)) {
+    if (key.return || sendImmediately) {
       // shift+enter under the kitty protocol, option+enter elsewhere
       if (key.shift || key.meta) {
         insertText('\n');
@@ -605,20 +618,24 @@ export function InputBar({
       }
       // a trailing backslash asks for a new line where the terminal cannot
       // report either modifier
-      if (editor.cursor === input.length && input.endsWith('\\')) {
+      if (!sendImmediately && editor.cursor === input.length && input.endsWith('\\')) {
         setRecall(null);
         setEditor({ text: `${input.slice(0, -1)}\n`, cursor: input.length });
         return;
       }
       if (selectedQueued) {
         leaveQueue(true);
+        if (sendImmediately) onSendNow?.();
         return;
       }
-      const selectedCommand = commands.matches[commands.selected];
+      const selectedCommand = !sendImmediately && commands.matches[commands.selected];
       const draft = draftMessage();
       const trimmed = selectedCommand ? `/${selectedCommand.name}` : draft.text.trim();
-      if (!trimmed && draft.images.length === 0) return; // nothing to send
-      if (key.tab) onQueue?.(trimmed, draft.images, draft.content);
+      if (!trimmed && draft.images.length === 0) {
+        if (sendImmediately) onSendNow?.();
+        return;
+      }
+      if (sendImmediately && onSendNow) onSendNow(trimmed, draft.images, draft.content);
       else if (send(trimmed, draft.images, draft.content) === false) return;
       if (directory && trimmed && (!trimmed.startsWith('/') || isNativeCommand(trimmed, nativeList))) {
         try { appendPromptHistory(directory, trimmed); }

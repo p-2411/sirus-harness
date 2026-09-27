@@ -71,6 +71,7 @@ export interface RuntimeHost {
   requestAnswers(agent: SessionAgent, request: CreateElicitationRequest, signal: AbortSignal): Promise<CreateElicitationResponse>;
   // A notice received between turns has no transcript entry to sit in.
   notice(agent: SessionAgent, notice: NoticeBlock): void;
+  toolsSettled?(agent: SessionAgent): void;
   // The user’s subagent model pin; null leaves the choice to the caller.
   subagentModel(): string | null;
   // The host a worker of this session runs under: its own worktree, the
@@ -641,6 +642,12 @@ export class SessionAgent {
       return;
     }
     this.record?.(update);
+    if (!this.subagentId && update.type === 'tool_call'
+      && (update.call.status === 'completed' || update.call.status === 'failed')
+      && !this.entry?.content.some(block => block.type === 'tool_call'
+        && (block.status === 'pending' || block.status === 'in_progress'))) {
+      this.host.toolsSettled?.(this);
+    }
   }
 
   private askPermission(request: RequestPermissionRequest, signal: AbortSignal): Promise<RequestPermissionResponse> {

@@ -866,8 +866,8 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
     state.currentModeId = session.modes?.currentModeId ?? '';
     state.configOptions = session.configOptions ?? [];
     const models = listedModelsIn(state.configOptions);
-    if (models.length > 0) options.onUpdate({ type: 'models', models });
-    await configure(state, launch.mode, options.model, options.thinkingLevel);
+    if (selectOption(state.configOptions, 'model')) options.onUpdate({ type: 'models', models });
+    if (!options.discoverModelsOnly) await configure(state, launch.mode, options.model, options.thinkingLevel);
     return runtimeFor(state, disposeProcess);
   } catch (error) {
     const failure = options.signal?.aborted ? abortReason(options.signal) : settled(error);

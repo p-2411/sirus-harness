@@ -328,15 +328,13 @@ export function isKnownModel(id: string): boolean {
 }
 
 export function modelIds(): string[] {
-  const listed = VENDORS.flatMap(vendor => (listedModels()[vendor] ?? []).map(model => model.id));
-  return [...new Set([...MODELS.map(model => model.id), ...listed])];
+  return [...new Set(VENDORS.flatMap(modelsOf))];
 }
 
-// The models a vendor offers, as it last listed them; the profiled ones
-// until it has.
+// Selectable models come only from the vendor. Profiles describe models;
+// they do not establish availability, even before the first discovery.
 export function modelsOf(vendor: Vendor): string[] {
-  const listed = listedModels()[vendor];
-  return listed && listed.length > 0 ? listed.map(model => model.id) : profiledModelsOf(vendor);
+  return (listedModels()[vendor] ?? []).map(model => model.id);
 }
 
 // The vendor's models that have a profile, in the table's order.

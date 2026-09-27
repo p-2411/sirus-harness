@@ -60,7 +60,7 @@ test('Escape dismisses help, command suggestions, login stages and secret entry'
     expect(output).toContain('ChatGPT');
     await type('\u001b');
     expect(output).not.toContain('› Claude');
-    expect(output).toContain('Welcome to Sirus.');
+    expect(output).toContain('What shall we build?');
 
     await type('/login');
     await type('\r');
@@ -268,7 +268,7 @@ function renderChat(session: Session) {
   };
 }
 
-test('local commands run during a turn and a reserved command drains after editing finishes', async () => {
+test('thinking runs immediately while other commands queue and remain editable', async () => {
   const model = 'test-chat-command-queue';
   let release!: () => void;
   let started!: () => void;
@@ -285,13 +285,13 @@ test('local commands run during a turn and a reserved command drains after editi
   try {
     await ready;
     await chat.flush();
+    await chat.type('/thinking high');
+    await chat.type('\r');
+    expect(chat.output()).toContain('@sirus thinking set to high.');
+    expect(session.getStatus()).toBe('working');
     await chat.type('/help');
     await chat.type('\r');
-    expect(chat.output()).toContain('list commands and keys');
-    expect(session.getStatus()).toBe('working');
-    await chat.type('\u001b');
-    expect(session.getStatus()).toBe('working');
-    session.queueMessage('/help');
+    expect(session.getQueuedMessages().map(message => message.text)).toEqual(['/help']);
     await chat.flush();
     await chat.type('\u001b[A');
     expect(session.getQueuedMessages()[0].editing).toBe(true);
@@ -304,6 +304,52 @@ test('local commands run during a turn and a reserved command drains after editi
     await chat.flush();
     expect(session.getQueuedMessageCount()).toBe(0);
     expect(chat.output()).toContain('list commands and keys');
+  } finally {
+    release();
+    await turn;
+    await chat.close();
+    await session.dispose();
+    unbindRuntime(model);
+  }
+});
+
+test.each(['\u001b[13;5u', '\u0018\u0013'])('Enter queues, Tab completes only, %j sends now, and Escape sends the remaining queue', async shortcut => {
+  const model = 'test-chat-claude-input';
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const binding = bindScriptedRuntime(model, async (input, emit) => {
+    if (input.text === 'Work') await gate;
+    emit({ type: 'text', text: 'Finished.' });
+  });
+  const session = new Session({ model });
+  const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Work' }] }).catch(() => {});
+  const chat = renderChat(session);
+  try {
+    await chat.waitFor('Work');
+    await chat.type('First follow-up');
+    await chat.type('\t');
+    expect(session.getInputContent()).toBe('First follow-up');
+    expect(session.getQueuedMessageCount()).toBe(0);
+    await chat.type('\r');
+    expect(session.getInputContent()).toBe('');
+    expect(session.getQueuedMessages().map(message => message.text)).toEqual(['First follow-up']);
+    expect(binding.runtimes[0].steers).toEqual([]);
+    await chat.type('Draft sent now');
+    // The alternate chord must work across separate keyboard events.
+    if (shortcut === '\u0018\u0013') {
+      await chat.type('\u0018');
+      await chat.type('\u0013');
+    } else await chat.type(shortcut);
+    expect(binding.runtimes[0].steers).toEqual(['First follow-up', 'Draft sent now']);
+    expect(session.getQueuedMessageCount()).toBe(0);
+    await chat.type('After interrupt');
+    await chat.type('\r');
+    await chat.type('\u001b');
+    await turn;
+    await chat.waitFor('Finished.');
+    expect(binding.runtimes[0].prompts.map(prompt => prompt.text)).toEqual(['Work', 'After interrupt']);
+    expect(session.getInputContent()).toBe('');
+    expect(session.getQueuedMessageCount()).toBe(0);
   } finally {
     release();
     await turn;

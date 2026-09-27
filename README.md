@@ -20,7 +20,7 @@ Run `sirus` on its own to open the current directory. The npm package includes t
 Inside Sirus:
 
 1. Type `/login` and choose Claude or ChatGPT, then sign in with an existing subscription or enter an API key through the masked input. Repeat `/login` to connect more accounts—as many as you want.
-2. Optionally type `/model` and pick a model. New sessions use your saved model preference, or `gpt-5.6-luna` by default.
+2. Optionally type `/model` and pick a model. The choices come only from your connected vendors and are cached between launches; Sirus fetches missing lists automatically. Short names such as `/model opus` work with vendor aliases such as `opus[1m]`. New sessions use your saved model preference, or `gpt-5.6-luna` by default.
 3. Give Sirus a task:
 
 ```text
@@ -115,13 +115,15 @@ Use `/compact` to ask for it now. There is nothing to turn on or off: compaction
 
 Create sessions, name them, and switch between them from the sidebar. Each session retains its working directory, conversation, participants, model choices, and permission mode. Existing sessions keep their model settings when you change models elsewhere.
 
-Send a follow-up while an agent is busy to queue it. Session history is saved automatically, including partial responses when you quit. Reopen Sirus to return to your conversations, and enable desktop notifications with `/notify background` to hear when attention is needed while you're away from the terminal.
+Press Enter while an agent is busy to queue a follow-up. Text reaches the agent after its tool calls finish, or starts the next turn if it is only writing. Commands and images wait until the turn ends; model, thinking, permission, status, and worker controls run immediately. Ctrl+Enter (or Ctrl+X Ctrl+S) sends waiting messages and your draft now. Esc interrupts and sends what is queued. Up/Down still let you edit individual queued messages; Enter saves and Esc restores the original.
+
+Session history is saved automatically, including partial responses when you quit. Reopen Sirus to return to your conversations, and enable desktop notifications with `/notify background` to hear when attention is needed while you're away from the terminal.
 
 ### Put the right context in the prompt
 
 Type `@` to find agents and files in one menu. The menu opens at the bottom, with the closest matches nearest the input. Agent names and the new-name option sit below file results; use ↑/↓ and Tab or Enter to select either. File search also accepts relative paths such as `@../proj/file.tsx`. Sirus includes the selected text files in your message, making it easy to point at the code you want to discuss.
 
-Attach an image with `Ctrl+V` or `/image /path/to/screenshot.png` to work from a screenshot, mockup, or visual bug report. Clipboard and notification support depend on your operating system and terminal.
+Paste text and images into the same input. Pasted image paths attach directly; forwarded paste shortcuts read text or images from the clipboard. `/image /path/to/screenshot.png` also attaches a file. Clipboard and notification support depend on your operating system and terminal.
 
 ### Repository instructions
 
@@ -183,9 +185,10 @@ Use `/usage` to see reported subscription allowance and how full each participan
 | `Option+↑` / `Option+↓` | Switch sessions. |
 | `Ctrl+K` | Collapse or expand the sidebar. |
 | `Enter` | Send a message, or queue it while agents are busy. |
+| `Ctrl+Enter` / `Ctrl+X Ctrl+S` | Send waiting messages and the draft now. |
 | `Tab` | Complete the highlighted `/` command or skill. |
 | `Shift+Enter` or `\` then `Enter` | Insert a new line. |
-| `Esc` | Close a menu or cancel the current session's turn. |
+| `Esc` | Close a menu, or interrupt the turn and send queued messages. |
 | `/rename <name>` | Give the current session a useful name. |
 | `/thinking` | Show or change reasoning depth. |
 | `/agents` | Watch, message, cancel, or clear the session's subagents. |

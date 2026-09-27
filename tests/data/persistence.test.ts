@@ -102,6 +102,18 @@ describe('prompt history', () => {
 });
 
 describe('session persistence', () => {
+  test('retains steering display positions after a session is reopened', () => {
+    const injectedAt = { seq: 0, block: 0, offset: 7 };
+    const session = new Session({ messages: [
+      { seq: 0, role: 'assistant', content: [{ type: 'text', text: 'Before After' }] },
+      { seq: 1, role: 'user', content: [{ type: 'text', text: 'Steering' }], injectedAt },
+    ] });
+    expect(saveSessionSnapshots([session.toSnapshot()], session.getId(), directory)).toBe(true);
+    const restored = Session.fromSnapshot(loadSessionSnapshots(directory).snapshots[0]!);
+    expect(restored.getMessages()[1]!.injectedAt).toEqual(injectedAt);
+    expect(restored.getMessages()[0]!.content).toEqual(session.getMessages()[0]!.content);
+  });
+
   test('round-trips images, checkpoints, tools, notices, compaction and naming metadata together', () => {
     const image = { type: 'image' as const, path: path.join(directory, 'images', 'screenshot.png'), mediaType: 'image/png' as const, bytes: 123 };
     const checkpoint = {

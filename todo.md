@@ -10,3 +10,6 @@
 [X] skills
 [X] heartbeat mechanism
 [X] when turn was cancelled, all tools should fial. "running commands" should also stop
+
+
+[] ![](image.png) nvm i alr did. right now  this is what we see when i press enter on a rnuning subagent. however, it should isntead mimic claude where it doesn't add that extra step. it has an actual UI that shows the transcript and also lets me send a message

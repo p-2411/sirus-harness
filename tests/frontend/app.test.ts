@@ -12,8 +12,10 @@ import { DEFAULT_MODEL, Session } from '../../src/agent_runtime/session';
 import * as naming from '../../src/agent_runtime/session/naming';
 import { providerFor } from '../../src/agent_runtime/providers';
 import { bindScriptedRuntime, textTurn, unbindRuntime } from '../support/runtime';
+import { isAbortError } from '../../src/abort';
 import App, { createWorkspace, nextSessionName, startSession } from '../../src/frontend/app';
 import { changeModel } from '../../src/commands/agents/behavior';
+import { rememberListedModels } from '../../src/agent_runtime/providers/catalog';
 import { deleteSessionSnapshot, loadSessionRevision, loadSessionSnapshot, loadSessionSnapshots, saveSessionSnapshot, saveSessionSnapshots } from '../../src/persistence';
 
 describe('app workspace startup', () => {
@@ -23,6 +25,8 @@ describe('app workspace startup', () => {
     settingsDirectory = mkdtempSync(join(tmpdir(), 'sirus-workspace-'));
     previousDirectory = process.env.SIRUS_DATA_DIR;
     process.env.SIRUS_DATA_DIR = settingsDirectory;
+    rememberListedModels('gpt', [{ id: 'gpt-6-sol', description: 'Sol' }]);
+    rememberListedModels('claude', [{ id: 'claude-haiku-4-5', description: 'Haiku' }]);
   });
   afterEach(() => {
     if (previousDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
@@ -273,7 +277,7 @@ describe('app workspace startup', () => {
     let emitChunk: ((text: string) => void) | undefined;
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
-    bindScriptedRuntime(DEFAULT_MODEL, async (_input, emit) => {
+    const binding = bindScriptedRuntime(DEFAULT_MODEL, async (_input, emit) => {
       emitChunk = text => emit({ type: 'text', text });
       await gate;
     });
@@ -289,7 +293,10 @@ describe('app workspace startup', () => {
     try {
       await new Promise(resolve => setImmediate(resolve));
       await app.waitUntilRenderFlush();
-      turn = restored.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Stream a reply' }] });
+      turn = restored.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Stream a reply' }] }).catch(error => {
+        if (!isAbortError(error)) throw error;
+        return restored.getMessages();
+      });
       const deadline = Date.now() + 2000;
       while (!emitChunk && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
       expect(emitChunk).toBeDefined();
@@ -317,6 +324,7 @@ describe('app workspace startup', () => {
       app.unmount();
       release();
       await turn;
+      expect(binding.runtimes.every(runtime => runtime.disposed)).toBe(true);
       await restored?.dispose();
       restore.mockRestore(); update.mockRestore(); unbindRuntime(DEFAULT_MODEL);
       stdin.destroy(); stdout.destroy();

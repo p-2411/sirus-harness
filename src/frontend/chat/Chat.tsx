@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { isPlanCall, planEntriesOf, type ImageBlock, type Message, type MessageBlock, type PlanEntry, type ToolCallBlock } from '../../agent_runtime/types';
-import { isAutoSendable, Session, type SessionSnapshot } from '../../agent_runtime/session';
-import { attachClipboardImage, describeImage, removeStoredImage } from '../../images';
+import { Session, type SessionSnapshot } from '../../agent_runtime/session';
+import { readClipboard, removeStoredImage } from '../../images';
 import { Box, Text, measureElement, renderToString, useApp, useBoxMetrics, useInput, useStdout, type DOMElement } from 'ink';
 import { theme } from '../styles/theme';
 import { HORSE } from '../branding/horse';
-import { ChatHistory, PlanChecklist, toolLine } from './ChatMessage';
+import { ChatHistory, PlanChecklist, thoughtHeading, toolLine } from './ChatMessage';
+import { useClickable } from '../interaction/clickable';
 import { Spinner } from './Spinner';
 import { InputBar, type InputMode } from './InputBar';
 import { InputFeedback } from './InputRows';
@@ -111,6 +112,15 @@ export function currentPlans(
 // Room for a tool title in the status line before it is cut.
 const PHASE_TITLE_LENGTH = 40;
 
+function turnThought(messages: readonly Message[]): string | null {
+  const last = messages.at(-1);
+  if (last?.role !== 'assistant') return null;
+  const tail = last.content.at(-1);
+  if (tail?.type !== 'thought' || !tail.text.trim()) return null;
+  if (last.content.some(block => block.type === 'tool_call' && block.status !== 'completed' && block.status !== 'failed')) return null;
+  return tail.text;
+}
+
 // What the agents are up to, read off the end of the timeline: the tool call
 // the turn is waiting on, text arriving, or nothing visible yet.
 export function turnPhase(messages: readonly Message[]): string {
@@ -123,6 +133,11 @@ export function turnPhase(messages: readonly Message[]): string {
   if (running) return `running ${toolLine(running, PHASE_TITLE_LENGTH)}`;
   const tail = last.content[last.content.length - 1];
   if (tail?.type === 'text' && tail.text) return 'writing';
+  const thought = turnThought(messages);
+  if (thought) {
+    const { title, body } = thoughtHeading(thought);
+    return title ?? body.replace(/\s+/g, ' ');
+  }
   return 'thinking';
 }
 
@@ -137,7 +152,7 @@ const QUIET_NOTICE_MS = 60_000;
 
 // The line at the foot of the history while a turn runs: what the agents are
 // doing, or that they are waiting on the user, and for how long.
-function TurnStatus({ messages, awaitingApproval, awaitingAnswer, compacting, startedAt, quietFor }: {
+export function TurnStatus({ messages, awaitingApproval, awaitingAnswer, compacting, startedAt, quietFor }: {
   messages: readonly Message[];
   awaitingApproval: boolean;
   awaitingAnswer: boolean;
@@ -152,18 +167,35 @@ function TurnStatus({ messages, awaitingApproval, awaitingAnswer, compacting, st
     return () => clearInterval(timer);
   }, []);
   const waitingOnUser = awaitingApproval || awaitingAnswer;
+  const thought = waitingOnUser || compacting ? null : turnThought(messages);
+  const last = messages.at(-1);
+  const thoughtKey = thought && last ? `${last.seq}:${last.content.length}` : null;
+  const [expandedThought, setExpandedThought] = useState<string | null>(null);
+  const expanded = thoughtKey !== null && expandedThought === thoughtKey;
+  const toggleThought = useCallback(() => setExpandedThought(expanded ? null : thoughtKey), [expanded, thoughtKey]);
+  const phaseRef = useRef<DOMElement>(null);
+  useClickable(phaseRef, toggleThought);
   const phase = awaitingApproval ? 'waiting for your approval'
     : awaitingAnswer ? 'waiting for your answer'
     : compacting ? 'compacting context'
       : turnPhase(messages);
   const quiet = waitingOnUser || compacting ? 0 : quietFor();
   return (
-    <Box paddingX={3} marginBottom={1}>
-      <Spinner />
-      <Text color={waitingOnUser ? theme.pending : theme.textSubtle}>  {phase}</Text>
-      <Text color={theme.textSubtle} dimColor> · {formatElapsed(now - startedAt)}</Text>
+    <Box flexDirection="column" paddingX={3} marginBottom={1}>
+      <Box>
+        <Box flexShrink={0}><Spinner /></Box>
+        <Box ref={phaseRef} flexShrink={1} minWidth={0}>
+          <Text color={waitingOnUser ? theme.pending : theme.textSubtle} wrap="truncate-end">  {phase}</Text>
+        </Box>
+        <Box flexShrink={0}>
+          <Text color={theme.textSubtle} dimColor> · {formatElapsed(now - startedAt)}</Text>
+        </Box>
+      </Box>
+      {expanded && thought && (
+        <Box paddingLeft={3}><Text color={theme.textSubtle}>{thoughtHeading(thought).body}</Text></Box>
+      )}
       {quiet >= QUIET_NOTICE_MS && (
-        <Text color={theme.pending}> · no output for {formatElapsed(quiet)} · esc to cancel</Text>
+        <Text color={theme.pending} wrap="truncate-end">  no output for {formatElapsed(quiet)} · esc to cancel</Text>
       )}
     </Box>
   );
@@ -256,7 +288,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   const plans = currentPlans(messages, participants);
   const [commandIsLoading, setCommandIsLoading] = useState(false);
   const [imageIsLoading, setImageIsLoading] = useState(false);
-  const isLoading = commandIsLoading || imageIsLoading || currSession.getStatus() === 'working';
+  const isLoading = commandIsLoading || currSession.getStatus() === 'working';
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const notice = currSession.getNotice();
   useEffect(() => {
@@ -293,18 +325,17 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       attachmentsRef.current = [];
     };
   }, []);
-  const pasteImage = () => {
+  const pasteClipboard = () => {
     if (imageIsLoading) return;
     setImageIsLoading(true);
-    setFeedback({ kind: 'info', text: 'Reading the clipboard…' });
-    attachClipboardImage()
-      .then(image => {
+    return readClipboard()
+      .then(content => {
+        if (typeof content === 'string') return mounted.current ? content : undefined;
         if (!mounted.current) {
-          removeStoredImage(image);
+          removeStoredImage(content);
           return;
         }
-        attachImage(image);
-        setFeedback({ kind: 'success', text: `Attached ${describeImage(image)}.` });
+        attachImage(content);
       })
       .catch((caught: unknown) => {
         if (mounted.current) setFeedback({ kind: 'error', text: caught instanceof Error ? caught.message : 'Could not read the clipboard.' });
@@ -540,10 +571,16 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   // A command leaves any attachments waiting for the next real message.
   // Commands are exactly what the background queue leaves for a mounted Chat.
   const send = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[]): boolean => {
+    const commandName = /^\/(\S+)/.exec(text)?.[1];
+    const immediate = commandName && ['model', 'thinking', 'effort', 'fast', 'status', 'usage', 'permissions', 'agents', 'tasks'].includes(commandName);
+    if ((currSession.getStatus() === 'working' || commandAbort.current) && !immediate) {
+      queue(text, images, content);
+      return true;
+    }
     // A Sirus command runs here. Anything else that starts with a slash, an
     // agent's own command or a name nobody knows, goes out as a message and
     // the agent's harness makes of it what it will.
-    const command = !isAutoSendable(text) && !isNativeCommand(text, currSession.getNativeCommands())
+    const command = text.startsWith('/') && !isNativeCommand(text, currSession.getNativeCommands())
       ? parseCommandLine(text)
       : null;
     if (command && commandRegistry.some(spec => spec.name === command.name)) {
@@ -602,19 +639,23 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       setFeedback(null);
       return;
     }
-    // Recover the waiting prompt before cancellation can drain the queue.
-    const waiting = currSession.takeQueuedMessage();
-    if (waiting) {
-      currSession.setInputContent(waiting.text);
-      replaceAttachments([...attachmentsRef.current, ...(waiting.images ?? [])]);
-    }
     interrupt();
+  };
+
+  const sendNow = (text = '', images: readonly ImageBlock[] = [], content?: MessageBlock[]) => {
+    if (currSession.getStatus() !== 'working' && !commandAbort.current && currSession.getQueuedMessageCount() === 0) {
+      if (text || images.length) send(text, images, content);
+      return;
+    }
+    if (text || images.length) queue(text, images, content);
+    commandAbort.current?.abort(new TurnCancelledError());
+    void currSession.deliverQueuedMessages();
   };
 
   // Queued messages live on the session so they survive switching away and
   // back. Send one at a time as soon as that session is free again.
   useEffect(() => {
-    if (!active || isLoading || currSession.getStatus() === 'working'
+    if (!active || isLoading || imageIsLoading || currSession.getStatus() === 'working'
       || queued === 0 || effectiveInputMode.type !== 'text') return;
     const next = currSession.shiftQueuedPrompt();
     if (next !== undefined) {
@@ -626,7 +667,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         });
       } else send(next.text, next.images, next.content ? [...next.content] : undefined);
     }
-  }, [currSession, active, isLoading, queued, nextQueuedId, effectiveInputMode.type]);
+  }, [currSession, active, isLoading, imageIsLoading, queued, nextQueuedId, effectiveInputMode.type]);
 
   historyContent.current = (
     <>
@@ -651,6 +692,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         sessionId={currSession.getId()}
         participantColors={participantColors}
         isMessageLive={message => currSession.isMessageLive(message)}
+        hideThoughtFor={isLoading ? messages.at(-1)?.seq : undefined}
       />
       {isLoading && (
         <TurnStatus
@@ -737,7 +779,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
           setFeedback({ kind: 'info', text: 'ctrl+c again to exit' });
         }}
         attachments={attachments}
-        onPasteImage={pasteImage}
+        onPasteClipboard={pasteClipboard}
         onAttachImage={attachImage}
         onOverlayChange={setInputOverlay}
         onRemoveAttachment={removeAttachment}
@@ -745,7 +787,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         thinkingLevel={currSession.getThinkingLevel()}
         history={history}
         queuedMessages={currSession.getQueuedMessages()}
-        onQueue={queue}
+        onSendNow={sendNow}
         onBeginQueuedEdit={id => currSession.beginQueuedMessageEdit(id)}
         onCancelQueuedEdit={id => currSession.cancelQueuedMessageEdit(id)}
         onUpdateQueued={(id, text) => currSession.commitQueuedMessageEdit(id, text)}

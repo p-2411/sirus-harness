@@ -26,7 +26,7 @@ function image(index: number): ImageBlock {
   };
 }
 
-function renderDraft(options: { history?: string[]; directory?: string; initial?: string; disabled?: boolean } = {}) {
+function renderDraft(options: { history?: string[]; directory?: string; initial?: string; disabled?: boolean; clipboardText?: string } = {}) {
   const images = [image(1), image(2)];
   const sent: SentDraft[] = [];
   let input = '';
@@ -62,7 +62,8 @@ function renderDraft(options: { history?: string[]; directory?: string; initial?
       feedback={null}
       participants={[]}
       attachments={attached}
-      onPasteImage={() => {
+      onPasteClipboard={() => {
+        if (options.clipboardText !== undefined) return options.clipboardText;
         setAttached(current => [...current, images[current.length]]);
       }}
       onRemoveAttachment={removed => {
@@ -89,7 +90,7 @@ function renderDraft(options: { history?: string[]; directory?: string; initial?
   // Adding an attachment updates state first, then InputBar's effect puts its
   // placeholder at the current cursor position.
   const pasteImage = async () => {
-    await press('\u0016');
+    await press('\x1b[200~\x1b[201~');
     await flush();
   };
   const unmount = () => {
@@ -111,6 +112,26 @@ function renderDraft(options: { history?: string[]; directory?: string; initial?
 }
 
 describe('positional image drafts', () => {
+  test('the forwarded normal paste shortcut handles both text and images', async () => {
+    for (const keys of ['\x1b[118;9u', '\u0016']) {
+      const textDraft = renderDraft({ clipboardText: 'clipboard text' });
+      try {
+        await textDraft.flush();
+        await textDraft.press(keys);
+        expect(textDraft.input).toBe('clipboard text');
+        expect(textDraft.attachments).toEqual([]);
+      } finally { textDraft.unmount(); }
+      const imageDraft = renderDraft();
+      try {
+        await imageDraft.flush();
+        await imageDraft.press(keys);
+        await imageDraft.flush();
+        expect(imageDraft.attachments).toEqual([image(1)]);
+        expect(imageDraft.input).toBe('\uE000');
+      } finally { imageDraft.unmount(); }
+    }
+  });
+
   test('sends text around an image in the order it was placed', async () => {
     const draft = renderDraft();
     try {
@@ -454,11 +475,11 @@ describe('history, shortcuts and pasted image paths', () => {
     } finally { second.unmount(); rmSync(directory, { recursive: true, force: true }); }
   });
 
-  test('opens shortcuts only on an empty draft and keeps the working hint live', async () => {
+  test('opens shortcuts only on an empty draft and keeps the working input quiet', async () => {
     const draft = renderDraft({ disabled: true });
     try {
       await draft.flush();
-      expect(draft.output).toContain('enter steers · tab queues');
+      expect(draft.output).not.toContain('enter queues · ctrl+enter sends now');
       expect(draft.output).not.toContain('agents are thinking');
       expect(draft.output).not.toContain('▌');
       await draft.press('?');

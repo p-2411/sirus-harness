@@ -366,14 +366,16 @@ describe('Sirus MCP server', () => {
 });
 
 
-test('SpawnAgent lists researched catalog models and models reported by the vendor on each request', async () => {
+test('SpawnAgent lists only vendor models and enriches known ones with profiles', async () => {
   const client = await connect('sirus');
   try {
     rememberListedModels('gpt', [{ id: 'gpt-future-test', description: 'Vendor description for a new model.' }]);
+    rememberListedModels('claude', [{ id: 'claude-opus-5', description: 'Opus' }]);
     const spawn = (await client.listTools()).tools.find(tool => tool.name === 'SpawnAgent')!;
     for (const model of MODELS) {
       expect(model.profile.sources?.length).toBeGreaterThan(0);
-      expect(spawn.description).toContain(`- ${model.id}: `);
+      if (model.id === 'claude-opus-5') expect(spawn.description).toContain(model.profile.strengths);
+      else expect(spawn.description).not.toContain(`- ${model.id}: `);
     }
     expect(spawn.description).toContain('- gpt-future-test: Vendor description for a new model.');
     rememberListedModels('gpt', [{ id: 'gpt-next-test', description: 'Newer listing.' }]);

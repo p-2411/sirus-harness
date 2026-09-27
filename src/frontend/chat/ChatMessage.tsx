@@ -28,6 +28,7 @@ import {
 } from '../../agent_runtime/tools/subagents';
 import { INTERRUPTED_REASON } from '../../agent_runtime/tools/subagents/report';
 import { formatTokens } from '../../agent_runtime/usage';
+import { historyParts } from './history';
 import { workerAge } from '../../commands/agents/behavior';
 import {
 	getPermissionsVersion,
@@ -202,6 +203,10 @@ interface PlanSegment {
 
 export type MessageSegment = MessageBlock | ToolRun | PlanSegment;
 
+function isActivity(segment: MessageSegment | undefined): boolean {
+	return segment !== undefined && ['tool_call', 'tool_run', 'plan', 'notice', 'thought'].includes(segment.type);
+}
+
 // A call that is part of a run of ordinary tool calls, which a group folds
 // away behind "Ran N commands". A SpawnAgent call is not: its row is a
 // worker's anchor, showing the run's status and carrying its report, so it
@@ -282,7 +287,7 @@ function PlanRow({ call }: { call: ToolCallBlock }) {
 	const entries = planEntriesOf(call);
 	const done = entries.filter(entry => entry.status === 'completed').length;
 	return (
-		<Box flexDirection="column" paddingX={1} paddingY={1}>
+		<Box flexDirection="column" paddingX={1}>
 			<Box ref={ref}>
 				<Text color={hovered ? theme.accentSoft : theme.textMuted} wrap="truncate-end">
 					{'  '}Updated plan · {done} of {entries.length} done
@@ -301,7 +306,7 @@ function NoticeRow({ block }: { block: NoticeBlock }) {
 	const color = block.severity === 'warning' ? theme.pending
 		: block.severity === 'error' ? theme.danger : theme.textMuted;
 	return (
-		<Box paddingX={1} paddingY={1}>
+		<Box paddingX={1}>
 			<Text color={color} dimColor wrap="truncate-end">
 				{'  '}{singleLine(block.title)}{block.description ? ` · ${singleLine(block.description)}` : ''}
 			</Text>
@@ -447,7 +452,7 @@ export function ToolRunGroup({ calls, defaultExpanded = false, sessionId }: {
 	const summaryColor = hovered ? theme.accentSoft : theme.textMuted;
 
 	return (
-		<Box flexDirection="column" marginLeft={2} marginY={1}>
+		<Box flexDirection="column" marginLeft={2}>
 			<Box ref={ref} flexDirection="row" flexWrap="nowrap">
 				<Text color={summaryColor} wrap="truncate-end">
 					{complete ? `Ran ${calls.length} commands` : <AnimatedCommandStatus count={calls.length} />}
@@ -556,16 +561,13 @@ function SpawnAgentEntry({ call, sessionId }: { call: ToolCallBlock; sessionId?:
 	);
 }
 
-// A row on its own is set off by a blank line; rows that follow one another
-// stack directly, as the entries of a group do.
-function ToolCallRow({ call, sessionId, joinsPrevious = false, joinsNext = false }: {
+// The message owns spacing between activity and prose; rows stack directly.
+function ToolCallRow({ call, sessionId }: {
 	call: ToolCallBlock;
 	sessionId?: string;
-	joinsPrevious?: boolean;
-	joinsNext?: boolean;
 }) {
 	return (
-		<Box flexDirection="column" paddingX={1} paddingTop={joinsPrevious ? 0 : 1} paddingBottom={joinsNext ? 0 : 1}>
+		<Box flexDirection="column" paddingX={1}>
 			{isSpawnAgent(call)
 				? <SpawnAgentEntry call={call} sessionId={sessionId} />
 				: <ToolCallEntry call={call} indent="  " sessionId={sessionId} />}
@@ -576,7 +578,7 @@ function ToolCallRow({ call, sessionId, joinsPrevious = false, joinsNext = false
 // A thought that opens with a bold title, as summarised reasoning does, is
 // named by that title; any other by its own opening words, and unfolds in
 // place rather than repeating them underneath.
-function thoughtHeading(text: string): { title: string | null; body: string } {
+export function thoughtHeading(text: string): { title: string | null; body: string } {
 	const trimmed = text.trim();
 	const titled = /^\*\*(.+?)\*\*\s*/.exec(trimmed);
 	if (titled) return { title: singleLine(titled[1]!), body: trimmed.slice(titled[0].length) };
@@ -589,27 +591,27 @@ function ThoughtRow({ text }: { text: string }) {
 	const [expanded, setExpanded] = useState(false);
 	const toggle = useCallback(() => setExpanded(current => !current), []);
 	const ref = useRef<DOMElement>(null);
-	const hovered = useClickable(ref, toggle);
+	useClickable(ref, toggle);
 	const { title, body } = thoughtHeading(text);
 	if (!title && expanded) {
 		return (
-			<Box flexDirection="column" padding={1}>
+			<Box flexDirection="column" paddingX={1}>
 				<Box ref={ref} marginLeft={2}>
-					<Text color={hovered ? theme.textMuted : theme.textSubtle} dimColor={!hovered} wrap="wrap">{body}</Text>
+					<Text color={theme.textSubtle} wrap="wrap">{body}</Text>
 				</Box>
 			</Box>
 		);
 	}
 	return (
-		<Box flexDirection="column" padding={1}>
+		<Box flexDirection="column" paddingX={1}>
 			<Box ref={ref}>
-				<Text color={hovered ? theme.textMuted : theme.textSubtle} dimColor={!hovered} wrap="truncate-end">
+				<Text color={theme.textSubtle} wrap="truncate-end">
 					{'  '}{title ?? singleLine(body)}
 				</Text>
 			</Box>
 			{expanded && body && (
 				<Box marginLeft={4}>
-					<Text color={theme.textSubtle} dimColor wrap="wrap">{body}</Text>
+					<Text color={theme.textSubtle} wrap="wrap">{body}</Text>
 				</Box>
 			)}
 		</Box>
@@ -656,6 +658,8 @@ interface ChatMessageProps {
 	participantColors?: ParticipantColors;
 	// The reply is still being written.
 	live?: boolean;
+	// The current thought is already shown in the turn status row.
+	hideThought?: boolean;
 }
 
 function sameFields<T extends object>(left: T, right: T): boolean {
@@ -688,18 +692,22 @@ export function ChatMessage(props: ChatMessageProps) {
 	return <MessageBody {...props} message={messageSnapshot(props.message)} />;
 }
 
-export function ChatHistory({ messages, participants, isMessageLive, ...props }: {
+export function ChatHistory({ messages, participants, isMessageLive, hideThoughtFor, ...props }: {
 	messages: readonly Message[];
 	participants: readonly { name: string; model: string }[];
 	isMessageLive: (message: Message) => boolean;
+	hideThoughtFor?: number;
 	sessionId: string;
 	participantColors: ParticipantColors;
 }) {
 	const models = new Map(participants.map(participant => [participant.name.toLocaleLowerCase(), participant.model]));
-	const entries = messages.map(message => ({
+	const liveMessages = new Set(messages.filter(isMessageLive).map(message => message.seq));
+	const entries = historyParts(messages).map(({ message, key, final }) => ({
+		key,
 		message: messageSnapshot(message),
 		model: message.model ?? (message.role === 'assistant' ? models.get((message.participant ?? 'sirus').toLocaleLowerCase()) : undefined),
-		live: isMessageLive(message),
+		live: final && liveMessages.has(message.seq),
+		hideThought: message.seq === hideThoughtFor,
 	}));
 	return <HistoryBody {...props} entries={entries} />;
 }
@@ -707,18 +715,43 @@ export function ChatHistory({ messages, participants, isMessageLive, ...props }:
 // A draft edit leaves the entire history subtree alone; streaming only
 // passes the changed entries through the message-level boundary below.
 const HistoryBody = memo(function HistoryBody({ entries, ...props }: {
-	entries: readonly Pick<ChatMessageProps, 'message' | 'model' | 'live'>[];
+	entries: readonly (Pick<ChatMessageProps, 'message' | 'model' | 'live' | 'hideThought'> & { key: string })[];
 	sessionId: string;
 	participantColors: ParticipantColors;
 }) {
-	return entries.map(entry => <MessageBody key={entry.message.seq} {...props} {...entry} />);
+	return entries.map(({ key, ...entry }) => <MessageBody key={key} {...props} {...entry} />);
 }, (previous, next) => previous.sessionId === next.sessionId
 	&& sameColors(previous.participantColors, next.participantColors)
 	&& previous.entries.length === next.entries.length
 	&& previous.entries.every((entry, index) => {
 		const other = next.entries[index]!;
-		return entry.model === other.model && entry.live === other.live && sameMessage(entry.message, other.message);
+		return entry.key === other.key && entry.model === other.model && entry.live === other.live && entry.hideThought === other.hideThought && sameMessage(entry.message, other.message);
 	}));
+
+function SegmentView({ block, participantColors, sessionId }: {
+	block: MessageSegment;
+	participantColors?: ParticipantColors;
+	sessionId?: string;
+}) {
+	switch (block.type) {
+		case 'text':
+			return block.filePath ? null : <Markdown participantColors={participantColors}>{block.text}</Markdown>;
+		case 'image':
+			return <ImageLine image={block} />;
+		case 'thought':
+			return <ThoughtRow text={block.text} />;
+		case 'plan':
+			return <PlanRow call={block.call} />;
+		case 'notice':
+			return <NoticeRow block={block} />;
+		case 'compaction':
+			return <CompactionRule block={block} participantColors={participantColors} />;
+		case 'tool_run':
+			return <ToolRunGroup calls={block.calls} sessionId={sessionId} />;
+		case 'tool_call':
+			return <ToolCallRow call={block} sessionId={sessionId} />;
+	}
+}
 
 const MessageBody = memo(function MessageBody({
 	message,
@@ -726,10 +759,11 @@ const MessageBody = memo(function MessageBody({
 	participantColors,
 	sessionId,
 	live = false,
+	hideThought = false,
 }: ChatMessageProps) {
 	const isUser = message.role === "user";
 	const participantName = message.participant ?? 'sirus';
-	const segments = messageSegments(visibleContent(message.content, live));
+	const segments = messageSegments(visibleContent(message.content, live && !hideThought));
 	if (message.content.length > 0 && segments.length === 0) return null;
 	return (
 		// no bars, no boxes — bold speaker label, body aligned flush beneath,
@@ -751,38 +785,19 @@ const MessageBody = memo(function MessageBody({
 				{!isUser && model && <Text color={theme.textSubtle} dimColor> {model}</Text>}
 			</Text>
 			{segments.map((block, index) => {
-				switch (block.type) {
-					case 'text':
-						if (block.filePath) return null;
-						return <Markdown key={index} participantColors={participantColors}>{block.text}</Markdown>;
-					case 'image':
-						return <ImageLine key={index} image={block} />;
-					case 'thought':
-						return <ThoughtRow key={index} text={block.text} />;
-					case 'plan':
-						return <PlanRow key={index} call={block.call} />;
-					case 'notice':
-						return <NoticeRow key={index} block={block} />;
-					case 'compaction':
-						return <CompactionRule key={index} block={block} participantColors={participantColors} />;
-					case 'tool_run':
-						return <ToolRunGroup key={index} calls={block.calls} sessionId={sessionId} />;
-					case 'tool_call':
-						return (
-							<ToolCallRow
-								key={index}
-								call={block}
-								sessionId={sessionId}
-								joinsPrevious={segments[index - 1]?.type === 'tool_call'}
-								joinsNext={segments[index + 1]?.type === 'tool_call'}
-							/>
-						);
-				}
+				const row = <SegmentView key={index} block={block} participantColors={participantColors} sessionId={sessionId} />;
+				if (!isActivity(block)) return row;
+				const previous = segments[index - 1];
+				const next = segments[index + 1];
+				return <Box key={index} flexDirection="column"
+					marginTop={previous && !isActivity(previous) ? 1 : 0}
+					marginBottom={next && !isActivity(next) ? 1 : 0}>{row}</Box>;
 			})}
 		</Box>
 	);
 }, (previous, next) => previous.sessionId === next.sessionId
 	&& previous.model === next.model
 	&& previous.live === next.live
+	&& previous.hideThought === next.hideThought
 	&& sameColors(previous.participantColors, next.participantColors)
 	&& sameMessage(previous.message, next.message));

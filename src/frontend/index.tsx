@@ -10,8 +10,8 @@ import { enableCheckpoints } from "../checkpoints";
 import { sendHeartbeat } from "../telemetry";
 
 export function startFrontend(options: CliOptions): void {
-  // Heartbeats are opt-in through SIRUS_HEARTBEAT_URL and never block startup.
-  void sendHeartbeat().catch(() => undefined);
+  const lifetime = new AbortController();
+  void sendHeartbeat({ signal: lifetime.signal }).catch(() => undefined);
 
   // Frame capture must see Ink's writes, so it wraps stdout before anything else.
   installFrameCapture();
@@ -37,6 +37,7 @@ export function startFrontend(options: CliOptions): void {
   // with the tool server they talk to, so their handles cannot leave the CLI
   // waiting for another Ctrl+C.
   const shutdown = () => {
+    lifetime.abort();
     disposeAllRuntimes();
     stopSirusMcpServer();
     closeAllMemoryStores();

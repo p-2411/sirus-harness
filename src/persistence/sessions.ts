@@ -117,6 +117,11 @@ const messageSchema = z.object({
   to: z.array(z.string().min(1)).optional(),
   model: z.string().min(1).optional(),
   hidden: z.literal(true).optional(),
+  injectedAt: z.object({
+    seq: z.number().int().nonnegative(),
+    block: z.number().int().nonnegative(),
+    offset: z.number().int().nonnegative(),
+  }).optional(),
   // A compaction summary written by Sirus itself, before the runtimes
   // compacted their own conversations. It becomes a boundary with the
   // summary text; the token figures it carried are gone with the gauge.
@@ -311,6 +316,7 @@ function toMessage(stored: StoredMessage, index: number, defaultParticipant: str
     ...(stored.to ? { to: stored.to } : {}),
     ...(stored.model ? { model: stored.model } : {}),
     ...(stored.hidden ? { hidden: true as const } : {}),
+    ...(stored.injectedAt ? { injectedAt: stored.injectedAt } : {}),
   };
 }
 

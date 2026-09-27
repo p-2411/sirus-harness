@@ -389,14 +389,33 @@ describe('chat message', () => {
     ));
     const lines = output.split('\n');
 
-    expect(lines).toHaveLength(5);
-    expect(lines[0]).toBe('');
-    expect(lines[1]).toContain('Ran 2 commands');
-    expect(lines[2]).toContain('● Read one.ts');
-    expect(lines[3]).toContain('● Run bun test');
-    expect(lines[4]).toBe('');
-    expect(lines[2].indexOf('●')).toBeGreaterThan(lines[1].indexOf('Ran'));
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toContain('Ran 2 commands');
+    expect(lines[1]).toContain('● Read one.ts');
+    expect(lines[2]).toContain('● Run bun test');
+    expect(lines[1].indexOf('●')).toBeGreaterThan(lines[0].indexOf('Ran'));
     expect(output).not.toMatch(/[›⌄]/);
+  });
+
+  test('stacks groups, workers, plans and notices without accumulating blank lines', () => {
+    const content: MessageBlock[] = [
+      { type: 'text', text: 'Checking the corpus.' },
+      ...calls,
+      toolCall({ id: 'spawn-spacing', title: 'SpawnAgent', status: 'in_progress', input: { name: 'graphify_docs_1' } }),
+      { type: 'notice', severity: 'info', title: 'Background task exec-123' },
+      planCall([{ content: 'Build graph', status: 'in_progress' }]),
+      ...calls.map(call => ({ ...call, id: `later-${call.id}` })),
+      { type: 'text', text: 'Extraction complete.' },
+    ];
+    const output = stripAnsi(renderToString(<ChatMessage message={{ seq: 0, role: 'assistant', content }} />, { columns: 100 }));
+    const lines = output.split('\n').map(line => line.trim());
+    const first = lines.indexOf('Ran 2 commands');
+    const last = lines.lastIndexOf('Ran 2 commands');
+    expect(lines.slice(first, last + 1).every(Boolean)).toBe(true);
+    expect(lines[first - 1]).toBe('');
+    expect(lines[first - 2]).toBe('Checking the corpus.');
+    expect(lines[last + 1]).toBe('');
+    expect(lines[last + 2]).toBe('Extraction complete.');
   });
 
 });

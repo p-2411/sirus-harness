@@ -16,6 +16,7 @@ import { loginMenuItems } from '../../src/commands/authentication/behavior';
 import { Session } from '../../src/agent_runtime/session';
 import { providerFor } from '../../src/agent_runtime/providers';
 import { resolveModelReference } from '../../src/commands/agents/behavior';
+import { MODELS, VENDORS, rememberListedModels } from '../../src/agent_runtime/providers/catalog';
 import type { SubagentRun } from '../../src/agent_runtime/tools/subagents';
 import type { Feedback } from '../../src/commands/feedback';
 import { loadSirusModelPreference, saveSirusModelPreference } from '../../src/persistence';
@@ -40,6 +41,13 @@ function menuItems(command: string, args: readonly string[]): CommandMenuItem[] 
   return commandMenu(command, args, new Session())?.filter(
     (entry): entry is CommandMenuItem => entry.type === 'item',
   ) ?? [];
+}
+
+function seedVendorModels(): void {
+  for (const vendor of VENDORS) {
+    rememberListedModels(vendor, MODELS.filter(model => model.vendor === vendor)
+      .map(model => ({ id: model.id, description: model.profile.strengths })));
+  }
 }
 
 describe('matchCommands', () => {
@@ -81,6 +89,7 @@ describe('executeCommand', () => {
     settingsDirectory = mkdtempSync(join(tmpdir(), 'sirus-model-command-'));
     previousDirectory = process.env.SIRUS_DATA_DIR;
     process.env.SIRUS_DATA_DIR = settingsDirectory;
+    seedVendorModels();
   });
 
   afterEach(() => {
@@ -183,6 +192,42 @@ describe('executeCommand', () => {
   test('model command rejects a partial name matching different model families', () => {
     expect(() => runCommand('model', ['claude'])).toThrow(/ambiguous model/i);
     expect(() => runCommand('model', ['claude'])).toThrow(/claude-opus-5/);
+  });
+
+  test('opus keeps working after Claude reports its qualified family alias', () => {
+    const session = new Session();
+    runCommand('model', ['opus'], session);
+    expect(session.getModel()).toBe('claude-opus-5-5');
+
+    rememberListedModels('claude', [
+      { id: 'opus[1m]', description: 'Opus with 1M context' },
+      { id: 'sonnet', description: 'Sonnet' },
+    ]);
+    runCommand('model', ['OPUS'], session);
+    expect(session.getModel()).toBe('opus[1m]');
+    expect(loadSirusModelPreference()).toBe('opus[1m]');
+
+    session.addParticipant('reviewer', 'claude-sonnet-5');
+    runCommand('model', ['@reviewer', 'opus'], session);
+    expect(session.getParticipants().find(p => p.name === 'reviewer')?.model).toBe('opus[1m]');
+    runCommand('model', ['subagent', 'opus'], session);
+    expect(session.getSubagentModel()).toBe('opus[1m]');
+    expect(() => resolveModelReference('claude-opus-5')).toThrow(/unknown model/i);
+    expect(menuItems('model', []).filter(item => item.key.includes('opus')).map(item => item.key))
+      .toEqual(['opus[1m]']);
+  });
+
+  test('an empty vendor list never falls back to built-in models', () => {
+    for (const vendor of VENDORS) rememberListedModels(vendor, []);
+    expect(menuItems('model', [])).toEqual([]);
+    expect(() => runCommand('model', ['opus'])).toThrow('No vendor models available yet');
+  });
+
+  test('model references prefer exact aliases and reject competing context variants', () => {
+    expect(resolveModelReference('opus', ['opus[1m]', 'opus'])).toBe('opus');
+    expect(resolveModelReference('opus[1m]', ['opus[1m]', 'opus'])).toBe('opus[1m]');
+    expect(() => resolveModelReference('opus', ['opus[1m]', 'opus[2m]']))
+      .toThrow(/ambiguous model/i);
   });
 
   test('model command groups selectable models under provider headings', () => {
@@ -567,13 +612,14 @@ describe('compact command', () => {
 
 describe('subagent model command', () => {
   // Models resolve against what the vendors last listed, which lives in the
-  // data directory; an empty one leaves the catalog's.
+  // data directory; seed the vendor response for these command tests.
   let directory: string;
   let previousDirectory: string | undefined;
   beforeEach(() => {
     directory = mkdtempSync(join(tmpdir(), 'sirus-subagent-model-'));
     previousDirectory = process.env.SIRUS_DATA_DIR;
     process.env.SIRUS_DATA_DIR = directory;
+    seedVendorModels();
   });
   afterEach(() => {
     if (previousDirectory === undefined) delete process.env.SIRUS_DATA_DIR;

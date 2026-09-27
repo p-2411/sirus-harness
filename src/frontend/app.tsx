@@ -210,6 +210,11 @@ export default function App({ launchDirectory = process.cwd(), startup }: { laun
     };
   }, [sessions, selectedSession, draftSession]);
 
+  useEffect(() => () => {
+    const { sessions, draftSession } = currentWorkspace.current;
+    for (const session of new Set([...sessions, draftSession])) void session.dispose();
+  }, []);
+
   // Retire the old object before restoring the same id: disposal unregisters
   // its tool server and workers, which must not remove the new object's bindings.
   function replaceSession(old: Session, snapshot: SessionSnapshot): Promise<Session> {

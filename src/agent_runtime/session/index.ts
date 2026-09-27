@@ -7,6 +7,7 @@ import { DEFAULT_PERMISSION_MODE, type PermissionMode } from '../permissions/pol
 import { sirusPrompt } from '../prompt';
 import { servableModelIds, servesModel } from '../providers';
 import { DEFAULT_MODEL, vendorOf } from '../providers/catalog';
+import { discoverMissingModels } from '../providers/discovery';
 import { nativeCommands, type NativeCommand } from '../runtime/commands';
 import type { BackgroundTask } from '../runtime/runtime';
 import { registerToolSession, sirusMcpServerEntry, unregisterToolSession } from '../tools/server';
@@ -179,6 +180,7 @@ function resolveSessionOptions(options: SessionOptions = {}): ResolvedSessionOpt
 export class Session {
   private readonly changes = new ChangeFeed(() => this.timeline.touch());
   private readonly queue = new MessageQueue();
+  private deliveringQueue = false;
   private readonly timeline: Timeline;
   private readonly roster: ParticipantRoster;
   private readonly checkpoints: CheckpointLog;
@@ -298,6 +300,7 @@ export class Session {
         this.changes.notify();
       },
       subagentModel: () => this.subagentModel,
+      toolsSettled: agent => { void this.deliverQueuedMessages(agent); },
       forWorker: (id, directory) => ({
         ...host,
         directory,
@@ -372,7 +375,7 @@ export class Session {
     this.roster.add(name, model);
   }
 
-  async sendMessage(message: Draft): Promise<Message[]> {
+  async sendMessage(message: Draft, queuedMessage?: QueuedMessage): Promise<Message[]> {
     if (message.role !== 'user') throw new Error('Only user messages can start a session turn');
     if (this.rewinding || this.checkpoints.isRestoringDirectory()) {
       throw new Error('Wait for the rewind to finish before sending a message.');
@@ -450,11 +453,21 @@ export class Session {
         try {
           await this.starting.get(target);
           if (generation !== this.sendGeneration) throw new TurnCancelledError();
+          const reply = target.activeReply;
+          const tail = reply?.content.at(-1);
+          const textTail = tail?.type === 'text' || tail?.type === 'thought';
+          const injectedAt = reply ? { seq: reply.seq,
+            block: reply.content.length - (textTail ? 1 : 0),
+            offset: textTail ? tail.text.length : 0 } : undefined;
           await target.steer(withIntroductions(textOf(stored), introduced, target.name));
+          entry.injectedAt ??= injectedAt;
           this.timeline.deliver(entry, [{ name: target.name, transcript: target.transcript }]);
         } catch (error) {
+          if (queuedMessage) {
+            this.queue.prepend({ ...queuedMessage, text: textOf(queued), images,
+              content: queued.content, to: [target.name] });
+          } else if (!isAbortError(error)) this.queue.push(textOf(queued), images, queued.content, [target.name]);
           if (isAbortError(error)) throw error;
-          this.queue.push(textOf(queued), images, queued.content, [target.name]);
           this.showNotice(`@${target.name} could not accept steering. Message queued.`, target.name);
         }
       });
@@ -818,6 +831,53 @@ export class Session {
     this.changes.notify();
   }
 
+  // Enter waits for a tool boundary. Ctrl+Enter calls without a boundary to
+  // ask the adapter to deliver now. Commands and images need a fresh turn.
+  async deliverQueuedMessages(atSafePoint?: SessionAgent): Promise<void> {
+    if (this.deliveringQueue || this.disposed) return;
+    if (this.activeSends === 0) { this.sendNextQueuedPrompt(); return; }
+    this.deliveringQueue = true;
+    try {
+      const count = this.queue.length;
+      for (let index = 0; index < count; index++) {
+        const next = this.queue.all().find(message => !message.editing);
+        if (!next) break;
+        if (!isAutoSendable(next.text) || next.images?.length) {
+          if (!atSafePoint) this.cancel();
+          break;
+        }
+        if (atSafePoint) {
+          if (atSafePoint.activeReply?.content.some(block => block.type === 'tool_call'
+            && (block.status === 'pending' || block.status === 'in_progress'))) break;
+          let text = next.text;
+          for (const file of parseFileMentions(text, this.directory).reverse()) {
+            text = text.slice(0, file.start) + ' '.repeat(file.end - file.start) + text.slice(file.end);
+          }
+          const mentions = this.roster.readMentions(text);
+          const names = next.to ?? (mentions.length ? mentions.map(mention => mention.name) : [this.roster.default.name]);
+          const busy = names.map(name => this.roster.find(name)).filter(agent => agent?.busy);
+          // A tool boundary for one participant must not interrupt another.
+          if (!busy.includes(atSafePoint) || busy.some(agent => agent !== atSafePoint)) break;
+        }
+        this.queue.shift();
+        this.changes.notify();
+        await this.sendMessage({ role: 'user', ...(next.to ? { to: [...next.to] } : {}),
+          content: next.content ? [...next.content] : [{ type: 'text', text: next.text }, ...(next.images ?? [])],
+        }, next);
+        // A refused delivery was put back at the front. Wait for turn end.
+        if (this.queue.all().some(message => message.id === next.id)) {
+          if (!atSafePoint) this.cancel();
+          break;
+        }
+      }
+    } catch {
+      // sendMessage retains undelivered steering and records failures.
+    } finally {
+      this.deliveringQueue = false;
+      this.sendNextQueuedPrompt();
+    }
+  }
+
   shiftQueuedMessage(): string | undefined {
     return this.shiftQueuedPrompt()?.text;
   }
@@ -857,7 +917,7 @@ export class Session {
   // owner needs before it answers anything the user typed meanwhile, so the
   // reports go first and the queue drains after the turn they start.
   private sendNextQueuedPrompt(): void {
-    if (this.activeSends > 0) return;
+    if (this.disposed || this.activeSends > 0 || this.deliveringQueue) return;
     if (this.pendingReports.length > 0) {
       this.flushReports();
       return;
@@ -970,7 +1030,13 @@ export class Session {
   }
 
   async warmup(): Promise<void> {
-    if (!this.disposed && this.isEmpty()) await this.roster.default.warmup();
+    if (this.disposed) return;
+    await Promise.all([
+      discoverMissingModels(this.getDirectory()).then(changed => {
+        if (changed && !this.disposed) this.changes.notify();
+      }),
+      this.isEmpty() ? this.roster.default.warmup() : Promise.resolve(),
+    ]);
   }
 
   releaseWarmup(): void {
