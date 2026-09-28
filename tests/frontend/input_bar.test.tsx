@@ -1411,7 +1411,7 @@ describe('input queue and interrupt precedence', () => {
     const bar = renderQueueInput(session);
     try {
       await bar.flush();
-      expect(bar.output).toContain('↑ edit queued · ctrl+enter sends now');
+      expect(bar.output).toContain('↑ · ctrl+enter');
       await bar.press('\u001b');
       expect(bar.events).toEqual(['escape']);
       expect(session.getQueuedMessages().map(item => item.text)).toEqual(['first', 'second']);

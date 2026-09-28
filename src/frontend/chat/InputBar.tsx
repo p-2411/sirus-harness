@@ -349,7 +349,7 @@ export function InputBar({
   // What Enter does, or with messages queued how to reach them, sits at the
   // right of the draft's first line, and the draft wraps short of it; a long
   // draft's position shows on its last line.
-  const enterHint = queuedMessages.length > 0 ? '↑ edit queued · ctrl+enter sends now' : disabled ? '' : 'enter ↵';
+  const enterHint = queuedMessages.length > 0 ? '↑ · ctrl+enter' : disabled ? '' : 'enter ↵';
   const hintWidth = Math.max(stringWidth(enterHint), stringWidth('copied ✓'), 11) + 1;
   const rows = draftRows(input, Math.max(1, (boxWidth || stdout.columns || 80) - 6 - hintWidth), character => {
     const image = imageFor(character);
