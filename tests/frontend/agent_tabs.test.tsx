@@ -126,14 +126,16 @@ test('an idle selected agent can answer while its peer runs and queued messages 
   } finally { release(); await turn.catch(() => {}); await chat.close(); await session.dispose(); unbindRuntime(builder); unbindRuntime(reviewer); }
 });
 
-test('handoffs are attributed and visible in both participating conversations', async () => {
+test('an agent-created participant appears in the header without taking over the selected conversation', async () => {
   const builder = 'test-tabs-handoff-builder', reviewer = 'test-tabs-handoff-reviewer';
-  bindScriptedRuntime(builder, (_input, emit) => emit({ type: 'text', text: '@reviewer Please check this change.' }));
+  bindScriptedRuntime(builder, (_input, emit) => emit({ type: 'text', text: `@reviewer ${reviewer} Please check this change.` }));
   bindScriptedRuntime(reviewer, (_input, emit) => emit({ type: 'text', text: 'Review complete.' }));
-  const session = new Session({ model: builder }); session.addParticipant('reviewer', reviewer);
+  const session = new Session({ model: builder });
   const chat = screen(session);
   try {
     await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Build it' }] }); await chat.flush();
+    expect(session.getSelectedParticipant()).toBe('sirus');
+    expect(chat.output().split('\n')[0]).toContain('reviewer.');
     expect(chat.output()).toContain('→ @reviewer');
     expect(chat.output()).not.toContain('Review complete.');
     await chat.select('right');

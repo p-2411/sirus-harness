@@ -13,11 +13,11 @@ export interface Invocation {
   // The entries this turn's prompt carries. They are already in the
   // participant's transcript; the runtime hears them through the prompt.
   entries: Message[];
-  // The participants the user's prompt added to the session.
+  // The participants these messages added to the session.
   introduced?: readonly Mention[];
 }
 
-// The user's prompt as a participant reads it, told who the prompt added to
+// A message as a participant reads it, told who the message added to
 // the session. The model that created a participant is taken out of the
 // prompt, and with it the only sign that the name is a participant now, so a
 // peer addressed in the same prompt would otherwise take it for a stranger.
@@ -55,9 +55,9 @@ function promptFor(invocation: Invocation): TurnInput {
     };
   }
   return {
-    text: invocation.entries
+    text: withIntroductions(invocation.entries
       .map(entry => `${entry.role === 'user' ? 'The user' : `@${entry.participant ?? 'sirus'}`} wrote:\n${textOf(withoutCreationModels(entry))}`)
-      .join('\n\n'),
+      .join('\n\n'), invocation.introduced ?? [], invocation.participant.name),
     images: invocation.entries.flatMap(entry => entry.role === 'user'
       ? entry.content.filter((block): block is ImageBlock => block.type === 'image') : []),
   };
@@ -107,8 +107,10 @@ export class TurnRunner {
     const combined = new Map<SessionAgent, Invocation>();
     for (const invocation of initial) {
       const existing = combined.get(invocation.participant);
-      if (existing) existing.entries.push(...invocation.entries);
-      else combined.set(invocation.participant, { ...invocation, entries: [...invocation.entries] });
+      if (existing) {
+        existing.entries.push(...invocation.entries);
+        existing.introduced = [...(existing.introduced ?? []), ...(invocation.introduced ?? [])];
+      } else combined.set(invocation.participant, { ...invocation, entries: [...invocation.entries] });
     }
     let pending = [...combined.values()];
     let firstFailure: unknown;
@@ -170,13 +172,23 @@ export class TurnRunner {
           }
           continue;
         }
-        const recipients = roster.routeAgentMessage(result.value, source);
-        timeline.deliver(result.value, recipients.map(participant => ({ name: participant.name, transcript: participant.transcript })));
-        for (const participant of recipients) {
-          const key = keyOf(participant.name);
-          const invocation = next.get(key);
-          if (invocation) invocation.entries.push(result.value);
-          else next.set(key, { participant, entries: [result.value] });
+        try {
+          const { recipients, introduced } = roster.routeAgentMessage(result.value, source);
+          // Kept as the agent wrote it; the runtimes read it without the models.
+          const creationModels = introduced.flatMap(mention => mention.modelSpan ? [mention.modelSpan] : []);
+          if (creationModels.length > 0) result.value.creationModels = creationModels;
+          timeline.deliver(result.value, recipients.map(participant => ({ name: participant.name, transcript: participant.transcript })));
+          for (const participant of recipients) {
+            const key = keyOf(participant.name);
+            const invocation = next.get(key);
+            if (invocation) {
+              invocation.entries.push(result.value);
+              invocation.introduced = [...(invocation.introduced ?? []), ...introduced];
+            } else next.set(key, { participant, entries: [result.value], introduced });
+          }
+        } catch (error) {
+          // An invalid introduction must not discard other agents' handoffs.
+          if (!hasFailure) { firstFailure = error; hasFailure = true; }
         }
       }
       pending = [...next.values()];

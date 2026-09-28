@@ -9,7 +9,7 @@ import type { Transcript } from './transcript';
 
 export type { Participant };
 
-// A participant named in a user prompt. New participants carry the model
+// A participant named in a user or agent message. New participants carry the model
 // that introduces them and the span of prompt text that named it.
 export interface Mention {
   name: string;
@@ -75,6 +75,12 @@ function requireKnownModel(model: string): void {
   }
 }
 
+function requireParticipantName(name: string): void {
+  if (!NAME_PATTERN.test(name) || RESERVED_NAMES.has(keyOf(name))) {
+    throw new Error(`Invalid participant name: @${name}`);
+  }
+}
+
 // The session's agents and all @name routing between them.
 export class ParticipantRoster {
   private readonly sessionId: string;
@@ -114,9 +120,7 @@ export class ParticipantRoster {
 
   add(name: string, model: string): void {
     const normalizedName = bareName(name);
-    if (!NAME_PATTERN.test(normalizedName) || RESERVED_NAMES.has(keyOf(normalizedName))) {
-      throw new Error(`Invalid participant name: @${normalizedName}`);
-    }
+    requireParticipantName(normalizedName);
     if (this.find(normalizedName)) {
       throw new Error(`Participant @${normalizedName} already exists`);
     }
@@ -183,8 +187,10 @@ export class ParticipantRoster {
     // Validate the complete turn first, then mutate the participant list.
     // This avoids partially creating agents when a later mention is bad.
     for (const mention of mentions) {
-      if (!this.find(mention.name) && !mention.model) {
-        throw new Error(`Model not specified for new participant @${mention.name}`);
+      if (!this.find(mention.name)) {
+        requireParticipantName(mention.name);
+        if (!mention.model) throw new Error(`Model not specified for new participant @${mention.name}`);
+        requireKnownModel(mention.model);
       }
     }
     for (const mention of mentions) {
@@ -193,21 +199,15 @@ export class ParticipantRoster {
     return mentions.map(mention => this.find(mention.name)!);
   }
 
-  // Who an agent's own response hands off to. Agents cannot introduce
-  // participants, and cannot recursively launch themselves by including
-  // their own name in a response.
-  routeAgentMessage(message: Message, speaker: SessionAgent): SessionAgent[] {
-    const mentioned: SessionAgent[] = [];
-    const seen = new Set<string>();
-    for (const { name } of scanMentions(textOf(message))) {
-      const participant = this.find(name);
-      if (!participant || participant === speaker) continue;
-      const key = keyOf(participant.name);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      mentioned.push(participant);
-    }
-    return mentioned;
+  // Agent replies use the same introduction syntax as user messages, but
+  // never invoke the speaker or fall back to the default agent.
+  routeAgentMessage(message: Message, speaker: SessionAgent): { recipients: SessionAgent[]; introduced: Mention[] } {
+    const mentions = this.readMentions(textOf(message))
+      .filter(mention => keyOf(mention.name) !== keyOf(speaker.name));
+    return {
+      recipients: mentions.length > 0 ? this.resolveMentions(mentions) : [],
+      introduced: mentions.filter(mention => mention.model),
+    };
   }
 
   activeSubagentCount(): number {

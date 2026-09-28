@@ -204,9 +204,20 @@ describe('app workspace startup', () => {
       await type('Second');
       expect(output).not.toContain('First');
       expect(output).toContain('Second');
+      await type('\u0012'); // Start renaming the highlighted session.
+      await type('Discarded rename');
+      expect(output).toContain('Discarded rename');
+      await type('\u001b');
+      expect(output).toContain('Manage sessions in the sidebar');
+      expect(output).toContain('search: Second▌');
+      expect(output).toContain('Second');
+      expect(output).not.toContain('Discarded rename');
+      expect(output).not.toContain('unfinished draft');
       await type('\u001b');
       expectPanes(26);
       expect(output).toContain('unfinished draft');
+      expect(output).toContain('Second');
+      expect(output).not.toContain('Discarded rename');
       expect(output).toMatch(/manage session\s+ctrl\+f/);
       expect(output).not.toContain('search:');
       expect(dots()).toEqual(originalDots);

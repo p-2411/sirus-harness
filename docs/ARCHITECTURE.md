@@ -81,11 +81,12 @@ facade over collaborators in the same folder, each constructible on its own:
   in the order they began; merges the transcripts into the one ordered view the UI and the snapshot read,
   keeps the activity clocks, and owns the identity of the assistant entries a round fills
   in.
-- `ParticipantRoster`: the agents in the session and all `@name` routing. The mention
-  grammar exists once, here.
+- `ParticipantRoster`: the agents in the session and all `@name` routing. Users and
+  participants can introduce peers with `@name <model> <task>`; names and models are
+  validated before adding them. The mention grammar exists once, here.
 - `TurnRunner`: the round loop, and the one place that decides what a participant is
-  prompted with, including who a user prompt added to the session
-  (`withIntroductions`), since the runtimes read the prompt without the model that created
+  prompted with, including who a user or peer message added to the session
+  (`withIntroductions`), since the runtimes read the message without the model that created
   them.
 - `CheckpointLog`: directory snapshots taken before each turn, and the cross-session
   interlock that makes restoring one safe. Injectable `DirectoryActivity`; the default is

@@ -57,11 +57,13 @@ Each agent runs its own vendor's tools: reading, searching, creating and editing
 
 Choose the model for each participant and adjust its reasoning depth. Bring in a second model to review an implementation or challenge a design while keeping the conversation in one place.
 
-Create a named participant by mentioning a new name followed by a supported model and a prompt:
+You or an agent can create a named participant by mentioning a new name followed by a supported model and a prompt:
 
 ```text
 @reviewer claude-sonnet-5 Read the uncommitted changes in this project and review them for bugs and missing tests.
 ```
+
+For an agent, put the introduction in a normal prose paragraph of its reply. The new participant appears in the header and receives that reply after the sender finishes, with the sender's name attached. It starts with that message rather than the sender's history, and the user's selected conversation stays in place. Mentions inside code, quotes, lists, or other Markdown examples do not create or invoke agents.
 
 Then address that participant by name:
 

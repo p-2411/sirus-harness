@@ -220,9 +220,9 @@ export interface Message {
   // Where a steered user message entered a reply that was still streaming.
   // Display metadata only: transcripts retain the complete vendor messages.
   injectedAt?: { seq: number; block: number; offset: number };
-  // User prompts: where the text names the model a new participant starts on,
-  // the `<model>` of `@name <model>`, in `textOf` offsets. The prompt is kept
-  // as typed; the runtimes read it without these (`withoutCreationModels`).
+  // Where a user prompt or an agent's reply names the model a new participant
+  // starts on, the `<model>` of `@name <model>`, in `textOf` offsets. The text
+  // is kept as written; the runtimes read it without these (`withoutCreationModels`).
   creationModels?: { start: number; end: number }[];
   // Assistant entries: when the turn that wrote it started and ended, and what
   // it used. Absent while it runs and in older snapshots. A participant's
@@ -279,9 +279,9 @@ export function textOf(message: Pick<Message, 'content'>): string {
     .join('\n');
 }
 
-// A user prompt as the runtimes read it. The model that follows a newly
+// A message as the runtimes read it. The model that follows a newly
 // introduced @name is routing, not conversation, so it is cut out of the text
-// the prompt was kept with; the user still sees it as they typed it.
+// the message was kept with; the user still sees it as it was written.
 export function withoutCreationModels<T extends Pick<Message, 'content' | 'creationModels'>>(message: T): T {
   const spans = [...(message.creationModels ?? [])].sort((left, right) => right.start - left.start);
   if (spans.length === 0) return message;

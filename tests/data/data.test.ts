@@ -1665,7 +1665,7 @@ describe('Session model', () => {
         // verifier runs alongside it in the same next round.
         emit({ type: 'text', text: '@sirus has the context. @verifier please verify.' });
       } else {
-        // Agent output cannot use the user-only creation syntax.
+        // A peer can add another independently addressable participant.
         emit({ type: 'text', text: 'Verified. @new-agent test-session-model join us.' });
       }
     };
@@ -1682,20 +1682,94 @@ describe('Session model', () => {
     });
 
     expect(calls.map(call => call.model))
-      .toEqual([testModel, secondTestModel, testModel, thirdTestModel]);
+      .toEqual([testModel, secondTestModel, testModel, thirdTestModel, testModel]);
     expect(calls[0].text).toBe('Start the review');
     // A mentioned participant gets the sender's whole message, attributed.
     expect(calls[1].text).toBe('@sirus wrote:\n@reviewer please review this.');
     expect(calls[2].text).toBe('@reviewer wrote:\n@sirus has the context. @verifier please verify.');
     expect(calls[3].text).toBe('@reviewer wrote:\n@sirus has the context. @verifier please verify.');
+    expect(calls[4].text).toBe('@verifier wrote:\nVerified. @new-agent join us.');
     const responses = session.getMessages().filter(message => message.role === 'assistant');
-    expect(responses.map(message => message.participant)).toEqual(['sirus', 'reviewer', 'sirus', 'verifier']);
+    expect(responses.map(message => message.participant)).toEqual(['sirus', 'reviewer', 'sirus', 'verifier', 'new-agent']);
     // Delivery is recorded on the entry, so a restore puts it back where it went.
     expect(responses[0].to).toEqual(['reviewer']);
     expect(responses[1].to).toEqual(['sirus', 'verifier']);
     expect(responses[2].to).toBeUndefined();
+    expect(responses[3].to).toEqual(['new-agent']);
     expect(session.getParticipants().map(participant => participant.name))
-      .toEqual(['sirus', 'reviewer', 'verifier']);
+      .toEqual(['sirus', 'reviewer', 'verifier', 'new-agent']);
+  });
+
+  test('an agent-created participant receives only its handoff, replies to its creator, and survives restore', async () => {
+    let turns = 0;
+    const source = bindScriptedRuntime(testModel, (_input, emit) => {
+      emit({ type: 'text', text: ++turns === 1
+        ? `@Reviewer ${secondTestModel} Review src/example.ts. @reviewer Check the tests too.`
+        : 'Review incorporated.' });
+    });
+    const reviewer = bindScriptedRuntime(secondTestModel, textTurn('@sirus The change passes review. Finish the task.'));
+    const session = new Session({ model: testModel, permissionMode: 'ask' });
+    let restored: Session | undefined;
+    try {
+      session.append({ role: 'user', content: [{ type: 'text', text: 'Earlier private context' }] });
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Get a review' }] });
+      expect(session.getParticipants().map(agent => [agent.name, agent.model])).toEqual([
+        ['sirus', testModel], ['Reviewer', secondTestModel],
+      ]);
+      expect(session.getSelectedParticipant()).toBe('sirus');
+      expect(source.runtimes[0].prompts).toHaveLength(2);
+      expect(reviewer.starts).toHaveLength(1);
+      expect(reviewer.starts[0].permissionMode).toBe('ask');
+      expect(reviewer.starts[0].directory).toBe(session.getDirectory());
+      expect(reviewer.runtimes[0].prompts[0].text).toBe('@sirus wrote:\n@Reviewer Review src/example.ts. @reviewer Check the tests too.');
+      // Kept as the agent wrote it; only the runtime's prompt drops the model.
+      expect(session.getMessages('Reviewer').map(textOf)).toEqual([
+        `@Reviewer ${secondTestModel} Review src/example.ts. @reviewer Check the tests too.`,
+        '@sirus The change passes review. Finish the task.',
+      ]);
+      restored = Session.fromSnapshot(session.toSnapshot());
+      expect(restored.getParticipants()).toEqual(session.getParticipants());
+      expect(restored.getMessages('Reviewer')).toEqual(session.getMessages('Reviewer'));
+    } finally { await restored?.dispose(); await session.dispose(); }
+  });
+
+  test('agent introduction examples, bare unknown names, invalid models, and self-mentions stay inert', async () => {
+    const examples = [
+      '@unknown has no model. @invalid not-a-supported-model do nothing.',
+      `@sirus ${secondTestModel} cannot invoke or replace myself.`,
+      `\`@inline ${secondTestModel} example\``,
+      `"@quoted ${secondTestModel} example"`,
+      `> @quote ${secondTestModel} example`,
+      `- @listed ${secondTestModel} example`,
+      `# @heading ${secondTestModel} example`,
+      `| Example |\n| --- |\n| @table ${secondTestModel} example |`,
+      `\`\`\`text\n@code ${secondTestModel} example\n\`\`\``,
+    ].join('\n\n');
+    const source = bindScriptedRuntime(testModel, textTurn(examples));
+    const other = bindScriptedRuntime(secondTestModel, textTurn('Should not run'));
+    const session = new Session({ model: testModel });
+    try {
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Explain the syntax' }] });
+      expect(session.getParticipants()).toEqual([{ name: 'sirus', model: testModel }]);
+      expect(source.runtimes[0].prompts).toHaveLength(1);
+      expect(other.starts).toHaveLength(0);
+      expect(textOf(session.getMessages().at(-1)!)).toBe(examples);
+    } finally { await session.dispose(); }
+  });
+
+  test('an invalid introduction creates no partial roster and does not discard another peer’s handoff', async () => {
+    bindScriptedRuntime(testModel, textTurn(`@unfinished ${thirdTestModel} Review this.\n\n@subagent ${thirdTestModel} Invalid reserved name.`));
+    bindScriptedRuntime(secondTestModel, textTurn(`@helper ${thirdTestModel} Check the tests.`));
+    const helper = bindScriptedRuntime(thirdTestModel, textTurn('Tests checked.'));
+    const session = new Session({ model: testModel });
+    session.addParticipant('reviewer', secondTestModel);
+    try {
+      await expect(session.sendMessage({ role: 'user', content: [{ type: 'text', text: '@sirus @reviewer Start' }] }))
+        .rejects.toThrow('Invalid participant name: @subagent');
+      expect(session.getParticipants().map(agent => agent.name)).toEqual(['sirus', 'reviewer', 'helper']);
+      expect(helper.runtimes[0].prompts[0].text).toBe('@reviewer wrote:\n@helper Check the tests.');
+      expect(session.getMessages('helper').map(textOf)).toEqual([`@helper ${thirdTestModel} Check the tests.`, 'Tests checked.']);
+    } finally { await session.dispose(); }
   });
 
   test('ignores an agent mentioning itself', async () => {
@@ -1712,40 +1786,42 @@ describe('Session model', () => {
     expect(session.getMessages()).toHaveLength(2);
   });
 
-  test('runs several participants mentioned by an agent in parallel', async () => {
+  test('creates several participants mentioned by an agent and runs them in parallel with introduction context', async () => {
     let releaseReviewer!: () => void;
     let releaseVerifier!: () => void;
     const reviewerGate = new Promise<void>(resolve => { releaseReviewer = resolve; });
     const verifierGate = new Promise<void>(resolve => { releaseVerifier = resolve; });
     const started: string[] = [];
-    bindScriptedRuntime(testModel, textTurn('@reviewer @verifier compare this.'));
-    bindScriptedRuntime(secondTestModel, async (_input, emit) => {
+    bindScriptedRuntime(testModel, textTurn(`@reviewer ${secondTestModel} Review this.\n\n@verifier ${thirdTestModel} Verify this.`));
+    const reviewer = bindScriptedRuntime(secondTestModel, async (_input, emit) => {
       started.push('reviewer');
       await reviewerGate;
       emit({ type: 'text', text: 'reviewed' });
     });
-    bindScriptedRuntime(thirdTestModel, async (_input, emit) => {
+    const verifier = bindScriptedRuntime(thirdTestModel, async (_input, emit) => {
       started.push('verifier');
       await verifierGate;
       emit({ type: 'text', text: 'verified' });
     });
     const session = new Session({ id: 'team-id', name: 'Team', model: testModel });
-    session.addParticipant('reviewer', secondTestModel);
-    session.addParticipant('verifier', thirdTestModel);
 
     const turn = session.sendMessage({
       role: 'user',
       content: [{ type: 'text', text: 'Delegate this' }],
     });
-    while (started.length < 2) await new Promise(resolve => setTimeout(resolve, 0));
-    releaseVerifier();
-    releaseReviewer();
-    expect(started).toEqual(['reviewer', 'verifier']);
-    await turn;
-
-    // The verifier was released first, so its reply came first.
-    expect(session.getMessages().filter(message => message.role === 'assistant')
-      .map(message => message.participant)).toEqual(['sirus', 'verifier', 'reviewer']);
+    try {
+      await until(() => started.length === 2, 'both introduced participants to start');
+      expect(started).toEqual(['reviewer', 'verifier']);
+      expect(reviewer.runtimes[0].prompts[0].text).toBe(
+        `This message adds @verifier (${thirdTestModel}) to the session as a new participant, and it receives this message too.\n\n@sirus wrote:\n@reviewer Review this.\n\n@verifier Verify this.`);
+      expect(verifier.runtimes[0].prompts[0].text).toContain(`This message adds @reviewer (${secondTestModel})`);
+      releaseVerifier();
+      releaseReviewer();
+      await turn;
+      // The verifier was released first, so its reply came first.
+      expect(session.getMessages().filter(message => message.role === 'assistant')
+        .map(message => message.participant)).toEqual(['sirus', 'verifier', 'reviewer']);
+    } finally { releaseVerifier(); releaseReviewer(); await turn; await session.dispose(); }
   });
 
   test('persists all participants and their model choices in snapshots', () => {

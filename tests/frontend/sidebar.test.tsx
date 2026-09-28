@@ -372,6 +372,39 @@ describe('sidebar session status', () => {
 
 
 describe('sidebar management', () => {
+  test.each(['search', 'rename', 'delete'])('Escape unwinds %s before returning to the conversation', async mode => {
+    const app = mountSidebar();
+    try {
+      await app.flush();
+      await app.manage();
+      await app.type('Session 12');
+      if (mode === 'rename') {
+        await app.type('\x12');
+        await app.type('Discarded rename');
+        expect(app.frame()).toContain('Discarded rename');
+      } else if (mode === 'delete') {
+        await app.type('\x04');
+        expect(app.frame()).toContain('Delete session?');
+      }
+      await app.type('\x1b');
+      if (mode !== 'search') {
+        expect(app.focused()).toBe(true);
+        expect(app.frame()).toContain('search: Session 12▌');
+        expect(app.frame()).toContain('Session 12');
+        expect(app.frame()).not.toContain('Discarded rename');
+        expect(app.frame()).not.toContain('Delete session?');
+        await app.type('\x1b');
+      }
+      expect(app.selected().getName()).toBe('Session 00');
+      expect(app.deleted()).toHaveLength(0);
+      expect(app.focused()).toBe(false);
+      expect(app.frame()).not.toContain('search:');
+      expect(app.frame()).toContain('manage session');
+      expect(app.frame()).not.toContain('Discarded rename');
+      expect(app.frame()).not.toContain('Delete session?');
+    } finally { await app.close(); }
+  });
+
   test('filters by typing, renames, archives, and requires confirmation to delete', async () => {
     const app = mountSidebar();
     try {
