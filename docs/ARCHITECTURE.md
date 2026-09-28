@@ -17,6 +17,7 @@ implementation.
 | Persistence | `src/persistence/settings.ts`, `sessions.ts` | Settings and session snapshots on disk, each file imported directly. Knows nothing about the runtime. |
 | Memory | `src/memory/store.ts` | Long-term memories in SQLite with vector search. |
 | Commands | `src/commands/registry.ts` | Slash commands the user types. |
+| Remote control | `src/remote/index.ts` | Tailscale listener, protocol views, and APNs for sessions with `/rc` on. |
 | Frontend | `src/frontend/app.tsx` | The Ink UI, worker strip included. Consumes the facades above; owns no runtime logic. |
 
 ## Tracing one message

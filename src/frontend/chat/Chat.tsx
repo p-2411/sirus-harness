@@ -27,12 +27,8 @@ import { historyParts } from './history';
 import { InputFeedback } from './InputRows';
 import {
   commandMenu,
-  commandRegistry,
   executeCommand,
-  isImmediateCommand,
-  isSirusCommand,
   parseCommandLine,
-  vendorCommandFor,
   type CommandMenuEntry,
   type CommandMenuItem,
   type CommandMenuResult,
@@ -61,6 +57,7 @@ import { onProviderChange } from '../../agent_runtime/providers/sources';
 import { copyToClipboard } from '../terminal/clipboard';
 import { nextPermissionMode } from '../../agent_runtime/permissions/policy';
 import { getSubagentsVersion, subscribeSubagents } from '../../agent_runtime/tools/subagents';
+import { commandArgs, queueInput, routeInput } from './send';
 
 export function ChatHeader({ session, activity = new Map(), width = 100, onSelect }: {
   session: Session;
@@ -76,6 +73,7 @@ export function ChatHeader({ session, activity = new Map(), width = 100, onSelec
       <Box flexGrow={1} flexShrink={1} minWidth={0}>
         <Text wrap="truncate-middle">
           <Text color={theme.textMuted}>{terminalText(session.getName()).toUpperCase()}</Text>
+          {session.isRemote() && <Text color={theme.mention}> rc</Text>}
           <Text color={theme.textSubtle} dimColor> {session.getDirectory()}</Text>
         </Text>
       </Box>
@@ -545,11 +543,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   // command's still-live abort handle. A typed command also hands over its
   // arguments as they were typed.
   const runCommand = (command: string, args: readonly string[], recipient = selected, argumentText?: string) => {
-    // Agent-specific pickers bake their destination into the resulting command.
-    if (['model', 'thinking', 'effort', 'fast'].includes(command)
-      && (args.length === 0 || (args.length === 1 && !args[0].startsWith('@') && args[0] !== 'subagent'))) {
-      args = [`@${recipient}`, ...args];
-    }
+    args = commandArgs(command, args, recipient);
     setFeedback(null);
     const controller = new AbortController();
     let menu: CommandMenuResult;
@@ -656,39 +650,26 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   // A command leaves any attachments waiting for the next real message.
   // Commands are exactly what the background queue leaves for a mounted Chat.
   const send = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[], recipient = selected, to?: readonly string[], queuedMessage?: QueuedMessage): boolean => {
-    const commandName = /^\/(\S+)/.exec(text)?.[1];
-    const immediate = isImmediateCommand(text);
-    // An agent's own command goes to the agent on that command's vendor: the
-    // selected one when it is, else another. One that only reports runs aside
-    // at once, whatever the agents are doing, and is kept nowhere.
-    const vendorCommand = vendorCommandFor(text, currSession.getNativeCommands(recipient));
-    const vendorTarget = vendorCommand?.vendor ? currSession.participantOn(vendorCommand.vendor, recipient) : null;
-    if (vendorCommand?.reporting && vendorTarget) {
-      // In the vendor's own words: `/codex:status` is Codex's `/status`.
+    // A vendor command that only reports runs aside at once, whatever the
+    // agents are doing, and is kept nowhere.
+    const route = routeInput(currSession, text, recipient, images, content, to);
+    if (route.aside) {
       if (queuedMessage) currSession.takeQueuedMessages([queuedMessage.id]);
-      runAside(vendorTarget, vendorCommand.command.invocation);
+      runAside(route.aside.participant, route.aside.text);
       return true;
     }
-    const addressed = to?.length ? [...to] : vendorTarget && vendorTarget !== recipient ? [vendorTarget] : undefined;
-    const routed = currSession.messageForParticipant({ role: 'user', ...(addressed ? { to: addressed } : {}),
-      content: content ?? [...images, { type: 'text', text }] }, recipient);
-    const targetsBusy = routed.to?.some(name => currSession.isParticipantWorking(name)) ?? false;
-    const taskCommand = commandName && commandRegistry.some(spec => spec.name === commandName);
-    if ((targetsBusy || commandAbort.current || (taskCommand && currSession.getStatus() === 'working')) && !immediate) {
+    if ((route.busy || commandAbort.current) && !route.immediate) {
       if (!queuedMessage) queue(text, images, content, recipient);
       return true;
     }
-    // A Sirus command runs here. Anything else that starts with a slash, an
-    // agent's own command or a name nobody knows, goes out as a message and
-    // the agent's harness makes of it what it will.
-    const command = isSirusCommand(text, currSession.getNativeCommands(recipient)) ? parseCommandLine(text) : null;
-    if (command && commandRegistry.some(spec => spec.name === command.name)) {
+    const command = route.command;
+    if (command) {
       if (queuedMessage) currSession.takeQueuedMessages([queuedMessage.id]);
       runCommand(command.name, command.args, recipient, command.rest);
     } else {
       const previousLength = currSession.getMessages().length;
       const previousDraft = currSession.getInputContent(recipient);
-      deliver(routed, images, queuedMessage)
+      deliver(route.message, images, queuedMessage)
         .catch((caught: unknown) => {
           if (currSession.getMessages().length === previousLength && !currSession.getInputContent(recipient)) {
             currSession.setInputContent(previousDraft, recipient);
@@ -726,8 +707,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   };
 
   const queue = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[], recipient = selected) => {
-    const message = currSession.messageForParticipant({ role: 'user', content: content ?? [{ type: 'text', text }] }, recipient);
-    currSession.queueMessage(text, images, content, message.to);
+    queueInput(currSession, text, recipient, images, content);
     const paths = new Set(images.map(image => image.path));
     replaceAttachments(view.attachments.filter(image => !paths.has(image.path)));
   };

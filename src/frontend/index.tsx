@@ -8,6 +8,7 @@ import { stopSirusMcpServer } from "../agent_runtime/tools/server";
 import { closeAllMemoryStores } from "../memory/store";
 import { enableCheckpoints } from "../checkpoints";
 import { sendHeartbeat } from "../telemetry";
+import { stopRemoteControl } from "../remote";
 
 export function startFrontend(options: CliOptions): void {
   // A heartbeat, carrying a random installation id and the version, goes to
@@ -38,13 +39,14 @@ export function startFrontend(options: CliOptions): void {
   );
 
   // Agent processes outlive individual turns. Tear them down when Ink exits,
-  // with the tool server they talk to, so their handles cannot leave the CLI
-  // waiting for another Ctrl+C.
+  // with the tool server they talk to and the remote control listener, so
+  // their handles cannot leave the CLI waiting for another Ctrl+C.
   const shutdown = () => {
     lifetime.abort();
     disposeAllRuntimes();
     stopSirusMcpServer();
     closeAllMemoryStores();
+    stopRemoteControl();
   };
   void app.waitUntilExit().then(shutdown, shutdown);
 }

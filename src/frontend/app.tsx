@@ -24,6 +24,8 @@ import type { SessionSnapshot } from '../agent_runtime/session';
 import { theme } from './styles/theme';
 import { checkSirusUpdate } from '../updater';
 import { onProviderChange } from '../agent_runtime/providers/sources';
+import { keepAwake } from '../keepAwake';
+import { setRemoteFocus, syncRemoteSessions } from '../remote';
 
 export function nextSessionName(sessions: readonly Session[]): string {
   let sessionCount = sessions.length + 1;
@@ -134,7 +136,24 @@ export default function App({ launchDirectory = process.cwd(), startup }: { laun
   useTextSelection();
   // focus reporting and the notifications that depend on it, likewise
   useTerminalFocus();
-  useNotifications(useMemo(() => [...sessions, draftSession], [sessions, draftSession]));
+  const processSessions = useMemo(() => [...sessions, draftSession], [sessions, draftSession]);
+  useNotifications(processSessions);
+  useEffect(() => keepAwake(processSessions), [processSessions]);
+  // Remote control serves whichever of them have /rc on, and opens the
+  // phone at the session and agent on screen here.
+  useEffect(() => syncRemoteSessions(processSessions, setStorageNotice), [processSessions]);
+  useEffect(() => {
+    const focus = () => setRemoteFocus(activeSession.getId(), activeSession.getSelectedParticipant());
+    focus();
+    return activeSession.subscribe(focus);
+  }, [activeSession]);
+  // A draft with /rc on that the phone sent the first message to becomes a
+  // session, as typing one into it does, without taking over the screen.
+  useEffect(() => draftSession.subscribe(() => {
+    if (!draftSession.isRemote() || draftSession.isEmpty()) return;
+    setWorkspace(current => current.draftSession !== draftSession || current.sessions.includes(draftSession) ? current
+      : { ...startSession(current, draftSession, launchDirectory), selectedSession: current.selectedSession ?? draftSession });
+  }), [draftSession]);
 
   useEffect(() => {
     let mounted = true;

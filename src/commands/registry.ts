@@ -15,6 +15,7 @@ import { updateCommandSpec, versionCommandSpec } from './update/commands';
 import { rewindCommandSpec, undoCommandSpec } from './checkpoints/commands';
 import { imageCommandSpec } from './images/commands';
 import { notifyCommandSpec } from './notifications/commands';
+import { rcCommandSpec } from './remote/commands';
 import { isAutoSendable } from '../agent_runtime/session/messageQueue';
 import { commandUsage } from './types';
 import { VENDOR_INFO, type Vendor } from '../agent_runtime/providers/catalog';
@@ -64,6 +65,7 @@ export const commandRegistry: readonly CommandSpec[] = [
   rewindCommandSpec,
   imageCommandSpec,
   notifyCommandSpec,
+  rcCommandSpec,
   renameCommand,
   newCommand,
   resumeCommand,

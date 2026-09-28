@@ -12,6 +12,7 @@ import { questionTitle } from './chat/QuestionCard';
 import { questionText } from './chat/QuestionCard';
 import { notify } from './terminal/notifications';
 import { truncate } from './terminal/text';
+import { pushRemote } from '../remote/push';
 
 const BODY_LENGTH = 120;
 
@@ -46,7 +47,10 @@ export function subscribeSessionNotifications(sessions: readonly Session[], send
       if (previous === current) return;
       statuses.set(session, current);
       if (previous === 'working' && current !== 'working' && !session.wasLastTurnCancelled()) {
-        send(`Sirus · ${session.getName()}`, turnSummary(session, current));
+        const title = `Sirus · ${session.getName()}`;
+        const body = turnSummary(session, current);
+        send(title, body);
+        pushRemote(session, title, body, { kind: 'finished' });
       }
     });
   });
@@ -62,10 +66,10 @@ export function subscribeApprovalNotifications(getSessions: () => readonly Sessi
     for (const request of current) {
       if (seen.has(request.id)) continue;
       const session = getSessions().find(candidate => candidate.getId() === request.sessionId);
-      send(
-        `Sirus · ${session?.getName() ?? 'approval needed'}`,
-        `${describeRequester(request.requester)} wants to ${firstLine(approvalAction(request.toolCall))}`,
-      );
+      const title = `Sirus · ${session?.getName() ?? 'approval needed'}`;
+      const body = `${describeRequester(request.requester)} wants to ${firstLine(approvalAction(request.toolCall))}`;
+      send(title, body);
+      if (session) pushRemote(session, title, body, { kind: 'approval', request });
     }
     seen = new Set(current.map(request => request.id));
   });
@@ -79,10 +83,10 @@ function subscribeQuestionNotifications(getSessions: () => readonly Session[], s
     for (const request of current) {
       if (seen.has(request.id)) continue;
       const session = getSessions().find(candidate => candidate.getId() === request.sessionId);
-      send(
-        `Sirus · ${session?.getName() ?? 'question'}`,
-        `${titleText(questionTitle(request))}: ${firstLine(questionText(request, request.fields[0]).question)}`,
-      );
+      const title = `Sirus · ${session?.getName() ?? 'question'}`;
+      const body = `${titleText(questionTitle(request))}: ${firstLine(questionText(request, request.fields[0]).question)}`;
+      send(title, body);
+      if (session) pushRemote(session, title, body, { kind: 'question', request });
     }
     seen = new Set(current.map(request => request.id));
   });
@@ -118,7 +122,8 @@ export function subscribeWorkerNotifications(
 
 // Watches every session, the approval and question queues, and the workers, and raises a
 // desktop notification when something finishes or needs the user. Whether a
-// notification actually shows is the notification module's call.
+// notification actually shows is the notification module's call. A session
+// with /rc on also pushes the turn's end, approvals and questions to the phone.
 export function useNotifications(sessions: readonly Session[]) {
   const latestSessions = useRef(sessions);
   latestSessions.current = sessions;

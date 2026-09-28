@@ -30,6 +30,15 @@ export interface SubscriptionPreferences {
   gpt: boolean;
 }
 
+export const APNS_ENVIRONMENTS = ['sandbox', 'production'] as const;
+
+export interface RemoteSettings {
+  apns?: { keyPath: string; keyId: string; teamId: string; bundleId: string };
+  devices?: { token: string; environment: typeof APNS_ENVIRONMENTS[number]; firstSeen: number }[];
+  // When a phone first connected, which ends /rc's one-time setup QR code.
+  firstConnection?: number;
+}
+
 export interface StoredApiKeys {
   claude?: string;
   gpt?: string;
@@ -64,6 +73,14 @@ const settingsFileSchema = z.object({
   // defaults. Sessions keep their own once created.
   permissionMode: z.enum(PERMISSION_MODES).optional(),
   thinkingLevel: z.enum(THINKING_LEVELS).optional(),
+  // Remote control: the APNs key pushes are signed with, from the owner's
+  // developer account, the phones that registered for them, and whether a
+  // phone has ever connected.
+  remote: z.object({
+    apns: z.object({ keyPath: z.string(), keyId: z.string(), teamId: z.string(), bundleId: z.string() }).optional(),
+    devices: z.array(z.object({ token: z.string(), environment: z.enum(APNS_ENVIRONMENTS), firstSeen: z.number() })).optional(),
+    firstConnection: z.number().optional(),
+  }).passthrough().optional(),
 }).passthrough();
 
 // The sections of the file this build could read. One that failed its schema
@@ -83,6 +100,7 @@ export interface SettingsShape {
   // Null leaves a new session on the built-in default.
   permissionMode: PermissionMode | null;
   thinkingLevel: ThinkingLevel | null;
+  remote: RemoteSettings;
 }
 
 // The single list of settings: its keys drive both the fallbacks a read uses
@@ -96,6 +114,7 @@ const DEFAULTS: SettingsShape = {
   notifications: 'background',
   permissionMode: null,
   thinkingLevel: null,
+  remote: {},
 };
 
 // How one setting maps onto the file. Only `memoryEnabled` is not a plain
@@ -154,6 +173,11 @@ const CODECS: { [K in keyof SettingsShape]: Codec<K> } = {
     section: 'thinkingLevel',
     read: file => file.thinkingLevel,
     write: (file, value) => { if (value === null) delete file.thinkingLevel; else file.thinkingLevel = value; },
+  },
+  remote: {
+    section: 'remote',
+    read: file => file.remote,
+    write: (file, value) => { if (Object.keys(value).length) file.remote = value; else delete file.remote; },
   },
 };
 

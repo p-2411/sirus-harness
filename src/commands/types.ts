@@ -75,6 +75,9 @@ export interface CommandSession {
   // Undefined: the participant runs at its model's default.
   getThinkingLevel(participantName?: string): ThinkingLevel | undefined;
   isEmpty(): boolean;
+  // Whether /rc put the conversation on the phone.
+  isRemote(): boolean;
+  setRemote(remote: boolean): void;
   rewind(checkpointId: string, options: RewindOptions): Promise<RewindResult>;
   setName(name: string): void;
   setPermissionMode(mode: PermissionMode): void;

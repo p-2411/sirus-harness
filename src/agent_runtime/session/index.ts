@@ -67,6 +67,7 @@ export interface SessionOptions {
   id?: string;
   name?: string;
   archived?: boolean;
+  remote?: boolean;
   directory?: string;
   // The default participant's model. Ignored when the participant list
   // already contains the default participant.
@@ -94,6 +95,7 @@ export interface SessionOptions {
 
 export interface SessionSnapshot {
   archived?: boolean;
+  remote?: boolean;
   id: string;
   name: string;
   directory: string;
@@ -189,6 +191,7 @@ export class Session {
   private readonly directory: string;
   private name: string;
   private archived: boolean;
+  private remote: boolean;
   private permissionMode: PermissionMode;
   private subagentModel: string | null;
   private notice: { participant: string; notice: NoticeBlock } | null = null;
@@ -220,6 +223,7 @@ export class Session {
     this.id = resolved.id;
     this.name = resolved.name;
     this.archived = options.archived ?? false;
+    this.remote = options.remote ?? false;
     this.directory = resolved.directory;
     this.permissionMode = resolved.permissionMode;
     this.subagentModel = resolved.subagentModel;
@@ -260,6 +264,7 @@ export class Session {
     return new Session({
       id: snapshot.id,
       archived: snapshot.archived,
+      remote: snapshot.remote,
       name: snapshot.name,
       directory: snapshot.directory,
       model: snapshot.defaultModel.model,
@@ -776,11 +781,25 @@ export class Session {
     this.changes.notify();
   }
 
+  // Whether /rc put the session on the phone. `src/remote` reads it; the
+  // snapshot keeps it, so the listener comes back after a restart.
+  isRemote(): boolean {
+    return this.remote;
+  }
+
+  setRemote(remote: boolean): void {
+    if (this.remote === remote) return;
+    this.remote = remote;
+    this.changes.notify();
+  }
+
   // A fork carries independent records and starts its own runtimes on demand.
   // Live workers belong to the original session and must not be registered twice.
   fork(): SessionSnapshot {
     const snapshot = structuredClone(this.toSnapshot());
     delete snapshot.workers;
+    // Remote control is turned on per session, with /rc, never inherited.
+    delete snapshot.remote;
     // A copied or rewound Sirus record must never reopen and append to the
     // original vendor session, whose history may include later turns.
     for (const participant of snapshot.participants) delete participant.nativeSession;
@@ -1279,6 +1298,7 @@ export class Session {
       id: this.id,
       name: this.name,
       archived: this.archived,
+      ...(this.remote ? { remote: true } : {}),
       directory: this.directory,
       participants: this.getParticipants(),
       defaultModel: this.roster.default.toParticipant(),

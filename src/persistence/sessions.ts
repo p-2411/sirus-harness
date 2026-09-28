@@ -261,6 +261,7 @@ const sessionSchema = z.object({
   lastResponseFinishedAt: z.number().nullable().optional(),
   autoNamePending: z.boolean().optional(),
   archived: z.boolean().optional(),
+  remote: z.boolean().optional(),
 }).refine(
   session => Boolean(session.model || (session.participants && session.defaultModel)),
   { message: 'Session must contain a model or participant list' },
@@ -407,6 +408,7 @@ function toSnapshot(stored: StoredSession, fallbackSessionDirectory: string): Se
     })),
     autoNamePending: stored.autoNamePending ?? false,
     ...(stored.archived !== undefined ? { archived: stored.archived } : {}),
+    ...(stored.remote !== undefined ? { remote: stored.remote } : {}),
     updatedAt: stored.updatedAt ?? 0,
     ...(stored.workers ? { workers: stored.workers.map(toWorkerRecord) } : {}),
     ...(stored.permissionMode ? { permissionMode: stored.permissionMode } : {}),
