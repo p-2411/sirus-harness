@@ -16,11 +16,13 @@ struct RequestCard: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(tone)
                 Text(request.requester).fontWeight(.semibold).foregroundStyle(Palette.platinum)
-                Text(verb).foregroundStyle(Palette.muted)
-                Spacer()
-                if waiting > 0 { Text("\(waiting) more").foregroundStyle(Palette.subtle) }
+                    .truncationMode(.middle)
+                Text(verb).foregroundStyle(Palette.muted).fixedSize()
+                Spacer(minLength: 4)
+                if waiting > 0 { Text("\(waiting) more").foregroundStyle(Palette.subtle).fixedSize() }
             }
             .font(.mono(12))
+            .lineLimit(1)
             .padding(.horizontal, 20)
             .padding(.top, 18)
             switch request.kind {
@@ -29,7 +31,10 @@ struct RequestCard: View {
             case .other:
                 VStack(alignment: .leading, spacing: 8) {
                     if let title = request.title ?? request.message {
-                        Text(title).font(.system(size: 17, weight: .medium)).foregroundStyle(Palette.white)
+                        Bounded(limit: 220) {
+                            Text(title).font(.system(size: 17, weight: .medium)).foregroundStyle(Palette.white)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                     }
                     Text("Answer this in Sirus on your Mac.").font(.system(size: 14)).foregroundStyle(Palette.muted)
                 }
@@ -57,7 +62,9 @@ struct RequestCard: View {
 }
 
 // Content that may be long sits in its own scroll, so the card never pushes
-// the transcript off the screen.
+// the transcript off the screen: as tall as the content up to the limit,
+// and shorter still when the keyboard leaves less room. Dragging it puts
+// the keyboard away, as a number pad has no key for that.
 private struct Bounded<Content: View>: View {
     let limit: CGFloat
     @ViewBuilder let content: Content
@@ -68,7 +75,8 @@ private struct Bounded<Content: View>: View {
             content.onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
         }
         .scrollBounceBehavior(.basedOnSize)
-        .frame(height: min(max(height, 1), limit))
+        .scrollDismissesKeyboard(.interactively)
+        .frame(maxHeight: height > 0 ? min(height, limit) : limit)
     }
 }
 
@@ -97,7 +105,7 @@ private struct ApprovalBody: View {
                 .padding(.vertical, 12)
             }
             if let failure {
-                Text(failure).font(.system(size: 13)).foregroundStyle(Palette.red)
+                Text(failure).font(.system(size: 13)).foregroundStyle(Palette.red).lineLimit(3)
                     .padding(.horizontal, 20).padding(.bottom, 8)
             }
             // Allowing once is the prominent answer, else the first that
@@ -119,6 +127,7 @@ private struct ApprovalBody: View {
                             Text(option.label)
                                 .font(.system(size: 16, weight: primary ? .semibold : .medium))
                                 .multilineTextAlignment(.leading)
+                                .lineLimit(3)
                         }
                         .foregroundStyle(primary ? Palette.ground : Palette.white)
                         .padding(.horizontal, 18)
@@ -191,7 +200,7 @@ private struct QuestionBody: View {
                 .padding(.vertical, 12)
             }
             if let failure {
-                Text(failure).font(.system(size: 13)).foregroundStyle(Palette.red)
+                Text(failure).font(.system(size: 13)).foregroundStyle(Palette.red).lineLimit(3)
                     .padding(.horizontal, 20).padding(.bottom, 8)
             }
             HStack(spacing: 8) {

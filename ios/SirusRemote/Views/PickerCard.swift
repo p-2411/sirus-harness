@@ -34,6 +34,7 @@ struct PickerCard: View {
                         .font(.system(size: 12, weight: .semibold))
                     Text(failure)
                         .font(.system(size: 13))
+                        .lineLimit(4)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 .foregroundStyle(Palette.red)
@@ -50,6 +51,8 @@ struct PickerCard: View {
         .animation(.smooth(duration: 0.2), value: prompted?.id)
         .animation(.smooth(duration: 0.2), value: failure)
         .accessibilityAction(.escape, dismiss)
+        // Over a scrim that closes it: VoiceOver stays inside until then.
+        .accessibilityAddTraits(.isModal)
     }
 
     // The title, and a close button in the corner. A swipe down on it

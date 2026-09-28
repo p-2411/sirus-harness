@@ -17,25 +17,28 @@ struct ConversationView: View {
             // so the list's activity updates don't redraw it.
             Conversation(store: store, client: client, sessionId: session.id, sessionName: session.name,
                          participant: store.participant(for: sessionId), menuOpen: $menuOpen)
-        } else {
+        } else if store.link == .live && !store.clients.contains(where: { $0.link == .connecting }) {
+            // Every Sirus answered, and none has it.
             VStack(spacing: 10) {
-                Image(systemName: store.link == .live ? "antenna.radiowaves.left.and.right.slash" : "arrow.triangle.2.circlepath")
+                Image(systemName: "antenna.radiowaves.left.and.right.slash")
                     .font(.system(size: 24, weight: .medium))
                     .foregroundStyle(Palette.subtle)
-                    .symbolEffect(.rotate, isActive: store.link != .live)
                     .padding(.bottom, 4)
-                Text(store.link == .live ? "This session is no longer remote controlled." : "Reconnecting to Sirus…")
+                    .accessibilityHidden(true)
+                Text("This session is no longer remote controlled.")
                     .font(.system(size: 16, weight: .medium))
                     .foregroundStyle(Palette.text)
-                if store.link == .live {
-                    Text("Run `/rc` in it on your Mac to bring it back.")
-                        .font(.system(size: 14))
-                        .foregroundStyle(Palette.muted)
-                }
+                Text("Run `/rc` in it on your Mac to bring it back.")
+                    .font(.system(size: 14))
+                    .foregroundStyle(Palette.muted)
             }
             .multilineTextAlignment(.center)
             .padding(.horizontal, 32)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            // Still reaching the Mac, or unable to: the lobby says which,
+            // and what to check.
+            Lobby(store: store)
         }
     }
 }
@@ -78,6 +81,7 @@ private struct Conversation: View {
     @State private var headerHeight: CGFloat = 0
     @State private var inputHeight: CGFloat = 0
     @State private var barHeight: CGFloat = 0
+    @State private var floatingHeight: CGFloat = 0
     @Namespace private var glass
 
     // The `/` and `@` menu's rows, with the draft they were worked out for:
@@ -131,15 +135,20 @@ private struct Conversation: View {
     }
 
     var body: some View {
-        Transcript(client: client, names: names)
+        Transcript(client: client, sessionId: sessionId, participant: participant, names: names)
             .safeAreaBar(edge: .top) { top }
             .safeAreaBar(edge: .bottom) { bottom.background { Fade(edge: .bottom) } }
             .overlay { floating }
             .task(id: "\(client.endpoint.port)/\(sessionId)/\(participant)") { await subscribe() }
             .task(id: completionQuery) { await complete(completionQuery) }
-            .onChange(of: client.requests.first?.id) { _, request in
-                // A request needs the user more than a menu does.
-                if request != nil { closePicker() }
+            .onChange(of: client.requests.first?.id) { _, id in
+                guard id != nil, let request = client.requests.first else { return }
+                // A request needs the user more than a menu does, and
+                // VoiceOver says it arrived wherever focus is.
+                closePicker()
+                let arrival = request.kind == .question ? "asks you something" : "needs your approval"
+                let announcement: String = "\(request.requester) \(arrival)"
+                AccessibilityNotification.Announcement(announcement).post()
             }
             .onChange(of: participant) { _, _ in
                 // A picker belongs to the agent it was opened for.
@@ -147,11 +156,15 @@ private struct Conversation: View {
             }
             .onChange(of: showsMenu, initial: true) { _, shown in menuOpen = shown }
             .onDisappear { menuOpen = false }
+            // Typed text outlives the screen: back in this session, it waits.
+            .onAppear { if draft.isEmpty { draft = store.draft(for: sessionId) } }
+            .onChange(of: draft) { _, text in store.keep(draft: text, for: sessionId) }
             #if DEBUG
             .task { await screenshotHooks() }
             #endif
             .sensoryFeedback(.impact(weight: .medium), trigger: client.requests.first?.id) { _, new in new != nil }
             .sensoryFeedback(.impact(weight: .light), trigger: chosenCompletion)
+            .sensoryFeedback(.error, trigger: note) { _, new in new?.failed == true }
     }
 
     // The session's name over its agents, centred on the screen.
@@ -212,36 +225,49 @@ private struct Conversation: View {
         .animation(.smooth(duration: 0.2), value: showsMenu)
     }
 
+    // A note goes above the bar, unless a picker takes the bottom or the
+    // bar, with a question and the keyboard up, leaves too little room over
+    // it; then it goes under the header.
+    private var noteOnTop: Bool { picker != nil || barHeight > floatingHeight / 2 }
+
     // Glass for what a menu hides: none while it is hidden.
     private var statusGlass: Glass { showsMenu ? .identity : .regular }
     private var inputGlass: Glass { picker == nil ? .regular : .identity }
 
-    // A question grows out of the status line; otherwise it says whether
-    // Sirus can be reached, and what the agent is doing.
-    @ViewBuilder private var statusLine: some View {
-        if let question = waitingQuestion {
-            RequestCard(request: question, waiting: client.requests.count - 1, client: client, names: names)
-                .id(question.id)
-                .glassEffect(statusGlass, in: .rect(cornerRadius: 30, style: .continuous))
-                .glassEffectID("status", in: glass)
-        } else if client.link != .live {
-            Button { if client.link == .offline { client.start() } } label: {
-                Pill(tone: Palette.muted, glass: statusGlass) {
-                    Image(systemName: client.link == .offline ? "wifi.slash" : "arrow.triangle.2.circlepath")
-                        .symbolEffect(.rotate, isActive: client.link == .connecting)
-                    Text(client.link == .offline ? "Offline" : "Reconnecting…")
-                    if client.link == .offline {
-                        Text("Retry").foregroundStyle(Palette.platinum)
+    // Whether Sirus can be reached, over a question that grows out of the
+    // status line, or else what the agent is doing. The link stays in view
+    // above a question, since answering needs it.
+    private var statusLine: some View {
+        VStack(spacing: 10) {
+            if client.link != .live {
+                Button {
+                    // The same process back, or one restarted on another port.
+                    client.start()
+                    Task { await store.rescan() }
+                } label: {
+                    Pill(tone: Palette.muted, glass: statusGlass) {
+                        Image(systemName: client.link == .offline ? "wifi.slash" : "arrow.triangle.2.circlepath")
+                            .symbolEffect(.rotate, isActive: client.link == .connecting)
+                        Text(client.link == .offline ? "Offline" : "Reconnecting…")
+                        if client.link == .offline {
+                            Text("Retry").foregroundStyle(Palette.platinum)
+                        }
                     }
                 }
+                .buttonStyle(RowPress())
+                .disabled(client.link != .offline)
+                .accessibilityHint("Reconnects to Sirus")
+                .glassEffectID("link", in: glass)
             }
-            .buttonStyle(RowPress())
-            .disabled(client.link != .offline)
-            .accessibilityHint("Reconnects to Sirus")
-            .glassEffectID("status", in: glass)
-        } else {
-            StatusPill(status: status, queued: header?.queued ?? 0, glass: statusGlass)
-                .glassEffectID("status", in: glass)
+            if let question = waitingQuestion {
+                RequestCard(request: question, waiting: client.requests.count - 1, client: client, names: names)
+                    .id(question.id)
+                    .glassEffect(statusGlass, in: .rect(cornerRadius: 30, style: .continuous))
+                    .glassEffectID("status", in: glass)
+            } else if client.link == .live {
+                StatusPill(status: status, queued: header?.queued ?? 0, glass: statusGlass)
+                    .glassEffectID("status", in: glass)
+            }
         }
     }
 
@@ -280,9 +306,8 @@ private struct Conversation: View {
             if let note, !showsCompletions {
                 NoteToast(note: note) { notify(nil) }
                     .padding(.horizontal, 24)
-                    .padding(.top, headerHeight + 10)
-                    .padding(.bottom, barHeight + 10)
-                    .frame(maxHeight: .infinity, alignment: picker == nil ? .bottom : .top)
+                    .padding(noteOnTop ? .top : .bottom, noteOnTop ? headerHeight + 10 : barHeight + 10)
+                    .frame(minHeight: 0, maxHeight: .infinity, alignment: noteOnTop ? .top : .bottom)
                     .zIndex(1)
                     .transition(.opacity.combined(with: .offset(y: 6)))
             }
@@ -300,7 +325,8 @@ private struct Conversation: View {
                     .transition(.menu)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .bottom)
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { floatingHeight = $0 }
         .animation(.spring(duration: 0.35, bounce: 0.1), value: picker == nil)
         .animation(.spring(duration: 0.35, bounce: 0.1), value: pickerRevision)
         .animation(.smooth(duration: 0.2), value: showsCompletions)
@@ -430,6 +456,8 @@ private struct Conversation: View {
     private func notify(_ shown: Note?) {
         note = shown
         guard let shown else { return }
+        // It appears away from where VoiceOver's focus is, so it is read out.
+        AccessibilityNotification.Announcement(shown.text).post()
         Task {
             try? await Task.sleep(for: .seconds(shown.duration))
             if note == shown { note = nil }

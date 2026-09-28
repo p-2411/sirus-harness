@@ -21,6 +21,7 @@ struct Sidebar: View {
     let selected: String?
     @Binding var expanded: Bool
     @State private var seen: [String: Int] = [:]
+    @State private var confirmingForget = false
     @GestureState private var drag: CGFloat = 0
 
     var body: some View {
@@ -49,6 +50,17 @@ struct Sidebar: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .sensoryFeedback(.selection, trigger: selected)
         .sensoryFeedback(.impact(weight: .light), trigger: expanded)
+        // Forgetting the Mac leaves only setup, and connecting again needs
+        // its name or QR code, so it asks first.
+        .confirmationDialog("Change Mac?", isPresented: $confirmingForget, titleVisibility: .visible) {
+            Button("Forget \(store.host)", role: .destructive) {
+                setExpanded(false)
+                store.forget()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("To connect again, scan the code `/rc` shows on your Mac or enter its name.")
+        }
         .onChange(of: store.sessions, initial: true) { _, sessions in
             // As in the TUI's sidebar: a session is unread once an agent
             // wrote something while another session was open.
@@ -70,9 +82,8 @@ struct Sidebar: View {
                     Spacer(minLength: 0)
                     Menu {
                         Button("Look Again", systemImage: "arrow.clockwise") { Task { await store.rescan() } }
-                        Button("Change Mac", systemImage: "desktopcomputer") {
-                            setExpanded(false)
-                            store.forget()
+                        Button("Change Mac…", systemImage: "desktopcomputer", role: .destructive) {
+                            confirmingForget = true
                         }
                     } label: {
                         Image(systemName: "ellipsis")
@@ -157,6 +168,8 @@ struct Sidebar: View {
                 LazyVStack(spacing: 2) {
                     ForEach(store.sessions) { session in
                         Button { select(session.id) } label: { row(session) }
+                            .accessibilityValue(mark(session).description)
+                            .accessibilityAddTraits(session.id == selected ? .isSelected : [])
                             .buttonStyle(RowPress())
                     }
                 }
@@ -166,11 +179,20 @@ struct Sidebar: View {
             .refreshable { await store.rescan() }
             .overlay {
                 if store.sessions.isEmpty {
-                    Text(store.link == .live ? "Nothing is remote controlled yet." : "No sessions to show.")
-                        .font(.system(size: 15))
-                        .foregroundStyle(Palette.muted)
-                        .multilineTextAlignment(.center)
-                        .padding(24)
+                    // Connecting is not empty: the list is on its way.
+                    if store.link == .connecting {
+                        ProgressView()
+                            .tint(Palette.silver)
+                            .accessibilityLabel("Connecting")
+                    } else {
+                        Text(store.link == .live
+                             ? "Nothing is remote controlled yet. Run `/rc` in a Sirus session on your Mac."
+                             : "Can't reach \(store.host).")
+                            .font(.system(size: 15))
+                            .foregroundStyle(Palette.muted)
+                            .multilineTextAlignment(.center)
+                            .padding(24)
+                    }
                 }
             }
             Hairline().padding(.horizontal, 18)
@@ -308,7 +330,7 @@ private struct LinkLine: View {
             Image(systemName: store.link == .offline ? "wifi.slash" : "desktopcomputer")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(color)
-                .symbolEffect(.pulse, isActive: store.link == .connecting)
+                .symbolEffect(.pulse, isActive: store.link == .connecting || store.scanning)
             Text(store.host)
                 .foregroundStyle(Palette.muted)
                 .lineLimit(1)
@@ -327,11 +349,14 @@ private struct LinkLine: View {
         }
     }
 
+    // A look under way comes first, so Look Again and pull to refresh show
+    // they are doing something even while connected.
     private var caption: String {
+        if store.scanning { return "looking…" }
         switch store.link {
-        case .live: store.clients.count > 1 ? "\(store.clients.filter { $0.link == .live }.count) processes" : "connected"
-        case .connecting: "connecting"
-        case .offline: "offline"
+        case .live: return store.clients.count > 1 ? "\(store.clients.filter { $0.link == .live }.count) processes" : "connected"
+        case .connecting: return "connecting"
+        case .offline: return "offline"
         }
     }
 }

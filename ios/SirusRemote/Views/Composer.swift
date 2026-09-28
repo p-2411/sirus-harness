@@ -23,7 +23,9 @@ struct Composer: View {
 
     private var text: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var empty: Bool { text.isEmpty }
-    private var stops: Bool { working && empty }
+    // Stop only once a message has gone: sending empties the draft, and a
+    // second tap then must not cancel the turn it was meant to reach.
+    private var stops: Bool { working && empty && !sending }
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 4) {
@@ -38,7 +40,7 @@ struct Composer: View {
             Button { if stops { stop() } else { submit() } } label: { trailing }
             .buttonStyle(.plain)
             .disabled(!stops && (empty || sending))
-            .accessibilityLabel(stops ? "Stop" : "Send")
+            .accessibilityLabel(sending ? "Sending" : stops ? "Stop" : "Send")
             .padding(.trailing, 1)
         }
         .animation(.spring(duration: 0.3, bounce: 0.2), value: stops)
@@ -61,17 +63,23 @@ struct Composer: View {
     }
 
     // Send, turning into a stop while the agent works; faint while there is
-    // nothing to send.
+    // nothing to send, and turning while a message is on its way.
     private var trailing: some View {
-        let lit = stops || !empty
-        return Image(systemName: stops ? "stop.fill" : "arrow.up")
-            .font(.system(size: stops ? 13 : 16, weight: .bold))
-            .contentTransition(.symbolEffect(.replace))
-            .foregroundStyle(lit ? Palette.ground : Palette.subtle)
-            .frame(width: 34, height: 34)
-            .background(Circle().fill(lit ? Palette.platinum : Palette.fill))
-            .frame(width: 44, height: 44)
-            .contentShape(Circle())
+        let lit = stops || !empty || sending
+        return Group {
+            if sending {
+                ProgressView().controlSize(.small).tint(Palette.ground)
+            } else {
+                Image(systemName: stops ? "stop.fill" : "arrow.up")
+                    .font(.system(size: stops ? 13 : 16, weight: .bold))
+                    .contentTransition(.symbolEffect(.replace))
+            }
+        }
+        .foregroundStyle(lit ? Palette.ground : Palette.subtle)
+        .frame(width: 34, height: 34)
+        .background(Circle().fill(lit ? Palette.platinum : Palette.fill))
+        .frame(width: 44, height: 44)
+        .contentShape(Circle())
     }
 
     private func submit() {

@@ -73,6 +73,7 @@ struct AgentTabs: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(agent.name)
+        .accessibilityValue(agent.needsYou ? "needs you" : agent.working ? "working" : "")
         .accessibilityAddTraits(active ? .isSelected : [])
     }
 

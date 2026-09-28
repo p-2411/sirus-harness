@@ -15,9 +15,14 @@ import Observation
     // what to check rather than only that it failed.
     private(set) var problem: HostScanner.Failure?
     var openSession: String?
+    // The Mac forgotten last, for setup to offer again.
+    private(set) var previousHost: String?
 
     // Observed, so a tab chosen in the conversation switches it at once.
     private var participants: [String: String] = [:]
+    // What was typed in each session and not sent, kept while the app runs
+    // so moving between sessions loses nothing.
+    @ObservationIgnored private var drafts: [String: String] = [:]
     @ObservationIgnored private var openedAtLaunch = false
     // Counts connects, so the newest decides the Mac rather than the slowest.
     @ObservationIgnored private var connects = 0
@@ -54,9 +59,14 @@ import Observation
         owned.values.map(\.session).sorted { $0.lastActivity > $1.lastActivity }
     }
 
+    // Live once any process answers. Until a look has failed it is still
+    // reaching the Mac, as at launch before the first look has begun.
     var link: RemoteClient.Link {
         if clients.contains(where: { $0.link == .live }) { return .live }
-        return clients.contains(where: { $0.link == .connecting }) || scanning ? .connecting : .offline
+        if scanning || clients.contains(where: { $0.link == .connecting }) || (clients.isEmpty && problem == nil) {
+            return .connecting
+        }
+        return .offline
     }
 
     func client(for sessionId: String) -> RemoteClient? { owned[sessionId]?.client }
@@ -113,6 +123,7 @@ import Observation
     func forget() {
         clients.forEach { $0.stop() }
         clients = []
+        previousHost = host
         host = ""
         openSession = nil
         problem = nil
@@ -141,6 +152,12 @@ import Observation
 
     func choose(_ participant: String, in sessionId: String) {
         participants[sessionId] = participant
+    }
+
+    func draft(for sessionId: String) -> String { drafts[sessionId] ?? "" }
+
+    func keep(draft: String, for sessionId: String) {
+        drafts[sessionId] = draft.isEmpty ? nil : draft
     }
 
     // A notification tap: the push says which Mac, so a phone that has not

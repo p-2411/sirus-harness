@@ -7,6 +7,8 @@ import SwiftUI
 // the conversation, so a streaming row redraws the transcript alone.
 struct Transcript: View {
     let client: RemoteClient
+    let sessionId: String
+    let participant: String
     let names: Set<String>
     @State private var position = ScrollPosition(edge: .bottom)
     @State private var pinned = true
@@ -18,7 +20,10 @@ struct Transcript: View {
     }
 
     var body: some View {
-        let rows = client.rows
+        // Until this conversation's first view arrives, the rows are none
+        // yet or another conversation's, so neither is shown.
+        let ready = client.shows(sessionId, participant)
+        let rows = ready ? client.rows : []
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
@@ -47,11 +52,12 @@ struct Transcript: View {
             }
         }
         .overlay {
-            if client.header == nil {
+            if !ready {
                 Pulse(color: Palette.subtle, size: 7)
+                    .accessibilityLabel("Loading the conversation")
             } else if rows.isEmpty {
                 VStack(spacing: 12) {
-                    Image("Horse")
+                    Image(decorative: "Horse")
                         .resizable()
                         .scaledToFit()
                         .frame(width: 44)
@@ -168,22 +174,28 @@ private struct ToolLine: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            // A tap opens the detail, or with none, the whole of a long title.
             Button {
-                guard !tool.detail.isEmpty else { return }
                 withAnimation(.smooth(duration: 0.22)) { open.toggle() }
             } label: {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Pulse(color: dot, active: tool.state == .running, size: 6)
                         .alignmentGuide(.firstTextBaseline) { $0[.bottom] + 1 }
-                    Text("\(Text(tool.title).foregroundStyle(tool.state == .running ? Palette.text : Palette.muted))\(Text(ending.map { " · \($0)" } ?? "").foregroundStyle(endingColor))")
-                        .font(.mono(12.5))
+                    Text(tool.title)
+                        .foregroundStyle(tool.state == .running ? Palette.text : Palette.muted)
                         .lineLimit(open ? nil : 2)
                         .multilineTextAlignment(.leading)
+                    // How it ended stays in view however long the title.
+                    if let ending {
+                        Text("· \(ending)").foregroundStyle(endingColor).fixedSize()
+                    }
                     Spacer(minLength: 0)
                 }
+                .font(.mono(12.5))
                 .contentShape(Rectangle())
             }
             .buttonStyle(RowPress())
+            .accessibilityValue(ending ?? (tool.state == .running ? "running" : "done"))
             if open {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(Array(tool.detail.enumerated()), id: \.offset) { _, block in

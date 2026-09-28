@@ -79,19 +79,32 @@ struct RootView: View {
     }
 }
 
-// No session open: still reaching the Mac, unable to, or nothing on it is
-// remote controlled yet.
-private struct Lobby: View {
+// No session open, or the one asked for can't be shown yet: still reaching
+// the Mac, unable to, or nothing on it is remote controlled yet.
+struct Lobby: View {
     let store: RemoteStore
+
+    private enum Phase { case connecting, offline, empty }
+
+    // A look that failed keeps the offline screen up through the quiet
+    // looks below, rather than flashing to connecting and back. With two
+    // Sirus windows, one still connecting isn't "no sessions" yet.
+    private var phase: Phase {
+        switch store.link {
+        case .live: store.clients.contains(where: { $0.link == .connecting }) ? .connecting : .empty
+        case .offline: .offline
+        case .connecting: store.problem == nil ? .connecting : .offline
+        }
+    }
 
     // Unreachable is nearly always Tailscale, so what to check comes with it.
     private var showsChecklist: Bool {
-        store.link == .offline && (store.problem?.concernsTailscale ?? true)
+        phase == .offline && (store.problem?.concernsTailscale ?? true)
     }
 
     var body: some View {
         VStack(spacing: 12) {
-            Image("Horse")
+            Image(decorative: "Horse")
                 .resizable()
                 .scaledToFit()
                 .frame(width: 64)
@@ -100,6 +113,8 @@ private struct Lobby: View {
             Text(title)
                 .font(.system(size: 17, weight: .semibold))
                 .foregroundStyle(Palette.text)
+                .lineLimit(2)
+                .truncationMode(.middle)
             if let detail {
                 Text(LocalizedStringKey(detail))
                     .font(.system(size: 15))
@@ -111,45 +126,64 @@ private struct Lobby: View {
                     .padding(.top, 10)
                     .transition(.opacity)
             }
-            if store.link == .connecting {
+            if phase == .connecting {
                 ProgressView()
                     .tint(Palette.silver)
                     .padding(.top, 8)
+                    .accessibilityLabel("Connecting")
             } else {
                 Button { Task { await store.rescan() } } label: {
-                    Label(store.link == .offline ? "Try Again" : "Look Again", systemImage: "arrow.clockwise")
-                        .font(.system(size: 15, weight: .medium))
-                        .padding(.horizontal, 6)
-                        .frame(minHeight: 36)
+                    Label {
+                        Text(phase == .offline ? "Try Again" : "Look Again")
+                    } icon: {
+                        // A look under way, including the quiet ones.
+                        if store.scanning {
+                            ProgressView().controlSize(.small).tint(Palette.silver)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                    }
+                    .font(.system(size: 15, weight: .medium))
+                    .padding(.horizontal, 6)
+                    .frame(minHeight: 36)
                 }
                 .buttonStyle(.glass)
+                .disabled(store.scanning)
                 .padding(.top, showsChecklist ? 4 : 12)
             }
         }
         .multilineTextAlignment(.center)
         .padding(.horizontal, 24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .animation(.smooth, value: store.link)
+        .animation(.smooth, value: phase)
+        .task {
+            // While nothing answers, look again every few seconds, so
+            // running /rc on the Mac is enough to bring the app back.
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                if phase == .offline { await store.rescan() }
+            }
+        }
     }
 
     private var title: String {
-        switch store.link {
+        switch phase {
         case .connecting: "Connecting to \(store.host)…"
         case .offline: "Can't reach \(store.host)"
-        case .live: "No sessions yet"
+        case .empty: "No sessions yet"
         }
     }
 
     // The checklist says what to try; a Mac that turned the phone away
     // also says so.
     private var detail: String? {
-        switch store.link {
+        switch phase {
         case .connecting:
             return nil
         case .offline:
             if case .refused? = store.problem { return store.problem?.errorDescription }
             return showsChecklist ? nil : store.problem?.errorDescription
-        case .live:
+        case .empty:
             return "Run `/rc` in a Sirus session on your Mac."
         }
     }

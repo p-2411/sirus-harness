@@ -5,8 +5,15 @@ import SwiftUI
 // when that is Tailscale, what to check, with Tailscale a tap away.
 struct SetupView: View {
     let store: RemoteStore
-    @State private var host = ""
+    @State private var host: String
     @FocusState private var typing: Bool
+
+    // After Change Mac, the one just forgotten is filled in, to go back to
+    // or to edit.
+    init(store: RemoteStore) {
+        self.store = store
+        _host = State(initialValue: store.previousHost ?? "")
+    }
 
     // The checklist stands in for the introduction while it is needed,
     // staying put through a retry, and steps aside while a new name is
@@ -20,7 +27,7 @@ struct SetupView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Spacer(minLength: 24)
-            Image("Horse")
+            Image(decorative: "Horse")
                 .resizable()
                 .scaledToFit()
                 .frame(width: compact ? 64 : 96)
@@ -65,6 +72,7 @@ struct SetupView: View {
                     .submitLabel(.go)
                     .focused($typing)
                     .onSubmit(connect)
+                    .accessibilityLabel("Your Mac's Tailscale name")
                 Button(action: connect) {
                     Group {
                         if store.scanning {
