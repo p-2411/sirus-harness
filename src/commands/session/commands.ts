@@ -124,7 +124,7 @@ export const exportCommand: CommandSpec = {
   name: 'export', args: '[path]', description: 'save this conversation as Markdown',
   run: (args, context) => {
     const session = context.session;
-    const path = resolve(session.getDirectory(), args.join(' ') || `sirus-${Date.now()}.md`);
+    const path = resolve(session.getDirectory(), (context.argumentText ?? args.join(' ')) || `sirus-${Date.now()}.md`);
     const messages = session.getMessages().filter(message => !message.hidden);
     const body = messages.map(message => `## ${message.role === 'user' ? 'You' : message.participant ?? 'Assistant'}\n\n${textOf(message)}`).join('\n\n');
     writeFileSync(path, `# ${session.getName()}\n\n${body}\n`, { flag: 'wx', mode: 0o600 });

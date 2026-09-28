@@ -418,7 +418,11 @@ describe('executeCommand', () => {
     session.append({ role: 'assistant', content: [{ type: 'text', text: 'The reply.' }] });
     runCommand('export', ['chat.md'], session);
     expect(readFileSync(join(settingsDirectory, 'chat.md'), 'utf8')).toContain('## You\n\nHello\n\n## Assistant\n\nThe reply.');
-    expect(statSync(join(settingsDirectory, 'chat.md')).mode & 0o777).toBe(0o600);
+    executeCommand('export', ['my', 'notes.md'], {
+      session, signal: new AbortController().signal, notify() {}, argumentText: 'my  notes.md',
+    });
+    expect(readFileSync(join(settingsDirectory, 'my  notes.md'), 'utf8')).toContain('## You');
+    expect(statSync(join(settingsDirectory, 'my  notes.md')).mode & 0o777).toBe(0o600);
     let copied = '';
     let fork: ReturnType<Session['fork']> | undefined;
     const context = { session, signal: new AbortController().signal, notify() {}, copy(text: string) { copied = text; }, openSession(snapshot: ReturnType<Session['fork']>) { fork = snapshot; } };
