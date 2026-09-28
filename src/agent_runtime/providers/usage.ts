@@ -6,7 +6,7 @@ import { LIMIT_PERIODS, type LimitPeriod } from '../types';
 import { providerFor } from './index';
 import { maskKeys } from './sources';
 import { dataDirectory } from '../../dataDirectory';
-import { loadSubscriptionLimitCache, saveSubscriptionLimitCache } from '../../persistence/subscriptionLimits';
+import { loadSubscriptionLimitCache, saveSubscriptionLimitCache, type CachedSubscriptionLimit } from '../../persistence/subscriptionLimits';
 
 export interface SubscriptionWindow {
   label: string;
@@ -155,7 +155,7 @@ export async function readSubscriptionUsage(vendor: Vendor, signal?: AbortSignal
 }
 
 // Use the overall allowance, excluding additional model-specific buckets.
-function allowanceWindow(usage: SubscriptionUsage, period: LimitPeriod): SubscriptionWindow | undefined {
+export function allowanceWindow(usage: SubscriptionUsage, period: LimitPeriod): SubscriptionWindow | undefined {
   const windows = usage.overall ?? usage.windows;
   return windows.find(window => window.label === period)
     ?? windows.find(window => window.label.toLowerCase() === `codex · ${period}`);
@@ -171,12 +171,12 @@ const PERIOD_HOURS: Record<LimitPeriod, number> = { '5-hour': 5, '7-day': 7 * 24
 
 // Cached values are only a placeholder while fetching. Do not reuse an old
 // window after its reset, or indefinitely when the reset wasn't reported.
-export function cachedSubscriptionRemaining(vendor: Vendor, profile: string, period: LimitPeriod, now = Date.now()): number | undefined {
+export function cachedSubscriptionLimit(vendor: Vendor, profile: string, period: LimitPeriod, now = Date.now()): CachedSubscriptionLimit | undefined {
   const entry = loadSubscriptionLimitCache().find(entry => entry.vendor === vendor && entry.profile === profile && entry.period === period);
   if (!entry) return undefined;
   const maxAge = PERIOD_HOURS[period] * 3600_000;
   if (now < entry.checkedAt || now - entry.checkedAt >= maxAge || (entry.resetsAt !== null && now >= entry.resetsAt)) return undefined;
-  return entry.remaining;
+  return entry;
 }
 export function formatRemaining(value: number | null): string {
   return value === null ? 'unavailable' : `${value}% left`;

@@ -6,7 +6,7 @@ import { Session } from '../../src/agent_runtime/session';
 import { CodexRpc } from '../../src/agent_runtime/providers/openai/codex-account';
 import { providerFor } from '../../src/agent_runtime/providers';
 import { usageCommand } from '../../src/commands/authentication/behavior';
-import { cachedSubscriptionRemaining, readSubscriptionUsage } from '../../src/agent_runtime/providers/usage';
+import { cachedSubscriptionLimit, readSubscriptionUsage } from '../../src/agent_runtime/providers/usage';
 import { loadSubscriptionLimitCache, saveSubscriptionLimitCache } from '../../src/persistence/subscriptionLimits';
 import { TurnCancelledError } from '../../src/abort';
 import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
@@ -106,13 +106,13 @@ describe('/usage subscription allowance', () => {
     expect(loadSubscriptionLimitCache()).toMatchObject([
       { vendor: 'gpt', profile: 'work', period: '7-day', remaining: 0 },
     ]);
-    expect(cachedSubscriptionRemaining('gpt', 'work', '7-day')).toBe(0);
-    expect(cachedSubscriptionRemaining('gpt', 'personal', '7-day')).toBeUndefined();
-    expect(cachedSubscriptionRemaining('claude', 'work', '7-day')).toBeUndefined();
-    expect(cachedSubscriptionRemaining('gpt', 'work', '5-hour')).toBeUndefined();
+    expect(cachedSubscriptionLimit('gpt', 'work', '7-day')).toMatchObject({ remaining: 0, resetsAt: null });
+    expect(cachedSubscriptionLimit('gpt', 'personal', '7-day')).toBeUndefined();
+    expect(cachedSubscriptionLimit('claude', 'work', '7-day')).toBeUndefined();
+    expect(cachedSubscriptionLimit('gpt', 'work', '5-hour')).toBeUndefined();
     fail = true;
     await readSubscriptionUsage('gpt', undefined, 'work');
-    expect(cachedSubscriptionRemaining('gpt', 'work', '7-day')).toBe(0);
+    expect(cachedSubscriptionLimit('gpt', 'work', '7-day')).toMatchObject({ remaining: 0, resetsAt: null });
   });
 
   test('expires cached windows and clears account values on removal or reauthentication', () => {
@@ -122,14 +122,14 @@ describe('/usage subscription allowance', () => {
     const entry = { vendor: 'gpt' as const, profile: 'work', period: '7-day' as const,
       remaining: 42, checkedAt: now, resetsAt: now + 1000 };
     saveSubscriptionLimitCache([entry]);
-    expect(cachedSubscriptionRemaining('gpt', 'work', '7-day', now)).toBe(42);
-    expect(cachedSubscriptionRemaining('gpt', 'work', '7-day', now + 1000)).toBeUndefined();
+    expect(cachedSubscriptionLimit('gpt', 'work', '7-day', now)).toEqual(entry);
+    expect(cachedSubscriptionLimit('gpt', 'work', '7-day', now + 1000)).toBeUndefined();
     saveSubscriptionLimitCache([{ ...entry, resetsAt: null }]);
-    expect(cachedSubscriptionRemaining('gpt', 'work', '7-day', now + 7 * 86400_000)).toBeUndefined();
+    expect(cachedSubscriptionLimit('gpt', 'work', '7-day', now + 7 * 86400_000)).toBeUndefined();
     current.sources.addSubscription('work');
-    expect(cachedSubscriptionRemaining('gpt', 'work', '7-day', now)).toBeUndefined();
+    expect(cachedSubscriptionLimit('gpt', 'work', '7-day', now)).toBeUndefined();
     saveSubscriptionLimitCache([entry]);
     current.sources.remove('work');
-    expect(cachedSubscriptionRemaining('gpt', 'work', '7-day', now)).toBeUndefined();
+    expect(cachedSubscriptionLimit('gpt', 'work', '7-day', now)).toBeUndefined();
   });
 });

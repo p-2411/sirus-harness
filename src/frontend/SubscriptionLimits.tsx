@@ -2,24 +2,43 @@ import { useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
 import { providerFor } from '../agent_runtime/providers';
 import { onProviderChange } from '../agent_runtime/providers/sources';
-import { VENDOR_INFO, VENDORS } from '../agent_runtime/providers/catalog';
-import { cachedSubscriptionRemaining, readSubscriptionUsage, remainingAllowance } from '../agent_runtime/providers/usage';
+import { VENDOR_INFO, VENDORS, type Vendor } from '../agent_runtime/providers/catalog';
+import { allowanceWindow, cachedSubscriptionLimit, readSubscriptionUsage, remainingAllowance } from '../agent_runtime/providers/usage';
 import { theme } from './styles/theme';
 
 export interface SubscriptionLimitRow {
   id: string;
+  vendor: Vendor;
   label: string;
   // Undefined while the first read is pending; null means no limit was reported.
   remaining: number | null | undefined;
+  resetsAt: number | null;
 }
 
-// One line per signed-in subscription, "claude: 54%": how much of the
-// vendor's allowance is left. `/usage` has both windows in words.
+function resetLabel(vendor: Vendor, resetsAt: number | null, today: Date): string | null {
+  if (resetsAt === null) return null;
+  const reset = new Date(resetsAt);
+  if (!Number.isFinite(reset.getTime())) return null;
+  if (vendor === 'claude' || reset.toDateString() === today.toDateString()) {
+    return reset.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }).replace(/\s+/g, '').toLowerCase();
+  }
+  return reset.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+// The selected allowance stays at the left; its reset sits at the right.
+// Claude shows a time. Codex shows a date until the local day of its reset.
 export function SubscriptionLimitRows({ rows }: { rows: readonly SubscriptionLimitRow[] }) {
+  const today = new Date();
   return <Box flexDirection="column" flexShrink={0}>
-    {rows.map(row => <Text key={row.id} color={theme.textSubtle}>
-      {row.label}: {row.remaining === undefined ? 'loading…' : row.remaining === null ? 'unavailable' : `${row.remaining}%`}
-    </Text>)}
+    {rows.map(row => {
+      const reset = row.remaining == null ? null : resetLabel(row.vendor, row.resetsAt, today);
+      return <Box key={row.id} justifyContent="space-between">
+        <Text color={theme.textSubtle} wrap="truncate-end">
+          {row.label}: {row.remaining === undefined ? 'loading…' : row.remaining === null ? 'unavailable' : `${row.remaining}%`}
+        </Text>
+        {reset && <Box flexShrink={0} marginLeft={1}><Text color={theme.textSubtle}>{reset}</Text></Box>}
+      </Box>;
+    })}
   </Box>;
 }
 
@@ -42,11 +61,14 @@ function activeSubscriptions() {
 }
 
 function subscriptionRows(subscriptions: ReturnType<typeof activeSubscriptions>, previous: readonly SubscriptionLimitRow[] = []): SubscriptionLimitRow[] {
-  return subscriptions.map(item => ({
-    id: item.id, label: item.label,
-    remaining: previous.find(row => row.id === item.id)?.remaining
-      ?? cachedSubscriptionRemaining(item.vendor, item.source.profile, VENDOR_INFO[item.vendor].limitPeriod),
-  }));
+  return subscriptions.map(item => {
+    const limit = previous.find(row => row.id === item.id)
+      ?? cachedSubscriptionLimit(item.vendor, item.source.profile, VENDOR_INFO[item.vendor].limitPeriod);
+    return {
+      id: item.id, vendor: item.vendor, label: item.label,
+      remaining: limit?.remaining, resetsAt: limit?.resetsAt ?? null,
+    };
+  });
 }
 
 export default function SubscriptionLimits() {
@@ -76,11 +98,12 @@ export default function SubscriptionLimits() {
         reads.set(item.id, request);
         void readSubscriptionUsage(item.vendor, request.signal, item.source.profile).then(usage => {
           if (request.signal.aborted) return;
+          const period = VENDOR_INFO[item.vendor].limitPeriod;
           setRows(previous => previous.map(row => row.id === item.id
-            ? { ...row, remaining: remainingAllowance(usage, VENDOR_INFO[item.vendor].limitPeriod) } : row));
+            ? { ...row, remaining: remainingAllowance(usage, period), resetsAt: allowanceWindow(usage, period)?.resetsAt ?? null } : row));
         }).catch(() => {
           if (request.signal.aborted) return;
-          setRows(previous => previous.map(row => row.id === item.id ? { ...row, remaining: null } : row));
+          setRows(previous => previous.map(row => row.id === item.id ? { ...row, remaining: null, resetsAt: null } : row));
         });
       }
     };
