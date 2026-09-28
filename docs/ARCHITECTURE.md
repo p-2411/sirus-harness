@@ -55,8 +55,8 @@ One user prompt, in the order a reader opens the files:
    knows which session it belongs to and who issued it. The registry is `tools/index.ts`;
    delegation runs in `tools/subagents/`.
 9. `agent_runtime/permissions/approvals.ts`: whatever the vendor escalates arrives as
-   `session/request_permission` and is queued here. `Chat.tsx` hands the session's first
-   waiting request to `InputBar`, whose `PromptBar.tsx` draws
+   `session/request_permission` and is queued here. `Chat.tsx` hands the first request
+   waiting on the selected agent or its workers to `InputBar`, whose `PromptBar.tsx` draws
    `frontend/chat/ApprovalPrompt.tsx` in place of the input box, keeps its keys and
    selection, and answers with one of the options the vendor offered. A question the agent asks arrives as `elicitation/create`, is
    queued in `permissions/questions.ts` the same way, and is drawn by `QuestionCard.tsx` once
@@ -132,7 +132,7 @@ spawn still setting up its worker. A worktree a worker changed outlives the sess
 reach.
 
 Compaction belongs to the runtime. Each one folds its own conversation when its window
-fills and reports it; `Session.compact` asks the default participant's runtime to do it now
+fills and reports it; `Session.compact` asks the selected participant's runtime to do it now
 by sending `/compact` as a prompt, which both vendors take as a slash command. What comes
 back is a compaction block in that participant's record, rendered as a rule in the chat.
 There is no automatic step of Sirus's own and nothing to switch off.
@@ -191,7 +191,7 @@ harness offers in `available_commands_update`, and `runtime/commands.ts` keeps i
 level behind `/thinking`'s back) and any that start with `_`, and `rememberNativeCommands`
 keeps the last list per vendor and directory in `native-commands.json`, so `nativeCommands`
 has something for the menu before the first turn of the day. A worker's list is not kept.
-`Session.getNativeCommands` answers for the default participant, since that is who a bare
+`Session.getNativeCommands` answers for the selected participant, since that is who a bare
 `/name` reaches. `isSirusCommand` in `commands/registry.ts` is what makes `Chat.send` run a
 `/` line as a Sirus command or send it as a prompt: a vendor command goes to the agent
 unless a Sirus command has the same name. `TurnRunner` puts it in the addressed
@@ -367,8 +367,8 @@ message is the one thing a menu cannot supply, so its entry carries `input`, whi
 input bar over to its entry prompt and sends what the user types as the command's last
 argument. The worker strip above the status row (`frontend/chat/WorkerStrip.tsx`) reads the
 run index directly rather than waiting for the session to hand it an array, since runs are
-mutated in place. It is one line: the run with the freshest `updatedAt` of those working or
-finished within the last second, with a counter for the rest. `↓` from the input bar hands
+mutated in place. It is one line: of the selected agent's runs, the one with the freshest
+`updatedAt` of those working or finished within the last second, with a counter for the rest. `↓` from the input bar hands
 it the keyboard against a list frozen as focus arrives, so nothing moves under the user, and
 `enter` sends `/agents <id>` down the path typing it takes; the ordering is the strip's own,
 while `/agents` keeps listing every run nobody has dismissed. A worker goes by the name its owner gave it (`workerName`), or its id when it has none, in

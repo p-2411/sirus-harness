@@ -242,11 +242,14 @@ describe('session checkpoint integration', () => {
     }
   });
 
-  test('queued prompts capture their own pre-turn files and history position', async () => {
+  test('queued prompts that need new turns capture their own pre-turn files and history position', async () => {
     let releaseFirst!: () => void;
     const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
     let turnNumber = 0;
-    bindScriptedRuntime(model, async (_input, emit, options) => {
+    bindScriptedRuntime(model, async (_input, emit, options, _signal, runtime) => {
+      // A vendor that cannot accept the safe-point delivery leaves the
+      // follow-up queued for a separate turn, with its own checkpoint.
+      runtime.steer = async () => { throw new Error('Steering unavailable'); };
       const number = ++turnNumber;
       if (number === 1) await firstGate;
       const oldText = readFileSync(path.join(options.directory, 'file.txt'), 'utf8');
@@ -275,7 +278,9 @@ describe('session checkpoint integration', () => {
     }
 
     const checkpoints = session.getCheckpoints();
-    expect(checkpoints.map(checkpoint => checkpoint.seq)).toEqual([0, 2]);
+    expect(checkpoints.map(checkpoint => checkpoint.seq)).toEqual(
+      session.getMessages().filter(message => message.role === 'user').map(message => message.seq),
+    );
     expect(checkpoints.map(checkpoint => checkpoint.summary)).toEqual(['Change the file', 'Second queued change']);
     expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('edit 2');
     expect(session.getQueuedMessageCount()).toBe(0);

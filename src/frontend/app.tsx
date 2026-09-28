@@ -238,6 +238,11 @@ export default function App({ launchDirectory = process.cwd(), startup }: { laun
     };
   }, [sessions, selectedSession, draftSession]);
 
+  useEffect(() => () => {
+    const { sessions, draftSession } = currentWorkspace.current;
+    for (const session of new Set([...sessions, draftSession])) void session.dispose();
+  }, []);
+
   // Retire the old object before restoring the same id: disposal unregisters
   // its tool server and workers, which must not remove the new object's bindings.
   function replaceSession(old: Session, snapshot: SessionSnapshot): Promise<Session> {
@@ -404,7 +409,10 @@ export default function App({ launchDirectory = process.cwd(), startup }: { laun
     // render inside the chat column (bottom-anchored, clipped at the top), so
     // nothing ever lands in scrollback outside the viewport.
     <Box flexDirection="row" width={terminalWidth} height={Math.max(terminalHeight, 14)}>
-      <Sidebar isActive={resumeQuery === null} sessions={sessions.filter(session => !session.isArchived())} directory={launchDirectory} onArchive={archiveSession} onFocusChange={setSidebarFocused} currSession={selectedSession} selectSession={selectSession} addSession={addSession} deleteSession={deleteSession} collapsed={sidebarCollapsed} />
+      <Sidebar isActive={resumeQuery === null} sessions={sessions.filter(session => !session.isArchived())} directory={launchDirectory} onArchive={archiveSession} onFocusChange={focused => {
+        setSidebarFocused(focused);
+        if (focused) setSidebarCollapsed(false);
+      }} currSession={selectedSession} selectSession={selectSession} addSession={addSession} deleteSession={deleteSession} collapsed={sidebarCollapsed} />
       <Box flexDirection="column" flexGrow={1} flexBasis={0} minWidth={0}>
       {updateVersion && <Text color={theme.success} wrap="truncate-end">Sirus {updateVersion} available · /update</Text>}
       {storageNotice && <Text color="yellow">{storageNotice}</Text>}

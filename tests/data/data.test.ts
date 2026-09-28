@@ -2356,6 +2356,151 @@ test('draft warmup is shared with the first turn and is disposed if unused', asy
   await draft.dispose();
 });
 
+test('queued follow-ups wait for all foreground tools, then steer in FIFO order in the same turn', async () => {
+  let emit!: (update: RuntimeUpdate) => void;
+  let finish!: () => void;
+  const gate = new Promise<void>(resolve => { finish = resolve; });
+  const binding = bindScriptedRuntime(testModel, async (_input, update) => {
+    emit = update;
+    await gate;
+  });
+  const session = new Session({ model: testModel });
+  const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Work' }] });
+  const tool = (id: string, status: 'in_progress' | 'completed') => emit({ type: 'tool_call', call: {
+    type: 'tool_call', id, title: id, kind: 'execute', status, locations: [], content: [],
+  } });
+  try {
+    await until(() => !!emit, 'runtime to start');
+    tool('one', 'in_progress');
+    tool('two', 'in_progress');
+    session.queueMessage('First');
+    session.queueMessage('Second');
+    tool('one', 'completed');
+    expect(binding.runtimes[0].steers).toEqual([]);
+    expect(session.getQueuedMessageCount()).toBe(2);
+    tool('two', 'completed');
+    await until(() => binding.runtimes[0].steers.length === 2, 'safe point deliveries');
+    expect(binding.runtimes[0].steers).toEqual(['First', 'Second']);
+    expect(binding.runtimes[0].prompts).toHaveLength(1);
+    expect(session.getQueuedMessageCount()).toBe(0);
+  } finally {
+    finish();
+    await turn;
+    await session.dispose();
+  }
+});
+
+test('steering records the injection boundary before the runtime streams its continuation', async () => {
+  let emit!: (update: RuntimeUpdate) => void;
+  let finish!: () => void;
+  const gate = new Promise<void>(resolve => { finish = resolve; });
+  bindScriptedRuntime(testModel, async (_input, update, _options, _signal, runtime) => {
+    emit = update;
+    emit({ type: 'text', text: 'Before' });
+    runtime.onSteer = () => emit({ type: 'text', text: 'After' });
+    await gate;
+  });
+  const session = new Session({ model: testModel });
+  const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Work' }] });
+  try {
+    await until(() => !!emit, 'runtime to start');
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'New instruction' }] });
+    const messages = session.getMessages();
+    const reply = messages.find(message => message.role === 'assistant')!;
+    expect(textOf(reply)).toBe('BeforeAfter');
+    expect(messages.at(-1)!.injectedAt).toEqual({ seq: reply.seq, block: 0, offset: 6 });
+  } finally {
+    finish();
+    await turn;
+    await session.dispose();
+  }
+});
+
+test.each(['/help', '!echo hello'])('queued %s blocks later text at a tool boundary', async command => {
+  let emit!: (update: RuntimeUpdate) => void;
+  let finish!: () => void;
+  const gate = new Promise<void>(resolve => { finish = resolve; });
+  const binding = bindScriptedRuntime(testModel, async (_input, update) => { emit = update; await gate; });
+  const session = new Session({ model: testModel });
+  const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Work' }] });
+  try {
+    await until(() => !!emit, 'runtime to start');
+    session.queueMessage(command);
+    session.queueMessage('Later');
+    emit({ type: 'tool_call', call: {
+      type: 'tool_call', id: 'done', title: 'Done', kind: 'execute', status: 'completed', locations: [], content: [],
+    } });
+    expect(binding.runtimes[0].steers).toEqual([]);
+    expect(session.getQueuedMessages().map(item => item.text)).toEqual([command, 'Later']);
+    finish();
+    await turn;
+    expect(session.getQueuedMessageCount()).toBe(2);
+  } finally {
+    finish();
+    await turn;
+    await session.dispose();
+  }
+});
+
+test('refused send-now interrupts and delivers the retained messages in FIFO order', async () => {
+  let finish!: () => void;
+  const gate = new Promise<void>(resolve => { finish = resolve; });
+  const binding = bindScriptedRuntime(testModel, async (input, _emit, _options, _signal, runtime) => {
+    if (input.text === 'Work') {
+      runtime.steer = async () => { throw new Error('Cannot steer'); };
+      await gate;
+    }
+  });
+  const session = new Session({ model: testModel });
+  const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Work' }] }).catch(() => {});
+  try {
+    await until(() => binding.runtimes[0]?.prompts.length === 1, 'runtime to start');
+    session.queueMessage('First');
+    session.queueMessage('Second');
+    await session.deliverQueuedMessages();
+    await turn;
+    await until(() => binding.runtimes[0].prompts.length === 3, 'queued turns');
+    expect(binding.runtimes[0].prompts.map(prompt => prompt.text)).toEqual(['Work', 'First', 'Second']);
+  } finally {
+    finish();
+    await turn;
+    await session.dispose();
+  }
+});
+
+test('an interrupted delivery retains only the undelivered follow-up ahead of later messages', async () => {
+  let rejectSteer!: (error: Error) => void;
+  let finish!: () => void;
+  const gate = new Promise<void>(resolve => { finish = resolve; });
+  const binding = bindScriptedRuntime(testModel, async (input, _emit, _options, _signal, runtime) => {
+    if (input.text === 'Work') {
+      runtime.steer = () => new Promise<void>((_resolve, reject) => { rejectSteer = reject; });
+      await gate;
+    }
+  });
+  const session = new Session({ model: testModel });
+  const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Work' }] }).catch(() => {});
+  try {
+    await until(() => binding.runtimes[0]?.prompts.length === 1, 'runtime to start');
+    session.queueMessage('First');
+    session.queueMessage('Second');
+    const delivery = session.deliverQueuedMessages();
+    await until(() => !!rejectSteer, 'steering request');
+    session.cancel();
+    rejectSteer(new DOMException('Interrupted', 'AbortError'));
+    await delivery;
+    await turn;
+    await until(() => binding.runtimes[0].prompts.length === 3, 'retained messages');
+    expect(binding.runtimes[0].prompts.map(prompt => prompt.text)).toEqual(['Work', 'First', 'Second']);
+    expect(session.getMessages().filter(message => message.role === 'user').map(textOf))
+      .toEqual(['Work', 'First', 'Second']);
+  } finally {
+    finish();
+    await turn;
+    await session.dispose();
+  }
+});
+
 test('a pending warmup cannot survive a model change or draft disposal', async () => {
   const { boundRuntimes } = await import('../../src/agent_runtime/runtime/runtime');
   const binding = bindScriptedRuntime(testModel, textTurn('Old'));
@@ -2576,8 +2721,8 @@ test.each(['initialize', 'session/new'])('cancelling ACP startup terminates an a
   }
 });
 
-test('a bound runtime resolving after startup cancellation is disposed before it can be adopted', async () => {
-  const { boundRuntimes, createRuntime } = await import('../../src/agent_runtime/runtime/runtime');
+test.each(['caller', 'shutdown'])('a bound runtime resolving after %s cancellation is disposed before it can be adopted', async cancellation => {
+  const { boundRuntimes, createRuntime, disposeAllRuntimes } = await import('../../src/agent_runtime/runtime/runtime');
   const model = 'late-startup-runtime';
   const binding = bindScriptedRuntime(model, textTurn('Unused'));
   const start = boundRuntimes[model]!;
@@ -2592,8 +2737,9 @@ test('a bound runtime resolving after startup cancellation is disposed before it
   }).catch(error => error);
   try {
     await new Promise(resolve => setImmediate(resolve));
-    controller.abort(new Error('Draft replaced'));
-    expect(await opening).toMatchObject({ message: 'Draft replaced' });
+    if (cancellation === 'caller') controller.abort(new Error('Draft replaced'));
+    else disposeAllRuntimes();
+    expect(await opening).toMatchObject({ message: cancellation === 'caller' ? 'Draft replaced' : 'Runtimes stopped' });
     release();
     await until(() => binding.runtimes.length === 1, 'late runtime');
     expect(binding.runtimes[0].disposed).toBe(true);

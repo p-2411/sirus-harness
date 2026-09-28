@@ -1,5 +1,11 @@
 import { marked } from 'marked';
 
+// One character of a bare, unquoted file mention: anything but whitespace,
+// quotes and backticks, angle brackets, and the brackets and punctuation
+// prose puts around a path. A mention is read up to the first character
+// outside it, and the file menu's token ends at the same place.
+export const FILE_PATH_CHARACTER = /[^\s"'`<>()[\]{},;]/;
+
 export interface RootTextRange {
   start: number;
   end: number;

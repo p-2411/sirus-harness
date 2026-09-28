@@ -15,18 +15,18 @@ export const clearCommand: CommandSpec = {
   },
 };
 
-// /compact asks the default participant's runtime to fold its conversation
+// /compact asks the selected participant's runtime to fold its conversation
 // now. Each runtime also compacts on its own when its window fills; that is
 // the vendor's and has no switch.
-async function compactCommand(session: CommandSession, signal?: AbortSignal): Promise<Feedback> {
-  await session.compact(signal);
-  return { kind: 'success', text: `Compacted @${DEFAULT_PARTICIPANT}'s context.` };
+async function compactCommand(session: CommandSession, signal?: AbortSignal, participant?: string): Promise<Feedback> {
+  await session.compact(signal, participant);
+  return { kind: 'success', text: `Compacted @${participant ?? DEFAULT_PARTICIPANT}'s context.` };
 }
 
 export const compactCommandSpec: CommandSpec = {
   name: 'compact',
   description: 'ask the agent to compact its context now',
-  run: (_args, context) => compactCommand(context.session, context.signal),
+  run: (_args, context) => compactCommand(context.session, context.signal, context.participant),
 };
 
 function renameSession(name: string, session: CommandSession): Feedback {
@@ -83,7 +83,8 @@ function permissionsMenuItems(): CommandMenuItem[] {
   }));
 }
 
-function permissionsCommand(mode: string | undefined, session: CommandSession): Feedback {
+// Setting a mode says nothing: the status row shows it.
+function permissionsCommand(mode: string | undefined, session: CommandSession): Feedback | void {
   if (mode === undefined) {
     const current = session.getPermissionMode();
     return {
@@ -94,10 +95,6 @@ function permissionsCommand(mode: string | undefined, session: CommandSession): 
   const parsed = parsePermissionMode(mode);
   if (!parsed) throw new Error('Usage: /permissions [ask|auto|bypass]');
   session.setPermissionMode(parsed);
-  return {
-    kind: 'success',
-    text: `Permission mode set to ${PERMISSION_MODE_NAMES[parsed]}.${parsed === 'ask' ? ` ${ASK_MODE_DESCRIPTION}` : ''}`,
-  };
 }
 
 export const permissionsCommandSpec: CommandSpec = {

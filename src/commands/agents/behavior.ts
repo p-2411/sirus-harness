@@ -43,9 +43,19 @@ export function resolveModelReference(
   reference: string,
   availableModels: readonly string[] = modelIds(),
 ): string {
+  if (availableModels.length === 0) {
+    throw new Error('No vendor models available yet. Use /login to connect a provider and let its model list load.');
+  }
   const normalized = reference.toLocaleLowerCase();
   const exact = availableModels.find(model => model.toLocaleLowerCase() === normalized);
   if (exact) return exact;
+
+  // Claude may list a family alias with a context qualifier, e.g. opus[1m].
+  // Prefer that vendor alias over matching the same family's pinned versions.
+  const aliases = availableModels.filter(model =>
+    model.toLocaleLowerCase().replace(/\[[^\]]+\]$/, '') === normalized,
+  );
+  if (aliases.length === 1) return aliases[0];
 
   const matches = availableModels.filter(model =>
     model.toLocaleLowerCase().includes(normalized),
@@ -80,7 +90,9 @@ export function modelMenuItems(args: readonly string[] = [], session?: CommandSe
     {
       type: 'heading' as const,
       key: `${vendor}-models`,
-      label: VENDOR_INFO[vendor].displayName,
+      label: modelsOf(vendor).length > 0
+        ? VENDOR_INFO[vendor].displayName
+        : `${VENDOR_INFO[vendor].displayName} — waiting for vendor models; connect with /login`,
     },
     ...modelsOf(vendor).map(model => {
       const description = [modelRestartWarning(participant ?? DEFAULT_PARTICIPANT, model, session), listedDescription(model)].filter(Boolean).join(' ');

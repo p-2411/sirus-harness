@@ -65,6 +65,23 @@ describe('unified mention menu', () => {
     expect(mentionMenuItems('install @scope/package', participants, [])).toEqual([]);
   });
 
+  test('opens a chosen directory and attaches the directory already typed', () => {
+    const directories = (input: string, files: string[]) => mentionMenuItems(input, [], files)
+      .filter(item => item.kind === 'directory')
+      .map(item => [item.label, item.description, item.replacement]);
+    expect(directories('@sr', ['src/', 'my dir/'])).toEqual([
+      ['@"my dir/"', 'open directory', '@"my dir/"'],
+      ['@src/', 'open directory', '@src/'],
+    ]);
+    expect(directories('@src/', ['src/', 'src/lib/'])).toEqual([
+      ['@src/lib/', 'open directory', '@src/lib/'],
+      ['@src/', 'attach directory', '@src/ '],
+    ]);
+    expect(directories('@./src/', ['src/'])).toEqual([['@src/', 'attach directory', '@src/ ']]);
+    expect(directories('@"my dir/"', ['my dir/'])).toEqual([['@"my dir/"', 'attach directory', '@"my dir/" ']]);
+    expect(mentionMenuItems('@src/', [], ['src/index.ts']).at(-1)).toMatchObject({ kind: 'file', replacement: '@src/index.ts ' });
+  });
+
   test('aligns agent and file descriptions with identical fixed selection slots', () => {
     const items = mentionMenuItems('@Re', participants, ['README.md']);
     const output = stripAnsi(renderToString(

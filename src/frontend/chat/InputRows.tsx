@@ -7,12 +7,12 @@ import { MentionText, type ParticipantColors } from '../MentionText';
 import { characterCount } from './editor';
 import type { Feedback } from '../../commands/feedback';
 
-const FEEDBACK_ICONS = {
-  info: '→',
+// An information line reads as plain text; the others are marked.
+const FEEDBACK_ICONS: Partial<Record<Feedback['kind'], string>> = {
   success: '✓',
   warning: '!',
   error: '!',
-} as const;
+};
 
 export function InputFeedback({ feedback, participantColors }: {
   feedback: Feedback | null;
@@ -23,37 +23,33 @@ export function InputFeedback({ feedback, participantColors }: {
     ? theme.success
     : feedback.kind === 'error' ? theme.danger
       : feedback.kind === 'warning' ? theme.pending : theme.accentSoft;
-  const showIcon = feedback.showIcon !== false;
+  const icon = feedback.showIcon === false ? undefined : FEEDBACK_ICONS[feedback.kind];
   return (
     <Box paddingX={3} flexShrink={0}>
-      {showIcon && <Text color={iconColor}>{FEEDBACK_ICONS[feedback.kind]}</Text>}
+      {icon && <Text color={iconColor}>{icon}</Text>}
       <Text color={feedback.kind === 'error' ? theme.danger : feedback.kind === 'warning' ? theme.pending : theme.textMuted}>
-        {showIcon ? ' ' : ''}<MentionText colors={participantColors}>{terminalText(feedback.text)}</MentionText>
+        {icon ? ' ' : ''}<MentionText colors={participantColors}>{terminalText(feedback.text)}</MentionText>
       </Text>
     </Box>
   );
 }
 
-// Waiting messages, with the one being edited highlighted.
-export function QueuedRow({ messages, selected = null, participantColors }: {
+// Waiting messages, oldest first, one line each.
+export function QueuedRow({ messages, participantColors }: {
   messages: readonly string[];
-  selected?: number | null;
   participantColors?: ParticipantColors;
 }) {
   if (messages.length === 0) return null;
   return (
     <Box paddingX={3} flexDirection="column" flexShrink={0}>
-      {messages.map((message, index) => {
-        const active = index === selected;
-        return (
-          <Box key={index} justifyContent="space-between">
-            <Text color={active ? theme.text : theme.textMuted} wrap="truncate-end">
-              <Text color={active ? theme.accent : theme.textSubtle}>{active ? '› ' : '⋮ '}</Text>
-              <MentionText colors={participantColors}>{singleLine(message)}</MentionText>
-            </Text>
-          </Box>
-        );
-      })}
+      {messages.map((message, index) => (
+        <Box key={index} justifyContent="space-between">
+          <Text color={theme.textMuted} wrap="truncate-end">
+            <Text color={theme.textSubtle}>⋮ </Text>
+            <MentionText colors={participantColors}>{singleLine(message)}</MentionText>
+          </Text>
+        </Box>
+      ))}
     </Box>
   );
 }

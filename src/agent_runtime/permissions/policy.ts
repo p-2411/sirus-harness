@@ -28,8 +28,9 @@ export function parsePermissionMode(value: unknown): PermissionMode | null {
   return PERMISSION_MODES.includes(value as PermissionMode) ? value as PermissionMode : null;
 }
 
+// shift+tab's cycle: ask, auto, bypass, and round again.
 export function nextPermissionMode(mode: PermissionMode): PermissionMode {
-  return mode === 'ask' ? 'auto' : 'ask';
+  return PERMISSION_MODES[(PERMISSION_MODES.indexOf(mode) + 1) % PERMISSION_MODES.length];
 }
 
 // Who is asking, for which Sirus session: stamped on every escalation a

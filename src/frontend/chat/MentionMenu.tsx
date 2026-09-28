@@ -53,7 +53,7 @@ export interface MentionMenuItem {
   label: string;
   description: string;
   replacement: string;
-  kind: 'participant' | 'file' | 'create';
+  kind: 'participant' | 'file' | 'directory' | 'create';
 }
 
 // Only the unfinished @token at the cursor offers participants. This supports
@@ -63,16 +63,22 @@ const activeMentionPattern = new RegExp(`(?<![\\w@])@(${NAME_PATTERN_SOURCE}|)$`
 
 // The menu's rows, top to bottom: the participant the name typed so far
 // would create unless one already has it, the participants whose names start
-// with it, longest first, then the matching files, which sit nearest the
-// input and take the selection once they arrive.
+// with it, longest first, then the matching files and folders, which sit
+// nearest the input and take the selection once they arrive.
 export function mentionMenuItems(
   input: string,
   participants: readonly Participant[],
   files: readonly string[],
 ): MentionMenuItem[] {
-  const fileItems: MentionMenuItem[] = [...files].reverse().map(file => {
+  const typedPath = activeFileMention(input, input.length)?.query.replace(/^\.\//, '');
+  const fileItems: MentionMenuItem[] = [...files].reverse().map((file): MentionMenuItem => {
     const label = formatFileMention(file);
-    return { key: `file:${file}`, label, description: 'attach file', replacement: `${label} `, kind: 'file' };
+    if (!file.endsWith('/')) return { key: `file:${file}`, label, description: 'attach file', replacement: `${label} `, kind: 'file' };
+    // Choosing a directory opens it and leaves the menu up for what is
+    // inside; choosing the directory already typed attaches it as is.
+    return file === typedPath
+      ? { key: `directory:${file}`, label, description: 'attach directory', replacement: `${label} `, kind: 'directory' }
+      : { key: `directory:${file}`, label, description: 'open directory', replacement: label, kind: 'directory' };
   });
   const fragment = activeMentionPattern.exec(input)?.[1];
   if (fragment === undefined) return fileItems;

@@ -22,6 +22,7 @@ export interface HeartbeatOptions {
   endpoint?: string;
   directory?: string;
   fetchImpl?: FetchLike;
+  signal?: AbortSignal;
 }
 
 function installationPath(directory: string): string {
@@ -71,6 +72,7 @@ function heartbeatEndpoint(value: string | undefined): string | null {
  * the caller and never intended to affect application startup.
  */
 export async function sendHeartbeat(options: HeartbeatOptions = {}): Promise<boolean> {
+  if (options.signal?.aborted) return false;
   const endpoint = heartbeatEndpoint(options.endpoint ?? process.env.SIRUS_HEARTBEAT_URL ?? DEFAULT_HEARTBEAT_ENDPOINT);
   if (!endpoint) return false;
 
@@ -88,7 +90,7 @@ export async function sendHeartbeat(options: HeartbeatOptions = {}): Promise<boo
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ installation_id: state.installationId, version: SIRUS_VERSION }),
-      signal: controller.signal,
+      signal: options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal,
     });
     if (!response.ok) return false;
 

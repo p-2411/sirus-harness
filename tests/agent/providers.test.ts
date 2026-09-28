@@ -7,7 +7,7 @@ import path from 'path';
 import { PassThrough } from 'stream';
 import { TurnCancelledError } from '../../src/abort';
 import { providerFor, servableModelIds, servesModel } from '../../src/agent_runtime/providers';
-import { modelInfo, VENDOR_INFO } from '../../src/agent_runtime/providers/catalog';
+import { modelIds, modelsOf, modelInfo, rememberListedModels, VENDOR_INFO } from '../../src/agent_runtime/providers/catalog';
 import { browserCommand } from '../../src/agent_runtime/providers/login';
 import { loginCodex, readCodexAccount, readCodexRateLimits } from '../../src/agent_runtime/providers/openai/codex-account';
 import { sourceEnvironment } from '../../src/agent_runtime/providers/profiles';
@@ -31,7 +31,7 @@ test('serves the catalog plus whatever a scripted runtime is bound to', () => {
     expect(servesModel('claude-opus-5')).toBe(true);
     expect(servesModel('gpt-2')).toBe(false);
     expect(servableModelIds()).toContain(model);
-    expect(servableModelIds()).toContain('gpt-5.6-luna');
+    expect(servableModelIds()).toEqual(expect.arrayContaining(modelIds()));
   } finally {
     unbindRuntime(model);
   }
@@ -66,6 +66,27 @@ test('a model no vendor knows any more is refused before any adapter starts', as
     expect(start).not.toHaveBeenCalled();
   } finally {
     start.mockRestore();
+  }
+});
+
+test('model choices come exclusively from cached vendor reports', () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-listed-models-'));
+  const previous = process.env.SIRUS_DATA_DIR;
+  process.env.SIRUS_DATA_DIR = directory;
+  try {
+    expect(modelIds()).toEqual([]);
+    expect(modelsOf('claude')).toEqual([]);
+    rememberListedModels('claude', [{ id: 'opus[1m]', description: 'Opus' }]);
+    rememberListedModels('gpt', [{ id: 'gpt-vendor-model', description: 'GPT' }]);
+    expect(modelIds()).toEqual(['opus[1m]', 'gpt-vendor-model']);
+    expect(modelsOf('claude')).toEqual(['opus[1m]']);
+    rememberListedModels('claude', []);
+    expect(modelsOf('claude')).toEqual([]);
+    expect(modelIds()).toEqual(['gpt-vendor-model']);
+  } finally {
+    if (previous === undefined) delete process.env.SIRUS_DATA_DIR;
+    else process.env.SIRUS_DATA_DIR = previous;
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 

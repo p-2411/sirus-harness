@@ -7,6 +7,7 @@ import { DEFAULT_PERMISSION_MODE } from '../permissions/policy';
 import { sirusPrompt } from '../prompt';
 import { requireKnownModel } from '../providers';
 import { DEFAULT_MODEL, vendorOf } from '../providers/catalog';
+import { discoverMissingModels } from '../providers/discovery';
 import { nativeCommands, type NativeCommand } from '../runtime/commands';
 import type { BackgroundTask } from '../runtime/runtime';
 import { registerToolSession, sirusMcpServerEntry, unregisterToolSession, workerRequester } from '../tools/server';
@@ -78,6 +79,8 @@ export interface SessionOptions {
   // when it was saved is restored as interrupted.
   workers?: readonly WorkerRecord[];
   inputContent?: string;
+  selectedParticipant?: string;
+  participantDrafts?: Record<string, string>;
   // A newly-created session may still take its name from its first prompt.
   autoNamePending?: boolean;
   timing?: SessionTiming;
@@ -94,6 +97,8 @@ export interface SessionSnapshot {
   messages: Message[];
   // Absent in snapshots saved before session drafts were supported.
   inputContent?: string;
+  selectedParticipant?: string;
+  participantDrafts?: Record<string, string>;
   // How tool calls are approved in this session; absent in older snapshots.
   permissionMode?: PermissionMode;
   // The model spawned subagents run on; absent for the owner's own.
@@ -167,6 +172,7 @@ function resolveSessionOptions(options: SessionOptions = {}): ResolvedSessionOpt
 export class Session {
   private readonly changes = new ChangeFeed(() => this.timeline.touch());
   private readonly queue = new MessageQueue();
+  private deliveringQueue = false;
   private readonly timeline: Timeline;
   private readonly roster: ParticipantRoster;
   private readonly checkpoints: CheckpointLog;
@@ -182,6 +188,8 @@ export class Session {
   // Drafts typed while a turn is active belong to the session, so switching
   // away and back does not discard them.
   private inputContent: string;
+  private selectedParticipant: string;
+  private readonly participantDrafts = new Map<string, string>();
   private autoNamePending: boolean;
   private namingController: AbortController | null = null;
 
@@ -217,6 +225,10 @@ export class Session {
       participants: resolved.participants,
       host: this.runtimeHost(),
     });
+    this.selectedParticipant = this.roster.find(options.selectedParticipant ?? '')?.name ?? this.roster.default.name;
+    for (const [name, draft] of Object.entries(options.participantDrafts ?? {})) {
+      if (this.roster.find(name)) this.participantDrafts.set(keyOf(name), draft);
+    }
     this.timeline = new Timeline(() => this.roster.transcripts(), this.changes, {
       updatedAt: resolved.updatedAt,
       conversationStartedAt: resolved.conversationStartedAt,
@@ -249,6 +261,8 @@ export class Session {
       workers: snapshot.workers,
       checkpoints: snapshot.checkpoints,
       inputContent: snapshot.inputContent,
+      selectedParticipant: snapshot.selectedParticipant,
+      participantDrafts: snapshot.participantDrafts,
       autoNamePending: snapshot.autoNamePending,
       permissionMode: snapshot.permissionMode,
       subagentModel: snapshot.subagentModel,
@@ -280,6 +294,7 @@ export class Session {
         this.changes.notify();
       },
       subagentModel: () => this.subagentModel,
+      toolsSettled: agent => { void this.deliverQueuedMessages(agent); },
       forWorker: (id, directory) => ({
         ...host,
         directory,
@@ -354,7 +369,19 @@ export class Session {
     this.roster.add(name, model);
   }
 
-  async sendMessage(message: Draft): Promise<Message[]> {
+  // Resolve the input's destination at submission time. Explicit mentions
+  // retain their routing (including creating agents); plain text uses the tab.
+  messageForParticipant(message: Draft, participantName: string): Draft {
+    let text = textOf(message);
+    for (const file of parseFileMentions(text, this.directory).reverse()) {
+      text = text.slice(0, file.start) + ' '.repeat(file.end - file.start) + text.slice(file.end);
+    }
+    return message.to?.length || this.roster.readMentions(text).length
+      ? message
+      : { ...message, to: [this.roster.require(participantName).name] };
+  }
+
+  async sendMessage(message: Draft, queuedMessage?: QueuedMessage): Promise<Message[]> {
     if (this.disposed) throw new Error('This session was deleted.');
     if (message.role !== 'user') throw new Error('Only user messages can start a session turn');
     if (this.rewinding || this.checkpoints.isRestoringDirectory()) {
@@ -426,11 +453,21 @@ export class Session {
         try {
           await this.starting.get(target);
           if (generation !== this.sendGeneration) throw new TurnCancelledError();
+          const reply = target.activeReply;
+          const tail = reply?.content.at(-1);
+          const textTail = tail?.type === 'text' || tail?.type === 'thought';
+          const injectedAt = reply ? { seq: reply.seq,
+            block: reply.content.length - (textTail ? 1 : 0),
+            offset: textTail ? tail.text.length : 0 } : undefined;
           await target.steer(withIntroductions(textOf(stored), introduced, target.name));
+          entry.injectedAt ??= injectedAt;
           this.timeline.deliver(entry, [{ name: target.name, transcript: target.transcript }]);
         } catch (error) {
+          if (queuedMessage) {
+            this.queue.prepend({ ...queuedMessage, text: textOf(queued), images,
+              content: queued.content, to: [target.name] });
+          } else if (!isAbortError(error)) this.queue.push(textOf(queued), images, queued.content, [target.name]);
           if (isAbortError(error)) throw error;
-          this.queue.push(textOf(queued), images, queued.content, [target.name]);
           this.showNotice(`@${target.name} could not accept steering. Message queued.`, target.name);
         }
       });
@@ -654,16 +691,16 @@ export class Session {
     return cancelled || this.activeSends > 0;
   }
 
-  // Asks the default participant's runtime to fold its own conversation now:
+  // Asks the selected participant's runtime to fold its own conversation now:
   // `/compact` is a slash command both vendors take as a prompt. What the
   // runtime reports lands in the record like any other turn. Like a rewind,
   // it waits for nothing else to be running and nothing else runs meanwhile.
-  async compact(signal?: AbortSignal): Promise<void> {
+  async compact(signal?: AbortSignal, participantName = this.selectedParticipant): Promise<void> {
     if (this.activeSends > 0 || this.rewinding || this.compacting) {
       throw new Error('Wait for the current operation to finish before compacting.');
     }
     if (this.timeline.isEmpty()) throw new Error('There is no history to compact.');
-    const agent = this.roster.default;
+    const agent = this.roster.require(participantName);
     this.compacting = true;
     this.activeSends++;
     this.activeTurnStartedAt = Date.now();
@@ -832,9 +869,56 @@ export class Session {
     this.changes.notify();
   }
 
-  queueMessage(message: string, images?: readonly ImageBlock[], content?: readonly MessageBlock[]): void {
-    this.queue.push(message, images, content);
+  queueMessage(message: string, images?: readonly ImageBlock[], content?: readonly MessageBlock[], to?: readonly string[]): void {
+    this.queue.push(message, images, content, to);
     this.changes.notify();
+  }
+
+  // Enter waits for a tool boundary. Ctrl+Enter calls without a boundary to
+  // ask the adapter to deliver now. Commands and images need a fresh turn.
+  async deliverQueuedMessages(atSafePoint?: SessionAgent): Promise<void> {
+    if (this.deliveringQueue || this.disposed) return;
+    if (this.activeSends === 0) { this.sendNextQueuedPrompt(); return; }
+    this.deliveringQueue = true;
+    try {
+      const count = this.queue.length;
+      for (let index = 0; index < count; index++) {
+        const next = this.queue.all()[0];
+        if (!next) break;
+        if (!isAutoSendable(next.text) || next.images?.length) {
+          if (!atSafePoint) this.cancel();
+          break;
+        }
+        if (atSafePoint) {
+          if (atSafePoint.activeReply?.content.some(block => block.type === 'tool_call'
+            && (block.status === 'pending' || block.status === 'in_progress'))) break;
+          let text = next.text;
+          for (const file of parseFileMentions(text, this.directory).reverse()) {
+            text = text.slice(0, file.start) + ' '.repeat(file.end - file.start) + text.slice(file.end);
+          }
+          const mentions = this.roster.readMentions(text);
+          const names = next.to ?? (mentions.length ? mentions.map(mention => mention.name) : [this.roster.default.name]);
+          const busy = names.map(name => this.roster.find(name)).filter(agent => agent?.busy);
+          // A tool boundary for one participant must not interrupt another.
+          if (!busy.includes(atSafePoint) || busy.some(agent => agent !== atSafePoint)) break;
+        }
+        this.queue.shift();
+        this.changes.notify();
+        await this.sendMessage({ role: 'user', ...(next.to ? { to: [...next.to] } : {}),
+          content: next.content ? [...next.content] : [{ type: 'text', text: next.text }, ...(next.images ?? [])],
+        }, next);
+        // A refused delivery was put back at the front. Wait for turn end.
+        if (this.queue.all().some(message => message.id === next.id)) {
+          if (!atSafePoint) this.cancel();
+          break;
+        }
+      }
+    } catch {
+      // sendMessage retains undelivered steering and records failures.
+    } finally {
+      this.deliveringQueue = false;
+      this.sendNextQueuedPrompt();
+    }
   }
 
   shiftQueuedMessage(): string | undefined {
@@ -847,28 +931,11 @@ export class Session {
     return next;
   }
 
-  takeQueuedMessage(): QueuedMessage | undefined {
-    const next = this.queue.take();
-    if (next) this.changes.notify();
-    return next;
-  }
-
-  beginQueuedMessageEdit(id: string): QueuedMessage | undefined {
-    const original = this.queue.beginEdit(id);
-    if (original) this.changes.notify();
-    return original;
-  }
-
-  commitQueuedMessageEdit(id: string, text: string, images?: readonly ImageBlock[], content?: readonly MessageBlock[]): void {
-    if (!this.queue.finishEdit(id, text, images, content)) return;
-    this.changes.notify();
-    this.sendNextQueuedPrompt();
-  }
-
-  cancelQueuedMessageEdit(id: string): void {
-    if (!this.queue.finishEdit(id)) return;
-    this.changes.notify();
-    this.sendNextQueuedPrompt();
+  // ↑ in the input bar takes the messages it shows back into its draft.
+  takeQueuedMessages(ids: readonly string[]): QueuedMessage[] {
+    const taken = this.queue.take(ids);
+    if (taken.length > 0) this.changes.notify();
+    return taken;
   }
 
   // What is waiting behind the turn that just ended, when nothing about it
@@ -878,7 +945,7 @@ export class Session {
   // deleted session sends nothing: deleting it cancels the turn, and this
   // runs as that turn ends.
   private sendNextQueuedPrompt(): void {
-    if (this.activeSends > 0 || this.disposed) return;
+    if (this.disposed || this.activeSends > 0 || this.deliveringQueue) return;
     if (this.pendingReports.length > 0) {
       this.flushReports();
       return;
@@ -898,10 +965,6 @@ export class Session {
     return this.queue.all();
   }
 
-  updateQueuedMessage(id: string, text: string): void {
-    if (this.queue.update(id, text)) this.changes.notify();
-  }
-
   getActiveTurnStartedAt(): number | null {
     return this.activeTurnStartedAt;
   }
@@ -912,7 +975,8 @@ export class Session {
 
   // How long every participant still answering has gone without a word from
   // its runtime; zero when any of them is producing or waiting on the user.
-  getTurnQuietFor(): number {
+  getTurnQuietFor(participantName?: string): number {
+    if (participantName) return this.roster.require(participantName).quietFor;
     const busy = this.roster.all().filter(agent => agent.busy);
     return busy.length > 0 ? Math.min(...busy.map(agent => agent.quietFor)) : 0;
   }
@@ -938,7 +1002,8 @@ export class Session {
 
   // What a vendor could not honour about the session's mode, if anything:
   // the default participant's word first, then any other participant's.
-  getModeNotice(): string | null {
+  getModeNotice(participantName?: string): string | null {
+    if (participantName) return this.roster.require(participantName).modeNotice;
     return this.roster.default.modeNotice
       ?? this.roster.all().find(agent => agent.modeNotice)?.modeNotice
       ?? null;
@@ -948,8 +1013,24 @@ export class Session {
     return this.notice;
   }
 
-  getMessages(): Message[] {
-    return this.timeline.entries();
+  getMessages(participantName?: string): Message[] {
+    return participantName ? [...this.roster.require(participantName).transcript.entries()] : this.timeline.entries();
+  }
+
+  isParticipantWorking(participantName: string): boolean {
+    const agent = this.roster.require(participantName);
+    return agent.busy || this.starting.has(agent);
+  }
+
+  getSelectedParticipant(): string {
+    return this.selectedParticipant;
+  }
+
+  selectParticipant(name: string): void {
+    const participant = this.roster.require(name);
+    if (participant.name === this.selectedParticipant) return;
+    this.selectedParticipant = participant.name;
+    this.changes.notify();
   }
 
   isMessageLive(message: Message): boolean {
@@ -973,11 +1054,9 @@ export class Session {
     return this.directory;
   }
 
-  // The vendor's own commands the user can call by name: those of the
-  // participant a prompt with no mention goes to, since that is who `/name`
-  // reaches.
-  getNativeCommands(): NativeCommand[] {
-    const agent = this.roster.default;
+  // Vendor commands follow the selected agent, like an unaddressed prompt.
+  getNativeCommands(participantName = this.selectedParticipant): NativeCommand[] {
+    const agent = this.roster.require(participantName);
     const vendor = vendorOf(agent.model);
     return vendor ? nativeCommands(vendor, agent.directory) : [];
   }
@@ -991,7 +1070,13 @@ export class Session {
   }
 
   async warmup(): Promise<void> {
-    if (!this.disposed && this.isEmpty()) await this.roster.default.warmup();
+    if (this.disposed) return;
+    await Promise.all([
+      discoverMissingModels(this.getDirectory()).then(changed => {
+        if (changed && !this.disposed) this.changes.notify();
+      }),
+      this.isEmpty() ? this.roster.default.warmup() : Promise.resolve(),
+    ]);
   }
 
   releaseWarmup(): void {
@@ -1092,13 +1177,15 @@ export class Session {
     this.changes.notify();
   }
 
-  getInputContent(): string {
-    return this.inputContent;
+  getInputContent(participantName = this.selectedParticipant): string {
+    return keyOf(participantName) === keyOf(this.roster.default.name)
+      ? this.inputContent : this.participantDrafts.get(keyOf(participantName)) ?? '';
   }
 
-  setInputContent(inputContent: string): void {
-    if (this.inputContent === inputContent) return;
-    this.inputContent = inputContent;
+  setInputContent(inputContent: string, participantName = this.selectedParticipant): void {
+    if (this.getInputContent(participantName) === inputContent) return;
+    if (keyOf(participantName) === keyOf(this.roster.default.name)) this.inputContent = inputContent;
+    else this.participantDrafts.set(keyOf(participantName), inputContent);
     this.changes.notify();
   }
 
@@ -1124,6 +1211,8 @@ export class Session {
       defaultModel: this.roster.default.toParticipant(),
       messages: [...this.timeline.entries()],
       inputContent: this.inputContent,
+      ...(this.selectedParticipant !== this.roster.default.name ? { selectedParticipant: this.selectedParticipant } : {}),
+      ...(this.participantDrafts.size > 0 ? { participantDrafts: Object.fromEntries(this.participantDrafts) } : {}),
       permissionMode: this.permissionMode,
       ...(this.subagentModel ? { subagentModel: this.subagentModel } : {}),
       ...(workers.length > 0 ? { workers } : {}),

@@ -261,32 +261,25 @@ describe('Session rounds', () => {
     }
   });
 
-  test.each(['commit', 'cancel'] as const)('queue editing reserves the original until %s and lets other slots drain', async action => {
+  test('messages taken back from the queue never drain; the rest go out when the turn ends', async () => {
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const binding = bindScriptedRuntime(streamingModel, async (_input, emit) => {
       emit({ type: 'text', text: 'Done' });
       await gate;
     });
-    const session = new Session({ name: 'Queue editing', model: streamingModel });
+    const session = new Session({ name: 'Queue take-back', model: streamingModel });
     const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Start' }] });
     try {
-      session.queueMessage('Original');
+      session.queueMessage('Taken back');
       session.queueMessage('Later slot');
-      const original = session.getQueuedMessages()[0]!;
-      expect(session.beginQueuedMessageEdit(original.id)?.text).toBe('Original');
-      session.updateQueuedMessage(original.id, 'Half typed');
-      expect(session.getQueuedMessages()[0]!.text).toBe('Original');
-      expect(session.getQueuedMessages()[0]!.editing).toBe(true);
+      const taken = session.getQueuedMessages()[0]!;
+      expect(session.takeQueuedMessages([taken.id]).map(item => item.text)).toEqual(['Taken back']);
+      expect(session.getQueuedMessages().map(item => item.text)).toEqual(['Later slot']);
       release();
       await turn;
-      await waitFor(() => session.getStatus() === 'idle');
+      await waitFor(() => session.getStatus() === 'idle' && session.getQueuedMessageCount() === 0);
       expect(binding.runtimes[0]!.prompts.map(prompt => prompt.text)).toEqual(['Start', 'Later slot']);
-      expect(session.getQueuedMessages()[0]!.id).toBe(original.id);
-      if (action === 'commit') session.commitQueuedMessageEdit(original.id, 'Completed edit');
-      else session.cancelQueuedMessageEdit(original.id);
-      await waitFor(() => session.getStatus() === 'idle');
-      expect(binding.runtimes[0]!.prompts[2]!.text).toBe(action === 'commit' ? 'Completed edit' : 'Original');
     } finally {
       release();
       await turn;
@@ -294,16 +287,19 @@ describe('Session rounds', () => {
     }
   });
 
-  test('takes the newest unreserved queued draft with its positioned image', async () => {
+  test('takes back the listed queued messages in queue order, images and all', async () => {
     const session = new Session({ name: 'Queue draft', model: streamingModel });
     const image: ImageBlock = { type: 'image', path: '/tmp/test-image.png', mediaType: 'image/png', bytes: 12 };
     session.queueMessage('First');
+    session.queueMessage('Elsewhere', undefined, undefined, ['peer']);
     session.queueMessage('Image', [image], [image, { type: 'text', text: 'Image' }]);
-    session.queueMessage('Being edited');
-    const edited = session.getQueuedMessages()[2]!;
-    session.beginQueuedMessageEdit(edited.id);
-    expect(session.takeQueuedMessage()).toMatchObject({ text: 'Image', images: [image], content: [image, { type: 'text', text: 'Image' }] });
-    expect(session.getQueuedMessages().map(item => item.text)).toEqual(['First', 'Being edited']);
+    const [first, , withImage] = session.getQueuedMessages();
+    expect(session.takeQueuedMessages([withImage!.id, first!.id])).toMatchObject([
+      { text: 'First' },
+      { text: 'Image', images: [image], content: [image, { type: 'text', text: 'Image' }] },
+    ]);
+    expect(session.getQueuedMessages().map(item => item.text)).toEqual(['Elsewhere']);
+    expect(session.takeQueuedMessages([first!.id])).toEqual([]);
     await session.dispose();
   });
 

@@ -4,7 +4,7 @@ import os from 'os';
 import path from 'path';
 import {
   attachImageFile, detectImageType, imageData, imageDataUrl, imagesDirectory,
-  MAX_IMAGE_BYTES, removeStoredImage, validatedImagePath,
+  MAX_IMAGE_BYTES, readClipboard, removeStoredImage, validatedImagePath,
 } from '../src/images';
 import { Session } from '../src/agent_runtime/session';
 import { loadSessionSnapshots, saveSessionSnapshots } from '../src/persistence/sessions';
@@ -32,6 +32,23 @@ function attach(): ImageBlock {
 }
 
 describe('image storage', () => {
+  test.skipIf(process.platform !== 'darwin' && process.platform !== 'linux')('normal paste reads clipboard text when no image format is present', async () => {
+    const previousPath = process.env.PATH;
+    // Stub native clipboard tools so the test never reads the user's clipboard.
+    writeFileSync(path.join(directory, 'osascript'), '#!/bin/sh\nexit 1\n', { mode: 0o700 });
+    for (const command of ['pbpaste', 'wl-paste', 'xclip']) {
+      writeFileSync(path.join(directory, command), '#!/bin/sh\ncase "$*" in *image/png*) exit 1;; esac\nprintf "copied text\\nsecond line"\n', { mode: 0o700 });
+    }
+    process.env.PATH = directory;
+    try {
+      expect(await readClipboard()).toBe('copied text\nsecond line');
+      expect(existsSync(imagesDirectory())).toBe(false);
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
+  });
+
   test('detects supported types from bytes and rejects unknown signatures', () => {
     expect(detectImageType(PNG)).toBe('image/png');
     expect(detectImageType(Buffer.from([0xff, 0xd8, 0xff]))).toBe('image/jpeg');

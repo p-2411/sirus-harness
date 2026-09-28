@@ -1,9 +1,9 @@
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { readdirSync, statSync } from 'node:fs';
 import { readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { FILE_PATH_CHARACTER } from './fileMentions';
-import { rootTextRanges } from './mentions';
+import { FILE_PATH_CHARACTER, rootTextRanges } from './mentions';
 
 const runFile = promisify(execFile);
 const excludedDirectories = new Set(['.git', 'node_modules', 'dist', 'build', '.next', 'coverage']);
@@ -18,9 +18,10 @@ export interface ActiveFileMention {
 }
 
 // An @ at the start of the input or after whitespace or an opening bracket,
-// so an email address is no mention, then a quoted path still open or a
-// bare one, running to the cursor.
-const ACTIVE_MENTION = new RegExp(String.raw`(?:^|[\s([{])@(?:"([^"\n]*)|(${FILE_PATH_CHARACTER.source}*))$`);
+// so an email address is no mention, then a quoted path still open, a bare
+// one, or a chosen quoted directory, which stays open: what is typed after
+// its closing quote continues the path inside it. Each runs to the cursor.
+const ACTIVE_MENTION = new RegExp(String.raw`(?:^|[\s([{])@(?:"([^"\n]*)|"([^"\n]*\/)"(${FILE_PATH_CHARACTER.source}*)|(${FILE_PATH_CHARACTER.source}*))$`);
 
 /** The unfinished file token being edited, without treating email addresses as mentions. */
 export function activeFileMention(input: string, cursor: number): ActiveFileMention | null {
@@ -33,7 +34,7 @@ export function activeFileMention(input: string, cursor: number): ActiveFileMent
   // quoted example, code or a list, so the menu offers files nowhere else.
   if (!rootTextRanges(input).some(range => start >= range.start && start < range.end)) return null;
   const quoted = match[1] !== undefined;
-  const query = match[1] ?? match[2] ?? '';
+  const query = match[1] ?? (match[2] !== undefined ? match[2] + match[3] : match[4] ?? '');
   let end = position;
   if (quoted) {
     while (end < input.length && input[end] !== '"' && input[end] !== '\n') end++;
@@ -109,6 +110,20 @@ export function fileSearchDirectory(directory: string, query: string): string {
   return path.resolve(directory, query.endsWith('/') ? query : path.dirname(query));
 }
 
+// The folders holding the listed files, each ending in '/', so a directory
+// can be mentioned too. Folders with nothing listable stay out, as ignored
+// files do.
+function withDirectories(files: readonly string[]): string[] {
+  const directories = new Set<string>();
+  for (const file of files) {
+    for (let slash = file.indexOf('/'); slash !== -1; slash = file.indexOf('/', slash + 1)) {
+      directories.add(file.slice(0, slash + 1));
+    }
+  }
+  return [...files, ...[...directories].sort()];
+}
+
+/** Files and folders to suggest for an @ mention; folder references end in '/'. */
 export async function listMentionFiles(
   directory: string,
   browseDirectory: string,
@@ -117,8 +132,8 @@ export async function listMentionFiles(
 ): Promise<string[]> {
   let root = browseDirectory;
   if (root === path.resolve(directory)) {
-    const files = await listProjectFiles(root, signal);
-    return absoluteReferences ? files.map(file => path.join(root, file)) : files;
+    const entries = withDirectories(await listProjectFiles(root, signal));
+    return absoluteReferences ? entries.map(entry => path.join(root, entry)) : entries;
   }
   while (true) {
     signal?.throwIfAborted();
@@ -132,12 +147,34 @@ export async function listMentionFiles(
     if (parent === root) return [];
     root = parent;
   }
-  const files = await listProjectFiles(root, signal);
-  return files.map(file => absoluteReferences
-    ? path.join(root, file)
-    : path.relative(directory, path.join(root, file)));
+  // The browsed folder is a suggestion too, so a typed ../proj/ can be attached as is.
+  const entries = ['', ...withDirectories(await listProjectFiles(root, signal))];
+  return entries.flatMap(entry => {
+    const target = path.join(root, entry);
+    const reference = absoluteReferences ? target : path.relative(directory, target);
+    if (!reference) return [];
+    return entry === '' || entry.endsWith('/') ? [reference.endsWith('/') ? reference : `${reference}/`] : [reference];
+  });
 }
 
+// Path prefix, then name prefix, then anywhere in the path.
+function fileRank(file: string, query: string): number {
+  const basename = file.slice(file.lastIndexOf('/') + 1);
+  return file.startsWith(query) ? 0 : basename.startsWith(query) ? 1 : file.includes(query) ? 2 : 3;
+}
+
+// A folder matches on its own name, or as the next level under a typed path,
+// so a matching parent does not bring every folder beneath it into the list.
+function directoryRank(directory: string, query: string): number {
+  if (directory.startsWith(query) && !directory.slice(query.length, -1).includes('/')) return 0;
+  if (!query) return 3;
+  const nameStart = directory.lastIndexOf('/', directory.length - 2) + 1;
+  if (directory.startsWith(query, nameStart)) return 1;
+  const at = directory.lastIndexOf(query);
+  return at >= 0 && at + query.length > nameStart ? 2 : 3;
+}
+
+/** Ranked suggestions for a query; folders come before files of the same rank. */
 export function matchFileSuggestions(files: readonly string[], query: string, limit = 50, directory?: string): string[] {
   let relativeQuery = query.startsWith('../') || path.isAbsolute(query) ? path.normalize(query) : query;
   // Raw project listings use relative paths, while explicit absolute browsing
@@ -150,12 +187,54 @@ export function matchFileSuggestions(files: readonly string[], query: string, li
   return files
     .map(file => {
       const lower = file.toLocaleLowerCase();
-      const basename = lower.slice(lower.lastIndexOf('/') + 1);
-      const rank = lower.startsWith(normalized) ? 0 : basename.startsWith(normalized) ? 1 : lower.includes(normalized) ? 2 : 3;
-      return { file, rank };
+      const folder = lower.endsWith('/');
+      return { file, folder, rank: folder ? directoryRank(lower, normalized) : fileRank(lower, normalized) };
     })
     .filter(item => item.rank < 3)
-    .sort((left, right) => left.rank - right.rank || (left.file < right.file ? -1 : left.file > right.file ? 1 : 0))
+    .sort((left, right) => left.rank - right.rank || Number(right.folder) - Number(left.folder)
+      || (left.file < right.file ? -1 : left.file > right.file ? 1 : 0))
     .slice(0, limit)
     .map(item => item.file);
+}
+
+// Git decides what .gitignore hides; outside a repository nothing is hidden.
+// Names go bare: git tells folders apart itself, and rejects a slash after a
+// linked folder.
+function ignoredNames(directory: string, names: readonly string[]): Set<string> {
+  if (names.length === 0) return new Set();
+  try {
+    const output = execFileSync('git', ['check-ignore', '-z', '--stdin'], {
+      cwd: directory,
+      input: names.join('\0'),
+      encoding: 'utf8',
+      timeout: 5_000,
+      maxBuffer: 8 * 1024 * 1024,
+      stdio: ['pipe', 'pipe', 'ignore'],
+    });
+    return new Set(output.split('\0').filter(Boolean));
+  } catch {
+    // Exit status 1 means nothing is ignored; 128 means no repository.
+    return new Set();
+  }
+}
+
+/**
+ * One level of a mentioned directory, folders first and ending in '/', hiding
+ * what file search hides. A folder whose every entry is ignored is itself
+ * ignored, and was named on purpose, so it is listed in full.
+ */
+export function listDirectoryEntries(directory: string): string[] {
+  const entries = readdirSync(directory, { withFileTypes: true }).filter(entry => visibleFile(entry.name));
+  const ignored = ignoredNames(directory, entries.map(entry => entry.name));
+  const visible = entries.filter(entry => !ignored.has(entry.name));
+  return (visible.length > 0 ? visible : entries)
+    .map(entry => {
+      let folder = entry.isDirectory();
+      if (entry.isSymbolicLink()) {
+        try { folder = statSync(path.join(directory, entry.name)).isDirectory(); } catch { /* a dangling link lists by name */ }
+      }
+      return folder ? `${entry.name}/` : entry.name;
+    })
+    .sort((left, right) => Number(right.endsWith('/')) - Number(left.endsWith('/'))
+      || (left < right ? -1 : left > right ? 1 : 0));
 }

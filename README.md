@@ -20,7 +20,7 @@ Run `sirus` on its own to open the current directory. The npm package includes t
 Inside Sirus:
 
 1. Type `/login` and choose Claude or ChatGPT, then sign in with an existing subscription or enter an API key through the masked input. Repeat `/login` to connect more accounts—as many as you want.
-2. Optionally type `/model` and pick a model. New sessions use your saved model preference, or `gpt-5.6-luna` by default.
+2. Optionally type `/model` and pick a model. The choices come only from your connected vendors and are cached between launches; Sirus fetches missing lists automatically. Short names such as `/model opus` work with vendor aliases such as `opus[1m]`. New sessions use your saved model preference, or `gpt-5.6-luna` by default.
 3. Give Sirus a task:
 
 ```text
@@ -69,7 +69,11 @@ Then address that participant by name:
 @reviewer Check whether the latest fix resolves the issues you found.
 ```
 
-Each participant keeps its own conversation. It reads the prompts you address to it, and whatever another participant says in a message that mentions it, attributed to the sender. A prompt that mentions no known participant goes to `@sirus`. An unknown `@word` stays ordinary text unless a supported model follows it. Matching files take priority in the `@` menu. Set a participant's model with `/model @reviewer <model>` and reasoning depth with `/thinking @reviewer high`. Use `/model` to see the model names supported by your installation.
+Each participant keeps its own conversation. It reads the prompts you address to it, and whatever another participant says in a message that mentions it, attributed to the sender. A prompt that mentions no known participant goes to the selected agent, initially `@sirus`. An unknown `@word` stays ordinary text unless a supported model follows it. Matching files take priority in the `@` menu. Set a participant's model with `/model @reviewer <model>` and reasoning depth with `/thinking @reviewer high`. Use `/model` to see the model names supported by your installation.
+
+The names at the top select which agent’s conversation you see. The selected name has a filled highlight in its own colour. Press **← / →** or click a name to switch agents; each keeps its own draft and scroll position. Other agents continue working without moving the conversation you are reading. While an agent works, a single column of dots moves across its name with constant height and density. A period after the name marks unread output (`reviewer.`); an exclamation mark (`!`) marks a request needing your attention. Requests from another agent appear with its name and destination in both conversations.
+
+The model, reasoning depth, context usage, unfinished plan, and approval prompts belong to the selected agent. `/model`, `/thinking`, and `/compact` act on that agent; explicit agent names still work. Plain horizontal arrows switch agents when there is more than one; Alt+←/→ still moves by words in the draft. Esc and Ctrl+C retain their task-wide interruption behavior.
 
 ### Delegate work, follow the results
 
@@ -81,7 +85,7 @@ Subagents work in the project directory itself by default, so assignments should
 
 Named participants are collaborators you can address and follow in the chat; subagents receive only their delegated task and report back to the agent that spawned them, though an agent can also start one from its own conversation so far when the task depends on what you have already established. While a subagent runs, its owner can ask it for its status, send it further instructions, or stop it. `Esc` cancels the session's turn and leaves the subagents working. A subagent whose agent has reported nothing for 15 minutes, not counting time spent waiting on your approval or inside a tool call that is still running, such as a long build, is taken as hung and stopped, and its report says so.
 
-You can follow them yourself. A subagent goes by the name its agent gave it, or by its id when it was given none, on the strip, in `/agents`, on its row and on its approval prompts. The strip above the status row shows one line, for the subagent that changed last: its name, its model, how long it has been running, its latest tool call, its task, and its branch, with a counter such as `1/3` when others are behind it. Press `↓` from the input bar to step onto the strip; the order is fixed as you arrive, `↑`/`↓` walk it, `enter` opens that subagent's actions, and `↑` past the first line or `Esc` hands the keyboard back to your draft. A subagent that ends keeps its line for a second, dimmed, saying how it ended, and is then off the strip. `/agents` lists the session's subagents and offers to show one's record, send it a message, cancel it, or dismiss its line. Runs are saved with the session: one still working when you quit comes back marked interrupted, with its record, and its report reaches its owner on your next prompt. Nothing restarts on its own.
+You can follow them yourself. A subagent goes by the name its agent gave it, or by its id when it was given none, on the strip, in `/agents`, on its row and on its approval prompts. The strip above the status row shows one line, for the selected agent's subagent that changed last: its name, its model, how long it has been running, its latest tool call, its task, and its branch, with a counter such as `1/3` when others are behind it. Press `↓` from the input bar to step onto the strip; the order is fixed as you arrive, `↑`/`↓` walk it, `enter` opens that subagent's actions, and `↑` past the first line or `Esc` hands the keyboard back to your draft. A subagent that ends keeps its line for a second, dimmed, saying how it ended, and is then off the strip. `/agents` lists the session's subagents and offers to show one's record, send it a message, cancel it, or dismiss its line. Runs are saved with the session: one still working when you quit comes back marked interrupted, with its record, and its report reaches its owner on your next prompt. Nothing restarts on its own.
 
 A subagent inherits its owner's model and reasoning depth unless the spawning agent selects another. Use `/model subagent <model>` to fix the subagent model for the session, `/model subagent` to see it, and `/model subagent default` to restore the default behavior.
 
@@ -115,15 +119,17 @@ Use `/compact` to ask for it now. There is nothing to turn on or off: compaction
 
 Create sessions, name them, and switch between them from the sidebar. Each session retains its working directory, conversation, participants, model choices, and permission mode. Existing sessions keep their model settings when you change models elsewhere.
 
-A follow-up sent while an agent is busy goes into its running turn; `Tab` queues it for after the turn instead. Session history is saved automatically, including partial responses when you quit. Reopen Sirus to return to your conversations. Desktop notifications tell you when attention is needed while the terminal is not focused; that is the default, and `/notify always` or `/notify off` changes it.
+Press Enter while an agent is busy to queue a follow-up. Text reaches the agent after its tool calls finish, or starts the next turn if it is only writing. Commands and images wait until the turn ends; model, thinking, permission, status, and worker controls run immediately. Ctrl+Enter (or Ctrl+X Ctrl+S) sends waiting messages and your draft now. Esc interrupts and sends what is queued. `↑` takes the messages waiting for the selected agent back into your draft, one per line, to edit and send again.
+
+Session history is saved automatically, including partial responses when you quit. Reopen Sirus to return to your conversations. Desktop notifications tell you when attention is needed while the terminal is not focused; that is the default, and `/notify always` or `/notify off` changes it.
 
 ### Put the right context in the prompt
 
-Type `@` to find agents and files in one menu. The menu opens at the bottom, with the closest matches nearest the input. File results sit below the agent names and the new-name option, and take the selection once they arrive; use ↑/↓ and Tab or Enter to select either. File search also accepts relative paths such as `@../proj/file.tsx`. Sirus includes the selected text files in your message, making it easy to point at the code you want to discuss: up to 10 files, 256 KiB each and 512 KiB together.
+Type `@` to find agents, files and folders in one menu. The menu opens at the bottom, with the closest matches nearest the input. File results sit below the agent names and the new-name option, and take the selection once they arrive; use ↑/↓ and Tab or Enter to select either. File search also accepts relative paths such as `@../proj/file.tsx`. Sirus includes the selected text files in your message, and for a folder what it holds, one level deep, making it easy to point at the code you want to discuss: up to 10 files and folders, 256 KiB each and 512 KiB together.
 
 A mention counts, and the menu opens, only in ordinary prose, not in a list item, heading, block quote, table, code or quoted text. A path ends at the first whitespace, quote, backtick, or any of `< > ( ) [ ] { } , ;`; the menu writes a path that needs it in double quotes, such as `@"my notes.txt"`.
 
-Attach an image with `Ctrl+V` or `/image /path/to/screenshot.png` to work from a screenshot, mockup, or visual bug report. Clipboard and notification support depend on your operating system and terminal.
+Paste text and images into the same input. Pasted image paths attach directly; forwarded paste shortcuts read text or images from the clipboard. `/image /path/to/screenshot.png` also attaches a file. Clipboard and notification support depend on your operating system and terminal.
 
 ### Repository instructions
 
@@ -137,7 +143,7 @@ The runtime Sirus uses to name a session reads no project instructions.
 
 Each agent uses its own vendor's skills and slash commands, found where Claude Code or Codex would find them: Claude its skills, commands and enabled plugins, GPT its Codex skills and built-in commands. Each also gets the other vendor's skills it lacks: a Claude participant those in `.agents/skills` and `.codex/skills` (the project's, up to the Git root, and yours) and in third-party Codex plugins you enabled, and a GPT participant those in `.claude/skills` and in third-party Claude plugins you enabled that have a description and that the model may invoke; none that shares a name with one it has already. Sirus links them from a folder under its data directory, and neither vendor's own folders change.
 
-Type `/` to find one: after Sirus's own commands, the menu lists what `@sirus`'s runtime reports it offers, with what each takes. The list is the one last reported for that vendor in the session's directory, kept on disk, so once a runtime has run there the menu has it before the first prompt; a skill you add appears once the runtime reports its list again. `Tab` completes the name so you can add arguments, including `@file` mentions, and `Enter` sends it. Sirus hands it to the agent as the vendor's own terminal would, `/deploy prod` for Claude or `$deploy prod` for a Codex skill, so it runs as it would in Claude Code or Codex. A Sirus command of the same name takes precedence, and a few of the vendors' commands stay out of the menu: `/effort`, which would change the reasoning depth behind `/thinking`'s back, and Claude's internal session commands.
+Type `/` to find one: after Sirus's own commands, the menu lists what the selected agent's runtime reports it offers, with what each takes. The list is the one last reported for that vendor in the session's directory, kept on disk, so once a runtime has run there the menu has it before the first prompt; a skill you add appears once the runtime reports its list again. `Tab` completes the name so you can add arguments, including `@file` mentions, and `Enter` sends it. Sirus hands it to the agent as the vendor's own terminal would, `/deploy prod` for Claude or `$deploy prod` for a Codex skill, so it runs as it would in Claude Code or Codex. A Sirus command of the same name takes precedence, and a few of the vendors' commands stay out of the menu: `/effort`, which would change the reasoning depth behind `/thinking`'s back, and Claude's internal session commands.
 
 Codex on an OpenAI key, or on any ChatGPT account after the first you signed in with, runs in a profile of its own under Sirus's data directory. Sirus links the skills in your `~/.codex/skills` (or `$CODEX_HOME/skills`) into that profile, so Codex finds them there too.
 
@@ -155,7 +161,7 @@ The mode applies to the session's participants and its subagents, including thos
 | `ask` | The agent asks before every action that is not a read, except what Codex runs in its sandbox (below). |
 | `bypass` | Nothing is asked. |
 
-Use `/permissions` to choose a mode, or `Shift+Tab` to switch between `ask` and `auto`. At a prompt, choose one of the options the agent offers, in its own words, such as allowing once, allowing without asking again, or denying.
+Use `/permissions` to choose a mode, or `Shift+Tab` to cycle through them. At a prompt, choose one of the options the agent offers, in its own words, such as allowing once, allowing without asking again, or denying.
 
 Two things differ by vendor. In `ask` and `auto`, Codex runs edits and commands inside the working directory in a sandbox that can write there and reach no network, so those run without asking and only what leaves the sandbox reaches you. Claude's `auto` mode depends on the model: where the model does not support it the session falls back to asking, and the status row says so. Codex's sandbox aside, these are tool approval controls, not an operating-system sandbox.
 
@@ -177,11 +183,13 @@ Use `/usage` to see reported subscription allowance and how full each participan
 | --- | --- |
 | `Ctrl+N` | Start a new session. |
 | `Option+↑` / `Option+↓` | Switch sessions. |
+| `←` / `→` | Switch agents within the current task. |
 | `Ctrl+B` | Collapse or expand the sidebar. |
-| `Enter` | Send a message; while agents are busy, it goes into their running turn. |
-| `Tab` | Complete the highlighted `/` command or skill, or queue the message for after the turn. |
+| `Enter` | Send a message, or queue it while agents are busy. |
+| `Ctrl+Enter` / `Ctrl+X Ctrl+S` | Send waiting messages and the draft now. |
+| `Tab` | Complete the highlighted `/` command or skill. |
 | `Shift+Enter` or `\` then `Enter` | Insert a new line. |
-| `Esc` | Close a menu or cancel the current session's turn. |
+| `Esc` | Close a menu, or interrupt the turn and send queued messages. |
 | `/rename <name>` | Give the current session a useful name. |
 | `/thinking` | Show or change reasoning depth. |
 | `/agents` | Watch, message, cancel, or clear the session's subagents. |

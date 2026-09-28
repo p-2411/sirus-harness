@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { execFileSync } from 'child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
-import { formatFileMention, MAX_MENTION_FILE_BYTES, parseFileMentions, resolveFileMentions } from '../src/fileMentions';
+import { formatFileMention, MAX_MENTION_DIRECTORY_ENTRIES, MAX_MENTION_FILE_BYTES, parseFileMentions, resolveFileMentions } from '../src/fileMentions';
 import { rootTextRanges } from '../src/mentions';
 import { Session } from '../src/agent_runtime/session';
 import type { Draft } from '../src/agent_runtime/session/timeline';
@@ -88,14 +89,54 @@ describe('file mentions', () => {
     expect(rootTextRanges(block.text)).toEqual([]);
   });
 
-  test('rejects missing, directory, binary, invalid UTF-8 and oversized attachments', () => {
-    mkdirSync(path.join(directory, 'folder'));
+  test('rejects missing, binary, invalid UTF-8 and oversized attachments', () => {
     writeFileSync(path.join(directory, 'binary'), Buffer.from([0, 1, 2]));
     writeFileSync(path.join(directory, 'invalid'), Buffer.from([0xc3, 0x28]));
     writeFileSync(path.join(directory, 'large'), Buffer.alloc(MAX_MENTION_FILE_BYTES + 1, 65));
-    for (const [file, error] of [['missing', /Could not attach/], ['folder', /regular text files/], ['binary', /Binary/], ['invalid', /UTF-8/], ['large', /256 KiB/]] as const) {
+    for (const [file, error] of [['missing', /Could not attach/], ['binary', /Binary/], ['invalid', /UTF-8/], ['large', /256 KiB/]] as const) {
       expect(() => resolveFileMentions(prompt(formatFileMention(file)), directory)).toThrow(error);
     }
+  });
+
+  test('formats and parses directory mentions by their trailing slash, quoting only unsafe paths', () => {
+    mkdirSync(path.join(directory, 'src'));
+    mkdirSync(path.join(directory, 'my dir'));
+    for (const folder of ['src/', './src/']) expect(formatFileMention(folder)).toBe('@src/');
+    expect(formatFileMention('my dir/')).toBe('@"my dir/"');
+    expect(formatFileMention('../proj/')).toBe('@../proj/');
+    expect(parseFileMentions('@src/ @src @"my dir/" @src/missing/', directory).map(mention => mention.path)).toEqual(['src/', 'my dir/']);
+  });
+
+  test('attaches a directory as a one-level listing, folders first, hiding what file search hides', () => {
+    execFileSync('git', ['init', '-q', directory]);
+    writeFileSync(path.join(directory, '.gitignore'), '*.log\nout/\n');
+    for (const file of ['src/lib/util.ts', 'src/index.ts', 'src/debug.log', 'src/.env', 'src/.env.example', 'src/out/bundle.js', 'src/node_modules/pkg/index.js', 'my dir/notes.md']) {
+      mkdirSync(path.dirname(path.join(directory, file)), { recursive: true });
+      writeFileSync(path.join(directory, file), 'contents');
+    }
+    mkdirSync(path.join(directory, 'src', 'empty'));
+    symlinkSync('lib', path.join(directory, 'src', 'linked'));
+    const resolved = resolveFileMentions(prompt('Look in @src/, @"src" and @./src/lib'), directory);
+    expect(resolved.content).toHaveLength(3);
+    expect(resolved.content[1]).toEqual({
+      type: 'text', filePath: 'src/', text: '\n\n```\nDirectory: "src/"\nempty/\nlib/\nlinked/\n.env.example\nindex.ts\n```',
+    });
+    expect(resolved.content[2]).toMatchObject({ type: 'text', filePath: 'src/lib/', text: '\n\n```\nDirectory: "src/lib/"\nutil.ts\n```' });
+    expect(resolveFileMentions(prompt('@"my dir/"'), directory).content[1]).toMatchObject({ filePath: 'my dir/', text: expect.stringContaining('notes.md') });
+    // A directory named on purpose is listed even when git ignores it.
+    expect(resolveFileMentions(prompt('@src/out/'), directory).content[1]).toMatchObject({ text: expect.stringContaining('\nbundle.js\n') });
+    mkdirSync(path.join(directory, 'blank'));
+    expect(resolveFileMentions(prompt('@blank/'), directory).content[1]).toMatchObject({ filePath: 'blank/', text: expect.stringContaining('\n(empty)\n') });
+  });
+
+  test('caps a large directory listing with a count of the rest', () => {
+    mkdirSync(path.join(directory, 'many'));
+    for (let i = 0; i < MAX_MENTION_DIRECTORY_ENTRIES + 5; i++) writeFileSync(path.join(directory, 'many', `${String(i).padStart(3, '0')}.txt`), '');
+    const block = resolveFileMentions(prompt('@many/'), directory).content[1];
+    const lines = block?.type === 'text' ? block.text.split('\n') : [];
+    expect(lines).toContain('099.txt');
+    expect(lines).not.toContain('100.txt');
+    expect(lines.at(-2)).toBe('… 5 more');
   });
 
   test('accepts sibling projects, absolute paths and symlinks and deduplicates equivalent references', () => {
@@ -171,15 +212,17 @@ describe('file mentions', () => {
     while (session.getStatus() === 'working') await new Promise(resolve => setImmediate(resolve));
   });
 
-  test('direct pathnames avoid participant creation while unmatched scoped packages retain ordinary text', async () => {
+  test('direct pathnames and directories avoid participant creation while unmatched scoped packages retain ordinary text', async () => {
     mkdirSync(path.join(directory, 'src'));
     writeFileSync(path.join(directory, 'src', 'index.ts'), 'source');
     writeFileSync(path.join(directory, 'README.md'), 'readme');
-    bindScriptedRuntime(model, textTurn('Done'));
+    const binding = bindScriptedRuntime(model, textTurn('Done'));
     const session = new Session({ id: 'pathname-session', name: 'Paths', directory, model });
-    await session.sendMessage(prompt('@src/index.ts @README.md @scope/package'));
+    await session.sendMessage(prompt('@src/index.ts @README.md @src/ @scope/package'));
     expect(session.getParticipants().map(participant => participant.name)).toEqual(['sirus']);
-    expect(session.getMessages()[0]?.content).toHaveLength(3);
+    expect(session.getMessages()[0]?.content).toHaveLength(4);
+    expect(session.getMessages()[0]?.content[3]).toMatchObject({ type: 'text', filePath: 'src/' });
+    expect(binding.runtimes[0].prompts[0].text).toContain('Directory: "src/"\nindex.ts');
   });
 
   test('distinguishes a quoted extensionless filename from an agent with the same name', async () => {

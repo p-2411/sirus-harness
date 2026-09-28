@@ -181,6 +181,9 @@ export interface Message {
   // sees its content somewhere else. A worker's report is shown under the
   // SpawnAgent call that started the worker, not as a message of its own.
   hidden?: true;
+  // Where a steered user message entered a reply that was still streaming.
+  // Display metadata only: transcripts retain the complete vendor messages.
+  injectedAt?: { seq: number; block: number; offset: number };
 }
 
 // The reasoning depth a user picks per agent. Runtimes translate the shared

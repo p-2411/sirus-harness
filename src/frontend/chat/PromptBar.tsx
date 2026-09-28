@@ -59,13 +59,14 @@ export type PromptMode =
     onCancel: () => void;
   };
 
-export function PromptBar({ mode, feedback, participantColors, queuedMessages, workers, status }: {
+export function PromptBar({ mode, feedback, participantColors, queuedMessages, workers, status, agentArrows = false }: {
   mode: PromptMode;
   feedback: Feedback | null;
   participantColors?: ParticipantColors;
   queuedMessages: readonly string[];
   workers: readonly SubagentRun[];
   status: StatusRowProps;
+  agentArrows?: boolean;
 }) {
   const [selected, setSelected] = useState(0);
   const [entry, setEntry] = useState('');
@@ -90,6 +91,7 @@ export function PromptBar({ mode, feedback, participantColors, queuedMessages, w
     if (isKeyboardProtocolReport(enteredInput)) return;
     if (key.eventType === 'release' || (key.ctrl && enteredInput === 'c')) return;
     if (isForeignInput(enteredInput, key)) return;
+    if (agentArrows && !key.ctrl && !key.meta && !key.shift && (key.leftArrow || key.rightArrow)) return;
     // The question card takes its own keys.
     if (mode.type === 'question') return;
 
@@ -152,7 +154,7 @@ export function PromptBar({ mode, feedback, participantColors, queuedMessages, w
         <QueuedRow messages={queuedMessages} participantColors={participantColors} />
         {mode.type === 'approval'
           ? <ApprovalPrompt request={mode.request} waiting={mode.waiting} selected={selected} requesterName={mode.requesterName} feedback={approvalFeedback ?? undefined} />
-          : <QuestionCard key={mode.request.id} request={mode.request} waiting={mode.waiting} onAnswer={mode.onAnswer} />}
+          : <QuestionCard key={mode.request.id} request={mode.request} waiting={mode.waiting} onAnswer={mode.onAnswer} agentArrows={agentArrows} />}
         <WorkerStrip workers={workers} />
         <StatusRow {...status} />
       </>

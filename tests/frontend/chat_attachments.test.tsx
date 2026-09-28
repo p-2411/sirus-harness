@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import * as naming from '../../src/agent_runtime/session/naming';
+import * as images from '../../src/images';
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -9,7 +10,7 @@ import stripAnsi from 'strip-ansi';
 import Chat from '../../src/frontend/chat/Chat';
 import { Session } from '../../src/agent_runtime/session';
 import type { PromptInput } from '../../src/agent_runtime/runtime/runtime';
-import type { Message } from '../../src/agent_runtime/types';
+import type { ImageBlock, Message } from '../../src/agent_runtime/types';
 import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
 
 const testModel = 'test-chat-attachment-model';
@@ -105,13 +106,94 @@ function storedImages(): string[] {
 }
 
 describe('chat attachment lifecycle', () => {
+  test('an attached draft stays with its agent across horizontal switches', async () => {
+    const session = new Session({ name: 'Agent image drafts', directory, model: testModel });
+    session.addParticipant('reviewer', testModel);
+    const chat = createChat(session);
+    try {
+      await chat.submit(`/image ${imagePath}`);
+      await chat.waitFor(() => storedImages().length === 1);
+      await chat.press('Describe this');
+      await chat.press('\x1b[C');
+      expect(session.getInputContent()).toBe('');
+      await chat.press('Separate review draft');
+      await chat.press('\x1b[D');
+      await chat.press('\r');
+      await chat.waitFor(() => received.length === 1 && session.getStatus() === 'idle');
+      expect(received[0].images).toHaveLength(1);
+      expect(received[0].text).toContain('Describe this');
+      expect(session.getMessages('reviewer')).toHaveLength(0);
+      expect(session.getInputContent('reviewer')).toBe('Separate review draft');
+      expect(session.getMessages('sirus')[0].content.filter(block => block.type === 'image')).toHaveLength(1);
+    } finally { await chat.close(); await session.dispose(); }
+  });
+
+  test.each(['', 'Keep this text'])('Ctrl+C clears pasted images alongside draft text: %s', async text => {
+    const clipboard = spyOn(images, 'readClipboard').mockImplementation(async () => images.attachImageFile(imagePath));
+    const session = new Session({ name: 'Clear image draft', directory, model: testModel });
+    const chat = createChat(session);
+    try {
+      if (text) await chat.press(text);
+      await chat.press('\x1b[118;9u');
+      await chat.press('\x1b[118;9u');
+      await chat.waitFor(() => storedImages().length === 2 && session.getInputContent().length === text.length + 2);
+      const beforeClear = chat.output().length;
+      await chat.press('\u0003');
+      expect(session.getInputContent()).toBe('');
+      expect(storedImages()).toEqual([]);
+      expect(chat.output().slice(beforeClear)).not.toContain('image ·');
+      expect(chat.output().slice(beforeClear)).toContain('ctrl+c again to exit');
+      expect(received).toHaveLength(0);
+      if (text) {
+        await chat.press('\x1b[A');
+        expect(session.getInputContent()).toBe(text);
+      } else await chat.press('Next prompt');
+      await chat.press('\r');
+      await chat.waitFor(() => session.getStatus() === 'idle' && received.length > 0);
+      expect(received[0]!.images).toEqual([]);
+    } finally {
+      clipboard.mockRestore();
+      await chat.close();
+      await session.dispose();
+    }
+  });
+
+  test('pasting an image stays quiet while the clipboard is read, then sends the attachment', async () => {
+    let finishPaste!: (content: ImageBlock | string) => void;
+    const clipboard = spyOn(images, 'readClipboard').mockImplementation(() => new Promise(resolve => { finishPaste = resolve; }));
+    const session = new Session({ name: 'Clipboard image', directory, model: testModel });
+    const chat = createChat(session);
+    try {
+      await chat.press('\x1b[118;9u'); // Cmd+V forwarded by the terminal.
+      expect(clipboard).toHaveBeenCalledTimes(1);
+      expect(chat.output()).not.toContain('thinking');
+      expect(session.getStatus()).toBe('idle');
+      expect(received).toHaveLength(0);
+
+      const image = images.attachImageFile(imagePath);
+      finishPaste(image);
+      await chat.waitFor(() => chat.output().includes('image ·'));
+      expect(chat.output()).not.toContain('thinking');
+      expect(chat.output()).not.toContain('Attached image');
+      await chat.press('\r');
+      await chat.waitFor(() => session.getStatus() === 'idle' && received.length > 0);
+      expect(received[0]!.images).toEqual([image]);
+    } finally {
+      finishPaste?.('');
+      clipboard.mockRestore();
+      await chat.close();
+      await session.dispose();
+    }
+  });
+
   test('retains an image after invalid routing, then transfers it to the accepted message', async () => {
     const session = new Session({ name: 'Image chat', directory, model: testModel, autoNamePending: true });
     const chat = createChat(session);
     let sentPath: string | undefined;
     try {
       await chat.submit(`/image ${imagePath}`);
-      await chat.waitFor(() => chat.output().includes('Attached image'));
+      await chat.waitFor(() => storedImages().length > 0);
+      expect(chat.output()).not.toContain('Attached image');
       expect(storedImages()).toHaveLength(1);
       sentPath = storedImages()[0];
       expect(session.getMessages()).toHaveLength(0);
@@ -158,7 +240,8 @@ describe('chat attachment lifecycle', () => {
     let sentPath: string | undefined;
     try {
       await chat.submit(`/image ${imagePath}`);
-      await chat.waitFor(() => chat.output().includes('Attached image'));
+      await chat.waitFor(() => storedImages().length > 0);
+      expect(chat.output()).not.toContain('Attached image');
       sentPath = storedImages()[0];
       activeTurn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Running task' }] });
       await chat.waitFor(() => calls === 1);
@@ -166,7 +249,8 @@ describe('chat attachment lifecycle', () => {
       await chat.submit('Describe attached image');
       expect(session.getQueuedMessageCount()).toBe(1);
       expect(session.getInputContent()).toBe('');
-      expect(chat.output()).toContain('queued');
+      expect(session.getQueuedMessages()[0].text).toBe('Describe attached image');
+      expect(session.getQueuedMessages()[0].images).toEqual([expect.objectContaining({ path: sentPath })]);
       expect(session.getMessages().filter(message => message.role === 'user')).toHaveLength(1);
       session.queueMessage('Queued text');
       release();
@@ -195,7 +279,8 @@ describe('chat attachment lifecycle', () => {
     const chat = createChat(session);
     try {
       await chat.submit(`/image ${imagePath}`);
-      await chat.waitFor(() => chat.output().includes('Attached image'));
+      await chat.waitFor(() => storedImages().length > 0);
+      expect(chat.output()).not.toContain('Attached image');
       await chat.press('draft ');
       await chat.press('\x1b[A');
       await chat.press('\x1b[B');
@@ -241,7 +326,8 @@ describe('chat attachment lifecycle', () => {
     const chat = createChat(session);
     try {
       await chat.submit(`/image ${imagePath}`);
-      await chat.waitFor(() => chat.output().includes('Attached image'));
+      await chat.waitFor(() => storedImages().length > 0);
+      expect(chat.output()).not.toContain('Attached image');
       await chat.press('\r');
       await chat.waitFor(() => session.getStatus() === 'idle' && received.length > 0);
       expect(session.getMessages()[0].content).toEqual([expect.objectContaining({ type: 'image' })]);
@@ -254,7 +340,8 @@ describe('chat attachment lifecycle', () => {
     const chat = createChat(new Session({ name: 'Unsent image', directory, model: testModel, autoNamePending: true }));
     try {
       await chat.submit(`/image ${imagePath}`);
-      await chat.waitFor(() => chat.output().includes('Attached image'));
+      await chat.waitFor(() => storedImages().length > 0);
+      expect(chat.output()).not.toContain('Attached image');
       expect(storedImages()).toHaveLength(1);
     } finally {
       await chat.close();

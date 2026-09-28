@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import {
   DEFAULT_PARTICIPANT,
   isPlanCall,
@@ -10,14 +10,17 @@ import {
   type ToolCallBlock,
 } from '../../agent_runtime/types';
 import { Session, type SessionSnapshot } from '../../agent_runtime/session';
-import { attachClipboardImage, describeImage, removeStoredImage } from '../../images';
+import { readClipboard, removeStoredImage } from '../../images';
 import { Box, Text, measureElement, renderToString, useApp, useBoxMetrics, useInput, useStdout, type DOMElement } from 'ink';
 import { theme } from '../styles/theme';
 import { singleLine, terminalText } from '../terminal/text';
 import { HORSE } from '../branding/horse';
-import { ChatHistory, PlanChecklist, toolLine } from './ChatMessage';
+import { ChatHistory, PlanChecklist, thoughtHeading, toolLine } from './ChatMessage';
+import { useClickable } from '../interaction/clickable';
 import { Spinner } from './Spinner';
-import { InputBar, type InputMode } from './InputBar';
+import { InputBar, createInputDraftState, type InputDraftState, type InputMode } from './InputBar';
+import { AgentTabs, type AgentActivity } from './AgentTabs';
+import { AgentHistory, type HistoryPosition } from './AgentHistory';
 import { InputFeedback } from './InputRows';
 import {
   commandMenu,
@@ -51,28 +54,53 @@ import { copyToClipboard } from '../terminal/clipboard';
 import { nextPermissionMode } from '../../agent_runtime/permissions/policy';
 import { getSubagentsVersion, subscribeSubagents } from '../../agent_runtime/tools/subagents';
 
-export function ChatHeader({ session }: { session: Session }) {
+export function ChatHeader({ session, activity = new Map(), width = 100, onSelect }: {
+  session: Session;
+  activity?: ReadonlyMap<string, AgentActivity>;
+  width?: number;
+  onSelect?: (name: string) => void;
+}) {
   const participants = session.getParticipants();
-  const participantColors = participantColorMap(participants);
+  const desired = 2 + participants.reduce((sum, participant) => sum + Math.min(24, participant.name.length + 2), 0) + participants.length - 1;
+  const tabWidth = Math.max(12, Math.min(desired, width - 4, Math.floor(width * 0.6)));
   return (
-    <Box paddingX={3} justifyContent="space-between" flexShrink={0}>
-      <Box flexShrink={1}>
+    <Box paddingLeft={3} paddingRight={1} justifyContent="space-between" alignItems="center" flexShrink={0} height={1}>
+      <Box flexGrow={1} flexShrink={1} minWidth={0}>
         <Text wrap="truncate-middle">
           <Text color={theme.textMuted}>{terminalText(session.getName()).toUpperCase()}</Text>
           <Text color={theme.textSubtle} dimColor> {session.getDirectory()}</Text>
         </Text>
       </Box>
-      <Box marginLeft={1} flexShrink={0}>
-        <Text dimColor>
-          {participants.map((participant, index) => (
-            <Text key={participant.name} color={participantColors.get(participant.name.toLocaleLowerCase())}>
-              {index > 0 ? ' · ' : ''}{participant.name}
-            </Text>
-          ))}
-        </Text>
-      </Box>
+      <AgentTabs participants={participants} selected={session.getSelectedParticipant()}
+        activity={activity} colors={participantColorMap(participants)} width={tabWidth} onSelect={onSelect} />
     </Box>
   );
+}
+
+interface AgentView {
+  history: HistoryPosition;
+  draft: InputDraftState;
+  attachments: ImageBlock[];
+  feedback: Feedback | null;
+  reset: number;
+  seen: string;
+}
+const agentViews = new WeakMap<Session, Map<string, AgentView>>();
+function viewsFor(session: Session): Map<string, AgentView> {
+  let views = agentViews.get(session);
+  if (!views) { views = new Map(); agentViews.set(session, views); }
+  for (const participant of session.getParticipants()) {
+    if (!views.has(participant.name)) views.set(participant.name, {
+      history: { offset: 0, height: 0 }, draft: createInputDraftState(), attachments: [], feedback: null, reset: 0,
+      seen: activityStamp(session.getMessages(participant.name)),
+    });
+  }
+  return views;
+}
+function activityStamp(messages: readonly Message[]): string {
+  const last = [...messages].reverse().find(message => message.role === 'assistant' && !message.hidden);
+  return last ? `${last.seq}:${last.content.length}:${last.content.reduce((length, block) =>
+    length + (block.type === 'text' || block.type === 'thought' ? block.text.length : block.type === 'tool_call' ? block.status.length : 0), 0)}` : '';
 }
 
 // The user's earlier prompts, oldest first, without immediate repeats, for
@@ -121,6 +149,15 @@ export function currentPlans(
 // Room for a tool title in the status line before it is cut.
 const PHASE_TITLE_LENGTH = 40;
 
+function turnThought(messages: readonly Message[]): string | null {
+  const last = messages.at(-1);
+  if (last?.role !== 'assistant') return null;
+  const tail = last.content.at(-1);
+  if (tail?.type !== 'thought' || !tail.text.trim()) return null;
+  if (last.content.some(block => block.type === 'tool_call' && block.status !== 'completed' && block.status !== 'failed')) return null;
+  return tail.text;
+}
+
 // What the agents are up to, read off the end of the timeline: the tool call
 // the turn is waiting on, text arriving, or nothing visible yet.
 export function turnPhase(messages: readonly Message[]): string {
@@ -133,6 +170,11 @@ export function turnPhase(messages: readonly Message[]): string {
   if (running) return `running ${toolLine(running, PHASE_TITLE_LENGTH)}`;
   const tail = last.content[last.content.length - 1];
   if (tail?.type === 'text' && tail.text) return 'writing';
+  const thought = turnThought(messages);
+  if (thought) {
+    const { title, body } = thoughtHeading(thought);
+    return title ?? body.replace(/\s+/g, ' ');
+  }
   return 'thinking';
 }
 
@@ -147,7 +189,7 @@ const QUIET_NOTICE_MS = 60_000;
 
 // The line at the foot of the history while a turn runs: what the agents are
 // doing, or that they are waiting on the user, and for how long.
-function TurnStatus({ messages, awaitingApproval, awaitingAnswer, compacting, startedAt, quietFor }: {
+export function TurnStatus({ messages, awaitingApproval, awaitingAnswer, compacting, startedAt, quietFor }: {
   messages: readonly Message[];
   awaitingApproval: boolean;
   awaitingAnswer: boolean;
@@ -162,18 +204,35 @@ function TurnStatus({ messages, awaitingApproval, awaitingAnswer, compacting, st
     return () => clearInterval(timer);
   }, []);
   const waitingOnUser = awaitingApproval || awaitingAnswer;
+  const thought = waitingOnUser || compacting ? null : turnThought(messages);
+  const last = messages.at(-1);
+  const thoughtKey = thought && last ? `${last.seq}:${last.content.length}` : null;
+  const [expandedThought, setExpandedThought] = useState<string | null>(null);
+  const expanded = thoughtKey !== null && expandedThought === thoughtKey;
+  const toggleThought = useCallback(() => setExpandedThought(expanded ? null : thoughtKey), [expanded, thoughtKey]);
+  const phaseRef = useRef<DOMElement>(null);
+  useClickable(phaseRef, toggleThought);
   const phase = awaitingApproval ? 'waiting for your approval'
     : awaitingAnswer ? 'waiting for your answer'
     : compacting ? 'compacting context'
       : turnPhase(messages);
   const quiet = waitingOnUser || compacting ? 0 : quietFor();
   return (
-    <Box paddingX={3} marginBottom={1}>
-      <Spinner />
-      <Text color={waitingOnUser ? theme.pending : theme.textSubtle}>  {phase}</Text>
-      <Text color={theme.textSubtle} dimColor> · {formatElapsed(now - startedAt)}</Text>
+    <Box flexDirection="column" paddingX={3} marginBottom={1}>
+      <Box>
+        <Box flexShrink={0}><Spinner /></Box>
+        <Box ref={phaseRef} flexShrink={1} minWidth={0}>
+          <Text color={waitingOnUser ? theme.pending : theme.textSubtle} wrap="truncate-end">  {phase}</Text>
+        </Box>
+        <Box flexShrink={0}>
+          <Text color={theme.textSubtle} dimColor> · {formatElapsed(now - startedAt)}</Text>
+        </Box>
+      </Box>
+      {expanded && thought && (
+        <Box paddingLeft={3}><Text color={theme.textSubtle}>{thoughtHeading(thought).body}</Text></Box>
+      )}
       {quiet >= QUIET_NOTICE_MS && (
-        <Text color={theme.pending}> · no output for {formatElapsed(quiet)} · esc to cancel</Text>
+        <Text color={theme.pending} wrap="truncate-end">  no output for {formatElapsed(quiet)} · esc to cancel</Text>
       )}
     </Box>
   );
@@ -256,65 +315,70 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   // A hidden entry belongs to the runtimes alone: a worker's report is in its
   // owner's record, but the user reads it under the SpawnAgent row that
   // started the worker, not as a message of its own.
-  const messages = currSession.getMessages().filter(message => !message.hidden);
+  const selected = currSession.getSelectedParticipant();
+  const views = viewsFor(currSession);
+  const view = views.get(selected)!;
+  const messages = currSession.getMessages(selected).filter(message => !message.hidden);
+  const [, refreshView] = useState(0);
+  const repaintView = () => refreshView(version => version + 1);
+  useEffect(() => { view.seen = activityStamp(messages); }, [selected, currSession.getVersion()]);
   const participants = currSession.getParticipants();
   const participantColors = participantColorMap(participants);
 
   const [hasCredentials, setHasCredentials] = useState(() => allProviders().some(provider => provider.sources.list().length > 0));
   useEffect(() => onProviderChange(() => setHasCredentials(allProviders().some(provider => provider.sources.list().length > 0))), []);
   const [showTasks, setShowTasks] = useState(true);
-  const plans = currentPlans(messages, participants);
+  const plans = currentPlans(messages, participants.filter(participant => participant.name === selected));
   const [commandIsLoading, setCommandIsLoading] = useState(false);
   const [imageIsLoading, setImageIsLoading] = useState(false);
-  const isLoading = commandIsLoading || imageIsLoading || currSession.getStatus() === 'working';
-  const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const isWorking = currSession.isParticipantWorking(selected);
+  const inputIsBusy = commandIsLoading || isWorking;
+  const feedback = view.feedback;
+  const setFeedback = (feedback: Feedback | null) => { view.feedback = feedback; repaintView(); };
   const notice = currSession.getNotice();
   useEffect(() => {
-    if (!notice) return;
+    if (!notice || notice.participant !== selected) return;
     const { severity, title, description } = notice.notice;
     setFeedback({
       kind: severity === 'error' || severity === 'warning' ? severity : 'info',
       text: `@${notice.participant}: ${singleLine([title, description].filter(Boolean).join(' · '))}`,
     });
-  }, [notice]);
+  }, [notice, selected]);
   const panelFeedback = feedback?.panel ? feedback : null;
   const [inputMode, setInputMode] = useState<InputMode>({ type: 'text' });
   const [inputOverlay, setInputOverlay] = useState(false);
-  // Images attached to the message being composed, until it is sent.
-  const [attachments, setAttachments] = useState<ImageBlock[]>([]);
-  const attachmentsRef = useRef<ImageBlock[]>([]);
+  // Draft attachments remain with their agent when the selected tab changes.
+  const attachments = view.attachments;
+  const replaceAttachments = (images: ImageBlock[]) => { view.attachments = images; repaintView(); };
+  const attachImage = (image: ImageBlock) => replaceAttachments([...view.attachments, image]);
   const mounted = useRef(true);
-  const replaceAttachments = (next: ImageBlock[]) => {
-    attachmentsRef.current = next;
-    setAttachments(next);
-  };
-  const attachImage = (image: ImageBlock) => {
-    if (!mounted.current) {
-      removeStoredImage(image);
-      return;
-    }
-    replaceAttachments([...attachmentsRef.current, image]);
-  };
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
-      for (const image of attachmentsRef.current) removeStoredImage(image);
-      attachmentsRef.current = [];
+      for (const [name, saved] of views) {
+        for (const image of saved.attachments) removeStoredImage(image);
+        if (saved.attachments.length) {
+          const text = [...currSession.getInputContent(name)].filter(character => !saved.draft.images.paths.has(character)).join('');
+          currSession.setInputContent(text, name);
+        }
+        saved.attachments = [];
+        saved.draft.images.paths.clear();
+        saved.draft.images.seen = null;
+      }
     };
   }, []);
-  const pasteImage = () => {
+  const pasteClipboard = () => {
     if (imageIsLoading) return;
     setImageIsLoading(true);
-    setFeedback({ kind: 'info', text: 'Reading the clipboard…' });
-    attachClipboardImage()
-      .then(image => {
+    return readClipboard()
+      .then(content => {
+        if (typeof content === 'string') return mounted.current ? content : undefined;
         if (!mounted.current) {
-          removeStoredImage(image);
+          removeStoredImage(content);
           return;
         }
-        attachImage(image);
-        setFeedback({ kind: 'success', text: `Attached ${describeImage(image)}.` });
+        attachImage(content);
       })
       .catch((caught: unknown) => {
         if (mounted.current) setFeedback({ kind: 'error', text: caught instanceof Error ? caught.message : 'Could not read the clipboard.' });
@@ -323,19 +387,37 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   };
   const removeAttachment = (image: ImageBlock) => {
     removeStoredImage(image);
-    replaceAttachments(attachmentsRef.current.filter(item => item.path !== image.path));
+    replaceAttachments(view.attachments.filter(item => item.path !== image.path));
   };
-  const [commandStartedAt, setCommandStartedAt] = useState<number | null>(null);
   const queued = currSession.getQueuedMessageCount();
-  const nextQueuedId = currSession.getQueuedMessages().find(message => !message.editing)?.id;
   const history = promptHistory(messages);
-  // A tool call of this session (or of a subagent it spawned) waiting on the
-  // user takes over the input bar until it is answered or the turn is cancelled.
+  // Only the selected agent and its workers can take over this input. Other
+  // agents advertise their pending requests in the header.
   useSyncExternalStore(subscribePermissions, getPermissionsVersion);
   // A question an agent asks waits behind the approvals.
   useSyncExternalStore(subscribeQuestions, getQuestionsVersion);
-  const approvals = pendingApprovals(currSession.getId());
-  const questions = pendingQuestions(currSession.getId());
+  const belongsToSelected = (requester: { participant: string } | { subagent: string }) =>
+    'participant' in requester ? requester.participant === selected
+      : currSession.getWorkers().find(worker => worker.id === requester.subagent)?.owner === selected;
+  const allApprovals = pendingApprovals(currSession.getId());
+  const allQuestions = pendingQuestions(currSession.getId());
+  const approvals = allApprovals.filter(request => belongsToSelected(request.requester));
+  const questions = allQuestions.filter(request => belongsToSelected(request.requester));
+  const activity = new Map<string, AgentActivity>(participants.map(participant => {
+    const needsAttention = [...allApprovals, ...allQuestions].some(({ requester }) =>
+      'participant' in requester ? requester.participant === participant.name
+        : currSession.getWorkers().find(worker => worker.id === requester.subagent)?.owner === participant.name);
+    return [participant.name, needsAttention ? 'attention' : currSession.isParticipantWorking(participant.name) ? 'working'
+      : participant.name !== selected && views.get(participant.name)!.seen !== activityStamp(currSession.getMessages(participant.name)) ? 'unread' : 'idle'];
+  }));
+  const selectAgent = (name: string) => {
+    if (inputOverlay || inputMode.type !== 'text' || commandIsLoading) return;
+    currSession.selectParticipant(name);
+  };
+  const moveAgent = (direction: -1 | 1) => {
+    const index = participants.findIndex(participant => participant.name === selected);
+    selectAgent(participants[Math.max(0, Math.min(participants.length - 1, index + direction))].name);
+  };
   const effectiveInputMode: InputMode = inputMode.type !== 'text' ? inputMode
     : approvals.length > 0
       ? {
@@ -369,68 +451,14 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   const cyclePermissionMode = () => {
     send(`/permissions ${nextPermissionMode(currSession.getPermissionMode())}`);
   };
-  const [scrollOffset, setScrollOffset] = useState(0);
+  const followLatest = () => { view.reset++; repaintView(); };
   const commandAbort = useRef<AbortController | null>(null);
   useEffect(() => () => { commandAbort.current?.abort(new TurnCancelledError()); }, []);
   const { stdout } = useStdout();
   const { exit } = useApp();
 
-  const viewportRef = useRef<DOMElement>(null);
-  const contentRef = useRef<DOMElement>(null);
-  const { height: viewportHeight } = useBoxMetrics(viewportRef);
-  const { height: contentHeight } = useBoxMetrics(contentRef);
-  // The history content, rendered once into the scrolling box below and again
-  // on demand at the same width when a selection is copied, so text that has
-  // scrolled out of the clipped viewport is still part of the copy.
-  const historyContent = useRef<ReactNode>(null);
-  const historyText = useCallback(() => {
-    const width = contentRef.current ? measureElement(contentRef.current).width : 0;
-    if (width <= 0) return [];
-    return renderToString(
-      <Box flexDirection="column" width={width}>{historyContent.current}</Box>,
-      { columns: width },
-    ).split('\n');
-  }, []);
-  // a drag that starts in the history stays in the history, and the highlight
-  // rides along with the content box as it scrolls
-  useSelectionRegion(viewportRef, { follows: contentRef, text: historyText });
-  const previousContentHeight = useRef(0);
-  const maxScroll = Math.max(0, contentHeight - viewportHeight);
-  const pageSize = Math.max(1, viewportHeight - 2);
-
-  useEffect(() => {
-    if (panelFeedback || viewportHeight === 0) return;
-    const addedHeight = Math.max(0, contentHeight - previousContentHeight.current);
-    previousContentHeight.current = contentHeight;
-
-    setScrollOffset(current => {
-      const next = current > 0 ? current + addedHeight : 0;
-      return Math.min(next, maxScroll);
-    });
-  }, [contentHeight, maxScroll, panelFeedback, viewportHeight]);
-
   useInput((input, key) => {
-    if (inputOverlay) return;
-    if (key.ctrl && input === 't') {
-      if (plans.length > 0) setShowTasks(shown => !shown);
-      return;
-    }
-    if (panelFeedback) return;
-    const wheel = parseMouseWheel(input);
-    if (wheel && wheel.column > sidebarWidth) {
-      const amount = 3;
-      setScrollOffset(current => wheel.direction === 'up'
-        ? Math.min(maxScroll, current + amount)
-        : Math.max(0, current - amount));
-    } else if (key.pageUp) {
-      setScrollOffset(current => Math.min(maxScroll, current + pageSize));
-    } else if (key.pageDown) {
-      setScrollOffset(current => Math.max(0, current - pageSize));
-    } else if (key.ctrl && key.home) {
-      setScrollOffset(maxScroll);
-    } else if (key.ctrl && key.end) {
-      setScrollOffset(0);
-    }
+    if (!inputOverlay && key.ctrl && input === 't' && plans.length > 0) setShowTasks(shown => !shown);
   }, { isActive: active });
 
   // A command with choices (like /login) turns the input bar into a
@@ -469,7 +497,12 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   // awaiting the browser) must never touch, let alone clear, another
   // command's still-live abort handle. A typed command also hands over its
   // arguments as they were typed.
-  const runCommand = (command: string, args: readonly string[], argumentText?: string) => {
+  const runCommand = (command: string, args: readonly string[], recipient = selected, argumentText?: string) => {
+    // Agent-specific pickers bake their destination into the resulting command.
+    if (['model', 'thinking', 'effort', 'fast'].includes(command)
+      && (args.length === 0 || (args.length === 1 && !args[0].startsWith('@') && args[0] !== 'subagent'))) {
+      args = [`@${recipient}`, ...args];
+    }
     setFeedback(null);
     let menu: CommandMenuEntry[] | null;
     try {
@@ -488,6 +521,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     try {
       result = executeCommand(command, args, {
         session: currSession,
+        participant: recipient,
         notify: text => setFeedback({ kind: 'info', text }),
         attachImage,
         exit: () => { currSession.setInputContent(''); exit(); },
@@ -528,7 +562,6 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       // a long-running command (browser login) holds the input like a turn
       // does; only now is the controller stored, so escape can cancel it.
       commandAbort.current = controller;
-      setCommandStartedAt(Date.now());
       setCommandIsLoading(true);
       result
         .then(outcome => { if (outcome) setFeedback(outcome); })
@@ -541,7 +574,6 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
           // Guard against a newer async command having taken over the ref
           // since this one started.
           if (commandAbort.current === controller) commandAbort.current = null;
-          setCommandStartedAt(null);
           setCommandIsLoading(false);
         });
     } else if (result) {
@@ -551,60 +583,50 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
 
   // A command leaves any attachments waiting for the next real message.
   // Commands are exactly what the background queue leaves for a mounted Chat.
-  const send = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[], asMessage = false): boolean => {
-    // A `/name` for one of the agent's own commands is a prompt: the agent's
-    // harness runs it.
-    if (!asMessage && isSirusCommand(text, currSession.getNativeCommands())) {
-      const { name, args, rest } = parseCommandLine(text);
-      if (!commandRegistry.some(command => command.name === name)) {
-        currSession.setInputContent(text);
-        setFeedback({ kind: 'warning', text: `Unknown command: /${name}. Send it as a message?` });
-        setInputMode({
-          type: 'menu',
-          items: [
-            { type: 'item', key: 'edit', label: 'Keep editing', command: '' },
-            { type: 'item', key: 'send', label: 'Send as a message', command: '' },
-          ],
-          onSelect: item => {
-            setInputMode({ type: 'text' });
-            if (item.key === 'send') {
-              currSession.setInputContent('');
-              send(text, images, content, true);
-            }
-          },
-          onCancel: () => setInputMode({ type: 'text' }),
-        });
-        return false;
-      }
-      runCommand(name, args, rest);
+  const send = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[], recipient = selected, to?: readonly string[]): boolean => {
+    const commandName = /^\/(\S+)/.exec(text)?.[1];
+    const immediate = commandName && ['model', 'thinking', 'effort', 'fast', 'status', 'usage', 'permissions', 'agents', 'tasks'].includes(commandName);
+    const routed = currSession.messageForParticipant({ role: 'user', ...(to?.length ? { to: [...to] } : {}),
+      content: content ?? [...images, { type: 'text', text }] }, recipient);
+    const targetsBusy = routed.to?.some(name => currSession.isParticipantWorking(name)) ?? false;
+    const taskCommand = commandName && commandRegistry.some(spec => spec.name === commandName);
+    if ((targetsBusy || commandAbort.current || (taskCommand && currSession.getStatus() === 'working')) && !immediate) {
+      queue(text, images, content, recipient);
+      return true;
+    }
+    // A Sirus command runs here. Anything else that starts with a slash, an
+    // agent's own command or a name nobody knows, goes out as a message and
+    // the agent's harness makes of it what it will.
+    const command = isSirusCommand(text, currSession.getNativeCommands(recipient))
+      ? parseCommandLine(text)
+      : null;
+    if (command && commandRegistry.some(spec => spec.name === command.name)) {
+      runCommand(command.name, command.args, recipient, command.rest);
     } else {
       // Images sit where the draft placed them. The session stamps the
       // entry's seq when it enters the transcript.
-      const msg = {
-        role: 'user' as const,
-        content: content ?? [...images, ...(text ? [{ type: 'text' as const, text }] : [])],
-      };
-      setScrollOffset(0);
+      const msg = routed;
+      followLatest();
       setFeedback(null);
       // Chat is remounted per session (key={session id}), so if the user
       // navigates away mid-request the unmounted Chat no longer repaints its
       // history. The session-owned status still updates its sidebar row.
       const previousLength = currSession.getMessages().length;
-      const previousDraft = currSession.getInputContent();
+      const previousDraft = currSession.getInputContent(recipient);
       const turn = currSession.sendMessage(msg);
       // Validation can reject a turn before its user message is appended.
       // Keep those images available so the user can correct the prompt.
       if ((currSession.getMessages().length > previousLength || currSession.getQueuedMessages().some(item => item.images?.some(image => images.some(sent => sent.path === image.path)))) && images.length > 0) {
         const sentPaths = new Set(images.map(image => image.path));
-        replaceAttachments(attachmentsRef.current.filter(image => !sentPaths.has(image.path)));
+        replaceAttachments(view.attachments.filter(image => !sentPaths.has(image.path)));
       }
       // A startup draft becomes a real sidebar session only after the turn is
       // valid and sendMessage has appended its user message.
       if (!currSession.isEmpty()) onStartSession?.(currSession);
       turn
         .catch((caught: unknown) => {
-          if (currSession.getMessages().length === previousLength && !currSession.getInputContent()) {
-            currSession.setInputContent(previousDraft);
+          if (currSession.getMessages().length === previousLength && !currSession.getInputContent(recipient)) {
+            currSession.setInputContent(previousDraft, recipient);
           }
           setFeedback(isAbortError(caught)
             ? null
@@ -614,10 +636,11 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     return true;
   }
 
-  const queue = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[]) => {
-    currSession.queueMessage(text, images, content);
+  const queue = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[], recipient = selected) => {
+    const message = currSession.messageForParticipant({ role: 'user', content: content ?? [{ type: 'text', text }] }, recipient);
+    currSession.queueMessage(text, images, content, message.to);
     const paths = new Set(images.map(image => image.path));
-    replaceAttachments(attachmentsRef.current.filter(image => !paths.has(image.path)));
+    replaceAttachments(view.attachments.filter(image => !paths.has(image.path)));
   };
   const interrupt = (): boolean => {
     if (currSession.getStatus() !== 'working' && !commandAbort.current) return false;
@@ -631,35 +654,33 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       setFeedback(null);
       return;
     }
-    // Recover the waiting prompt before cancellation can drain the queue.
-    const waiting = currSession.takeQueuedMessage();
-    if (waiting) {
-      currSession.setInputContent(waiting.text);
-      replaceAttachments([...attachmentsRef.current, ...(waiting.images ?? [])]);
-    }
     interrupt();
+  };
+
+  const sendNow = (text = '', images: readonly ImageBlock[] = [], content?: MessageBlock[]) => {
+    if (currSession.getStatus() !== 'working' && !commandAbort.current && currSession.getQueuedMessageCount() === 0) {
+      if (text || images.length) send(text, images, content);
+      return;
+    }
+    if (text || images.length) queue(text, images, content);
+    commandAbort.current?.abort(new TurnCancelledError());
+    void currSession.deliverQueuedMessages();
   };
 
   // Queued messages live on the session so they survive switching away and
   // back. Send one at a time as soon as that session is free again.
   useEffect(() => {
-    if (!active || isLoading || currSession.getStatus() === 'working'
+    if (!active || inputIsBusy || imageIsLoading || currSession.getStatus() === 'working'
       || queued === 0 || effectiveInputMode.type !== 'text') return;
     const next = currSession.shiftQueuedPrompt();
     if (next !== undefined) {
-      if (next.to?.length) {
-        void currSession.sendMessage({ role: 'user', to: [...next.to],
-          content: next.content ? [...next.content] : [{ type: 'text', text: next.text }, ...(next.images ?? [])],
-        }).catch((caught: unknown) => {
-          setFeedback({ kind: 'error', text: caught instanceof Error ? caught.message : 'Could not send queued message.' });
-        });
-      } else send(next.text, next.images, next.content ? [...next.content] : undefined);
+      send(next.text, next.images, next.content ? [...next.content] : undefined, next.to?.[0] ?? selected, next.to);
     }
-  }, [currSession, active, isLoading, queued, nextQueuedId, effectiveInputMode.type]);
+  }, [currSession, active, inputIsBusy, imageIsLoading, queued, effectiveInputMode.type]);
 
-  historyContent.current = (
+  const historyContent = (
     <>
-      {messages.length === 0 && !isLoading && (
+      {messages.length === 0 && !isWorking && (
         <Box flexDirection="column" alignItems="center">
           {
             // art lines stay left-aligned inside their own box so the
@@ -680,15 +701,16 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         sessionId={currSession.getId()}
         participantColors={participantColors}
         isMessageLive={message => currSession.isMessageLive(message)}
+        hideThoughtFor={isWorking ? messages.at(-1)?.seq : undefined}
       />
-      {isLoading && (
+      {isWorking && (
         <TurnStatus
           messages={messages}
           awaitingApproval={approvals.length > 0}
           awaitingAnswer={questions.length > 0}
           compacting={currSession.isCompacting()}
-          startedAt={currSession.getActiveTurnStartedAt() ?? commandStartedAt ?? Date.now()}
-          quietFor={() => currSession.getTurnQuietFor()}
+          startedAt={currSession.getActiveTurnStartedAt() ?? Date.now()}
+          quietFor={() => currSession.getTurnQuietFor(selected)}
         />
       )}
     </>
@@ -696,7 +718,8 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
 
   return (
     <Box flexDirection="column" flexGrow={1} flexBasis={0} minWidth={0} height="100%" minHeight={0}>
-      <ChatHeader session={currSession} />
+      <ChatHeader session={currSession} activity={activity}
+        width={(stdout.columns ?? 80) - sidebarWidth} onSelect={active ? selectAgent : undefined} />
       {/* marginLeft -1 lets the rule start in the sidebar border's cell with a
           ├ junction, so the two lines meet instead of leaving a half-cell gap */}
       <Box marginLeft={-1} flexShrink={0}>
@@ -713,27 +736,10 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
           paused={inputOverlay}
         />
       )}
-      <Box
-        ref={viewportRef}
-        display={panelFeedback ? 'none' : 'flex'}
-        position="relative"
-        flexDirection="column"
-        flexGrow={1}
-        minHeight={0}
-        overflow="hidden"
-        justifyContent={messages.length === 0 && !isLoading ? "center" : "flex-end"}
-      >
-        <Box
-          ref={contentRef}
-          position={messages.length === 0 && !isLoading ? "static" : "absolute"}
-          bottom={messages.length === 0 && !isLoading ? undefined : -scrollOffset}
-          width="100%"
-          flexDirection="column"
-          flexShrink={0}
-        >
-          {historyContent.current}
-        </Box>
-      </Box>
+      <AgentHistory key={`history:${selected}`} position={view.history} active={active && !inputOverlay}
+        hidden={Boolean(panelFeedback)} sidebarWidth={sidebarWidth} empty={messages.length === 0 && !isWorking} reset={view.reset}>
+        {historyContent}
+      </AgentHistory>
       {showTasks && plans.length > 0 && (
         <Box paddingX={3} marginBottom={1} flexDirection="column" flexShrink={0}>
           {plans.map(plan => (
@@ -745,17 +751,21 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         </Box>
       )}
       {active && <InputBar
+        key={`input:${selected}`}
+        recipient={selected}
+        draftState={view.draft}
+        onSelectAgent={participants.length > 1 ? moveAgent : undefined}
         send={send}
-        inputContent={currSession.getInputContent()}
-        setInputContent={inputContent => currSession.setInputContent(inputContent)}
-        disabled={isLoading}
+        inputContent={currSession.getInputContent(selected)}
+        setInputContent={inputContent => currSession.setInputContent(inputContent, selected)}
+        disabled={inputIsBusy}
         feedback={panelFeedback ? null : feedback}
         participants={participants}
-        workers={currSession.getWorkers()}
+        workers={currSession.getWorkers().filter(worker => worker.owner === selected)}
         directory={currSession.getDirectory()}
         mode={effectiveInputMode}
         permissionMode={currSession.getPermissionMode()}
-        modeNotice={currSession.getModeNotice()}
+        modeNotice={currSession.getModeNotice(selected)}
         onCyclePermissionMode={cyclePermissionMode}
         onEscape={escape}
         onRewind={() => send('/rewind')}
@@ -766,19 +776,17 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
           setFeedback({ kind: 'info', text: 'ctrl+c again to exit' });
         }}
         attachments={attachments}
-        onPasteImage={pasteImage}
+        onPasteClipboard={pasteClipboard}
         onAttachImage={attachImage}
         onOverlayChange={setInputOverlay}
         onRemoveAttachment={removeAttachment}
-        model={currSession.getModel()}
-        thinkingLevel={currSession.getThinkingLevel()}
+        model={participants.find(participant => participant.name === selected)!.model}
+        thinkingLevel={currSession.getThinkingLevel(selected)}
         history={history}
-        queuedMessages={currSession.getQueuedMessages()}
-        onQueue={queue}
-        onBeginQueuedEdit={id => currSession.beginQueuedMessageEdit(id)}
-        onCancelQueuedEdit={id => currSession.cancelQueuedMessageEdit(id)}
-        onUpdateQueued={(id, text) => currSession.commitQueuedMessageEdit(id, text)}
-        contextUsage={currSession.getContextUsage()}
+        queuedMessages={currSession.getQueuedMessages().filter(message => !message.to?.length || message.to.includes(selected))}
+        onSendNow={sendNow}
+        onTakeQueued={ids => currSession.takeQueuedMessages(ids)}
+        contextUsage={currSession.getContextUsage(selected)}
         nativeCommands={() => currSession.getNativeCommands()}
         tasksVisible={plans.length > 0 ? showTasks : undefined}
       />}

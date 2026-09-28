@@ -122,6 +122,11 @@ const messageSchema = z.object({
   to: z.array(z.string().min(1)).optional(),
   model: z.string().min(1).optional(),
   hidden: z.literal(true).optional(),
+  injectedAt: z.object({
+    seq: z.number().int().nonnegative(),
+    block: z.number().int().nonnegative(),
+    offset: z.number().int().nonnegative(),
+  }).optional(),
   // A compaction summary written by Sirus itself, before the runtimes
   // compacted their own conversations. It becomes a boundary with the
   // summary text; the token figures it carried are gone with the gauge.
@@ -215,6 +220,8 @@ const sessionSchema = z.object({
   defaultModel: participantSchema.optional(),
   messages: z.array(messageSchema),
   inputContent: z.string().optional(),
+  selectedParticipant: z.string().optional(),
+  participantDrafts: z.record(z.string(), z.string()).optional(),
   // Unknown values fail the parse of that session; an absent one means the
   // default (auto approve).
   permissionMode: z.enum(PERMISSION_MODES).optional(),
@@ -329,6 +336,7 @@ function toMessage(stored: StoredMessage, index: number, defaultParticipant: str
     ...(stored.to ? { to: stored.to } : {}),
     ...(stored.model ? { model: stored.model } : {}),
     ...(stored.hidden ? { hidden: true as const } : {}),
+    ...(stored.injectedAt ? { injectedAt: stored.injectedAt } : {}),
   };
 }
 
@@ -360,6 +368,8 @@ function toSnapshot(stored: StoredSession, fallbackSessionDirectory: string): Se
     defaultModel,
     messages: stored.messages.map((message, index) => toMessage(message, index, defaultModel.name)),
     inputContent: stored.inputContent ?? '',
+    selectedParticipant: stored.selectedParticipant,
+    participantDrafts: stored.participantDrafts,
     checkpoints: (stored.checkpoints ?? []).map(({ messageIndex, seq, ...checkpoint }) => ({
       ...checkpoint,
       seq: seq ?? messageIndex ?? 0,

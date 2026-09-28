@@ -13,8 +13,9 @@ export function startFrontend(options: CliOptions): void {
   // A heartbeat, carrying a random installation id and the version, goes to
   // the Sirus stats endpoint at most once a day and never blocks startup. It
   // is on by default: SIRUS_HEARTBEAT_URL points it elsewhere, and an empty
-  // value turns it off.
-  void sendHeartbeat().catch(() => undefined);
+  // value turns it off. Shutting down abandons one still in flight.
+  const lifetime = new AbortController();
+  void sendHeartbeat({ signal: lifetime.signal }).catch(() => undefined);
 
   // Frame capture must see Ink's writes, so it wraps stdout before anything else.
   installFrameCapture();
@@ -40,6 +41,7 @@ export function startFrontend(options: CliOptions): void {
   // with the tool server they talk to, so their handles cannot leave the CLI
   // waiting for another Ctrl+C.
   const shutdown = () => {
+    lifetime.abort();
     disposeAllRuntimes();
     stopSirusMcpServer();
     closeAllMemoryStores();

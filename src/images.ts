@@ -20,6 +20,7 @@ const EXTENSIONS: Record<ImageMediaType, string> = {
 };
 
 const CLIPBOARD_TIMEOUT_MS = 15_000;
+class ClipboardImageUnavailableError extends Error {}
 
 export function imagesDirectory(): string {
   return path.join(dataDirectory(), 'images');
@@ -173,7 +174,7 @@ async function clipboardImageFile(directory: string): Promise<string> {
       ]);
     } catch {
       try { unlinkSync(target); } catch { /* nothing was written */ }
-      throw new Error('The clipboard does not contain an image.');
+      throw new ClipboardImageUnavailableError('The clipboard does not contain an image.');
     }
     return target;
   }
@@ -192,11 +193,11 @@ async function clipboardImageFile(directory: string): Promise<string> {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') missing++;
       }
     }
-    throw new Error(missing === attempts.length
+    throw new ClipboardImageUnavailableError(missing === attempts.length
       ? 'Reading clipboard images needs wl-paste (Wayland) or xclip (X11) installed.'
       : 'The clipboard does not contain an image.');
   }
-  throw new Error(`Clipboard images are not supported on ${process.platform}.`);
+  throw new ClipboardImageUnavailableError(`Clipboard images are not supported on ${process.platform}.`);
 }
 
 export async function attachClipboardImage(): Promise<ImageBlock> {
@@ -212,5 +213,26 @@ export async function attachClipboardImage(): Promise<ImageBlock> {
     } catch {
       // the temporary file is gone already
     }
+  }
+}
+
+// A forwarded paste shortcut has no payload. Read either clipboard format
+// through the same path; terminal-provided text pastes need no native read.
+export async function readClipboard(): Promise<ImageBlock | string> {
+  try {
+    return await attachClipboardImage();
+  } catch (imageError) {
+    // A present but invalid image must retain its validation/storage error.
+    if (!(imageError instanceof ClipboardImageUnavailableError)) throw imageError;
+    try {
+      if (process.platform === 'darwin') return (await run('pbpaste', [])).toString('utf8');
+      if (process.platform === 'linux') {
+        const [command, args] = process.env.WAYLAND_DISPLAY
+          ? ['wl-paste', ['--no-newline']] as const
+          : ['xclip', ['-selection', 'clipboard', '-o']] as const;
+        return (await run(command, [...args])).toString('utf8');
+      }
+    } catch { /* Report the original clipboard failure below. */ }
+    throw imageError;
   }
 }

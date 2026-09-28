@@ -1,0 +1,302 @@
+{
+  "node_count": 2157,
+  "unverified_node_count": 0,
+  "raw_edge_count": 6691,
+  "non_object_edges": 0,
+  "missing_endpoint_edges": 0,
+  "dangling_endpoint_edges": 424,
+  "self_loop_edges": 0,
+  "valid_candidate_edges": 6267,
+  "exact_duplicate_edges": 49,
+  "directed_unique_endpoint_pairs": 6119,
+  "directed_same_endpoint_collapsed_edges": 148,
+  "undirected_unique_endpoint_pairs": 6111,
+  "undirected_same_endpoint_collapsed_edges": 156,
+  "same_endpoint_group_count": 123,
+  "relation_variant_groups": 45,
+  "source_file_variant_groups": 0,
+  "source_location_variant_groups": 35,
+  "context_variant_groups": 8,
+  "post_build_graph_type": "Graph",
+  "post_build_node_count": 2157,
+  "post_build_edge_count": 6111,
+  "post_build_error": "",
+  "producer_suppression": {
+    "path": "/Users/parhamsepasgozar/.local/share/uv/tools/graphifyy/lib/python3.14/site-packages/graphify/extract.py",
+    "total_sites": 11,
+    "sites": [
+      {
+        "line": 1099,
+        "name": "seen_ids",
+        "tuple_arity": 0,
+        "sample": "seen_ids = {n[\"id\"] for n in nodes}"
+      },
+      {
+        "line": 1253,
+        "name": "seen_ids",
+        "tuple_arity": 0,
+        "sample": "seen_ids = {n[\"id\"] for n in nodes}"
+      },
+      {
+        "line": 1255,
+        "name": "seen_doc_refs",
+        "tuple_arity": 0,
+        "sample": "seen_doc_refs: set[str] = set()"
+      },
+      {
+        "line": 1600,
+        "name": "seen_ids",
+        "tuple_arity": 0,
+        "sample": "seen_ids: set[str] = {n[\"id\"] for n in nodes}"
+      },
+      {
+        "line": 2069,
+        "name": "seen_keys",
+        "tuple_arity": 0,
+        "sample": "seen_keys: set[tuple] = set()"
+      },
+      {
+        "line": 2228,
+        "name": "seen_keys",
+        "tuple_arity": 0,
+        "sample": "seen_keys: set[tuple] = set()"
+      },
+      {
+        "line": 3272,
+        "name": "seen_ids",
+        "tuple_arity": 0,
+        "sample": "seen_ids: set[str] = set()"
+      },
+      {
+        "line": 3380,
+        "name": "seen_ids",
+        "tuple_arity": 0,
+        "sample": "seen_ids: set[str] = set()"
+      },
+      {
+        "line": 3459,
+        "name": "seen_ids",
+        "tuple_arity": 0,
+        "sample": "seen_ids: set[str] = set()"
+      },
+      {
+        "line": 3974,
+        "name": "seen_ids",
+        "tuple_arity": 0,
+        "sample": "seen_ids: set[str] = set()"
+      },
+      {
+        "line": 3975,
+        "name": "seen_edges",
+        "tuple_arity": 4,
+        "sample": "seen_edges: set[tuple[str, str, str, str | None]] = set()"
+      }
+    ],
+    "error": ""
+  },
+  "examples": [
+    {
+      "source": "src_persistence_index",
+      "target": "src_persistence_settings",
+      "edge_count": 5,
+      "relations": [
+        "imports_from",
+        "re_exports"
+      ],
+      "source_files": [
+        "src/persistence/index.ts"
+      ],
+      "source_locations": [
+        "L1",
+        "L17",
+        "L18",
+        "L2"
+      ],
+      "contexts": [
+        "export",
+        "import",
+        "re-export"
+      ]
+    },
+    {
+      "source": "tests_frontend_file_mentions_integration_test",
+      "target": "tests_frontend_file_mentions_integration_test_editor",
+      "edge_count": 5,
+      "relations": [
+        "contains"
+      ],
+      "source_files": [
+        "tests/frontend/file_mentions_integration.test.tsx"
+      ],
+      "source_locations": [
+        "L135",
+        "L159",
+        "L201",
+        "L244",
+        "L86"
+      ],
+      "contexts": [
+        ""
+      ]
+    },
+    {
+      "source": "tests_frontend_app_test",
+      "target": "tests_frontend_app_test_setrawmode",
+      "edge_count": 4,
+      "relations": [
+        "contains"
+      ],
+      "source_files": [
+        "tests/frontend/app.test.ts"
+      ],
+      "source_locations": [
+        "L119",
+        "L220",
+        "L283",
+        "L45"
+      ],
+      "contexts": [
+        ""
+      ]
+    },
+    {
+      "source": "tests_frontend_app_test",
+      "target": "tests_frontend_app_test_ref",
+      "edge_count": 4,
+      "relations": [
+        "contains"
+      ],
+      "source_files": [
+        "tests/frontend/app.test.ts"
+      ],
+      "source_locations": [
+        "L119",
+        "L220",
+        "L283",
+        "L45"
+      ],
+      "contexts": [
+        ""
+      ]
+    },
+    {
+      "source": "tests_frontend_app_test",
+      "target": "tests_frontend_app_test_unref",
+      "edge_count": 4,
+      "relations": [
+        "contains"
+      ],
+      "source_files": [
+        "tests/frontend/app.test.ts"
+      ],
+      "source_locations": [
+        "L119",
+        "L220",
+        "L283",
+        "L45"
+      ],
+      "contexts": [
+        ""
+      ]
+    }
+  ],
+  "latest_incremental_check": {
+    "node_count": 2161,
+    "unverified_node_count": 0,
+    "raw_edge_count": 6047,
+    "non_object_edges": 0,
+    "missing_endpoint_edges": 0,
+    "dangling_endpoint_edges": 0,
+    "self_loop_edges": 0,
+    "valid_candidate_edges": 6047,
+    "exact_duplicate_edges": 0,
+    "directed_unique_endpoint_pairs": 6047,
+    "directed_same_endpoint_collapsed_edges": 0,
+    "undirected_unique_endpoint_pairs": 6047,
+    "undirected_same_endpoint_collapsed_edges": 0,
+    "same_endpoint_group_count": 0,
+    "relation_variant_groups": 0,
+    "source_file_variant_groups": 0,
+    "source_location_variant_groups": 0,
+    "context_variant_groups": 0,
+    "post_build_graph_type": "Graph",
+    "post_build_node_count": 2161,
+    "post_build_edge_count": 6047,
+    "post_build_error": "",
+    "producer_suppression": {
+      "path": "/Users/parhamsepasgozar/.local/share/uv/tools/graphifyy/lib/python3.14/site-packages/graphify/extract.py",
+      "total_sites": 11,
+      "sites": [
+        {
+          "line": 1099,
+          "name": "seen_ids",
+          "tuple_arity": 0,
+          "sample": "seen_ids = {n[\"id\"] for n in nodes}"
+        },
+        {
+          "line": 1253,
+          "name": "seen_ids",
+          "tuple_arity": 0,
+          "sample": "seen_ids = {n[\"id\"] for n in nodes}"
+        },
+        {
+          "line": 1255,
+          "name": "seen_doc_refs",
+          "tuple_arity": 0,
+          "sample": "seen_doc_refs: set[str] = set()"
+        },
+        {
+          "line": 1600,
+          "name": "seen_ids",
+          "tuple_arity": 0,
+          "sample": "seen_ids: set[str] = {n[\"id\"] for n in nodes}"
+        },
+        {
+          "line": 2069,
+          "name": "seen_keys",
+          "tuple_arity": 0,
+          "sample": "seen_keys: set[tuple] = set()"
+        },
+        {
+          "line": 2228,
+          "name": "seen_keys",
+          "tuple_arity": 0,
+          "sample": "seen_keys: set[tuple] = set()"
+        },
+        {
+          "line": 3272,
+          "name": "seen_ids",
+          "tuple_arity": 0,
+          "sample": "seen_ids: set[str] = set()"
+        },
+        {
+          "line": 3380,
+          "name": "seen_ids",
+          "tuple_arity": 0,
+          "sample": "seen_ids: set[str] = set()"
+        },
+        {
+          "line": 3459,
+          "name": "seen_ids",
+          "tuple_arity": 0,
+          "sample": "seen_ids: set[str] = set()"
+        },
+        {
+          "line": 3974,
+          "name": "seen_ids",
+          "tuple_arity": 0,
+          "sample": "seen_ids: set[str] = set()"
+        },
+        {
+          "line": 3975,
+          "name": "seen_edges",
+          "tuple_arity": 4,
+          "sample": "seen_edges: set[tuple[str, str, str, str | None]] = set()"
+        }
+      ],
+      "error": ""
+    },
+    "examples": []
+  },
+  "latest_incremental_check_note": "This check uses the merged post-build graph. It cannot recover or remeasure relationships lost during the original extraction."
+}

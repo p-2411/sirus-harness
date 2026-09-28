@@ -291,6 +291,7 @@ describe('file mentions through the terminal', () => {
       expect(session.getInputContent()).toBe('@reviewer Read @notes.txt ');
       expect(calls).toHaveLength(0);
       await ui.type('\r');
+      await ui.type('\x1b[C'); // Open the addressed agent's conversation.
       await ui.until(() => ui.output().includes('Reviewed the attachment.'));
       expect(calls.map(call => call.participant)).toEqual(['reviewer']);
       expect(calls[0]!.prompt.text).toContain(contents);
@@ -360,6 +361,53 @@ describe('file mentions through the terminal', () => {
       const restored = Session.fromSnapshot(JSON.parse(JSON.stringify(session.toSnapshot())));
       expect(promptHistory(restored.getMessages())).toEqual(['@../proj/file.tsx']);
       expect(restored.getMessages()[0]!.content.some(block => block.type === 'text' && block.filePath === '../proj/file.tsx')).toBe(true);
+    } finally { ui.close(); }
+  });
+
+  test('a chosen directory stays open for its contents and sends a listing of it', async () => {
+    const directory = project({
+      'src/index.ts': 'export {};', 'src/lib/util.ts': 'export {};', 'other.txt': 'Unrelated', 'my dir/notes.md': '# Notes',
+    });
+    const received: PromptInput[] = [];
+    bindScriptedRuntime(model, (input, emit) => {
+      received.push(input);
+      emit({ type: 'text', text: 'Looked at the directory.' });
+    });
+    const session = new Session({ id: 'directory-mention-integration', name: 'Directory mention', directory, model });
+    const ui = terminal(<Chat currSession={session} />);
+    try {
+      await ui.flush();
+      await ui.type('@sr');
+      await ui.until(() => ui.output().includes('› @src/'));
+      expect(ui.output()).toContain('open directory');
+      expect(ui.output()).not.toMatch(/@src\/lib\/ /);
+      await ui.type('\t');
+      expect(session.getInputContent()).toBe('@src/');
+      await ui.until(() => ui.output().includes('attach directory'));
+      expect(ui.output()).toContain('› @src/ ');
+      expect(ui.output()).toMatch(/@src\/lib\/ +open directory/);
+      expect(ui.output()).toContain('@src/index.ts');
+      await ui.type('\r');
+      expect(session.getInputContent()).toBe('@src/ ');
+      expect(received).toHaveLength(0);
+      await ui.type('\r');
+      await ui.until(() => ui.output().includes('Looked at the directory.'));
+      expect(received[0]!.text).toContain('Directory: "src/"\nlib/\nindex.ts');
+      expect(promptHistory(session.getMessages())).toEqual(['@src/']);
+      expect(ui.output()).not.toContain('Directory:');
+      const restored = Session.fromSnapshot(JSON.parse(JSON.stringify(session.toSnapshot())));
+      expect(restored.getMessages()[0]!.content.some(block => block.type === 'text' && block.filePath === 'src/')).toBe(true);
+
+      // A quoted directory keeps browsing past its closing quote.
+      await ui.type('@my');
+      await ui.until(() => ui.output().includes('› @"my dir/"'));
+      await ui.type('\t');
+      expect(session.getInputContent()).toBe('@"my dir/"');
+      await ui.until(() => ui.output().includes('attach directory'));
+      await ui.type('no');
+      await ui.until(() => ui.output().includes('› @"my dir/notes.md"'));
+      await ui.type('\t');
+      expect(session.getInputContent()).toBe('@"my dir/notes.md" ');
     } finally { ui.close(); }
   });
 });

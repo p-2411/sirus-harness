@@ -13,8 +13,10 @@ import { DEFAULT_MODEL } from '../../src/agent_runtime/providers/catalog';
 import * as naming from '../../src/agent_runtime/session/naming';
 import { providerFor } from '../../src/agent_runtime/providers';
 import { bindScriptedRuntime, textTurn, unbindRuntime } from '../support/runtime';
+import { isAbortError } from '../../src/abort';
 import App, { createWorkspace, nextSessionName, startSession } from '../../src/frontend/app';
 import { changeModel } from '../../src/commands/agents/behavior';
+import { rememberListedModels } from '../../src/agent_runtime/providers/catalog';
 import * as sessionFile from '../../src/persistence/sessions';
 import { deleteSessionSnapshot, loadSessionRevision, loadSessionSnapshot, loadSessionSnapshots, saveSessionSnapshot, saveSessionSnapshots } from '../../src/persistence/sessions';
 
@@ -25,6 +27,8 @@ describe('app workspace startup', () => {
     settingsDirectory = mkdtempSync(join(tmpdir(), 'sirus-workspace-'));
     previousDirectory = process.env.SIRUS_DATA_DIR;
     process.env.SIRUS_DATA_DIR = settingsDirectory;
+    rememberListedModels('gpt', [{ id: 'gpt-6-sol', description: 'Sol' }]);
+    rememberListedModels('claude', [{ id: 'claude-haiku-4-5', description: 'Haiku' }]);
   });
   afterEach(() => {
     if (previousDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
@@ -191,6 +195,21 @@ describe('app workspace startup', () => {
       await type('\u0002');
       expectPanes(4);
       expect(dots()).toEqual(originalDots);
+      await type('\u0006'); // Ctrl+F expands the sidebar and opens management.
+      expect(output).toContain('search: ▌__');
+      expect(output).toContain('Manage sessions in the sidebar');
+      expect(output).not.toContain('manage session');
+      await type('Second');
+      expect(output).not.toContain('First');
+      expect(output).toContain('Second');
+      await type('\u001b');
+      expectPanes(26);
+      expect(output).toContain('unfinished draft');
+      expect(output).toMatch(/manage session\s+ctrl\+f/);
+      expect(output).not.toContain('search:');
+      expect(dots()).toEqual(originalDots);
+      await type('\u0002');
+      expectPanes(4);
       // The sidebar remains interactive when collapsed.
       await type('\u001b[1;3B'); // Option+Down switches to a saved session.
       expect(output).toContain('Existing history');
@@ -275,7 +294,7 @@ describe('app workspace startup', () => {
     let emitChunk: ((text: string) => void) | undefined;
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
-    bindScriptedRuntime(DEFAULT_MODEL, async (_input, emit) => {
+    const binding = bindScriptedRuntime(DEFAULT_MODEL, async (_input, emit) => {
       emitChunk = text => emit({ type: 'text', text });
       await gate;
     });
@@ -291,7 +310,10 @@ describe('app workspace startup', () => {
     try {
       await new Promise(resolve => setImmediate(resolve));
       await app.waitUntilRenderFlush();
-      turn = restored.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Stream a reply' }] });
+      turn = restored.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Stream a reply' }] }).catch(error => {
+        if (!isAbortError(error)) throw error;
+        return restored.getMessages();
+      });
       const deadline = Date.now() + 2000;
       while (!emitChunk && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
       expect(emitChunk).toBeDefined();
@@ -319,6 +341,7 @@ describe('app workspace startup', () => {
       app.unmount();
       release();
       await turn;
+      expect(binding.runtimes.every(runtime => runtime.disposed)).toBe(true);
       await restored?.dispose();
       restore.mockRestore(); update.mockRestore(); unbindRuntime(DEFAULT_MODEL);
       stdin.destroy(); stdout.destroy();

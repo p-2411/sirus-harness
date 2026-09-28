@@ -20,11 +20,14 @@ describe('file mention suggestions', () => {
     expect(activeFileMention(quoted, quoted.length)).toEqual({ start: 7, end: quoted.length, query: './docs/design not' });
     expect(activeFileMention('Use @"./docs/file name.md" next', 15)?.end).toBe(26);
     expect(activeFileMention("Let's use @App", 14)?.query).toBe('App');
+    // A chosen quoted directory keeps browsing past its closing quote.
+    expect(activeFileMention('@"my dir/"', 10)).toEqual({ start: 0, end: 10, query: 'my dir/' });
+    expect(activeFileMention('@"my dir/"no next', 12)).toEqual({ start: 0, end: 12, query: 'my dir/no' });
   });
 
   test('ignores emails, complete mentions, and quoted/code examples', () => {
     for (const input of [
-      'user@example', '@./src/App.ts ', '@"./docs/file name.md" ',
+      'user@example', '@./src/App.ts ', '@"./docs/file name.md" ', '@"./docs/file name.md"', '@"my dir/" ',
       '"try @App', "'try @App", '`try @App', '```ts\nconst @App', '~~~ts\nconst @App', 'text \\@App',
     ]) expect(activeFileMention(input, input.length)).toBeNull();
     const input = '`example` now @App';
@@ -45,6 +48,23 @@ describe('file mention suggestions', () => {
     expect(matchFileSuggestions(Array.from({ length: 70 }, (_, index) => `file${index}.ts`), 'file')).toHaveLength(50);
   });
 
+  test('suggests folders by their own name or as the next level of a typed path, before files of the same rank', () => {
+    const entries = [
+      'src/frontend/chat/Input.tsx', 'src/frontend/App.tsx', 'src/cli.ts', 'tests/frontend/app.test.ts', 'README.md',
+      'src/', 'src/frontend/', 'src/frontend/chat/', 'tests/', 'tests/frontend/',
+    ];
+    expect(matchFileSuggestions(entries, '')).toEqual([
+      'src/', 'tests/', 'README.md', 'src/cli.ts', 'src/frontend/App.tsx', 'src/frontend/chat/Input.tsx', 'tests/frontend/app.test.ts',
+    ]);
+    expect(matchFileSuggestions(entries, 'SRC/')).toEqual([
+      'src/', 'src/frontend/', 'src/cli.ts', 'src/frontend/App.tsx', 'src/frontend/chat/Input.tsx',
+    ]);
+    expect(matchFileSuggestions(entries, 'front')).toEqual([
+      'src/frontend/', 'tests/frontend/', 'src/frontend/App.tsx', 'src/frontend/chat/Input.tsx', 'tests/frontend/app.test.ts',
+    ]);
+    expect(matchFileSuggestions(entries, 'frontend/ch')).toEqual(['src/frontend/chat/', 'src/frontend/chat/Input.tsx']);
+  });
+
   test('discovers tracked and untracked files while respecting gitignore and subdirectory scope', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'sirus-file-menu-'));
     try {
@@ -62,6 +82,12 @@ describe('file mention suggestions', () => {
       expect(await listProjectFiles(path.join(directory, 'src')))
         .toEqual(['.env.example', 'new file.ts', 'tracked.ts']);
       expect(await listProjectFiles(directory)).toContain('outside.ts');
+      await mkdir(path.join(directory, 'logs'));
+      await writeFile(path.join(directory, 'logs/run.ignored'), 'ignored');
+      const entries = await listMentionFiles(directory, directory, false);
+      expect(entries).toContain('src/');
+      expect(entries).toContain('src/tracked.ts');
+      expect(entries).not.toContain('logs/');
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -107,6 +133,9 @@ describe('file mention suggestions', () => {
       expect(matchFileSuggestions(absoluteFiles, absoluteQuery, 50, project)).toEqual([path.join(sibling, 'file.tsx')]);
       expect(await listMentionFiles(project, fileSearchDirectory(project, ''), false)).toEqual(['local.ts']);
       expect(await listMentionFiles(project, path.join(sibling, 'missing/deeper'), false)).toContain('../proj/file.tsx');
+      const browsed = await listMentionFiles(project, fileSearchDirectory(project, '../proj/'), false);
+      expect(matchFileSuggestions(browsed, '../proj/', 50, project)).toEqual(['../proj/', '../proj/.gitignore', '../proj/file.tsx']);
+      expect(await listMentionFiles(project, sibling, true)).toContain(`${sibling}/`);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

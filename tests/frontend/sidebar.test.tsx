@@ -17,7 +17,7 @@ import ResumePicker from '../../src/frontend/ResumePicker';
 import { requestPermission } from '../../src/agent_runtime/permissions/approvals';
 import { requestAnswers } from '../../src/agent_runtime/permissions/questions';
 import { theme } from '../../src/frontend/styles/theme';
-import { pressAt, releaseAt } from '../../src/frontend/interaction/clickable';
+import { moveAt, pressAt, releaseAt } from '../../src/frontend/interaction/clickable';
 import { lineToRow } from '../../src/frontend/terminal/screen';
 
 const noOp = () => {};
@@ -66,13 +66,26 @@ function mountSidebar() {
     archived: () => archived,
     focused: () => focused,
     async manage() {
-      const row = frame.split('\n').findIndex(line => line.includes('filter / manage'));
+      const row = frame.split('\n').findIndex(line => line.includes('manage session'));
+      expect(row).toBeGreaterThanOrEqual(0);
       pressAt({ col: 3, line: row }); releaseAt({ col: 3, line: row }); await flush();
     },
-    async wheel(direction: 'up' | 'down', column = 3, line = 4) {
-      await type(`\x1b[<${direction === 'up' ? 64 : 65};${column};${lineToRow(line)}M`);
+    async wheel(direction: 'up' | 'down', column = 3, line?: number) {
+      const target = line ?? frame.split('\n').findIndex(row => row.includes('○'));
+      await type(`\x1b[<${direction === 'up' ? 64 : 65};${column};${lineToRow(target)}M`);
     },
     async resize(next: number) { height = next; app.rerender(view()); await flush(); },
+    async hover(marker: string) {
+      const row = frame.split('\n').findIndex(line => line.includes(marker));
+      moveAt({ col: 3, line: row }); await flush();
+    },
+    async click(marker: string, offset = 0) {
+      const lines = frame.split('\n');
+      const row = lines.findIndex(line => line.includes(marker));
+      expect(row).toBeGreaterThanOrEqual(0);
+      const col = lines[row]!.indexOf(marker) + offset;
+      pressAt({ col, line: row }); releaseAt({ col, line: row }); await flush();
+    },
     async collapse() { collapsed = true; app.rerender(view()); await flush(); },
     async keepFirst(count: number) {
       sessions = sessions.slice(0, count);
@@ -91,6 +104,67 @@ function mountSidebar() {
 }
 
 describe('sidebar scrolling', () => {
+  test('manage mode alone exposes inline delete controls, including clickable yes and no', async () => {
+    const app = mountSidebar();
+    try {
+      await app.flush();
+      expect(app.frame()).toMatch(/manage session\s+ctrl\+f/);
+      expect(app.frame()).not.toContain('search:');
+      const firstSessionRow = app.frame().split('\n').findIndex(line => line.includes('Session 00'));
+      await app.hover('Session 00');
+      expect(app.frame()).not.toContain('×');
+      await app.manage();
+      expect(app.frame()).toContain('search: ▌__');
+      expect(app.frame().split('\n')[firstSessionRow - 1]).toContain('search:');
+      expect(app.frame().split('\n')[firstSessionRow]).toContain('Session 00');
+      expect(app.frame()).not.toContain('manage session');
+      await app.hover('Session 00');
+      expect(app.frame()).toContain('×');
+      expect(app.frame()).toContain('^a archive · esc back');
+      expect(app.frame()).not.toMatch(/\^d delete|\^r rename/);
+      await app.click('×');
+      expect(app.frame()).not.toContain('Session 00');
+      expect(app.frame()).toContain('Delete session?');
+      expect(app.frame()).toContain('y/n');
+      await app.click('y/n', 2);
+      expect(app.deleted()).toHaveLength(0);
+      expect(app.frame()).not.toContain('y/n');
+      expect(app.frame()).not.toContain('Delete session?');
+      expect(app.frame()).toContain('Session 00');
+      await app.click('×');
+      await app.click('y/n');
+      expect(app.deleted().map(session => session.getName())).toEqual(['Session 00']);
+      expect(app.frame()).not.toContain('Session 00');
+      await app.type('\x1b');
+      expect(app.frame()).not.toContain('search:');
+      expect(app.frame()).toContain('manage session');
+      expect(app.frame().split('\n')[firstSessionRow]).toContain('Session 01');
+      await app.hover('Session 01');
+      expect(app.frame()).not.toContain('×');
+    } finally { await app.close(); }
+  });
+
+  test('double-click renames in place, Enter confirms, and Escape cancels', async () => {
+    const app = mountSidebar();
+    try {
+      await app.flush();
+      await app.click('Session 00');
+      await app.click('Session 00');
+      expect(app.focused()).toBe(true);
+      await app.type('Renamed');
+      expect(app.frame()).toContain('Renamed');
+      expect(app.frame()).not.toContain('Rename session');
+      await app.type('\r');
+      expect(app.selected().getName()).toBe('Renamed');
+      await app.click('Renamed');
+      await app.click('Renamed');
+      await app.type('Discarded');
+      await app.type('\x1b');
+      expect(app.frame()).toContain('Renamed');
+      expect(app.frame()).not.toContain('Discarded');
+    } finally { await app.close(); }
+  });
+
   test('wheel scrolling reaches the last session, keeps controls fixed, and clicks the visible row', async () => {
     const app = mountSidebar();
     try {
@@ -145,6 +219,7 @@ describe('sidebar scrolling', () => {
       expect(app.frame()).toContain('Session 12');
       await app.keepFirst(3);
       expect(app.frame()).toContain('Session 00');
+      await app.resize(14);
       expect(app.frame()).toContain('Session 02');
       expect(app.frame()).not.toContain('┃');
     } finally {
@@ -318,6 +393,7 @@ describe('sidebar management', () => {
       expect(app.frame()).toContain('Session 12');
       expect(app.frame()).not.toContain('Session 00');
       await app.type('\x04');
+      expect(app.frame()).toContain('y/n');
       expect(app.frame()).toContain('Delete session?');
       expect(app.deleted()).toHaveLength(0);
       await app.type('\r');

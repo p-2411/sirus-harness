@@ -13,6 +13,7 @@ import {
 } from '../../src/frontend/interaction/selection';
 import { pressAt, releaseAt } from '../../src/frontend/interaction/clickable';
 import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
+import * as updater from '../../src/updater';
 
 // A Chat in a terminal the test types into. `frame` is the last frame drawn;
 // `press` waits out Ink's pause after a lone escape, which it holds briefly
@@ -103,7 +104,7 @@ test('Escape dismisses help, command suggestions, login stages and secret entry'
     expect(output).toContain('ChatGPT');
     await type('\u001b');
     expect(output).not.toContain('› Claude');
-    expect(output).toContain('Welcome to Sirus.');
+    expect(output).toContain('What shall we build?');
 
     await type('/login');
     await type('\r');
@@ -311,7 +312,51 @@ function renderChat(session: Session) {
   };
 }
 
-test('local commands run during a turn and a reserved command drains after editing finishes', async () => {
+test('/update shows its own progress and reserves thinking for an actual agent turn', async () => {
+  let finishUpdate!: () => void;
+  const updating = new Promise<void>(resolve => { finishUpdate = resolve; });
+  let notify!: (text: string) => void;
+  const update = spyOn(updater, 'updateSirus').mockImplementation(async onProgress => {
+    notify = onProgress!;
+    notify('Checking npm for a newer Sirus release…');
+    await updating;
+    return { updated: true, currentVersion: '1.0.0', latestVersion: '1.0.1' };
+  });
+  const model = 'test-update-progress';
+  let finishTurn!: () => void;
+  const working = new Promise<void>(resolve => { finishTurn = resolve; });
+  bindScriptedRuntime(model, async (_input, emit) => { await working; emit({ type: 'text', text: 'Done.' }); });
+  const session = new Session({ model });
+  const chat = renderChat(session);
+  try {
+    await chat.flush();
+    await chat.type('/update');
+    await chat.type('\r');
+    await chat.waitFor('Checking npm for a newer Sirus release…');
+    expect(chat.output()).not.toContain('thinking');
+    notify('Updating Sirus 1.0.0 → 1.0.1…');
+    await chat.flush();
+    expect(chat.output()).toContain('Updating Sirus 1.0.0 → 1.0.1…');
+    expect(chat.output()).not.toContain('thinking');
+    expect(session.getStatus()).toBe('idle');
+    finishUpdate();
+    await chat.waitFor('Updated 1.0.0 → 1.0.1.');
+    await chat.type('Work');
+    await chat.type('\r');
+    await chat.waitFor('thinking');
+    finishTurn();
+    await chat.waitFor('Done.');
+  } finally {
+    finishUpdate();
+    finishTurn();
+    update.mockRestore();
+    await chat.close();
+    await session.dispose();
+    unbindRuntime(model);
+  }
+});
+
+test('thinking runs immediately while other commands queue and can be taken back', async () => {
   const model = 'test-chat-command-queue';
   let release!: () => void;
   let started!: () => void;
@@ -328,25 +373,80 @@ test('local commands run during a turn and a reserved command drains after editi
   try {
     await ready;
     await chat.flush();
+    await chat.type('/thinking high');
+    await chat.type('\r');
+    expect(chat.output()).toContain('@sirus thinking set to high.');
+    expect(session.getStatus()).toBe('working');
     await chat.type('/help');
     await chat.type('\r');
-    expect(chat.output()).toContain('list commands and keys');
-    expect(session.getStatus()).toBe('working');
-    await chat.type('\u001b');
-    expect(session.getStatus()).toBe('working');
-    session.queueMessage('/help');
+    expect(session.getQueuedMessages().map(message => message.text)).toEqual(['/help']);
     await chat.flush();
     await chat.type('\u001b[A');
-    expect(session.getQueuedMessages()[0].editing).toBe(true);
+    expect(session.getQueuedMessageCount()).toBe(0);
+    expect(session.getInputContent()).toBe('/help');
     release();
     await turn;
     await chat.flush();
-    expect(session.getQueuedMessageCount()).toBe(1);
-    expect(chat.output()).not.toContain('list commands and keys');
+    // The draft's command menu names /help; its panel has not opened.
+    expect(chat.output()).not.toContain('pgup / pgdn · ctrl+home / end · esc closes');
     await chat.type('\r');
     await chat.flush();
     expect(session.getQueuedMessageCount()).toBe(0);
     expect(chat.output()).toContain('list commands and keys');
+  } finally {
+    release();
+    await turn;
+    await chat.close();
+    await session.dispose();
+    unbindRuntime(model);
+  }
+});
+
+test.each(['\u001b[13;5u', '\u0018\u0013'])('Enter queues, Tab completes only, %j sends now, and Escape sends the remaining queue', async shortcut => {
+  const model = 'test-chat-claude-input';
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const binding = bindScriptedRuntime(model, async (input, emit) => {
+    if (input.text === 'Work') await gate;
+    emit({ type: 'text', text: 'Finished.' });
+  });
+  const session = new Session({ model });
+  const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Work' }] }).catch(() => {});
+  const chat = renderChat(session);
+  try {
+    await chat.waitFor('Work');
+    await chat.type('First follow-up');
+    await chat.type('\t');
+    expect(session.getInputContent()).toBe('First follow-up');
+    expect(session.getQueuedMessageCount()).toBe(0);
+    await chat.type('\r');
+    expect(session.getInputContent()).toBe('');
+    expect(session.getQueuedMessages().map(message => message.text)).toEqual(['First follow-up']);
+    await chat.type('Second follow-up');
+    await chat.type('\r');
+    // ↑ takes both back as one draft, and Enter queues it again as one entry.
+    await chat.type('\u001b[A');
+    expect(session.getQueuedMessageCount()).toBe(0);
+    expect(session.getInputContent()).toBe('First follow-up\nSecond follow-up');
+    await chat.type('\r');
+    expect(session.getQueuedMessages().map(message => message.text)).toEqual(['First follow-up\nSecond follow-up']);
+    expect(binding.runtimes[0].steers).toEqual([]);
+    await chat.type('Draft sent now');
+    // The alternate chord must work across separate keyboard events.
+    if (shortcut === '\u0018\u0013') {
+      await chat.type('\u0018');
+      await chat.type('\u0013');
+    } else await chat.type(shortcut);
+    expect(binding.runtimes[0].steers).toEqual(['First follow-up\nSecond follow-up', 'Draft sent now']);
+    expect(session.getQueuedMessageCount()).toBe(0);
+    await chat.type('After interrupt');
+    await chat.type('\r');
+    await chat.type('\u001b');
+    await turn;
+    await chat.waitFor('Finished.');
+    expect(binding.runtimes[0].prompts.map(prompt => prompt.text)).toEqual(['Work', 'After interrupt']);
+    expect(session.getInputContent()).toBe('');
+    expect(session.getQueuedMessageCount()).toBe(0);
   } finally {
     release();
     await turn;
@@ -393,7 +493,7 @@ describe('pinned plans', () => {
     expect(currentPlans(messages.slice(0, 2), [{ name: 'sirus' }, { name: 'reviewer' }])).toHaveLength(2);
   });
 
-  test('restores each participant’s list, naming the lists only when more than one remains', async () => {
+  test('shows only the selected participant’s restored plan', async () => {
     const original = new Session({ name: 'Restored plans' });
     original.addParticipant('reviewer', 'gpt-5.6-luna');
     original.append({ role: 'assistant', participant: 'sirus', content: [planCall(entries)] });
@@ -405,17 +505,20 @@ describe('pinned plans', () => {
     try {
       await chat.flush();
       expect(chat.output()).toContain('▸ Update the source');
+      expect(chat.output()).not.toContain('○ Review the change');
+      session.selectParticipant('reviewer');
+      await chat.flush();
       expect(chat.output()).toContain('○ Review the change');
-      expect(chat.output()).toContain('@sirus');
-      expect(chat.output()).toContain('@reviewer');
+      expect(chat.output()).not.toContain('Update the source');
+      session.selectParticipant('sirus');
+      await chat.flush();
       expect(chat.output()).toContain('ctrl+t to hide tasks');
 
       session.append({ role: 'assistant', participant: 'reviewer', content: [planCall([])] });
       await chat.flush();
       expect(chat.output()).toContain('▸ Update the source');
       expect(chat.output()).not.toContain('Review the change');
-      expect(chat.output()).not.toContain('@sirus');
-      expect(chat.output()).not.toContain('@reviewer');
+      expect(chat.output()).not.toContain('○ Review the change');
 
       session.append({ role: 'assistant', participant: 'sirus', content: [planCall([])] });
       await chat.flush();
@@ -509,7 +612,7 @@ test('notices between turns appear as input feedback without adding transcript e
         type: 'notice', severity, title: 'Configuration\nchanged', description: 'A vendor\tdetail.',
       });
       await chat.flush();
-      expect(chat.output()).toContain(`${severity === 'vendor-info' ? '→' : '!'} @sirus: Configuration changed · A vendor detail.`);
+      expect(chat.output()).toContain(`${severity === 'vendor-info' ? '' : '! '}@sirus: Configuration changed · A vendor detail.`);
       expect(session.getMessages()).toEqual(before);
       await chat.type('\u001b');
       expect(chat.output()).not.toContain('Configuration changed');
@@ -603,21 +706,16 @@ test('escape closes what is open before it cancels the turn', async () => {
     expect(session.getStatus()).toBe('working');
     await chat.press('\u0015');
 
-    // A queued message being edited: tab queues it behind the turn.
+    // A message queued behind the turn has nothing open to close: ↑ takes
+    // it back into the draft, and clearing the draft drops it, so no turn
+    // follows the cancel below.
     await chat.press('later');
-    await chat.press('\t');
+    await chat.press('\r');
     expect(session.getQueuedMessageCount()).toBe(1);
     await chat.press('\u001b[A');
-    expect(chat.frame()).toContain('enter saves · esc restores');
-    await chat.press('\u001b');
-    expect(chat.frame()).not.toContain('enter saves · esc restores');
-    expect(session.getStatus()).toBe('working');
-    // Emptied and saved, it leaves the queue, so no turn follows the cancel
-    // below.
-    await chat.press('\u001b[A');
-    await chat.press('\u0015');
-    await chat.press('\r');
     expect(session.getQueuedMessageCount()).toBe(0);
+    expect(session.getStatus()).toBe('working');
+    await chat.press('\u0015');
 
     // A text selection.
     beginSelection({ line: 4, col: 2 });
@@ -690,56 +788,53 @@ test('copying from the history copies the lines on screen after a row was opened
   }
 });
 
-test('a reply that appears ahead of a peer\'s in its round leaves the peer\'s opened row alone', async () => {
-  const writerModel = 'test-chat-order-writer';
-  const peerModel = 'test-chat-order-peer';
-  let releaseWriter!: () => void;
-  const writerGate = new Promise<void>(resolve => { releaseWriter = resolve; });
+test('a message steered into a reply leaves the rows opened in it alone', async () => {
+  const model = 'test-chat-steered-row';
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
   const edit = (id: string, name: string) => ({
     type: 'tool_call' as const, id, kind: 'edit' as const, title: `${name}.md`, status: 'completed' as const,
     locations: [], content: [{ type: 'diff' as const, path: `${name}.md`, oldText: null, newText: `${name} line` }],
   });
-  // The writer speaks first in the round but answers last, so its reply
-  // enters the history above the peer's after the peer's is on screen.
-  bindScriptedRuntime(writerModel, async (_input, emit) => {
-    await writerGate;
-    emit({ type: 'tool_call', call: edit('writer-edit', 'writer') });
+  // The reply edits one file, is steered, and then edits another, so the
+  // steered message lands between the two and splits the reply around it.
+  bindScriptedRuntime(model, async (_input, emit) => {
+    emit({ type: 'tool_call', call: edit('first-edit', 'first') });
+    await gate;
+    emit({ type: 'tool_call', call: edit('second-edit', 'second') });
   });
-  bindScriptedRuntime(peerModel, (_input, emit) => {
-    emit({ type: 'tool_call', call: edit('peer-edit', 'peer') });
-  });
-  const session = new Session({ model: writerModel });
-  session.addParticipant('writer', writerModel);
-  session.addParticipant('peer', peerModel);
+  const session = new Session({ model });
   const chat = mountChat(session);
-  const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: '@writer @peer edit' }] });
+  const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'edit' }] });
   try {
-    for (let tries = 0; tries < 50 && !chat.frame().includes('● Edit peer.md'); tries++) {
+    for (let tries = 0; tries < 50 && !chat.frame().includes('● Edit first.md'); tries++) {
       await new Promise(resolve => setTimeout(resolve, 10));
       await chat.flush();
     }
     const lines = chat.frame().split('\n');
-    const line = lines.findIndex(text => text.includes('● Edit peer.md'));
-    const row = { line, col: lines[line]!.indexOf('● Edit peer.md') };
+    const line = lines.findIndex(text => text.includes('● Edit first.md'));
+    const row = { line, col: lines[line]!.indexOf('● Edit first.md') };
     expect(pressAt(row)).toBe(true);
     expect(releaseAt(row)).toBe(true);
     await chat.flush();
-    expect(chat.frame()).toContain('+ peer line');
+    expect(chat.frame()).toContain('+ first line');
 
-    releaseWriter();
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Also the second file.' }] });
+    release();
     await turn;
     await new Promise(resolve => setTimeout(resolve, 60));
     await chat.flush();
-    expect(chat.frame().indexOf('● Edit writer.md')).toBeLessThan(chat.frame().indexOf('● Edit peer.md'));
-    expect(chat.frame()).toContain('+ peer line');
-    expect(chat.frame()).not.toContain('+ writer line');
+    const frame = chat.frame();
+    expect(frame.indexOf('● Edit first.md')).toBeLessThan(frame.indexOf('Also the second file.'));
+    expect(frame.indexOf('Also the second file.')).toBeLessThan(frame.indexOf('● Edit second.md'));
+    expect(frame).toContain('+ first line');
+    expect(frame).not.toContain('+ second line');
   } finally {
-    releaseWriter();
+    release();
     await turn.catch(() => undefined);
     await chat.unmount();
     session.dispose();
-    unbindRuntime(writerModel);
-    unbindRuntime(peerModel);
+    unbindRuntime(model);
   }
 });
 
@@ -788,7 +883,7 @@ describe('turn status', () => {
 });
 
 
-test('slash paths are sent and unknown commands retain their draft until explicitly sent', async () => {
+test('slash paths and unknown commands are sent as messages', async () => {
   const model = 'test-slash-input';
   const received: string[] = [];
   bindScriptedRuntime(model, (input, emit) => { received.push(input.text); emit({ type: 'text', text: 'Received.' }); });
@@ -802,13 +897,8 @@ test('slash paths are sent and unknown commands retain their draft until explici
     expect(received[0]).toContain('/tmp/foo.txt what is in this file');
     await chat.type('/not-a-command hello');
     await chat.type('\r');
-    expect(session.getInputContent()).toBe('/not-a-command hello');
-    expect(chat.output()).toContain('Send as a message');
-    expect(received).toHaveLength(1);
-    await chat.type('\u001b[B');
-    await chat.type('\r');
-    await chat.waitFor('Received.');
-    expect(received).toHaveLength(2);
+    for (let attempt = 0; attempt < 200 && received.length < 2; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+    expect(chat.output()).not.toContain('Unknown command');
     expect(received[1]).toBe('/not-a-command hello');
     expect(session.getInputContent()).toBe('');
   } finally {

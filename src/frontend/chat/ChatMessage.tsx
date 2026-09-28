@@ -31,6 +31,7 @@ import {
 import { isSpawnAgentTitle } from '../../agent_runtime/tools/agents';
 import { INTERRUPTED_REASON } from '../../agent_runtime/tools/subagents/report';
 import { formatTokens } from '../../agent_runtime/usage';
+import { historyParts } from './history';
 import { workerAge } from '../../commands/agents/behavior';
 import {
 	getPermissionsVersion,
@@ -201,6 +202,10 @@ interface PlanSegment {
 
 export type MessageSegment = MessageBlock | ToolRun | PlanSegment;
 
+function isActivity(segment: MessageSegment | undefined): boolean {
+	return segment !== undefined && ['tool_call', 'tool_run', 'plan', 'notice', 'thought'].includes(segment.type);
+}
+
 // A call that is part of a run of ordinary tool calls, which a group folds
 // away behind "Ran N commands". A SpawnAgent call is not: its row is a
 // worker's anchor, showing the run's status and carrying its report, so it
@@ -321,7 +326,7 @@ function PlanRow({ call }: { call: ToolCallBlock }) {
 	const entries = planEntriesOf(call);
 	const done = entries.filter(entry => entry.status === 'completed').length;
 	return (
-		<Box flexDirection="column" paddingX={1} paddingY={1}>
+		<Box flexDirection="column" paddingX={1}>
 			<Box ref={ref}>
 				<Text color={hovered ? theme.accentSoft : theme.textMuted} wrap="truncate-end">
 					{'  '}Updated plan · {done} of {entries.length} done
@@ -340,7 +345,7 @@ function NoticeRow({ block }: { block: NoticeBlock }) {
 	const color = block.severity === 'warning' ? theme.pending
 		: block.severity === 'error' ? theme.danger : theme.textMuted;
 	return (
-		<Box paddingX={1} paddingY={1}>
+		<Box paddingX={1}>
 			<Text color={color} dimColor wrap="truncate-end">
 				{'  '}{singleLine(block.title)}{block.description ? ` · ${singleLine(block.description)}` : ''}
 			</Text>
@@ -485,7 +490,7 @@ export function ToolRunGroup({ calls, defaultExpanded = false, sessionId }: {
 	const summaryColor = hovered ? theme.accentSoft : theme.textMuted;
 
 	return (
-		<Box flexDirection="column" marginLeft={2} marginY={1}>
+		<Box flexDirection="column" marginLeft={2}>
 			<Box ref={ref} flexDirection="row" flexWrap="nowrap">
 				<Text color={summaryColor} wrap="truncate-end">
 					{complete ? `Ran ${calls.length} commands` : <AnimatedCommandStatus count={calls.length} />}
@@ -592,16 +597,13 @@ function SpawnAgentEntry({ call, sessionId }: { call: ToolCallBlock; sessionId?:
 	);
 }
 
-// A row on its own is set off by a blank line; rows that follow one another
-// stack directly, as the entries of a group do.
-function ToolCallRow({ call, sessionId, joinsPrevious = false, joinsNext = false }: {
+// The message owns spacing between activity and prose; rows stack directly.
+function ToolCallRow({ call, sessionId }: {
 	call: ToolCallBlock;
 	sessionId?: string;
-	joinsPrevious?: boolean;
-	joinsNext?: boolean;
 }) {
 	return (
-		<Box flexDirection="column" paddingX={1} paddingTop={joinsPrevious ? 0 : 1} paddingBottom={joinsNext ? 0 : 1}>
+		<Box flexDirection="column" paddingX={1}>
 			{isSpawnAgent(call)
 				? <SpawnAgentEntry call={call} sessionId={sessionId} />
 				: <ToolCallEntry call={call} indent="  " sessionId={sessionId} />}
@@ -612,7 +614,7 @@ function ToolCallRow({ call, sessionId, joinsPrevious = false, joinsNext = false
 // A thought that opens with a bold title, as summarised reasoning does, is
 // named by that title; any other by its own opening words, and unfolds in
 // place rather than repeating them underneath.
-function thoughtHeading(text: string): { title: string | null; body: string } {
+export function thoughtHeading(text: string): { title: string | null; body: string } {
 	const trimmed = text.trim();
 	const titled = /^\*\*(.+?)\*\*\s*/.exec(trimmed);
 	if (titled) return { title: singleLine(titled[1]!), body: trimmed.slice(titled[0].length) };
@@ -624,27 +626,27 @@ function thoughtHeading(text: string): { title: string | null; body: string } {
 function ThoughtRow({ row, text }: { row: string; text: string }) {
 	const [expanded, toggle] = useRowExpansion(row, false);
 	const ref = useRef<DOMElement>(null);
-	const hovered = useClickable(ref, toggle);
+	useClickable(ref, toggle);
 	const { title, body } = thoughtHeading(terminalText(text));
 	if (!title && expanded) {
 		return (
-			<Box flexDirection="column" padding={1}>
+			<Box flexDirection="column" paddingX={1}>
 				<Box ref={ref} marginLeft={2}>
-					<Text color={hovered ? theme.textMuted : theme.textSubtle} dimColor={!hovered} wrap="wrap">{body}</Text>
+					<Text color={theme.textSubtle} wrap="wrap">{body}</Text>
 				</Box>
 			</Box>
 		);
 	}
 	return (
-		<Box flexDirection="column" padding={1}>
+		<Box flexDirection="column" paddingX={1}>
 			<Box ref={ref}>
-				<Text color={hovered ? theme.textMuted : theme.textSubtle} dimColor={!hovered} wrap="truncate-end">
+				<Text color={theme.textSubtle} wrap="truncate-end">
 					{'  '}{title ?? singleLine(body)}
 				</Text>
 			</Box>
 			{expanded && body && (
 				<Box marginLeft={4}>
-					<Text color={theme.textSubtle} dimColor wrap="wrap">{body}</Text>
+					<Text color={theme.textSubtle} wrap="wrap">{body}</Text>
 				</Box>
 			)}
 		</Box>
@@ -691,12 +693,16 @@ interface ChatMessageProps {
 	participantColors?: ParticipantColors;
 	// The reply is still being written.
 	live?: boolean;
+	// The current thought is already shown in the turn status row.
+	hideThought?: boolean;
 }
 
 // What the message body draws from: a copy of the entry, and the entry
-// itself, which the rows the user opened are kept against.
+// itself, which the rows the user opened are kept against. A reply a steered
+// message split is drawn in parts; `part` names this one.
 interface MessageBodyProps extends ChatMessageProps {
 	entry: Message;
+	part?: string;
 }
 
 function sameFields<T extends object>(left: T, right: T): boolean {
@@ -712,12 +718,13 @@ function sameColors(left?: ParticipantColors, right?: ParticipantColors): boolea
 }
 
 function messageSnapshot(message: Message): Message {
-	return { ...message, content: message.content.map(block => ({ ...block })) };
+	return { ...message, to: message.to ? [...message.to] : undefined, content: message.content.map(block => ({ ...block })) };
 }
 
 function sameMessage(previous: Message, next: Message): boolean {
 	return previous.seq === next.seq && previous.role === next.role
 		&& previous.participant === next.participant
+		&& (previous.to ?? []).join('\0') === (next.to ?? []).join('\0')
 		&& previous.content.length === next.content.length
 		&& previous.content.every((block, index) => sameFields(block, next.content[index]!));
 }
@@ -729,19 +736,24 @@ export function ChatMessage(props: ChatMessageProps) {
 	return <MessageBody {...props} entry={props.message} message={messageSnapshot(props.message)} />;
 }
 
-export function ChatHistory({ messages, participants, isMessageLive, ...props }: {
+export function ChatHistory({ messages, participants, isMessageLive, hideThoughtFor, ...props }: {
 	messages: readonly Message[];
 	participants: readonly { name: string; model: string }[];
 	isMessageLive: (message: Message) => boolean;
+	hideThoughtFor?: number;
 	sessionId: string;
 	participantColors: ParticipantColors;
 }) {
 	const models = new Map(participants.map(participant => [participant.name.toLocaleLowerCase(), participant.model]));
-	const entries = messages.map(message => ({
-		entry: message,
+	const originals = new Map(messages.map(message => [message.seq, message]));
+	const liveMessages = new Set(messages.filter(isMessageLive).map(message => message.seq));
+	const entries = historyParts(messages).map(({ message, key, final }) => ({
+		key,
+		entry: originals.get(message.seq) ?? message,
 		message: messageSnapshot(message),
 		model: message.model ?? (message.role === 'assistant' ? models.get((message.participant ?? DEFAULT_PARTICIPANT).toLocaleLowerCase()) : undefined),
-		live: isMessageLive(message),
+		live: final && liveMessages.has(message.seq),
+		hideThought: message.seq === hideThoughtFor,
 	}));
 	return <HistoryBody {...props} entries={entries} />;
 }
@@ -749,32 +761,65 @@ export function ChatHistory({ messages, participants, isMessageLive, ...props }:
 // A draft edit leaves the entire history subtree alone; streaming only
 // passes the changed entries through the message-level boundary below.
 const HistoryBody = memo(function HistoryBody({ entries, ...props }: {
-	entries: readonly Pick<MessageBodyProps, 'entry' | 'message' | 'model' | 'live'>[];
+	entries: readonly (Pick<MessageBodyProps, 'entry' | 'message' | 'model' | 'live' | 'hideThought'> & { key: string })[];
 	sessionId: string;
 	participantColors: ParticipantColors;
 }) {
-	return entries.map(entry => <MessageBody key={entry.message.seq} {...props} {...entry} />);
+	return entries.map(({ key, ...entry }) => <MessageBody key={key} part={key} {...props} {...entry} />);
 }, (previous, next) => previous.sessionId === next.sessionId
 	&& sameColors(previous.participantColors, next.participantColors)
 	&& previous.entries.length === next.entries.length
 	&& previous.entries.every((entry, index) => {
 		const other = next.entries[index]!;
-		return entry.entry === other.entry && entry.model === other.model && entry.live === other.live
+		return entry.key === other.key && entry.entry === other.entry && entry.model === other.model
+			&& entry.live === other.live && entry.hideThought === other.hideThought
 			&& sameMessage(entry.message, other.message);
 	}));
 
+function SegmentView({ block, row, participantColors, sessionId }: {
+	block: MessageSegment;
+	// The block's name among its message's rows, for the ones the user opened.
+	row: string;
+	participantColors?: ParticipantColors;
+	sessionId?: string;
+}) {
+	switch (block.type) {
+		case 'text':
+			return block.filePath ? null : <Markdown participantColors={participantColors}>{block.text}</Markdown>;
+		case 'image':
+			return <ImageLine image={block} />;
+		case 'thought':
+			return <ThoughtRow row={row} text={block.text} />;
+		case 'plan':
+			return <PlanRow call={block.call} />;
+		case 'notice':
+			return <NoticeRow block={block} />;
+		case 'compaction':
+			return <CompactionRule row={row} block={block} participantColors={participantColors} />;
+		case 'tool_run':
+			return <ToolRunGroup calls={block.calls} sessionId={sessionId} />;
+		case 'tool_call':
+			return <ToolCallRow call={block} sessionId={sessionId} />;
+	}
+}
+
 const MessageBody = memo(function MessageBody({
 	entry,
+	part = String(entry.seq),
 	message,
 	model,
 	participantColors,
 	sessionId,
 	live = false,
+	hideThought = false,
 }: MessageBodyProps) {
 	const isUser = message.role === "user";
 	const participantName = message.participant ?? DEFAULT_PARTICIPANT;
-	const segments = messageSegments(visibleContent(message.content, live));
+	const segments = messageSegments(visibleContent(message.content, live && !hideThought));
 	if (message.content.length > 0 && segments.length === 0) return null;
+	// A steered message splits its reply into parts, so a block is named by
+	// the part it is drawn in as well as its place there.
+	const rowOf = (block: MessageSegment) => `block:${part}:${(message.content as readonly MessageSegment[]).indexOf(block)}`;
 	return (
 		// no bars, no boxes — bold speaker label, body aligned flush beneath,
 		// whitespace doing the separating
@@ -794,42 +839,16 @@ const MessageBody = memo(function MessageBody({
 					{isUser ? "you" : participantName}
 				</Text>
 				{!isUser && model && <Text color={theme.textSubtle} dimColor> {model}</Text>}
+				{!isUser && message.to?.length ? <Text color={theme.textMuted}> → {message.to.map(name => `@${name}`).join(', ')}</Text> : null}
 			</Text>
 			{segments.map((block, index) => {
-				switch (block.type) {
-					case 'text':
-						if (block.filePath) return null;
-						return <Markdown key={index} participantColors={participantColors}>{block.text}</Markdown>;
-					case 'image':
-						return <ImageLine key={index} image={block} />;
-					case 'thought':
-						return <ThoughtRow key={index} row={`block:${message.content.indexOf(block)}`} text={block.text} />;
-					case 'plan':
-						return <PlanRow key={index} call={block.call} />;
-					case 'notice':
-						return <NoticeRow key={index} block={block} />;
-					case 'compaction':
-						return (
-							<CompactionRule
-								key={index}
-								row={`block:${message.content.indexOf(block)}`}
-								block={block}
-								participantColors={participantColors}
-							/>
-						);
-					case 'tool_run':
-						return <ToolRunGroup key={index} calls={block.calls} sessionId={sessionId} />;
-					case 'tool_call':
-						return (
-							<ToolCallRow
-								key={index}
-								call={block}
-								sessionId={sessionId}
-								joinsPrevious={segments[index - 1]?.type === 'tool_call'}
-								joinsNext={segments[index + 1]?.type === 'tool_call'}
-							/>
-						);
-				}
+				const row = <SegmentView key={index} block={block} row={rowOf(block)} participantColors={participantColors} sessionId={sessionId} />;
+				if (!isActivity(block)) return row;
+				const previous = segments[index - 1];
+				const next = segments[index + 1];
+				return <Box key={index} flexDirection="column"
+					marginTop={previous && !isActivity(previous) ? 1 : 0}
+					marginBottom={next && !isActivity(next) ? 1 : 0}>{row}</Box>;
 			})}
 		</Box>
 		</RowScope.Provider>
@@ -838,5 +857,6 @@ const MessageBody = memo(function MessageBody({
 	&& previous.sessionId === next.sessionId
 	&& previous.model === next.model
 	&& previous.live === next.live
+	&& previous.hideThought === next.hideThought
 	&& sameColors(previous.participantColors, next.participantColors)
 	&& sameMessage(previous.message, next.message));
