@@ -8,9 +8,9 @@ import type { ParticipantColors } from '../MentionText';
 
 export type AgentActivity = 'working' | 'unread' | 'attention' | 'idle';
 
-// A full block fills the whole cell, so the moving bar spans the pill's height;
-// braille dots leave a gap above and below.
-const BAR_COLUMN = '█';
+// A column of dots, all four rows of them, moves across the pill with its
+// colour showing between the dots.
+const BAR_COLUMN = '⣿';
 
 function ThinkingName({ name, width, color }: {
   name: string;
