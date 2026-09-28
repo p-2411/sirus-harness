@@ -2,13 +2,12 @@ import SwiftUI
 
 // The rows, kept to the bottom while the reader is at the bottom and left
 // alone once they scroll up to read. Rows are replaced in place as they
-// stream, so nothing above the reader moves. `leading` keeps them clear of
-// the sidebar rail.
+// stream, so nothing above the reader moves. They use the full width; the
+// sidebar's rail floats over them.
 struct Transcript: View {
     let rows: [Row]
     let names: Set<String>
     let loading: Bool
-    let leading: CGFloat
     @State private var position = ScrollPosition(edge: .bottom)
     @State private var pinned = true
 
@@ -26,8 +25,7 @@ struct Transcript: View {
                         .equatable()
                 }
             }
-            .padding(.leading, leading)
-            .padding(.trailing, 20)
+            .padding(.horizontal, 20)
             .padding(.top, 4)
             .padding(.bottom, 16)
         }
@@ -47,8 +45,6 @@ struct Transcript: View {
                 pinned = new.belowView < 40
             }
         }
-        // Centred on the screen, like the header; only the rows keep clear
-        // of the rail.
         .overlay {
             if loading {
                 Pulse(color: Palette.subtle, size: 7)

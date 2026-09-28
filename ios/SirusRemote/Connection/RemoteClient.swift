@@ -47,11 +47,15 @@ import Observation
     }
 
     func subscribe(sessionId: String, participant: String) async throws {
+        if subscription?.sessionId != sessionId {
+            header = nil
+            requests = []
+        }
+        // Another agent in the same session keeps the header, tabs included,
+        // so the switch animates; only its conversation starts afresh.
         if subscription?.sessionId != sessionId || subscription?.participant != participant {
             subscription = (sessionId, participant)
-            header = nil
             rows = []
-            requests = []
         }
         _ = try await request(.subscribe(sessionId, participant))
     }

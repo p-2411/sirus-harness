@@ -150,6 +150,21 @@ Client → server:
     // while busy, steering). Text starting with `/` runs through the command
     // registry like the TUI; a command that needs the terminal fails with its
     // own message. Feedback text comes back as the result's "feedback" string.
+    // A command that opens a picker in the TUI (`/model`, `/thinking`,
+    // `/permissions`…) returns it instead of running: the result carries
+    // "picker": { "title": "/model", "entries": [
+    //   { "kind": "heading" | "info", "label": "…" } |
+    //   { "kind": "item", "label": "…", "description"?: "…", "command": "/model @sirus opus",
+    //     "current"?: true, "prompt"?: { "text": "API key", "secret": true } } ] }
+    // and, when the message had words after the command, "draft" with them to
+    // put back in the input. Choosing an item sends its command (after the
+    // prompt's value, as its last argument, when it has one).
+{ "type": "complete", "id": "7", "sessionId": "…", "participant": "sirus", "text": "fix /mo", "cursor": 7 }
+    // The `/` or `@` menu for the input at the cursor (UTF-16 offsets), by the
+    // TUI's own rules: result "items": [ { "kind": "command" | "participant" |
+    // "create" | "file" | "directory", "label": "/model …", "description": "…",
+    // "tag"?: "claude", "start": 4, "end": 7, "insert": "/model " } ], nearest
+    // match last. A newer complete supersedes an older one still working.
 { "type": "cancel", "id": "3", "sessionId": "…" }                              // what Esc does
 { "type": "approve", "id": "4", "requestId": "…", "optionId": "…" }
 { "type": "answer", "id": "5", "requestId": "…",

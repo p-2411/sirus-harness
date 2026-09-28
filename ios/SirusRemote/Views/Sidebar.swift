@@ -1,8 +1,7 @@
 import SwiftUI
 
 // src/frontend/Sidebar.tsx on the phone, floating over the conversation.
-// Collapsed, a slim glass rail down the leading edge, as tall as the TUI's
-// collapsed sidebar and ending above the bottom bar, one mark per session;
+// Collapsed, a slim glass rail on the leading edge with one mark per session;
 // expanded, a glass panel naming them, with the Mac they come from. It is one
 // pane of glass that springs between the two, its toggle staying put. It
 // opens from the toggle or a swipe in from the edge, and closes from the
@@ -14,14 +13,13 @@ struct Sidebar: View {
     // Controls in the panel's corners sit concentric with them: in from each
     // edge by the corner's radius less their own.
     static let cornerInset = panelRadius - railWidth / 2
-    // How far in the conversation starts, so the rail never covers it.
+    // How far in the header sits from each edge: clear of the rail, and
+    // centred on the screen.
     static let gutter = inset + railWidth + 12
 
     let store: RemoteStore
     let selected: String?
     @Binding var expanded: Bool
-    // The open conversation's bottom bar, which the rail stops above.
-    var bottomInset: CGFloat = 0
     @State private var seen: [String: Int] = [:]
     @GestureState private var drag: CGFloat = 0
 
@@ -47,7 +45,6 @@ struct Sidebar: View {
             pane
                 .padding(.leading, Self.inset)
                 .padding(.top, 2)
-                .padding(.bottom, expanded ? 0 : bottomInset + 8)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .sensoryFeedback(.selection, trigger: selected)
@@ -98,7 +95,7 @@ struct Sidebar: View {
         .containerRelativeFrame(.horizontal, alignment: .leading) { width, _ in
             expanded ? min(340, width - 60) : Self.railWidth
         }
-        .frame(maxHeight: .infinity, alignment: .top)
+        .frame(maxHeight: expanded ? .infinity : nil, alignment: .top)
         .clipShape(shape)
         .glassEffect(.regular, in: shape)
         .offset(x: drag)
@@ -141,6 +138,7 @@ struct Sidebar: View {
             }
             .scrollIndicators(.hidden)
             .scrollBounceBehavior(.basedOnSize)
+            .frame(height: min(CGFloat(store.sessions.count), 7) * 44)
         }
         .frame(width: Self.railWidth)
         .padding(.bottom, 4)

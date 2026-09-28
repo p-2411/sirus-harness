@@ -9,6 +9,7 @@ import { commandArgs, commandsWait, queueDraft, queueInput, routeInput, splitDra
 import { APNS_ENVIRONMENTS, openSettings } from '../persistence/settings';
 import { subscribeSubagents } from '../agent_runtime/tools/subagents';
 import { SIRUS_VERSION } from '../version';
+import { completions, pickerEntries, type PickerEntry } from './menus';
 import { sessionEntry, viewOf } from './view';
 
 // Remote control: the sessions this process has /rc on, served to the phone
@@ -55,7 +56,14 @@ interface SocketData {
   // Commands the phone started on this socket, by session, so Stop on the
   // phone and a dropped connection can end them.
   running: Set<{ sessionId: string; controller: AbortController }>;
+  // The `/` or `@` menu being worked out; a newer keystroke ends it.
+  completing: AbortController | null;
 }
+
+// A command's picker, sent back in place of running it, with what was left
+// of the message to go back in the phone's input until a choice is made.
+interface Picker { title: string; entries: PickerEntry[] }
+interface SendReply { feedback?: string; picker?: Picker; draft?: string }
 
 type Socket = ServerWebSocket<SocketData>;
 
@@ -244,22 +252,26 @@ type Frame = Record<string, unknown>;
 // conversation in the terminal: the same commands, wherever they are
 // written, and the same routing and queueing (`frontend/chat/send.ts`). What
 // the commands and a reporting vendor command say comes back as feedback.
-async function sendText(socket: Socket, session: Session, participant: string, text: string): Promise<string | undefined> {
+async function sendText(socket: Socket, session: Session, participant: string, text: string): Promise<SendReply> {
   const draft = splitDraft(session, text, participant);
   if (commandsWait(session, draft)) {
     queueDraft(draft, [], (queued, images, content) => queueInput(session, queued, participant, images, content));
-    return undefined;
+    return {};
   }
   const said: string[] = [];
+  const feedback = () => said.length ? { feedback: said.join('\n') } : {};
   for (const command of draft.commands) {
     const output = await runCommand(socket, session, participant, command);
+    // A command that opens its picker holds the rest of the message back,
+    // as the TUI leaves it in the input until the choice is made.
+    if (typeof output === 'object') return { ...feedback(), picker: output, ...(draft.prompt ? { draft: draft.prompt } : {}) };
     if (output) said.push(output);
   }
   if (draft.prompt) {
     const output = await sendPrompt(socket, session, participant, draft.prompt);
     if (output) said.push(output);
   }
-  return said.join('\n') || undefined;
+  return feedback();
 }
 
 // A controller for work the phone started, ended by Stop on the phone or by
@@ -274,12 +286,12 @@ async function tracked<T>(socket: Socket, session: Session, work: (signal: Abort
   }
 }
 
-async function runCommand(socket: Socket, session: Session, participant: string, command: PromptCommand): Promise<string | undefined> {
+// What a command said, or the picker it opens instead of running, as the
+// TUI shows one for `/model` with nothing after it.
+async function runCommand(socket: Socket, session: Session, participant: string, command: PromptCommand): Promise<string | Picker | undefined> {
   const args = commandArgs(command.name, command.args, participant);
-  const probe = new AbortController();
-  const menu = commandMenu(command.name, args, session, probe.signal);
-  probe.abort();
-  if (menu) throw new Error(`/${command.name} ${args.length ? 'with these arguments ' : ''}opens a menu, which only the terminal can show.`);
+  const menu = await tracked(socket, session, signal => Promise.resolve(commandMenu(command.name, args, session, signal)));
+  if (menu?.length) return { title: `/${command.name}`, entries: pickerEntries(menu) };
   let progress: string | undefined;
   const outcome = await tracked(socket, session, signal => Promise.resolve(executeCommand(command.name, args, {
     session, participant, signal, argumentText: command.argumentText,
@@ -335,7 +347,7 @@ function isAnswer(value: unknown): value is QuestionAnswer {
 // the phone shows. A type this build does not know is ignored.
 async function handle(socket: Socket, frame: Frame): Promise<void> {
   const id = typeof frame.id === 'string' ? frame.id : '';
-  let feedback: string | undefined;
+  let reply: object = {};
   try {
     switch (frame.type) {
       case 'subscribe': {
@@ -347,7 +359,18 @@ async function handle(socket: Socket, frame: Frame): Promise<void> {
       case 'send': {
         const session = remoteSession(frame.sessionId);
         if (typeof frame.text !== 'string' || !frame.text.trim()) throw new Error('There is nothing to send.');
-        feedback = await sendText(socket, session, participantOf(session, frame.participant), frame.text);
+        reply = await sendText(socket, session, participantOf(session, frame.participant), frame.text);
+        break;
+      }
+      case 'complete': {
+        const session = remoteSession(frame.sessionId);
+        if (typeof frame.text !== 'string' || typeof frame.cursor !== 'number') throw new Error('There is nothing to complete.');
+        socket.data.completing?.abort();
+        const controller = new AbortController();
+        socket.data.completing = controller;
+        const cursor = Math.max(0, Math.min(frame.text.length, Math.floor(frame.cursor)));
+        reply = { items: await completions(session, participantOf(session, frame.participant), frame.text, cursor, controller.signal) };
+        if (socket.data.completing === controller) socket.data.completing = null;
         break;
       }
       case 'cancel': {
@@ -390,7 +413,7 @@ async function handle(socket: Socket, frame: Frame): Promise<void> {
       default:
         return;
     }
-    socket.send(JSON.stringify({ type: 'result', id, ok: true, ...(feedback ? { feedback } : {}) }));
+    socket.send(JSON.stringify({ type: 'result', id, ok: true, ...reply }));
   } catch (error) {
     socket.send(JSON.stringify({ type: 'result', id, ok: false, error: error instanceof Error ? error.message : 'Something went wrong.' }));
   }
@@ -418,7 +441,7 @@ function listen(self: { ip: string; host: string; user: string }): Listener {
           const { pathname } = new URL(request.url);
           if (request.method === 'GET' && pathname === '/v1/hello') return Response.json({ protocol: 1, sirus: SIRUS_VERSION, pid: process.pid });
           if (request.method === 'GET' && pathname === '/v1/socket') {
-            if (server.upgrade(request, { data: { ip, subscription: null, running: new Set() } })) return undefined;
+            if (server.upgrade(request, { data: { ip, subscription: null, running: new Set(), completing: null } })) return undefined;
             return new Response('Expected a WebSocket', { status: 400 });
           }
           return new Response('Not found', { status: 404 });
@@ -438,6 +461,7 @@ function listen(self: { ip: string; host: string; user: string }): Listener {
           close(socket) {
             unsubscribe(socket);
             for (const { controller } of socket.data.running) controller.abort();
+            socket.data.completing?.abort();
             sockets.delete(socket);
           },
         },
