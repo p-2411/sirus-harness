@@ -13,3 +13,5 @@ Pass `repository_id: "p-2411/sirus-harness"` to repository-scoped tools.
 The project hooks provide reminders to use remote MCP tools. They need no local
 graph or Graphify CLI, and `graphify update` does not refresh the remote index.
 See `docs/graphify-hooks.md` for configuration and activation.
+
+@AGENTS.md
