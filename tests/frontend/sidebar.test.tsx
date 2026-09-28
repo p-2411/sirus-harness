@@ -21,8 +21,8 @@ import { moveAt, pressAt, releaseAt } from '../../src/frontend/interaction/click
 import { lineToRow } from '../../src/frontend/terminal/screen';
 
 const noOp = () => {};
-// A sidebar row holding nothing but the arrow that says more sessions are below.
-const arrowRow = (frame: string) => frame.split('\n').some(line => /^\s*↓\s*│/.test(line));
+// A sidebar row holding nothing but the arrow that says more sessions are above or below.
+const arrowRow = (frame: string, arrow = '↓') => frame.split('\n').some(line => new RegExp(`^\\s*${arrow}\\s*│`).test(line));
 
 function mountSidebar() {
   let sessions = Array.from({ length: 30 }, (_, index) => new Session({
@@ -176,14 +176,20 @@ describe('sidebar scrolling', () => {
       expect(initial).not.toContain('Session 29');
       // The last row says more sessions are below, and a blank line keeps them off the controls.
       expect(arrowRow(initial)).toBe(true);
+      expect(arrowRow(initial, '↑')).toBe(false);
       const footerLine = initial.split('\n').findIndex(line => line.includes('new session'));
       expect(initial.split('\n')[footerLine - 2]).toMatch(/^\s*│/);
       await app.wheel('down', 30); // Over chat, not the sidebar.
       await app.wheel('down', 3, 0); // Over the fixed header.
       expect(app.frame()).toBe(initial);
+      await app.wheel('down');
+      // Part way down, sessions are out of view on both sides.
+      expect(arrowRow(app.frame(), '↑')).toBe(true);
+      expect(arrowRow(app.frame())).toBe(true);
       for (let index = 0; index < 12; index++) await app.wheel('down');
       expect(app.frame()).toContain('Session 29');
       expect(app.frame()).not.toContain('Session 00');
+      expect(arrowRow(app.frame(), '↑')).toBe(true);
       expect(app.frame().split('\n')[footerLine]).toContain('new session');
       expect(app.frame().split('\n')[0]).toContain('sirus');
       expect(arrowRow(app.frame())).toBe(false);
