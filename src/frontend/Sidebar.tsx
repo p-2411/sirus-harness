@@ -262,11 +262,14 @@ export default function SideBar({ sessions, currSession, selectSession, addSessi
   const { height } = useBoxMetrics(listRef);
   const visibleRows = Math.max(0, Math.floor(height));
   const [scrollOffset, setScrollOffset] = useState(0);
-  const maxOffset = Math.max(0, ordered.length - visibleRows);
+  // Sessions out of view above or below take a row each for an arrow saying
+  // so, when the list has rows to spare; the last page leaves room for its one.
+  const arrows = visibleRows >= 3 ? 1 : 0;
+  const maxOffset = ordered.length > visibleRows ? ordered.length - visibleRows + arrows : 0;
   const offset = Math.min(scrollOffset, maxOffset);
-  // While sessions are left below, the last row is an arrow saying so.
-  const rowsAt = (at: number) => at < maxOffset ? visibleRows - 1 : visibleRows;
-  const moreBelow = offset < maxOffset;
+  const rowsAt = (at: number) => visibleRows - (at > 0 ? arrows : 0) - (at < maxOffset ? arrows : 0);
+  const moreAbove = arrows > 0 && offset > 0;
+  const moreBelow = arrows > 0 && offset < maxOffset;
   const selectedId = focused ? highlighted?.getId() : currSession?.getId();
   const selectedIndex = ordered.findIndex(session => session.getId() === selectedId);
 
@@ -277,7 +280,7 @@ export default function SideBar({ sessions, currSession, selectSession, addSessi
       const clamped = Math.min(previous, maxOffset);
       if (selectedIndex < 0) return clamped;
       if (selectedIndex < clamped) return selectedIndex;
-      if (selectedIndex >= clamped + rowsAt(clamped)) return Math.min(maxOffset, selectedIndex - visibleRows + 2);
+      if (selectedIndex >= clamped + rowsAt(clamped)) return Math.min(maxOffset, selectedIndex - visibleRows + 1 + 2 * arrows);
       return clamped;
     });
   }, [selectedId, selectedIndex, visibleRows, maxOffset]);
@@ -370,6 +373,9 @@ export default function SideBar({ sessions, currSession, selectSession, addSessi
       <Box ref={listRef} flexGrow={1} minHeight={0} overflow="hidden">
         <Box flexDirection="column" flexGrow={1} minWidth={0}>
           {!collapsed && ordered.length === 0 && <Text color={theme.textMuted}>No matching sessions</Text>}
+          {moreAbove && <Box justifyContent="center" flexShrink={0}>
+            <Text color={theme.textSubtle}>↑</Text>
+          </Box>}
           {ordered.map((session, index) => (
             <SessionItem
               key={session.getId()}
@@ -389,7 +395,7 @@ export default function SideBar({ sessions, currSession, selectSession, addSessi
               visible={index >= offset && index < offset + rowsAt(offset)}
             />
           ))}
-          {moreBelow && visibleRows > 0 && <Box justifyContent="center" flexShrink={0}>
+          {moreBelow && <Box justifyContent="center" flexShrink={0}>
             <Text color={theme.textSubtle}>↓</Text>
           </Box>}
         </Box>
