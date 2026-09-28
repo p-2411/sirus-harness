@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { spawn } from 'child_process';
+import { fileURLToPath } from 'url';
 import { NOTIFICATION_PREFERENCES, openSettings, type NotificationPreference } from '../../persistence/settings';
 import { osc } from './osc';
 import { writeOverlay } from './screen';
@@ -10,6 +11,13 @@ import { terminalFocused } from './window-focus';
 // Ghostty, VTE terminals each have an escape sequence for it, and the
 // sequence also works over SSH); otherwise the platform's notifier runs.
 // A bell goes with every notification, for terminals that badge or bounce.
+//
+// Terminal sequences and osascript can only show the terminal's own icon.
+// On a local Mac with terminal-notifier installed, that runs first instead,
+// so the notification carries the Sirus logo.
+
+// Shipped inside src/ so the published package ("files": ["src"]) has it.
+const LOGO_PATH = fileURLToPath(new URL('../../assets/sirus-icon.png', import.meta.url));
 
 export const NOTIFICATION_MODE_DESCRIPTIONS: Record<NotificationPreference, string> = {
   off: 'never notify',
@@ -73,12 +81,7 @@ export function terminalNotificationSequence(
   return null;
 }
 
-function nativeNotify(title: string, body: string): void {
-  const command = process.platform === 'darwin'
-    ? ['osascript', '-e', `display notification ${JSON.stringify(plain(body))} with title ${JSON.stringify(plain(title))}`]
-    : process.platform === 'linux' ? ['notify-send', '--', plain(title), plain(body)]
-    : null;
-  if (!command) return;
+function spawnDetached(command: string[]): void {
   try {
     const child = spawn(command[0], command.slice(1), { stdio: 'ignore', detached: true });
     child.on('error', () => {});
@@ -88,10 +91,47 @@ function nativeNotify(title: string, body: string): void {
   }
 }
 
+let terminalNotifier: string | null | undefined;
+
+// terminal-notifier posts from its own app, so it needs the local desktop:
+// over SSH the notification would land on the remote Mac.
+function logoNotifier(): string | null {
+  if (process.platform !== 'darwin' || process.env.SSH_CONNECTION || process.env.SSH_TTY) return null;
+  if (terminalNotifier === undefined) terminalNotifier = Bun.which('terminal-notifier');
+  return terminalNotifier;
+}
+
+// terminal-notifier reads its arguments as user defaults, which parse a
+// leading bracket as a property list; its README escapes it with a backslash.
+function notifierText(text: string): string {
+  return plain(text).replace(/^\[/, '\\[');
+}
+
+function logoNotify(notifier: string, title: string, body: string): void {
+  const command = [
+    notifier, '-title', notifierText(title), '-message', notifierText(body),
+    '-appIcon', LOGO_PATH, '-contentImage', LOGO_PATH,
+  ];
+  // Clicking the notification brings back the terminal Sirus runs in.
+  const terminal = process.env.__CFBundleIdentifier;
+  if (terminal) command.push('-activate', terminal);
+  spawnDetached(command);
+}
+
+function nativeNotify(title: string, body: string): void {
+  const command = process.platform === 'darwin'
+    ? ['osascript', '-e', `display notification ${JSON.stringify(plain(body))} with title ${JSON.stringify(plain(title))}`]
+    : process.platform === 'linux' ? ['notify-send', '--icon', LOGO_PATH, '--', plain(title), plain(body)]
+    : null;
+  if (command) spawnDetached(command);
+}
+
 export function notify(title: string, body: string): void {
   if (!shouldNotify()) return;
-  const sequence = terminalNotificationSequence(title, body);
-  if (sequence) writeOverlay(sequence);
+  const notifier = logoNotifier();
+  const sequence = notifier ? null : terminalNotificationSequence(title, body);
+  if (notifier) logoNotify(notifier, title, body);
+  else if (sequence) writeOverlay(sequence);
   else nativeNotify(title, body);
   writeOverlay('\x07');
 }
