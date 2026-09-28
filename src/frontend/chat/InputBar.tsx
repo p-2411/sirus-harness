@@ -3,7 +3,7 @@ import { Box, Text, useApp, useBoxMetrics, useInput, usePaste, useStdout, type D
 import stringWidth from 'string-width';
 import { theme } from '../styles/theme';
 import { CommandMenu, useCommandMenu } from './CommandMenu';
-import { isNativeCommand, isSirusCommand } from '../../commands/registry';
+import { commandTokenAt, isNativeCommand, isSirusCommand } from '../../commands/registry';
 import { MentionMenu, useFileSuggestions, useMentionMenu } from './MentionMenu';
 import { DraftRow, TrailingImages } from './DraftText';
 import { describeImage, attachImageFile } from '../../images';
@@ -218,8 +218,8 @@ export function InputBar({
     getDraft: () => editor,
     setDraft: setEditor,
   });
-  const draftMessage = () => {
-    const content = composeContent(expandPastes(input).trim(), imageFor, trailingImages);
+  const draftMessage = (typed = input) => {
+    const content = composeContent(expandPastes(typed).trim(), imageFor, trailingImages);
     const text = content.flatMap(block => block.type === 'text' ? [block.text] : []).join('');
     return { text, images: [...placedImages, ...trailingImages], content };
   };
@@ -230,8 +230,17 @@ export function InputBar({
   useEffect(() => {
     setMenusDismissed(false);
   }, [input]);
-  const nativeList = input.startsWith('/') ? nativeCommands?.() ?? NO_NATIVE_COMMANDS : NO_NATIVE_COMMANDS;
-  const commands = useCommandMenu(input, mode.type === 'text' && !menusDismissed, nativeList);
+  const nativeList = input.includes('/') ? nativeCommands?.() ?? NO_NATIVE_COMMANDS : NO_NATIVE_COMMANDS;
+  const commands = useCommandMenu(input, mode.type === 'text' && !menusDismissed, nativeList, editor.cursor);
+  // The draft with the `/name` being typed completed to the highlighted
+  // command, wherever in the prompt it is typed.
+  const completeCommand = (): InputState | null => {
+    const token = commandTokenAt(input, editor.cursor);
+    const match = commands.matches[commands.selected];
+    if (!token || !match) return null;
+    const completed = `/${match.name} `;
+    return { text: input.slice(0, token.start) + completed + input.slice(token.end), cursor: token.start + completed.length };
+  };
   // A Sirus command takes no @mentions; a vendor command's arguments are a
   // prompt and do, once its name is complete.
   const sirusCommand = isSirusCommand(input, nativeList);
@@ -573,10 +582,10 @@ export function InputBar({
       }
     }
     // tab completes the highlighted command, so its arguments can follow
-    if (key.tab && !key.shift && commands.matches.length > 0) {
-      const completed = `/${commands.matches[commands.selected].name} `;
+    const completion = key.tab && !key.shift ? completeCommand() : null;
+    if (completion) {
       setRecall(null);
-      setEditor({ text: completed, cursor: completed.length });
+      setEditor(completion);
       return;
     }
     // Cmd+V / Ctrl+V use the same clipboard handler when forwarded; native
@@ -632,18 +641,17 @@ export function InputBar({
         setEditor({ text: `${input.slice(0, -1)}\n`, cursor: input.length });
         return;
       }
-      const selectedCommand = !sendImmediately && commands.matches[commands.selected];
-      const draft = draftMessage();
-      const trimmed = selectedCommand ? `/${selectedCommand.name}` : draft.text.trim();
+      // A command picked from the menu goes as its full name, not as the
+      // prefix typed so far.
+      const completion = sendImmediately ? null : completeCommand();
+      const draft = draftMessage(completion?.text);
+      const trimmed = draft.text.trim();
       if (!trimmed && draft.images.length === 0) {
         if (sendImmediately) onSendNow?.();
         return;
       }
-      // A command picked from the menu goes as its full name, not as the
-      // prefix typed so far, which the draft's own content still holds.
-      const content = selectedCommand ? undefined : draft.content;
-      if (sendImmediately && onSendNow) onSendNow(trimmed, draft.images, content);
-      else if (send(trimmed, draft.images, content) === false) return;
+      if (sendImmediately && onSendNow) onSendNow(trimmed, draft.images, draft.content);
+      else if (send(trimmed, draft.images, draft.content) === false) return;
       if (directory && trimmed && (!trimmed.startsWith('/') || isNativeCommand(trimmed, nativeList))) {
         try { appendPromptHistory(directory, trimmed); }
         catch (error) { setLocalFeedback({ kind: 'warning', text: `Could not save prompt history: ${errorMessage(error)}` }); }

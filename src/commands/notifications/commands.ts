@@ -7,7 +7,7 @@ import {
 import { NOTIFICATION_PREFERENCES, type NotificationPreference } from '../../persistence/settings';
 import { terminalFocused } from '../../frontend/terminal/window-focus';
 import type { Feedback } from '../feedback';
-import { commandUsage, type CommandMenuItem, type CommandSpec } from '../types';
+import { commandUsage, takesOne, type CommandMenuItem, type CommandSpec } from '../types';
 
 function notifyMenuItems(): CommandMenuItem[] {
   return NOTIFICATION_PREFERENCES.map(mode => ({
@@ -41,4 +41,5 @@ export const notifyCommandSpec: CommandSpec = {
     return notifyCommand(mode);
   },
   menu: args => args.length === 0 ? notifyMenuItems() : null,
+  takes: takesOne(parseNotificationMode),
 };

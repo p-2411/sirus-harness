@@ -2,8 +2,12 @@ import {
   agentsCommand,
   agentsMenuItems,
   changeModel,
+  changeThinkingLevel,
+  isThinkingArgument,
+  modelArgumentCount,
   modelMenuItems,
   subagentModelCommand,
+  thinkingArgumentCount,
   thinkingCommand,
   thinkingMenuItems,
 } from './behavior';
@@ -12,21 +16,25 @@ import { DEFAULT_PARTICIPANT } from '../../agent_runtime/types';
 
 export const modelCommand: CommandSpec = {
   name: 'model',
-  args: '[agent|subagent] <model>',
-  description: 'set an agent\'s model, or the one subagents run on',
+  args: '[agent|subagent] <model> [thinking]',
+  description: 'set an agent\'s model and thinking, or the model subagents run on',
   run: (args, context) => {
     if (args[0] === 'subagent') {
       return subagentModelCommand(args.slice(1), context.session);
     }
-    if (args.length === 1) {
-      return changeModel(DEFAULT_PARTICIPANT, args[0], context.session, context.notify);
+    // Two words are an agent and its model unless the second is a level.
+    const named = args.length === 3 || (args.length === 2 && !isThinkingArgument(args[1]));
+    const [participant, model, level] = named ? args : [DEFAULT_PARTICIPANT, ...args];
+    if (!model || args.length > 3 || (level !== undefined && !isThinkingArgument(level))) {
+      throw new Error(`Usage: ${commandUsage(modelCommand)}`);
     }
-    if (args.length === 2) {
-      return changeModel(args[0], args[1], context.session, context.notify);
-    }
-    throw new Error(`Usage: ${commandUsage(modelCommand)}`);
+    const changed = changeModel(participant, model, context.session, context.notify);
+    if (level === undefined) return changed;
+    const thinking = changeThinkingLevel(participant, level, context.session);
+    return { kind: changed.kind === 'success' ? thinking.kind : changed.kind, text: `${changed.text} ${thinking.text}` };
   },
   menu: modelMenuItems,
+  takes: modelArgumentCount,
 };
 
 export const agentsCommandSpec: CommandSpec = {
@@ -46,4 +54,5 @@ export const thinkingCommandSpec: CommandSpec = {
     return thinkingCommand(args, context.session);
   },
   menu: thinkingMenuItems,
+  takes: thinkingArgumentCount,
 };

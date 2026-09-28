@@ -9,6 +9,8 @@ import {
   executeCommand,
   matchCommands,
   parseCommandLine,
+  promptContent,
+  splitPrompt,
   vendorCommandFor,
   type CommandMenuItem,
   type CommandSession,
@@ -81,7 +83,7 @@ describe('matchCommands', () => {
 
   test('filters by typed prefix', () => {
     expect(matchCommands('/mod').map(c => c.name)).toEqual(['model']);
-    expect(matchCommands('/model')[0].args).toBe('[agent|subagent] <model>');
+    expect(matchCommands('/model')[0].args).toBe('[agent|subagent] <model> [thinking]');
   });
 
   test('returns nothing for a non-matching prefix', () => {
@@ -193,6 +195,67 @@ describe('matchCommands', () => {
   });
 });
 
+describe('commands written in a prompt', () => {
+  const simplify: NativeCommand = { name: 'simplify', description: 'Simplify code', invocation: '/simplify', vendor: 'claude' };
+  const split = (text: string) => {
+    const { commands, prompt } = splitPrompt(text, [simplify], new Session());
+    return { commands: commands.map(command => [command.name, ...command.args]), prompt };
+  };
+
+  beforeEach(seedVendorModels);
+
+  test('a command takes the words its grammar reads, wherever it is, and the rest is the prompt', () => {
+    expect(split('/model claude-fable-5-1 refactor the parser')).toEqual({
+      commands: [['model', 'claude-fable-5-1']], prompt: 'refactor the parser',
+    });
+    expect(split('/model haiku high refactor the parser')).toEqual({
+      commands: [['model', 'haiku', 'high']], prompt: 'refactor the parser',
+    });
+    expect(split('please fix the bug /model @sirus haiku')).toEqual({
+      commands: [['model', '@sirus', 'haiku']], prompt: 'please fix the bug',
+    });
+    expect(split('fix /thinking max the bug /usage')).toEqual({
+      commands: [['thinking', 'max'], ['usage']], prompt: 'fix the bug',
+    });
+    // A grammar reads only the command's own line.
+    expect(split('/model haiku\nhigh level plan')).toEqual({ commands: [['model', 'haiku']], prompt: 'high level plan' });
+  });
+
+  test('a prompt that is only a command reads as it always has', () => {
+    expect(split('/model haiku')).toEqual({ commands: [['model', 'haiku']], prompt: '' });
+    expect(split('/model not a model')).toEqual({ commands: [['model', 'not', 'a', 'model']], prompt: '' });
+    expect(split('/rename the parser work')).toEqual({ commands: [['rename', 'the', 'parser', 'work']], prompt: '' });
+    expect(split('/clear')).toEqual({ commands: [['clear']], prompt: '' });
+  });
+
+  test('paths, unknown names, code and standalone commands past the start stay prose', () => {
+    for (const text of ['use and/or /tmp/x', 'see /nope first', 'explain `/model haiku` please', 'then /usage.', 'fix it /new']) {
+      expect(split(text)).toEqual({ commands: [], prompt: text });
+    }
+  });
+
+  test('a vendor command written after the start leads the prompt it was written in', () => {
+    expect(split('tidy the parser /simplify')).toEqual({ commands: [], prompt: '/simplify tidy the parser' });
+    expect(split('/simplify the parser /thinking high')).toEqual({ commands: [['thinking', 'high']], prompt: '/simplify the parser' });
+    expect(split('/simplify the parser, then /simplify again')).toEqual({ commands: [], prompt: '/simplify the parser, then /simplify again' });
+  });
+
+  test('the same cut applies to a draft\'s blocks around its images', () => {
+    const image = { type: 'image' as const, path: '/tmp/shot.png', mediaType: 'image/png' as const, bytes: 1 };
+    const content = [{ type: 'text' as const, text: 'fix ' }, image, { type: 'text' as const, text: ' /model haiku now' }];
+    expect(promptContent(content, splitPrompt('fix  /model haiku now', [], new Session()))).toEqual([
+      { type: 'text', text: 'fix ' }, image, { type: 'text', text: ' now' },
+    ]);
+  });
+
+  test('the menu offers commands for a slash typed mid-prompt, at the cursor', () => {
+    expect(matchCommands('fix the bug /mod').map(match => match.name)).toEqual(['model']);
+    expect(matchCommands('fix /mod the bug', [], 8).map(match => match.name)).toEqual(['model']);
+    expect(matchCommands('and/mod')).toEqual([]);
+    expect(matchCommands('fix the bug /ne').map(match => match.name)).toEqual([]);
+  });
+});
+
 describe('executeCommand', () => {
   let settingsDirectory: string;
   let previousDirectory: string | undefined;
@@ -281,6 +344,16 @@ describe('executeCommand', () => {
     expect(session.getParticipants()[1]).toEqual({ name: 'reviewer', model: 'claude-fable-5-1' });
     expect(openSettings().get('sirusModel')).toBe('gpt-5.6-terra');
     expect(session.getModel()).toBe('gpt-5.6-luna');
+  });
+
+  test('model command sets a thinking level after the model', () => {
+    const session = new Session();
+    session.addParticipant('reviewer', 'claude-sonnet-5');
+    expect(runCommand('model', ['haiku', 'high'], session)).toMatchObject({ text: expect.stringContaining('@sirus thinking set to high.') });
+    expect(session.getThinkingLevel()).toBe('high');
+    runCommand('model', ['@reviewer', 'claude-fable-5-1', 'low'], session);
+    expect(session.getParticipants().find(participant => participant.name === 'reviewer')?.model).toBe('claude-fable-5-1');
+    expect(session.getThinkingLevel('reviewer')).toBe('low');
   });
 
   test('model command accepts an unambiguous partial model name', () => {
