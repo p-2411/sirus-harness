@@ -356,6 +356,23 @@ describe('shared vendor skills', () => {
     return target;
   }
 
+  test('skips oversized and non-regular skill instructions while keeping valid skills', () => {
+    const root = path.join(claudeHome, 'skills');
+    const valid = skill(root, 'valid');
+    const oversized = skill(root, 'oversized');
+    writeFileSync(path.join(oversized, 'SKILL.md'), 'x'.repeat(1024 * 1024 + 1));
+    if (process.platform !== 'win32') {
+      const pipe = path.join(root, 'pipe', 'SKILL.md');
+      mkdirSync(path.dirname(pipe), { recursive: true });
+      childProcess.execFileSync('mkfifo', [pipe]);
+    }
+    const roots = codexSkillDirectories(project);
+    expect(roots).toHaveLength(1);
+    const linked = path.join(roots[0]!, '.agents', 'skills', 'personal');
+    expect(readdirSync(linked)).toEqual(['valid']);
+    expect(realpathSync(path.join(linked, 'valid'))).toBe(realpathSync(valid));
+  });
+
   function claudePlugin(id: string, name: string, enabled = true, manifest: Record<string, unknown> = {}): string {
     const target = path.join(claudeHome, 'plugins', 'cache', 'community', id, '1.0.0');
     json(path.join(target, '.claude-plugin', 'plugin.json'), { name, ...manifest });

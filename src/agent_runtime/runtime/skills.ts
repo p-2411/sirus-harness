@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { closeSync, constants, existsSync, fstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { dataDirectory } from '../../dataDirectory';
@@ -32,6 +32,7 @@ interface Inventory {
 
 type Fields = Record<string, unknown>;
 const LINK_TYPE = process.platform === 'win32' ? 'junction' : 'dir';
+const MAX_SKILL_BYTES = 1024 * 1024;
 
 function fields(value: unknown): Fields {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Fields : {};
@@ -95,8 +96,21 @@ function projects(directory: string): string[] {
 }
 
 function readSkill(folder: string): Skill | null {
+  let descriptor: number;
+  try { descriptor = openSync(path.join(folder, 'SKILL.md'), constants.O_RDONLY | constants.O_NONBLOCK); }
+  catch { return null; }
   try {
-    const text = readFileSync(path.join(folder, 'SKILL.md'), 'utf8');
+    const stat = fstatSync(descriptor);
+    if (!stat.isFile() || stat.size > MAX_SKILL_BYTES) return null;
+    const buffer = Buffer.alloc(MAX_SKILL_BYTES + 1);
+    let bytes = 0;
+    while (bytes < buffer.length) {
+      const count = readSync(descriptor, buffer, bytes, buffer.length - bytes, null);
+      if (count === 0) break;
+      bytes += count;
+    }
+    if (bytes > MAX_SKILL_BYTES) return null;
+    const text = buffer.subarray(0, bytes).toString('utf8');
     const match = /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
     const metadata = match ? fields(Bun.YAML.parse(match[1])) : {};
     return {
@@ -108,6 +122,8 @@ function readSkill(folder: string): Skill | null {
     };
   } catch {
     return null;
+  } finally {
+    closeSync(descriptor);
   }
 }
 
