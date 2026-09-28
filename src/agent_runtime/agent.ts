@@ -223,7 +223,12 @@ export class SessionAgent {
   set thinkingLevel(level: ThinkingLevel | undefined) {
     this.level = level;
     this.fitThinkingLevel();
-    void this.runtime?.setThinkingLevel(this.level).catch(() => this.releaseRuntime());
+    // A refusal that arrives late releases the runtime that refused, never a
+    // newer one that has replaced it meanwhile.
+    const runtime = this.runtime;
+    void runtime?.setThinkingLevel(this.level).catch(() => {
+      if (this.runtime === runtime) this.releaseRuntime();
+    });
   }
 
   // The depth the vendor gives this agent's model when nobody sets one, once
