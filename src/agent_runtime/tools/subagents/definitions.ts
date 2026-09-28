@@ -2,7 +2,7 @@ import { YAML } from 'bun';
 import { existsSync, readdirSync, readFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
-import { modelIds, vendorOf } from '../../providers/catalog';
+import { modelIds, vendorOf, VENDOR_INFO } from '../../providers/catalog';
 import { parseThinkingLevel, type ThinkingLevel } from '../../types';
 
 export interface AgentDefinition {
@@ -105,7 +105,7 @@ function definitionsIn(folder: string, prefix: string): AgentDefinition[] {
 }
 
 export function agentDefinitions(directory: string): AgentDefinition[] {
-  const home = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+  const home = process.env[VENDOR_INFO.claude.profileDirEnv] || path.join(os.homedir(), '.claude');
   const projects = projectDirectories(directory);
   const folders = [
     ...pluginAgents(home, projects),

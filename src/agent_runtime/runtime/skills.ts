@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpath
 import os from 'os';
 import path from 'path';
 import { dataDirectory } from '../../dataDirectory';
+import { VENDOR_INFO } from '../providers/catalog';
 
 // The vendors still load their own skills. These wrappers add only what the
 // other vendor has and this one does not, without touching either home or
@@ -76,8 +77,8 @@ function userHome(): string {
 
 function homes(): { claude: string; codex: string } {
   return {
-    claude: process.env.CLAUDE_CONFIG_DIR || path.join(userHome(), '.claude'),
-    codex: process.env.CODEX_HOME || path.join(userHome(), '.codex'),
+    claude: process.env[VENDOR_INFO.claude.profileDirEnv] || path.join(userHome(), '.claude'),
+    codex: process.env[VENDOR_INFO.gpt.profileDirEnv] || path.join(userHome(), '.codex'),
   };
 }
 
