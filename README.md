@@ -83,9 +83,9 @@ For work that can be split into independent tasks, Sirus can spawn subagents tha
 
 An agent can also wait for a subagent's report in the call that spawned it. If you press `Esc` while it waits, or the wait passes four and a half minutes (both vendors give up on a tool call after five), the subagent carries on in the background and its report reaches the agent the same way.
 
-Subagents work in the project directory itself by default, so assignments should avoid overlapping edits. An agent can ask for a Git worktree instead: the subagent then works on a branch named after the run and cut from your project's HEAD, so its edits meet neither yours nor another subagent's. Uncommitted changes and ignored files are not carried over. The report names the branch, and merging or inspecting it is yours or the spawning agent's to do. A worktree the subagent left unchanged is removed when it ends, with its branch; one it changed stays in Sirus's data directory, deleting the session included, and its branch stays in your repository. A project that is not a Git repository, or has no commit yet, gets no worktree, and its subagents work in the project directory. If Git cannot create the worktree, the subagent is not started.
+Subagents work in the project directory itself by default, so assignments should avoid overlapping edits. An agent can ask for a Git worktree instead: the subagent then works on a branch named after the run and cut from your project's HEAD, so its edits meet neither yours nor another subagent's. Uncommitted changes and ignored files are not carried over. The report names the branch, and merging or inspecting it is yours or the spawning agent's to do. A worktree the subagent left unchanged is removed when it ends, with its branch; one it changed stays in Sirus's data directory, deleting the session included, and its branch stays in your repository. A project that is not a Git repository gets no worktree, and its subagents work in the project directory. A repository must have a commit before a worktree can be created. If Git cannot inspect the repository or create the worktree, the subagent is not started.
 
-Named participants are collaborators you can address and follow in the chat; subagents receive only their delegated task and report back to the agent that spawned them, though an agent can also start one from its own conversation so far when the task depends on what you have already established. While a subagent runs, its owner can ask it for its status, send it further instructions, or stop it. `Esc` cancels the session's turn and leaves the subagents working. A subagent whose agent has reported nothing for 15 minutes, not counting time spent waiting on your approval or inside a tool call that is still running, such as a long build, is taken as hung and stopped, and its report says so.
+Named participants are collaborators you can address and follow in the chat; subagents receive only their delegated task and report back to the agent that spawned them, though an agent can also start one from its own conversation so far when the task depends on what you have already established. While a subagent runs, its owner can ask it for its status, send it further instructions, or stop it. `Esc` cancels the session's turn and any subagent setup still in progress; subagents already running keep working. A subagent whose agent has reported nothing for 15 minutes, not counting time spent waiting on your approval or inside a tool call that is still running, such as a long build, is taken as hung and stopped, and its report says so.
 
 You can follow them yourself. A subagent goes by the name its agent gave it, or by its id when it was given none, on the strip, in `/agents`, on its row and on its approval prompts. The strip above the status row shows one line, for the selected agent's subagent that changed last: its name, its model, how long it has been running, its latest tool call, its task, and its branch, with a counter such as `1/3` when others are behind it. Press `↓` from the input bar to step onto the strip; the order is fixed as you arrive, `↑`/`↓` walk it, `enter` opens that subagent's actions, and `↑` past the first line or `Esc` hands the keyboard back to your draft. A subagent that ends keeps its line for a second, dimmed, saying how it ended, and is then off the strip. `/agents` lists the session's subagents and offers to show one's record, send it a message, cancel it, or dismiss its line. Runs are saved with the session: one still working when you quit comes back marked interrupted, with its record, and its report reaches its owner on your next prompt. Nothing restarts on its own.
 
@@ -121,9 +121,9 @@ Use `/compact` to ask for it now, optionally followed by what the summary should
 
 Create sessions, name them, and switch between them from the sidebar. Each session retains its working directory, conversation, participants, model choices, and permission mode. Existing sessions keep their model settings when you change models elsewhere.
 
-Press Enter while an agent is busy to queue a follow-up. Text reaches the agent after its tool calls finish, or starts the next turn if it is only writing. Commands and images wait until the turn ends; model, thinking, permission, status, and worker controls run immediately. Ctrl+Enter (or Ctrl+X Ctrl+S) sends waiting messages and your draft now. Esc interrupts and sends what is queued. `↑` takes the messages waiting for the selected agent back into your draft, one per line, to edit and send again.
+Press Enter while an agent is busy to queue a follow-up. Text reaches the agent after its tool calls finish, or starts the next turn if it is only writing. Commands and images wait until the turn ends; queued commands also need their session open with the input ready. Model, thinking, permission, status, and worker controls run immediately. Ctrl+Enter (or Ctrl+X Ctrl+S) sends waiting messages and your draft now. Esc interrupts and sends what is queued. `↑` takes the messages waiting for the selected agent back into your draft, preserving their text and image order, to edit and send again. A queued prompt that fails before it is accepted stays queued for you to edit or retry with Send now.
 
-Session history is saved automatically, including partial responses when you quit. Reopen Sirus to return to your conversations. Desktop notifications tell you when attention is needed while the terminal is not focused; that is the default, and `/notify always` or `/notify off` changes it.
+Session history is saved automatically, including partial responses when you quit. Sirus opens on a fresh draft by default; choose a saved conversation in the sidebar or with `/resume`. Start it with `--continue` to reopen the latest conversation in this directory, or `--resume <query>` to match a name or id. Desktop notifications tell you when attention is needed while the terminal is not focused; that is the default, and `/notify always` or `/notify off` changes it.
 
 ### Put the right context in the prompt
 
@@ -183,7 +183,7 @@ Use `/usage` to see reported subscription allowance and how full each participan
 
 | Control | What it does |
 | --- | --- |
-| `Ctrl+N` | Start a new session. |
+| `Ctrl+N` | Focus the draft session. |
 | `Option+↑` / `Option+↓` | Switch sessions. |
 | `←` / `→` | Switch agents within the current task. |
 | `Ctrl+B` | Collapse or expand the sidebar. |
@@ -195,6 +195,7 @@ Use `/usage` to see reported subscription allowance and how full each participan
 | `/rename <name>` | Give the current session a useful name. |
 | `/thinking` | Show or change reasoning depth; `default` leaves it to the model. |
 | `/agents` | Watch, message, cancel, or clear the session's subagents. |
+| `/tasks` | Inspect background commands started by the vendors. |
 | `/undo` / `/rewind` | Choose what to restore from a checkpoint. |
 | `/notify` | Configure desktop notifications. |
 | `/doctor` | Check Bun, adapter and vendor versions, logins, data directory and git. Also available as `sirus doctor`. API key validity is not checked. |

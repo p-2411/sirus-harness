@@ -180,8 +180,8 @@ Codex's own subagents off (`multi_agent`) and `request_user_input` on in every m
 `Launch.session` builds what one session carries, whether it is opened by `session/new`,
 `session/fork` or `session/resume`, so the vendor's extras are written once and each
 session names the participant it was opened for; `forkNeedsResume` says whether the
-vendor's fork answers with a live session (Codex) or has to be reopened in the worker's
-directory first (Claude). On both vendors a fork keeps the system prompt of the conversation
+fork must be resumed before use. Both current adapters require it: Claude reopens the
+copy in the worker's directory, and Codex subscribes the fork to session updates. On both vendors a fork keeps the system prompt of the conversation
 it was forked from, so the worker's own contract arrives in its first prompt instead
 (`FORKED_WORKER_HANDOVER` in `prompt.ts`). Adding a vendor starts with a launch spec and a
 catalog row; Providers below lists the rest.
@@ -201,6 +201,8 @@ profile of Sirus's own, `linkCodexSkills` links the user's `~/.codex/skills` int
 project's and those of third-party plugins the user enabled, linked from `shared-skills/`
 under the data directory: Claude gets them as local plugins (`claudeSkillPlugins`), Codex as
 additional directories (`codexSkillDirectories`), and neither vendor's own folders change.
+The bridge reads `SKILL.md` metadata only from regular files, through an opened descriptor,
+and skips files larger than 1 MiB. Skill symlinks retain their existing behavior.
 
 The vendors' own commands, skills included, are what each runtime reports in
 `available_commands_update` (`runtime/commands.ts`); the last list per vendor and directory
@@ -215,7 +217,13 @@ command that only reports and takes no arguments (`isReportingCommand`: Claude's
 Codex's `/status`) is not sent at all: `SessionAgent.runAside` runs it on a throwaway fork of
 the participant's runtime, or on a fresh runtime while the vendor holds no conversation yet,
 and the chat shows what it printed as a panel, so it leaves no turn, no checkpoint and nothing
-in any record. Sirus's own `/init` and `/review` go the prompt way too: the chat shows
+in any record. The entry point accepts only the vendor's known reporting commands without
+arguments. These sessions receive no Sirus MCP endpoint and an empty native tool list;
+permissions and questions are declined. A cold report tries the configured credentials in
+order, while a live fork uses its owner's actual credential. `/mcp` distinguishes the
+participant's reported connections from those of this restricted reporting session.
+Sirus's own `/init` and `/review` go the prompt way too, explicitly addressed to the selected
+recipient so their instruction text cannot route to another participant: the chat shows
 `/init`, and `nativePrompt` hands the participant Sirus's prompt for it, except that Codex's
 `/review` stays Codex's. Claude reads a slash command only from the prompt's last text
 block, so a cold runtime seeded with its record gets that record as a block of its own
@@ -233,6 +241,10 @@ are refused and `dispose` waits for it. `createSubagent` builds the worker as a
 and none of the delegation tools. A worker started from its owner's conversation has
 `forkFrom` start its first runtime as a fork of the owner's, falling back to a fresh runtime
 seeded with the owner's record as text when there is nothing to fork or the vendor refuses.
+The spawning call's abort signal covers checkout creation and fork setup. Cancellation
+before start cleans up an unused checkout and any late fork; after start, the worker has
+its own lifetime. A foreground result that cannot reach its cancelled call is delivered
+through the background report path.
 
 Runtimes stay warm between turns. Each participant and worker snapshot carries a
 `nativeSession`: vendor, vendor session id, original session directory, credential source
@@ -324,9 +336,11 @@ start, check, steer, cancel, and the report handed to the owner at the end), `re
 (everything a run says about itself, to the model that asked and in that report),
 `worktree.ts` (the checkout a spawn with `isolation: "worktree"` gets under the data
 directory, cut from the project's HEAD onto `sirus/<id>`, removed with its branch when the
-run ends having changed nothing, and kept with its branch otherwise). A project that
-is no repository, or has no commit yet, gets no worktree and the worker runs in place; a
-repository git fails to cut a worktree from fails the spawn instead.
+run ends having changed nothing, and kept with its branch otherwise). Branch cleanup
+deletes the ref only if it still points at the original commit. Only a directory outside
+a repository falls back to running in place; an unborn repository or a Git inspection or
+creation error fails the spawn. Rewind interlocks identify directories by their real path
+so sessions and in-place workers reached through symlinks still share the same guard.
 
 Permissions are the vendor's. `policy.ts` holds the vocabulary of the three modes;
 `runtime/runtime.ts` maps each onto the vendor mode kind (`standard`, `auto_review`,
@@ -370,8 +384,12 @@ is the only way a `Session` is rebuilt. The single `sessions.json` older builds 
 migrated once, each session validated on its own and its file created with a hard link
 only where none exists yet. A session file this build cannot read is moved into `invalid/`
 with a notice, or left where it is when it cannot be moved, and is never written over.
-`app.tsx` saves each changed session on a 500 ms trailing timer, and synchronously on exit;
-a session whose file another window deleted is not written back.
+`app.tsx` schedules a save 500 ms after the first change, coalesces changes while that
+timer is pending, and saves synchronously on exit. Deleting a session first writes a
+durable tombstone; saves check it before and after publishing, and reads and legacy
+migration respect it, so stale windows cannot resurrect a deleted session. Concurrent
+edits to a session that still exists remain last-writer-wins. `promptHistory.ts` reads
+backward in chunks until it has the newest 1,000 valid prompt records.
 Nothing under `persistence/` imports runtime code: its value imports from outside the folder
 are the zero-dependency `agent_runtime/types.ts`, `src/dataDirectory.ts` and, in
 `sessions.ts`, `isCheckpointId` from `src/checkpoints.ts`; its imports of `Session` and
