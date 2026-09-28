@@ -1,4 +1,6 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, fstatSync, linkSync, lstatSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, constants } from 'node:fs';
+import type { Stats } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type { CommandSpec } from '../types';
 
@@ -16,14 +18,50 @@ const IMPORT_LINE = '@AGENTS.md';
 function importAgentsFromClaude(directory: string): 'created' | 'added' | 'present' | 'no-agents' {
   if (!existsSync(join(directory, 'AGENTS.md'))) return 'no-agents';
   const claude = join(directory, 'CLAUDE.md');
-  if (!existsSync(claude)) {
-    writeFileSync(claude, `${IMPORT_LINE}\n`);
-    return 'created';
+  let original: Stats | undefined;
+  try {
+    original = lstatSync(claude);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
-  const text = readFileSync(claude, 'utf8');
+  if (original && !original.isFile()) throw new Error('CLAUDE.md must be a regular file, not a symlink or special file.');
+  let text = '';
+  if (original) {
+    const fd = openSync(claude, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const opened = fstatSync(fd);
+      if (!opened.isFile() || opened.dev !== original.dev || opened.ino !== original.ino) {
+        throw new Error('CLAUDE.md changed while reading it. Run /init again.');
+      }
+      text = readFileSync(fd, 'utf8');
+    } finally {
+      closeSync(fd);
+    }
+  }
   if (text.split(/\r?\n/).some(line => line.trim() === IMPORT_LINE)) return 'present';
-  writeFileSync(claude, `${IMPORT_LINE}\n\n${text}`);
-  return 'added';
+  // Replace the directory entry atomically: a link swapped in during the
+  // write is replaced as a link, never followed to its target.
+  const temporary = join(directory, `.CLAUDE.md-${randomUUID()}.tmp`);
+  try {
+    writeFileSync(temporary, original ? `${IMPORT_LINE}\n\n${text}` : `${IMPORT_LINE}\n`, {
+      flag: 'wx', mode: original ? original.mode & 0o777 : 0o666,
+    });
+    if (original) {
+      chmodSync(temporary, original.mode & 0o777);
+      const current = lstatSync(claude);
+      if (!current.isFile() || current.dev !== original.dev || current.ino !== original.ino) {
+        throw new Error('CLAUDE.md changed while updating it. Run /init again.');
+      }
+      renameSync(temporary, claude);
+      return 'added';
+    }
+    linkSync(temporary, claude);
+    return 'created';
+  } finally {
+    try { unlinkSync(temporary); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
 }
 
 function sendPrompt(text: string, context: Parameters<CommandSpec['run']>[1]): Promise<void> {

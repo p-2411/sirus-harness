@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, symlinkSync, statSync, mkdirSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, beforeEach } from 'bun:test';
@@ -162,6 +162,27 @@ describe('matchCommands', () => {
         .toMatchObject({ kind: 'warning', text: expect.stringContaining('did not write AGENTS.md') });
     } finally {
       rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('/init refuses a linked or non-regular CLAUDE.md without writing its target', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'sirus-init-safe-'));
+    const outside = mkdtempSync(join(tmpdir(), 'sirus-init-outside-'));
+    try {
+      writeFileSync(join(directory, 'AGENTS.md'), '# Guide\n');
+      const target = join(outside, 'notes.md');
+      writeFileSync(target, 'Keep this text.\n');
+      const claude = join(directory, 'CLAUDE.md');
+      symlinkSync(target, claude);
+      const context = { session: new Session({ directory }), signal: new AbortController().signal, notify() {}, sendPrompt: async () => {} };
+      await expect(executeCommand('init', [], context)).rejects.toThrow('regular file');
+      expect(readFileSync(target, 'utf8')).toBe('Keep this text.\n');
+      rmSync(claude);
+      mkdirSync(claude);
+      await expect(executeCommand('init', [], context)).rejects.toThrow('regular file');
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
     }
   });
 });
