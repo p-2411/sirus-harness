@@ -51,20 +51,16 @@ struct Composer: View {
         #if DEBUG
         .task {
             // Screenshot hooks: -composerDraft <text> and -composerFocused YES.
-            // Focus asked for while the screen is still settling can raise
-            // the keyboard without the focus state hearing of it, and then
-            // the menu never opens; a tap never comes that early. So it
-            // waits, and asks again until the state has it.
+            // The field takes the keyboard as a tap gives it: its own text
+            // view becomes first responder, and the focus state hears of it
+            // from there. Setting the focus state at launch instead could
+            // raise the keyboard without the state hearing of it, and then
+            // the menu never opened, as it would for no tap.
             let preset = UserDefaults.standard.string(forKey: "composerDraft")
             if let preset { draft = preset }
             if UserDefaults.standard.bool(forKey: "composerFocused") {
-                for _ in 0..<8 {
-                    try? await Task.sleep(for: .milliseconds(700))
-                    if focus.wrappedValue { break }
-                    focus.wrappedValue = false
-                    await Task.yield()
-                    focus.wrappedValue = true
-                }
+                try? await Task.sleep(for: .milliseconds(700))
+                lowestTextInput()?.becomeFirstResponder()
             }
             if preset != nil {
                 await Task.yield()
@@ -125,3 +121,18 @@ struct Composer: View {
         }
     }
 }
+
+#if DEBUG
+// The text input lowest in the window, which in a conversation is the
+// composer's.
+@MainActor private func lowestTextInput() -> UIView? {
+    let window = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.keyWindow }.first
+    var inputs: [UIView] = []
+    func collect(_ view: UIView) {
+        if view is UITextView || view is UITextField { inputs.append(view) }
+        view.subviews.forEach(collect)
+    }
+    if let window { collect(window) }
+    return inputs.max { $0.convert($0.bounds, to: nil).maxY < $1.convert($1.bounds, to: nil).maxY }
+}
+#endif
