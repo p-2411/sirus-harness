@@ -127,7 +127,7 @@ export const exportCommand: CommandSpec = {
     const path = resolve(session.getDirectory(), args.join(' ') || `sirus-${Date.now()}.md`);
     const messages = session.getMessages().filter(message => !message.hidden);
     const body = messages.map(message => `## ${message.role === 'user' ? 'You' : message.participant ?? 'Assistant'}\n\n${textOf(message)}`).join('\n\n');
-    writeFileSync(path, `# ${session.getName()}\n\n${body}\n`, { flag: 'wx' });
+    writeFileSync(path, `# ${session.getName()}\n\n${body}\n`, { flag: 'wx', mode: 0o600 });
     return { kind: 'success', text: `Exported to ${path}.` };
   },
 };
