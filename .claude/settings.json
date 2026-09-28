@@ -1,21 +1,24 @@
 {
   "hooks": {
-    "PreToolUse": [
+    "SessionStart": [
       {
-        "matcher": "Bash|Grep",
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/parhamsepasgozar/.local/bin/graphify hook-guard search"
+            "command": "node \"${CLAUDE_PROJECT_DIR}/scripts/graphify-remote-hook.mjs\"",
+            "timeout": 5
           }
         ]
-      },
+      }
+    ],
+    "PreToolUse": [
       {
-        "matcher": "Read|Glob",
+        "matcher": "^(Bash|Grep|Read|Glob)$",
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/parhamsepasgozar/.local/bin/graphify hook-guard read"
+            "command": "node \"${CLAUDE_PROJECT_DIR}/scripts/graphify-remote-hook.mjs\"",
+            "timeout": 5
           }
         ]
       }

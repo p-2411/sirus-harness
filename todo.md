@@ -7,6 +7,9 @@
 
 [] notifications should come with the sirus logo
 
+[] highlighting input bar only highlights within the input bar.
+
+[] remove the 5h from codex in the usage menu since codex doesn't have a 5h limit.
 
 ## features
 [] auto-rag + breadcrumb memory system (copy from ../sirius)
