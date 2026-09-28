@@ -693,24 +693,34 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   // prompt there until the choice is made. A command leaves any attachments
   // waiting for the next real message. Commands are exactly what the
   // background queue leaves for a mounted Chat.
-  const send = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[], recipient = selected, to?: readonly string[], queuedMessage?: QueuedMessage): boolean => {
+  const splitDraft = (text: string, content: MessageBlock[] | undefined, recipient: string) => {
     const typed = content ? content.flatMap(block => block.type === 'text' ? [block.text] : []).join('') : text;
     const parts = splitPrompt(typed, currSession.getNativeCommands(recipient), currSession);
     const prompt = parts.cuts.length > 0 ? parts.prompt : text;
     const promptBlocks = content && parts.cuts.length > 0 ? promptContent(content, parts) : content;
-    if (parts.commands.length === 0) return sendToAgents(prompt, images, promptBlocks, recipient, to, queuedMessage);
+    return { commands: parts.commands, prompt, promptBlocks };
+  };
+  // A prompt held back goes into the queue as send would run it: each
+  // command an item of its own, so none is read again with another's words
+  // or sent to the agents unrun, then what is left for the agents.
+  const queueDraft = ({ commands, prompt, promptBlocks }: ReturnType<typeof splitDraft>, images: readonly ImageBlock[], recipient: string) => {
+    for (const command of commands) queue(command.text, [], undefined, recipient);
+    if (prompt || images.length) queue(prompt, images, promptBlocks, recipient);
+  };
+  const send = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[], recipient = selected, to?: readonly string[], queuedMessage?: QueuedMessage): boolean => {
+    const draft = splitDraft(text, content, recipient);
+    const { commands, prompt, promptBlocks } = draft;
+    if (commands.length === 0) return sendToAgents(prompt, images, promptBlocks, recipient, to, queuedMessage);
 
     const waits = (commandAbort.current !== null || currSession.getStatus() === 'working')
-      && !parts.commands.every(command => isImmediateCommand(command.text));
+      && !commands.every(command => isImmediateCommand(command.text));
     if (waits) {
-      if (queuedMessage) return true;
-      for (const command of parts.commands) queue(command.text, [], undefined, recipient);
-      if (prompt) queue(prompt, images, promptBlocks, recipient);
+      if (!queuedMessage) queueDraft(draft, images, recipient);
       return true;
     }
     if (queuedMessage) currSession.takeQueuedMessages([queuedMessage.id]);
     let said: Feedback | undefined;
-    for (const command of parts.commands) {
+    for (const command of commands) {
       const outcome = runCommand(command.name, command.args, recipient, command.argumentText);
       if (outcome.status === 'failed') return !prompt;
       if (outcome.status === 'menu') {
@@ -825,7 +835,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       if (text || images.length) send(text, images, content);
       return;
     }
-    if (text || images.length) queue(text, images, content);
+    if (text || images.length) queueDraft(splitDraft(text, content, selected), images, selected);
     commandAbort.current?.abort(new TurnCancelledError());
     void currSession.deliverQueuedMessages();
   };
