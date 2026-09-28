@@ -1,6 +1,12 @@
 import { describe, expect, test } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { claudeSubscriptionUsage, codexSubscriptionUsage } from '../../src/agent_runtime/providers/usage';
 import { describeSubscriptionUsage } from '../../src/commands/authentication/behavior';
+import { turnFailure } from '../../src/agent_runtime/runtime/errors';
+import { rememberListedModels } from '../../src/agent_runtime/providers/catalog';
+import { providerFor } from '../../src/agent_runtime/providers';
 
 describe('subscription allowance normalization', () => {
   test('prefers all Codex buckets over the duplicate legacy view', () => {
@@ -79,4 +85,25 @@ describe('allowance display', () => {
     expect(describeSubscriptionUsage({ windows: [], unavailable: 'request timed out' }))
       .toBe('5h unavailable · 7d unavailable');
   });
+});
+
+test('rate-limit switch hint requires a current credential for the other vendor', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sirus-limit-hint-'));
+  const previous = process.env.SIRUS_DATA_DIR;
+  process.env.SIRUS_DATA_DIR = directory;
+  try {
+    rememberListedModels('claude', [{ id: 'claude-hint-model', description: '' }]);
+    expect(turnFailure(new Error('Rate limit exceeded'), 'gpt', 'sirus').message)
+      .toContain('sign in with /login');
+    const source = providerFor('claude').sources.addApiKey('test-key');
+    expect(turnFailure(new Error('Rate limit exceeded'), 'gpt', 'sirus').message)
+      .toContain('/model claude-hint-model');
+    providerFor('claude').sources.remove(source.id);
+    expect(turnFailure(new Error('Rate limit exceeded'), 'gpt', 'sirus').message)
+      .toContain('sign in with /login');
+  } finally {
+    if (previous === undefined) delete process.env.SIRUS_DATA_DIR;
+    else process.env.SIRUS_DATA_DIR = previous;
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

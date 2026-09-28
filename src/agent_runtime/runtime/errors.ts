@@ -1,4 +1,7 @@
 import { modelsOf, VENDOR_INFO, type Vendor } from '../providers/catalog';
+import { providerFor } from '../providers';
+import { DEFAULT_PARTICIPANT } from '../types';
+import { errorMessage } from '../../abort';
 
 // Transport failures can be retried once. Vendor refusals must keep their
 // meaning even when the adapter wraps them in JSON-RPC's Internal error.
@@ -25,7 +28,7 @@ function resetDescription(value: unknown, depth = 0): string | undefined {
 }
 
 export function turnFailure(error: unknown, vendor: Vendor, participant: string, resetsAt?: number): TurnFailure {
-  const detail = error instanceof Error ? error.message : String(error);
+  const detail = errorMessage(error);
   const cause = error instanceof Error ? error.cause ?? error : error;
   const metadata = cause && typeof cause === 'object' ? (cause as { data?: unknown }).data : undefined;
   const data = JSON.stringify(metadata ?? '');
@@ -41,8 +44,8 @@ export function turnFailure(error: unknown, vendor: Vendor, participant: string,
     // A model the other vendor listed, which is all `/model` takes; none
     // until that vendor is signed in and has said.
     const other: Vendor = vendor === 'gpt' ? 'claude' : 'gpt';
-    const model = modelsOf(other)[0];
-    const command = participant === 'sirus' ? '/model' : `/model @${participant}`;
+    const model = providerFor(other).sources.list().length > 0 ? modelsOf(other)[0] : undefined;
+    const command = participant === DEFAULT_PARTICIPANT ? '/model' : `/model @${participant}`;
     const instead = model
       ? `To use ${VENDOR_INFO[other].displayName} instead, type ${command} ${model}.`
       : `To use ${VENDOR_INFO[other].displayName} instead, sign in with /login.`;

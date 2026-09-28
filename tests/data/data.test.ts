@@ -3121,16 +3121,20 @@ test('limit errors preserve structured reset times without copying debug credent
   const resetsAt = Math.floor(Date.now() / 1000) + 3600;
   const cause = Object.assign(new Error('Internal error'), { data: { details: 'rate_limit_exceeded', resetsAt } });
   const { rememberListedModels } = await import('../../src/agent_runtime/providers/catalog');
+  const { providerFor } = await import('../../src/agent_runtime/providers');
+  const claudeSources = spyOn(providerFor('claude').sources, 'list').mockReturnValue([]);
   const previousDirectory = process.env.SIRUS_DATA_DIR;
   process.env.SIRUS_DATA_DIR = mkdtempSync(path.join(os.tmpdir(), 'sirus-limit-'));
   try {
     // Only a model the other vendor listed is offered, since that is all /model takes.
     expect(turnFailure(new Error('Rate limit exceeded'), 'gpt', 'sirus').message).toContain('To use Claude instead, sign in with /login.');
     rememberListedModels('claude', [{ id: 'sonnet', description: '' }]);
+    claudeSources.mockReturnValue([{ id: 'active', kind: 'subscription', profile: 'default' }]);
     const failure = turnFailure(new Error('Internal error', { cause }), 'gpt', 'reviewer');
     expect(failure.message).toContain(new Date(resetsAt * 1000).toLocaleString());
     expect(failure.message).toContain('To use Claude instead, type /model @reviewer sonnet.');
   } finally {
+    claudeSources.mockRestore();
     rmSync(process.env.SIRUS_DATA_DIR!, { recursive: true, force: true });
     if (previousDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
     else process.env.SIRUS_DATA_DIR = previousDirectory;
