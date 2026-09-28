@@ -526,7 +526,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         session: currSession,
         participant: recipient,
         notify: text => setFeedback({ kind: 'info', text }),
-        sendPrompt: text => deliver(currSession.messageForParticipant({ role: 'user', content: [{ type: 'text', text }] }, recipient)).then(() => undefined),
+        sendPrompt: text => deliver(currSession.messageForParticipant({ role: 'user', to: [recipient], content: [{ type: 'text', text }] }, recipient)).then(() => undefined),
         attachImage,
         exit: () => { currSession.setInputContent(''); exit(); },
         newSession: onNewSession,

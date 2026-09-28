@@ -413,6 +413,30 @@ test('thinking runs immediately while other commands queue and can be taken back
   }
 });
 
+test('/review keeps its selected recipient when instructions mention another agent', async () => {
+  bindScriptedRuntime('test-reviewer', async () => {});
+  const session = new Session();
+  session.addParticipant('reviewer', 'test-reviewer');
+  let addressed: readonly string[] | undefined;
+  const send = spyOn(session, 'sendMessage').mockImplementation(async draft => {
+    addressed = draft.to;
+    return [];
+  });
+  const chat = renderChat(session);
+  try {
+    await chat.flush();
+    await chat.type('/review Check @reviewer');
+    await chat.type('\r');
+    await chat.flush();
+    expect(addressed).toEqual(['sirus']);
+  } finally {
+    send.mockRestore();
+    await chat.close();
+    await session.dispose();
+    unbindRuntime('test-reviewer');
+  }
+});
+
 test.each(['\u001b[13;5u', '\u0018\u0013'])('Enter queues, Tab completes only, %j sends now, and Escape sends the remaining queue', async shortcut => {
   const model = 'test-chat-claude-input';
   let release!: () => void;
