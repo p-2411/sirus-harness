@@ -413,6 +413,43 @@ test('thinking runs immediately while other commands queue and can be taken back
   }
 });
 
+test('brief command confirmations expire without clearing newer feedback', async () => {
+  const session = new Session();
+  const chat = renderChat(session);
+  try {
+    await chat.type('/thinking high');
+    await chat.type('\r');
+    expect(chat.output()).toContain('@sirus thinking set to high.');
+    await new Promise(resolve => setTimeout(resolve, 1400));
+    await chat.type('/notify off');
+    await chat.type('\r');
+    expect(chat.output()).toContain('Notifications set to off.');
+    await new Promise(resolve => setTimeout(resolve, 1300));
+    await chat.flush();
+    expect(chat.output()).toContain('Notifications set to off.');
+    await new Promise(resolve => setTimeout(resolve, 1300));
+    await chat.flush();
+    expect(chat.output()).not.toContain('Notifications set to off.');
+
+    await chat.type('/thinking invalid');
+    await chat.type('\r');
+    expect(chat.output()).toContain('Unknown thinking level.');
+    await new Promise(resolve => setTimeout(resolve, 2600));
+    await chat.flush();
+    expect(chat.output()).toContain('Unknown thinking level.');
+
+    await chat.type('/help');
+    await chat.type('\r');
+    expect(chat.output()).toContain('list commands and keys');
+    await new Promise(resolve => setTimeout(resolve, 2600));
+    await chat.flush();
+    expect(chat.output()).toContain('list commands and keys');
+  } finally {
+    await chat.close();
+    await session.dispose();
+  }
+}, 12000);
+
 test('/review keeps its selected recipient when instructions mention another agent', async () => {
   bindScriptedRuntime('test-reviewer', async () => {});
   const session = new Session();

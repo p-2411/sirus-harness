@@ -93,6 +93,7 @@ interface AgentView {
   reset: number;
   seen: string;
 }
+const SUCCESS_FEEDBACK_MS = 2500;
 const agentViews = new WeakMap<Session, Map<string, AgentView>>();
 function viewsFor(session: Session): Map<string, AgentView> {
   let views = agentViews.get(session);
@@ -351,7 +352,24 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   const isWorking = currSession.isParticipantWorking(selected);
   const inputIsBusy = commandIsLoading || isWorking;
   const feedback = view.feedback;
-  const setFeedback = (feedback: Feedback | null) => { view.feedback = feedback; repaintView(); };
+  const feedbackTimers = useRef(new Map<AgentView, ReturnType<typeof setTimeout>>());
+  const setFeedback = (feedback: Feedback | null) => {
+    const previous = feedbackTimers.current.get(view);
+    if (previous) clearTimeout(previous);
+    feedbackTimers.current.delete(view);
+    view.feedback = feedback;
+    if (feedback?.kind === 'success' && !feedback.panel && !feedback.markdown && !feedback.text.includes('\n')) {
+      const timedView = view;
+      feedbackTimers.current.set(timedView, setTimeout(() => {
+        feedbackTimers.current.delete(timedView);
+        if (timedView.feedback === feedback) {
+          timedView.feedback = null;
+          repaintView();
+        }
+      }, SUCCESS_FEEDBACK_MS));
+    }
+    repaintView();
+  };
   const notice = currSession.getNotice();
   useEffect(() => {
     if (!notice || notice.participant !== selected) return;
@@ -373,6 +391,8 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     mounted.current = true;
     return () => {
       mounted.current = false;
+      for (const timer of feedbackTimers.current.values()) clearTimeout(timer);
+      feedbackTimers.current.clear();
       for (const [name, saved] of views) {
         for (const image of saved.attachments) removeStoredImage(image);
         if (saved.attachments.length) {
