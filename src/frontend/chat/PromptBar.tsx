@@ -185,13 +185,13 @@ export function PromptBar({ mode, feedback, participantColors, queuedMessages, w
         <Box justifyContent="space-between">
           {mode.type === 'entry'
             ? <EntryInput prompt={mode.prompt} value={entry} masked={mode.masked} />
-            : (
+            : mode.items.some(item => item.type === 'item') ? (
               <Box>
                 <Text color={theme.accentSoft}>›{' '}</Text>
                 <Text color={theme.textSubtle}>↑↓ choose · enter to select</Text>
               </Box>
-            )}
-          <Text color={theme.textSubtle}>esc cancels</Text>
+            ) : null}
+          <Text color={theme.textSubtle}>{mode.type === 'menu' ? 'esc closes' : 'esc cancels'}</Text>
         </Box>
       </Box>
       <WorkerStrip workers={workers} />

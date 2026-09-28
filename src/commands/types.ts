@@ -34,7 +34,14 @@ export interface CommandMenuItem {
   input?: { prompt: string };
 }
 
-export type CommandMenuEntry = CommandMenuHeading | CommandMenuItem;
+export interface CommandMenuInfo {
+  type: 'info';
+  key: string;
+  label: string;
+}
+
+export type CommandMenuEntry = CommandMenuHeading | CommandMenuItem | CommandMenuInfo;
+export type CommandMenuResult = CommandMenuEntry[] | Promise<CommandMenuEntry[]> | null;
 
 // The conversation as commands see it: the Session methods they call, and
 // nothing else. Session satisfies this structurally, so the session code has
@@ -135,8 +142,9 @@ export interface CommandSpec {
   run: (args: readonly string[], context: CommandContext & CommandCapabilities) => CommandResult;
   // Picking a menu item sends its command text, plus any secret entered.
   // Null means the command should run directly. The session is the one the
-  // command would run in, for menus that list its state.
-  menu?: (args: readonly string[], session: CommandSession) => CommandMenuEntry[] | null;
+  // command would run in, for menus that list its state. Async menus open
+  // while loading; closing the menu aborts their signal.
+  menu?: (args: readonly string[], session: CommandSession, signal?: AbortSignal) => CommandMenuResult;
 }
 
 // A command written out with the arguments it takes: `/undo [all|files|chat]`.

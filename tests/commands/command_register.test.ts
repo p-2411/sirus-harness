@@ -49,8 +49,14 @@ function signIn(): void {
   providerFor('gpt').sources.addApiKey('sk-proj-model-menu-1234');
 }
 
+function syncCommandMenu(...args: Parameters<typeof commandMenu>) {
+  const menu = commandMenu(...args);
+  if (menu instanceof Promise) throw new Error('Expected a synchronous command menu');
+  return menu;
+}
+
 function menuItems(command: string, args: readonly string[]): CommandMenuItem[] {
-  return commandMenu(command, args, new Session())?.filter(
+  return syncCommandMenu(command, args, new Session())?.filter(
     (entry): entry is CommandMenuItem => entry.type === 'item',
   ) ?? [];
 }
@@ -237,7 +243,7 @@ describe('executeCommand', () => {
     signIn();
     const session = new Session();
     session.append({ role: 'user', content: [{ type: 'text', text: 'Keep this context' }] });
-    const menu = commandMenu('model', [], session)!;
+    const menu = syncCommandMenu('model', [], session)!;
     expect(menu.find((item): item is CommandMenuItem => item.type === 'item' && item.key === 'claude-sonnet-5')?.description)
       .toContain('restarts its session; it keeps the conversation as text');
     expect(menu.find((item): item is CommandMenuItem => item.type === 'item' && item.key === 'gpt-6-sol')?.description ?? '')
@@ -341,7 +347,7 @@ describe('executeCommand', () => {
 
   test('model command groups selectable models under provider headings', () => {
     signIn();
-    const menu = commandMenu('model', [], new Session())!;
+    const menu = syncCommandMenu('model', [], new Session())!;
     expect(menu.filter(entry => entry.type === 'heading').map(entry => entry.label)).toEqual([
       'Claude',
       'Codex',
@@ -361,11 +367,11 @@ describe('executeCommand', () => {
       '/model gpt-6-astra',
     ]);
     expect(menuItems('model', ['@reviewer'])[0].command).toBe('/model @reviewer claude-opus-5');
-    expect(commandMenu('model', ['gpt-5.6-sol'], new Session())).toBeNull();
+    expect(syncCommandMenu('model', ['gpt-5.6-sol'], new Session())).toBeNull();
   });
 
   test('the model picker offers signed-in vendors only and marks the current model where the vendor lists it or not', () => {
-    expect(() => commandMenu('model', [], new Session())).toThrow(/No vendor is signed in/);
+    expect(() => syncCommandMenu('model', [], new Session())).toThrow(/No vendor is signed in/);
     providerFor('claude').sources.addApiKey('sk-ant-model-menu-1234');
     // The vendor's own ids are what is offered. A session from before them,
     // on a catalog id, still finds its own model under its vendor.
@@ -375,14 +381,14 @@ describe('executeCommand', () => {
       { id: 'haiku', description: 'Haiku 4.5 · Fastest for quick answers' },
     ]);
     const session = new Session({ model: 'claude-haiku-4-5' });
-    const menu = commandMenu('model', [], session)!;
+    const menu = syncCommandMenu('model', [], session)!;
     expect(menu.filter(entry => entry.type === 'heading').map(entry => entry.label)).toEqual(['Claude']);
     const items = menu.filter((entry): entry is CommandMenuItem => entry.type === 'item');
     expect(items.map(item => item.key)).toEqual(['claude-haiku-4-5', 'opus', 'claude-fable-5-1[1m]', 'haiku']);
     expect(items.filter(item => item.current).map(item => item.key)).toEqual(['claude-haiku-4-5']);
     // On a listed model, that row is the one marked, and nothing is added.
     session.changeParticipantModel('sirus', 'opus');
-    const onAlias = commandMenu('model', [], session)!.filter((entry): entry is CommandMenuItem => entry.type === 'item');
+    const onAlias = syncCommandMenu('model', [], session)!.filter((entry): entry is CommandMenuItem => entry.type === 'item');
     expect(onAlias.map(item => item.key)).toEqual(['opus', 'claude-fable-5-1[1m]', 'haiku']);
     expect(onAlias.filter(item => item.current).map(item => item.key)).toEqual(['opus']);
   });
@@ -517,7 +523,7 @@ describe('executeCommand', () => {
     ]);
     expect(menuItems('thinking', []).filter(item => item.current).map(item => item.key)).toEqual(['default']);
     expect(menuItems('thinking', ['@reviewer'])[3].command).toBe('/thinking @reviewer high');
-    expect(commandMenu('thinking', ['low'], new Session())).toBeNull();
+    expect(syncCommandMenu('thinking', ['low'], new Session())).toBeNull();
   });
 
   test('thinking offers only the levels the model offers and records the level it runs at', () => {
@@ -526,7 +532,7 @@ describe('executeCommand', () => {
     rememberModelFacts('claude-haiku-4-5', { efforts: [] });
     const session = new Session({ model: 'gpt-5.6-luna' });
     session.setThinkingLevel('xhigh');
-    const items = (commandMenu('thinking', [], session) ?? []).filter((entry): entry is CommandMenuItem => entry.type === 'item');
+    const items = (syncCommandMenu('thinking', [], session) ?? []).filter((entry): entry is CommandMenuItem => entry.type === 'item');
     expect(items.map(item => item.key)).toEqual(['default', ...THINKING_LEVELS]);
 
     // A model without xhigh runs at high, and the switch says so.
@@ -535,7 +541,7 @@ describe('executeCommand', () => {
       text: '@sirus model set to gpt-5.6-terra. gpt-5.6-terra does not offer xhigh thinking, so @sirus thinks at high.',
     });
     expect(session.getThinkingLevel()).toBe('high');
-    const offered = (commandMenu('thinking', [], session) ?? []).filter((entry): entry is CommandMenuItem => entry.type === 'item');
+    const offered = (syncCommandMenu('thinking', [], session) ?? []).filter((entry): entry is CommandMenuItem => entry.type === 'item');
     expect(offered.map(item => item.key)).toEqual(['default', 'low', 'medium', 'high']);
     expect(offered.find(item => item.current)?.key).toBe('high');
     expect(() => runCommand('thinking', ['max'], session)).toThrow(/does not offer max thinking. Try: low, medium, high/);
@@ -544,12 +550,12 @@ describe('executeCommand', () => {
     expect(runCommand('thinking', ['default'], session)).toEqual({
       kind: 'success', text: '@sirus thinking set to its model\'s default (medium).',
     });
-    const reset = (commandMenu('thinking', [], session) ?? []).filter((entry): entry is CommandMenuItem => entry.type === 'item');
+    const reset = (syncCommandMenu('thinking', [], session) ?? []).filter((entry): entry is CommandMenuItem => entry.type === 'item');
     expect(reset.find(item => item.current)).toMatchObject({ key: 'default', description: 'whatever the model picks, medium' });
 
     // A model with no effort option has no levels to choose from.
     runCommand('model', ['claude-haiku-4-5'], session);
-    expect(() => commandMenu('thinking', [], session)).toThrow('claude-haiku-4-5 has no thinking levels to choose from.');
+    expect(() => syncCommandMenu('thinking', [], session)).toThrow('claude-haiku-4-5 has no thinking levels to choose from.');
   });
 
   test('memory command reports and persists on/off access', () => {
@@ -604,7 +610,7 @@ describe('executeCommand', () => {
       expect(() => runCommand('memory', ['forget', 'secret'], session)).toThrow(/No memory named "secret"/);
       expect(runCommand('memory', ['forget', 'global', 'tone'], session)).toEqual({ kind: 'success', text: 'Forgot the global memory "tone".' });
       expect(runCommand('memory', ['forget', 'tests'], session)).toEqual({ kind: 'success', text: 'Forgot the project memory "tests".' });
-      expect(commandMenu('memory', ['forget'], session)?.map(entry => entry.label)).toEqual(['project · tone']);
+      expect(syncCommandMenu('memory', ['forget'], session)?.map(entry => entry.label)).toEqual(['project · tone']);
       expect((runCommand('memory', ['list'], session) as Feedback).text).not.toContain('global');
     } finally {
       closeAllMemoryStores();
@@ -737,7 +743,7 @@ describe('credential commands', () => {
       kind: 'success',
       text: 'Removed Claude · sk-ant-…9876.',
     });
-    expect(commandMenu('logout', [], new Session())).toBeNull();
+    expect(syncCommandMenu('logout', [], new Session())).toBeNull();
     expect(runCommand('logout', [])).toEqual({ kind: 'info', text: 'Nothing to sign out of.' });
   });
 
@@ -924,7 +930,7 @@ describe('/agents', () => {
   }
 
   function items(args: readonly string[], session: CommandSession): CommandMenuItem[] {
-    return commandMenu('agents', args, session)?.filter(
+    return syncCommandMenu('agents', args, session)?.filter(
       (entry): entry is CommandMenuItem => entry.type === 'item',
     ) ?? [];
   }
@@ -950,7 +956,7 @@ describe('/agents', () => {
 
   test('says so plainly when the session has no workers', () => {
     const { session } = workerSession([]);
-    expect(commandMenu('agents', [], session)).toBeNull();
+    expect(syncCommandMenu('agents', [], session)).toBeNull();
     expect(runCommand('agents', [], session)).toEqual({ kind: 'info', text: 'No workers in this session.' });
   });
 
@@ -968,8 +974,8 @@ describe('/agents', () => {
     expect(message.input?.prompt).toMatch(/sub-live/);
     expect(message.secret).toBeUndefined();
     // An action already chosen runs instead of opening another menu.
-    expect(commandMenu('agents', ['show', 'sub-live'], session)).toBeNull();
-    expect(() => commandMenu('agents', ['sub-nope'], session)).toThrow(/no worker "sub-nope"/i);
+    expect(syncCommandMenu('agents', ['show', 'sub-live'], session)).toBeNull();
+    expect(() => syncCommandMenu('agents', ['sub-nope'], session)).toThrow(/no worker "sub-nope"/i);
   });
 
   test('shows a worker record and the conversation it has had', () => {
@@ -1056,7 +1062,7 @@ describe('/agents', () => {
       ['greet-jsdoc · gpt-5.6-terra · working 2m10s', 'Add JSDoc to greet · sub-1a2b3c4d', '/agents sub-1a2b3c4d'],
       ['loader · gpt-5.6-terra · done 2m10s', 'Rewrite the loader · sub-done', '/agents sub-done'],
     ]);
-    expect(commandMenu('agents', ['greet-jsdoc'], session)?.[0]).toMatchObject({ label: 'greet-jsdoc (sub-1a2b3c4d) · working' });
+    expect(syncCommandMenu('agents', ['greet-jsdoc'], session)?.[0]).toMatchObject({ label: 'greet-jsdoc (sub-1a2b3c4d) · working' });
     const shown = (runCommand('agents', ['show', 'greet-jsdoc'], session) as Feedback).text;
     expect(shown).toStartWith('greet-jsdoc (sub-1a2b3c4d) · working · 2m10s');
     expect((runCommand('agents', [], session) as Feedback).text)
@@ -1131,12 +1137,12 @@ describe('background tasks', () => {
       session.addParticipant('reviewer', models[1]);
       await session.sendMessage({ role: 'user', content: [{ type: 'text', text: '@sirus @reviewer start' }] });
       expect(session.getBackgroundTasks().map(task => task.participant)).toEqual(['sirus', 'reviewer']);
-      const menu = commandMenu('tasks', [], session)!;
+      const menu = syncCommandMenu('tasks', [], session)!;
       expect(menu).toHaveLength(2);
       expect(menu.map(entry => entry.type === 'item' ? entry.command : '')).toEqual([
         '/tasks @sirus shell-1', '/tasks @reviewer shell-1',
       ]);
-      expect(commandMenu('tasks', ['@reviewer', 'shell-1'], session)).toMatchObject([
+      expect(syncCommandMenu('tasks', ['@reviewer', 'shell-1'], session)).toMatchObject([
         { command: '/tasks stop @reviewer shell-1' },
       ]);
       expect(await runCommand('tasks', ['stop', '@reviewer', 'shell-1'], session)).toMatchObject({ kind: 'success' });

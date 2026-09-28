@@ -1,6 +1,7 @@
 import { Box, Text } from 'ink';
 import type { CommandMenuEntry } from '../../commands/types';
 import { theme } from '../styles/theme';
+import { terminalText } from '../terminal/text';
 
 // The selection after an arrow key, wrapping around at either end.
 export function moveSelection(selected: number, delta: number, length: number): number {
@@ -41,6 +42,9 @@ export function SelectMenu({
   return (
     <Box flexDirection="column" paddingX={2} marginX={1} flexShrink={0} position="static">
       {items.map(item => {
+        if (item.type === 'info') {
+          return <Text key={item.key} color={theme.textMuted}>{terminalText(item.label)}</Text>;
+        }
         if (item.type === 'heading') {
           return (
             <Box key={item.key} marginTop={choiceIndex >= 0 ? 1 : 0}>

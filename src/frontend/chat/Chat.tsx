@@ -35,6 +35,7 @@ import {
   vendorCommandFor,
   type CommandMenuEntry,
   type CommandMenuItem,
+  type CommandMenuResult,
 } from '../../commands/registry';
 
 import { parseMouseWheel } from '../interaction/mouse';
@@ -469,7 +470,16 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   };
   const followLatest = () => { view.reset++; repaintView(); };
   const commandAbort = useRef<AbortController | null>(null);
-  useEffect(() => () => { commandAbort.current?.abort(new TurnCancelledError()); }, []);
+  const menuAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => {
+    commandAbort.current?.abort(new TurnCancelledError());
+    menuAbort.current?.abort(new TurnCancelledError());
+  }, []);
+  useEffect(() => {
+    if (inputMode.type !== 'text') return;
+    menuAbort.current?.abort(new TurnCancelledError());
+    menuAbort.current = null;
+  }, [inputMode.type]);
   const { stdout } = useStdout();
   const { exit } = useApp();
 
@@ -482,8 +492,14 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   // still needs a value asks for it in the bar and hands it over as one final
   // argument, so a key or a message containing spaces survives whole and a
   // secret is never echoed into the input.
-  const openMenu = (items: readonly CommandMenuEntry[]) => {
-    const close = () => setInputMode({ type: 'text' });
+  const openMenu = (items: NonNullable<CommandMenuResult>, controller: AbortController) => {
+    menuAbort.current?.abort(new TurnCancelledError());
+    menuAbort.current = controller;
+    const close = () => {
+      controller.abort(new TurnCancelledError());
+      if (menuAbort.current === controller) menuAbort.current = null;
+      setInputMode({ type: 'text' });
+    };
     const choose = (item: CommandMenuItem) => {
       const asked = item.secret ?? item.input;
       if (!asked) {
@@ -503,7 +519,22 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         onCancel: close,
       });
     };
-    setInputMode({ type: 'menu', items, onSelect: choose, onCancel: close });
+    setInputMode({
+      type: 'menu',
+      items: items instanceof Promise ? [{ type: 'info', key: 'loading', label: 'Loading…' }] : items,
+      onSelect: choose,
+      onCancel: close,
+    });
+    if (items instanceof Promise) {
+      const update = (loaded: CommandMenuEntry[]) => {
+        if (controller.signal.aborted) return;
+        setInputMode(current => current.type === 'menu' && current.onCancel === close
+          ? { ...current, items: loaded } : current);
+      };
+      void items.then(update).catch((error: unknown) => {
+        update([{ type: 'info', key: 'error', label: error instanceof Error ? error.message : 'Could not load menu.' }]);
+      });
+    }
   };
 
   // The one path a command takes, however it was started: its menu opens if
@@ -520,19 +551,19 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       args = [`@${recipient}`, ...args];
     }
     setFeedback(null);
-    let menu: CommandMenuEntry[] | null;
+    const controller = new AbortController();
+    let menu: CommandMenuResult;
     try {
       // Args may carry a secret (see openMenu) — never let it reach a menu label.
-      menu = commandMenu(command, args, currSession);
+      menu = commandMenu(command, args, currSession, controller.signal);
     } catch (e) {
       setFeedback({ kind: 'error', text: e instanceof Error ? e.message : 'Something went wrong.' });
       return;
     }
     if (menu) {
-      openMenu(menu);
+      openMenu(menu, controller);
       return;
     }
-    const controller = new AbortController();
     let result;
     try {
       result = executeCommand(command, args, {

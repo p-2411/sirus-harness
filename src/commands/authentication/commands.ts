@@ -4,6 +4,7 @@ import {
   logoutCommand,
   logoutMenuItems,
   usageCommand,
+  usageMenuItems,
 } from './behavior';
 import type { CommandSpec } from '../types';
 
@@ -27,4 +28,5 @@ export const usageCommandSpec: CommandSpec = {
   name: 'usage',
   description: 'remaining subscription allowance and each participant\'s context',
   run: (_args, context) => usageCommand(context.signal, context.session),
+  menu: usageMenuItems,
 };

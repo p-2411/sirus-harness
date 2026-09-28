@@ -4,7 +4,7 @@ import { maskApiKey, type Source } from '../../agent_runtime/providers/sources';
 import { contextPercent, formatTokens, formatTurnUsage } from '../../agent_runtime/usage';
 import type { Feedback } from '../feedback';
 import type { Notify } from '../../agent_runtime/providers/login';
-import type { CommandMenuItem, CommandSession } from '../types';
+import type { CommandMenuEntry, CommandMenuItem, CommandSession } from '../types';
 import { readSubscriptionUsage, remainingAllowance, formatRemaining, type SubscriptionUsage } from '../../agent_runtime/providers/usage';
 
 // `/login` asks which provider first; `/login <provider>` then offers that
@@ -143,8 +143,22 @@ export function describeSessionUsage(session: CommandSession): string {
   return parts.length ? `session · ${parts.join(' · ')}` : 'session · no usage reported yet';
 }
 
-export async function usageCommand(signal?: AbortSignal, session?: CommandSession): Promise<Feedback> {
+async function usageLines(signal?: AbortSignal, session?: CommandSession): Promise<string[]> {
   const lines = await Promise.all(VENDORS.map(vendor => describeVendor(vendor, signal)));
   if (session) lines.push(describeSessionUsage(session));
+  return lines.flatMap(line => line.split('\n'));
+}
+
+export function usageMenuItems(args: readonly string[], session: CommandSession, signal?: AbortSignal): Promise<CommandMenuEntry[]> | null {
+  if (args.length > 0) return null;
+  return usageLines(signal, session).then(lines => [
+    { type: 'heading', key: 'usage', label: 'Usage' },
+    ...lines.map((label, index): CommandMenuEntry => ({ type: 'info', key: `usage-${index}`, label })),
+    { type: 'item', key: 'refresh', label: 'Refresh', command: '/usage' },
+  ]);
+}
+
+export async function usageCommand(signal?: AbortSignal, session?: CommandSession): Promise<Feedback> {
+  const lines = await usageLines(signal, session);
   return { kind: 'info', text: lines.join('\n'), showIcon: false };
 }

@@ -22,7 +22,7 @@ import { isReportingCommand, vendorPrefixed, type NativeCommand } from '../agent
 import type {
   CommandCapabilities,
   CommandContext,
-  CommandMenuEntry,
+  CommandMenuResult,
   CommandResult,
   CommandSession,
   CommandSpec,
@@ -32,6 +32,7 @@ export type {
   CommandContext,
   CommandMenuEntry,
   CommandMenuItem,
+  CommandMenuResult,
   CommandResult,
   CommandSession,
   CommandSpec,
@@ -194,9 +195,10 @@ export function commandMenu(
   command: string,
   args: readonly string[],
   session: CommandSession,
-): CommandMenuEntry[] | null {
+  signal?: AbortSignal,
+): CommandMenuResult {
   const spec = commandRegistry.find(spec => spec.name === command);
-  return spec?.menu ? spec.menu(args, session) : null;
+  return spec?.menu ? spec.menu(args, session, signal) : null;
 }
 
 export function executeCommand(

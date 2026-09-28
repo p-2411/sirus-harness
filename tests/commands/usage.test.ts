@@ -6,6 +6,7 @@ import { Session } from '../../src/agent_runtime/session';
 import { CodexRpc } from '../../src/agent_runtime/providers/openai/codex-account';
 import { providerFor } from '../../src/agent_runtime/providers';
 import { usageCommand } from '../../src/commands/authentication/behavior';
+import { commandMenu } from '../../src/commands/registry';
 import { cachedSubscriptionLimit, readSubscriptionUsage } from '../../src/agent_runtime/providers/usage';
 import { loadSubscriptionLimitCache, saveSubscriptionLimitCache } from '../../src/persistence/subscriptionLimits';
 import { TurnCancelledError } from '../../src/abort';
@@ -70,6 +71,23 @@ describe('/usage subscription allowance', () => {
     expect(result.text).toContain('Codex · plus plan · 5h unavailable');
     expect(result.text).toContain('session · no usage reported yet');
     expect(result.text).not.toContain('100% remaining');
+  });
+
+  test('/usage builds informational menu rows and a refresh action', async () => {
+    fakeAppServer(() => ({ rateLimits: {
+      primary: { usedPercent: 30, windowDurationMins: 300 },
+      secondary: { usedPercent: 10, windowDurationMins: 10080 },
+    } }));
+    const menu = await commandMenu('usage', [], new Session());
+    expect(menu).toContainEqual({ type: 'heading', key: 'usage', label: 'Usage' });
+    expect(menu?.filter(entry => entry.type === 'info').map(entry => entry.label))
+      .toEqual(expect.arrayContaining([
+        'Codex · plus plan · 5h 70% left · 7d 90% left',
+        'session · no usage reported yet',
+      ]));
+    expect(menu?.filter(entry => entry.type === 'item'))
+      .toEqual([{ type: 'item', key: 'refresh', label: 'Refresh', command: '/usage' }]);
+    expect(commandMenu('usage', ['now'], new Session())).toBeNull();
   });
 
   test('a failed read says why, with any key masked', async () => {
