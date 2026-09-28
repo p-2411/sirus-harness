@@ -37,7 +37,7 @@ struct ConnectionHelp: View {
                 .font(.mono(11, .semibold))
                 .foregroundStyle(Palette.muted)
                 .frame(width: 22, height: 22)
-                .background { Circle().fill(.white.opacity(0.08)) }
+                .background { Circle().fill(Palette.fill) }
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
                     .font(.system(size: 15, weight: .medium))

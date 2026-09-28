@@ -179,7 +179,7 @@ import Observation
         var frame = frame
         frame.id = String(sequence)
         let id = frame.id
-        let text = String(decoding: try JSONEncoder().encode(frame), as: UTF8.self)
+        let text = try frame.encoded()
         return try await withCheckedThrowingContinuation { continuation in
             pending[id] = continuation
             socket.send(.string(text)) { error in

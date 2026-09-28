@@ -219,7 +219,7 @@ struct Sidebar: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 11)
         .background {
-            if current { RoundedRectangle(cornerRadius: 20, style: .continuous).fill(.white.opacity(0.08)) }
+            if current { RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Palette.fill) }
         }
         .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
@@ -246,7 +246,7 @@ struct Sidebar: View {
     }
 
     private func setExpanded(_ value: Bool) {
-        if value { UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) }
+        if value { dismissKeyboard() }
         withAnimation(.spring(duration: 0.45, bounce: 0.16)) { expanded = value }
     }
 }

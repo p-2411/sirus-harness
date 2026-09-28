@@ -19,6 +19,8 @@ enum Palette {
     static let amber = Color(hex: 0xE3B341)
     static let green = Color(hex: 0x00C853)
     static let red = Color(hex: 0xBF6A6A)
+    // The faint fill of a control at rest on the ground or on glass.
+    static let fill = Color.white.opacity(0.08)
 }
 
 extension Color {
@@ -71,16 +73,20 @@ struct RowPress: ButtonStyle {
     }
 }
 
-// The permission mode in the TUI's words ("ask for approval", "auto
-// approve", "bypass permissions"), coloured as its status row colours it:
-// muted when Sirus asks, amber when the vendor's reviewer decides, red when
-// nothing is asked.
-func permissionMode(_ raw: String?) -> (name: String, color: Color)? {
-    guard let raw, !raw.isEmpty else { return nil }
-    let mode = raw.lowercased()
-    if mode.hasPrefix("bypass") { return (raw, Palette.red) }
-    if mode.hasPrefix("auto") { return (raw, Palette.amber) }
-    return (raw, Palette.muted)
+// The permission mode, which Sirus sends in the TUI's words ("ask for
+// approval", "auto approve", "bypass permissions"), coloured as its status
+// row colours it: muted when Sirus asks, amber when the vendor's reviewer
+// decides, red when nothing is asked.
+func permissionColor(_ mode: String) -> Color {
+    let mode = mode.lowercased()
+    if mode.hasPrefix("bypass") { return Palette.red }
+    if mode.hasPrefix("auto") { return Palette.amber }
+    return Palette.muted
+}
+
+// Puts the keyboard away, from whichever field has it.
+@MainActor func dismissKeyboard() {
+    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
 }
 
 func elapsed(since milliseconds: Double, now: Date) -> String {

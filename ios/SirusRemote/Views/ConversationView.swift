@@ -13,7 +13,9 @@ struct ConversationView: View {
 
     var body: some View {
         if let client = store.client(for: sessionId), let session = store.session(sessionId) {
-            Conversation(store: store, client: client, session: session,
+            // Only what the conversation shows of the session is passed on,
+            // so the list's activity updates don't redraw it.
+            Conversation(store: store, client: client, sessionId: session.id, sessionName: session.name,
                          participant: store.participant(for: sessionId), menuOpen: $menuOpen)
         } else {
             VStack(spacing: 10) {
@@ -38,28 +40,37 @@ struct ConversationView: View {
     }
 }
 
+// What was said about the last thing sent, a moment over the conversation:
+// long enough to read, then out of the way. A failure stays a little longer.
+struct Note: Equatable {
+    let text: String
+    let failed: Bool
+
+    var duration: Double { failed ? 6 : 3.5 }
+}
+
 private struct Conversation: View {
     let store: RemoteStore
     let client: RemoteClient
-    let session: RemoteSession
+    let sessionId: String
+    let sessionName: String
     let participant: String
     @Binding var menuOpen: Bool
-    // Kept here rather than in the composer, so a request that takes the
+    // Kept here rather than in the composer, so an approval that takes the
     // composer's place leaves the draft waiting, as the TUI does.
     @State private var draft = ""
     @State private var note: Note?
     @State private var selection: TextSelection?
     @State private var composerFocused = false
-    @State private var completions: [CompletionItem] = []
-    @State private var completionTask: Task<Void, Never>?
-    @State private var completionGeneration = 0
+    @State private var completions = Completions()
     @State private var picker: CommandPicker?
     @State private var pickerRevision = 0
     @State private var chosenCompletion = 0
     // The caption's command whose picker is on its way.
-    @State private var opening: String?
-    // Counts pickers put away, so an answer that comes back after its
-    // picker was closed, or after another agent was chosen, is dropped.
+    @State private var openingCommand: String?
+    // Bumped whenever a picker is put away or another agent is chosen. An
+    // answer to something sent before that opens no picker; what it said is
+    // still shown.
     @State private var pickerEpoch = 0
     // Where the chrome ends, so the menus can float just above the input
     // and clear of the header without being laid out in either bar: a menu
@@ -69,6 +80,24 @@ private struct Conversation: View {
     @State private var barHeight: CGFloat = 0
     @Namespace private var glass
 
+    // The `/` and `@` menu's rows, with the draft they were worked out for:
+    // their offsets only fit that text.
+    private struct Completions {
+        var text = ""
+        var items: [CompletionItem] = []
+    }
+
+    // What the menu is asked for, while the composer has the keyboard and a
+    // `/` or `@` before the cursor could open it; nil otherwise.
+    private struct CompletionQuery: Equatable {
+        let text: String
+        let cursor: Int
+    }
+
+    // Where a message or command came from, which decides what its answer
+    // may do to the pickers.
+    private enum Origin { case composer, caption, picker }
+
     private var header: Header? { client.header }
     private var names: Set<String> { Set(header?.participants.map(\.name) ?? [participant]) }
     private var working: Bool {
@@ -76,46 +105,46 @@ private struct Conversation: View {
     }
     private var status: Status? { header?.status.flatMap { $0.participant == participant ? $0 : nil } }
     private var waitingQuestion: Request? {
-        client.requests.first?.kind == .question ? client.requests.first : nil
+        client.requests.first.flatMap { $0.kind == .question ? $0 : nil }
     }
     // An approval stands in the composer's place until it is answered.
-    private var approvalWaiting: Bool {
-        client.requests.first.map { $0.kind != .question } ?? false
+    private var waitingApproval: Request? {
+        client.requests.first.flatMap { $0.kind == .question ? nil : $0 }
     }
     private var showsCompletions: Bool {
-        !completions.isEmpty && composerFocused && picker == nil && !approvalWaiting
+        !completions.items.isEmpty && composerFocused && picker == nil && waitingApproval == nil
     }
     private var showsMenu: Bool { picker != nil || showsCompletions }
     private var showsStatus: Bool {
         waitingQuestion != nil || client.link != .live || working || status != nil
     }
 
+    private var completionQuery: CompletionQuery? {
+        guard composerFocused, picker == nil, waitingApproval == nil, client.link == .live else { return nil }
+        var cursor = draft.utf16.count
+        if case .selection(let range) = selection?.indices {
+            cursor = max(0, min(range.lowerBound.utf16Offset(in: draft), cursor))
+        }
+        let before = String(decoding: draft.utf16.prefix(cursor), as: UTF16.self)
+        guard before.contains("/") || before.contains("@") else { return nil }
+        return CompletionQuery(text: draft, cursor: cursor)
+    }
+
     var body: some View {
-        Transcript(rows: client.rows, names: names, loading: header == nil)
+        Transcript(client: client, names: names)
             .safeAreaBar(edge: .top) { top }
             .safeAreaBar(edge: .bottom) { bottom.background { Fade(edge: .bottom) } }
             .overlay { floating }
-            .task(id: "\(client.endpoint.port)/\(session.id)/\(participant)/\(client.link == .live)") {
-                // Before the socket is up this fails quietly; the client
-                // subscribes again as soon as it is.
-                try? await client.subscribe(sessionId: session.id, participant: participant)
-            }
-            .onChange(of: draft) { _, _ in updateCompletions() }
-            .onChange(of: selection) { _, _ in updateCompletions() }
-            .onChange(of: composerFocused) { _, _ in updateCompletions() }
+            .task(id: "\(client.endpoint.port)/\(sessionId)/\(participant)") { await subscribe() }
+            .task(id: completionQuery) { await complete(completionQuery) }
             .onChange(of: client.requests.first?.id) { _, request in
                 // A request needs the user more than a menu does.
                 if request != nil { closePicker() }
-                updateCompletions()
             }
-            .onChange(of: picker?.title) { _, _ in updateCompletions() }
             .onChange(of: participant) { _, _ in
                 // A picker belongs to the agent it was opened for.
                 closePicker()
-                updateCompletions()
             }
-            .onChange(of: session.id) { _, _ in updateCompletions() }
-            .onChange(of: client.link) { _, _ in updateCompletions() }
             .onChange(of: showsMenu, initial: true) { _, shown in menuOpen = shown }
             .onDisappear { menuOpen = false }
             .sensoryFeedback(.impact(weight: .medium), trigger: client.requests.first?.id) { _, new in new != nil }
@@ -125,14 +154,14 @@ private struct Conversation: View {
     // The session's name over its agents, centred on the screen.
     private var top: some View {
         VStack(spacing: 8) {
-            Text(session.name)
+            Text(sessionName)
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(Palette.white)
                 .lineLimit(1)
                 .frame(height: 20)
             if let participants = header?.participants, !participants.isEmpty {
                 AgentTabs(participants: participants, selected: participant) { name in
-                    store.choose(name, in: session.id)
+                    store.choose(name, in: sessionId)
                 }
             }
         }
@@ -155,13 +184,15 @@ private struct Conversation: View {
                         // A menu floats where the status stands. Hidden rather
                         // than removed, so the bar keeps its height and the
                         // transcript stays where it is; its glass is turned
-                        // off too, as the container draws glass itself.
+                        // off too, as the container draws glass itself, and
+                        // its animations stop.
                         .opacity(showsMenu ? 0 : 1)
                         .allowsHitTesting(!showsMenu)
+                        .symbolEffectsRemoved(showsMenu)
                 }
                 VStack(spacing: 0) {
                     input
-                    ModeCaption(header: header, participant: participant, opening: opening, open: openPicker)
+                    ModeCaption(header: header, participant: participant, openingCommand: openingCommand, open: openPicker)
                 }
                 // A picker floats in the input's place, as the TUI's menu
                 // takes the input bar's.
@@ -212,15 +243,17 @@ private struct Conversation: View {
     }
 
     @ViewBuilder private var input: some View {
-        if let request = client.requests.first, request.kind != .question {
-            RequestCard(request: request, waiting: client.requests.count - 1, client: client, names: names)
-                .id(request.id)
+        if let approval = waitingApproval {
+            RequestCard(request: approval, waiting: client.requests.count - 1, client: client, names: names)
+                .id(approval.id)
                 .glassEffect(inputGlass, in: .rect(cornerRadius: 30, style: .continuous))
                 .glassEffectID("input", in: glass)
         } else {
-            Composer(client: client, sessionId: session.id, participant: participant, working: working,
-                     draft: $draft, note: $note, selection: $selection,
-                     onFocus: { composerFocused = $0 }, onResult: receive)
+            Composer(client: client, sessionId: sessionId, participant: participant, working: working,
+                     draft: $draft, selection: $selection,
+                     onFocus: { composerFocused = $0 },
+                     send: { try await send($0, from: .composer) },
+                     notify: notify)
                 .glassEffect(inputGlass, in: .rect(cornerRadius: 23, style: .continuous))
                 .glassEffectID("input", in: glass)
         }
@@ -228,9 +261,8 @@ private struct Conversation: View {
 
     // What floats over the conversation without being laid out in it: a
     // command's picker in the input's place, over a scrim that closes it;
-    // the `/` and `@` completions just above the input; and a note on the
-    // last command above the whole bar, or under the header while a picker
-    // takes the bottom.
+    // the `/` and `@` completions just above the input; and a note above the
+    // whole bar, or under the header while a picker takes the bottom.
     private var floating: some View {
         ZStack(alignment: .bottom) {
             if picker != nil {
@@ -243,7 +275,7 @@ private struct Conversation: View {
                     .transition(.opacity)
             }
             if let note, !showsCompletions {
-                NoteToast(note: note) { self.note = nil }
+                NoteToast(note: note) { notify(nil) }
                     .padding(.horizontal, 24)
                     .padding(.top, headerHeight + 10)
                     .padding(.bottom, barHeight + 10)
@@ -252,13 +284,13 @@ private struct Conversation: View {
                     .transition(.opacity.combined(with: .offset(y: 6)))
             }
             if let picker {
-                PickerCard(picker: picker, dismiss: closePicker, send: run)
+                PickerCard(picker: picker, dismiss: closePicker, run: { try await send($0, from: .picker) })
                     .id(pickerRevision)
                     .padding(.horizontal, 12)
                     .padding(.top, headerHeight + 12)
                     .transition(.menu)
             } else if showsCompletions {
-                CompletionMenu(items: completions, choose: chooseCompletion)
+                CompletionMenu(items: completions.items, choose: chooseCompletion)
                     .padding(.horizontal, 12)
                     .padding(.top, headerHeight + 12)
                     .padding(.bottom, inputHeight + 8)
@@ -272,52 +304,61 @@ private struct Conversation: View {
         .animation(.smooth(duration: 0.25), value: note)
     }
 
-    private func updateCompletions() {
-        completionGeneration += 1
-        let generation = completionGeneration
-        completionTask?.cancel()
-        guard composerFocused, picker == nil, !approvalWaiting, client.link == .live else {
-            completions = []
-            return
-        }
-        let text = draft
-        let cursor: Int
-        if case .selection(let range) = selection?.indices {
-            cursor = max(0, min(range.lowerBound.utf16Offset(in: text), text.utf16.count))
-        } else { cursor = text.utf16.count }
-        completionTask = Task {
-            try? await Task.sleep(for: .milliseconds(80))
-            guard !Task.isCancelled else { return }
-            let items = try? await client.complete(text, cursor: cursor, sessionId: session.id, participant: participant)
-            guard !Task.isCancelled, generation == completionGeneration else { return }
-            completions = items ?? []
+    // Before the socket is up this fails quietly: the client subscribes
+    // again as soon as it is. A live Sirus that refuses, as for an agent it
+    // doesn't have, says why, and the conversation falls back to its first
+    // agent rather than waiting on one that won't come.
+    private func subscribe() async {
+        do {
+            try await client.subscribe(sessionId: sessionId, participant: participant)
+        } catch {
+            guard !Task.isCancelled, client.link == .live else { return }
+            show(error.localizedDescription, failed: true)
+            let fallback = header?.participants.first?.name ?? "sirus"
+            if fallback != participant { store.choose(fallback, in: sessionId) }
         }
     }
 
+    // Asks for the menu after a short pause in typing; a newer query cancels
+    // this one.
+    private func complete(_ query: CompletionQuery?) async {
+        guard let query else {
+            completions = Completions()
+            return
+        }
+        try? await Task.sleep(for: .milliseconds(80))
+        guard !Task.isCancelled else { return }
+        let items = try? await client.complete(query.text, cursor: query.cursor, sessionId: sessionId, participant: participant)
+        guard !Task.isCancelled else { return }
+        completions = Completions(text: query.text, items: items ?? [])
+    }
+
     private func chooseCompletion(_ item: CompletionItem) {
-        guard item.start >= 0, item.end >= item.start,
+        // Rows worked out for an older draft would land in the wrong place;
+        // the menu for this one is on its way.
+        guard draft == completions.text, item.start >= 0, item.end >= item.start,
               let range = Range(NSRange(location: item.start, length: item.end - item.start), in: draft) else { return }
         let offset = item.start + item.insert.utf16.count
         draft.replaceSubrange(range, with: item.insert)
         let caret = String.Index(utf16Offset: offset, in: draft)
         selection = TextSelection(range: caret..<caret)
         chosenCompletion += 1
-        updateCompletions()
     }
 
     // A tap on the caption: its command opens a picker rather than running.
     // The chip lets go after a while even if Sirus never answers, so the
     // caption can't stay stuck.
     private func openPicker(_ command: String) {
-        guard opening == nil else { return }
-        opening = command
+        guard openingCommand == nil else { return }
+        openingCommand = command
         Task {
-            if let failure = await run(command) { show(failure, failed: true) }
-            if opening == command { opening = nil }
+            do { try await send(command, from: .caption) }
+            catch { show(error.localizedDescription, failed: true) }
+            if openingCommand == command { openingCommand = nil }
         }
         Task {
             try? await Task.sleep(for: .seconds(10))
-            if opening == command { opening = nil }
+            if openingCommand == command { openingCommand = nil }
         }
     }
 
@@ -326,30 +367,31 @@ private struct Conversation: View {
         picker = nil
     }
 
-    // Runs a command from the caption or a picker, returning why it failed;
-    // the caller says so where the user is looking. What comes back is
-    // applied only if no picker was put away meanwhile: then only its
-    // feedback is shown.
-    private func run(_ command: String) async -> String? {
+    // Sends a message or command to the agent and applies what comes back:
+    // a picker to open, text held back behind it, and what Sirus said. A
+    // picker's entry that ran closes it. If a picker was put away or another
+    // agent chosen meanwhile, no picker opens and held-back text only
+    // returns to an empty composer. Failures are thrown to whoever sent,
+    // except that a picker already gone can't show one, so it is shown here.
+    private func send(_ text: String, from origin: Origin) async throws {
         let epoch = pickerEpoch
+        let result: ResultFrame
         do {
-            let result = try await client.send(command, sessionId: session.id, participant: participant)
-            if epoch == pickerEpoch { receive(result) }
-            else if let feedback = result.feedback, !feedback.isEmpty { show(feedback, failed: false) }
-            return nil
+            result = try await client.send(text, sessionId: sessionId, participant: participant)
         } catch {
-            return error.localizedDescription
+            if origin == .picker, epoch != pickerEpoch { show(error.localizedDescription, failed: true) }
+            throw error
         }
-    }
-
-    private func receive(_ result: ResultFrame) {
-        if result.picker != nil {
+        let current = epoch == pickerEpoch
+        if current, let next = result.picker {
             pickerRevision += 1
+            picker = next
             // The picker wants the room the keyboard takes.
-            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+            dismissKeyboard()
+        } else if current, origin == .picker {
+            picker = nil
         }
-        picker = result.picker
-        if let restored = result.draft {
+        if let restored = result.draft, current || draft.isEmpty {
             draft = restored
             selection = TextSelection(range: draft.endIndex..<draft.endIndex)
         }
@@ -357,10 +399,16 @@ private struct Conversation: View {
     }
 
     private func show(_ text: String, failed: Bool) {
-        let shown = Note(text: text, failed: failed)
+        notify(Note(text: text, failed: failed))
+    }
+
+    // Shows a note until its time is up or another replaces it; nil puts
+    // the current one away.
+    private func notify(_ shown: Note?) {
         note = shown
+        guard let shown else { return }
         Task {
-            try? await Task.sleep(for: .seconds(Note.duration(failed: failed)))
+            try? await Task.sleep(for: .seconds(shown.duration))
             if note == shown { note = nil }
         }
     }
@@ -405,7 +453,8 @@ private struct Pill<Content: View>: View {
     }
 }
 
-// What a command said, a moment over the conversation. A tap puts it away.
+// A note: what a command said, or why something sent did not go. A tap
+// puts it away.
 private struct NoteToast: View {
     let note: Note
     let dismiss: () -> Void
@@ -471,19 +520,19 @@ private struct StatusPill: View {
 private struct ModeCaption: View {
     let header: Header?
     let participant: String
-    let opening: String?
+    let openingCommand: String?
     let open: (String) -> Void
 
     private var model: String? { header?.participants.first { $0.name == participant }?.model }
 
     var body: some View {
         HStack(spacing: 6) {
-            if let mode = permissionMode(header?.permissionMode) {
+            if let mode = header?.permissionMode, !mode.isEmpty {
                 let notice = Text(header?.modeNotice.map { " · \($0)" } ?? "").foregroundStyle(Palette.subtle)
-                CaptionChip(name: "Permission mode", value: mode.name, busy: opening == "/permissions") {
+                CaptionChip(name: "Permission mode", value: mode, busy: openingCommand == "/permissions") {
                     open("/permissions")
                 } label: {
-                    Text("\(Text(mode.name).foregroundStyle(mode.color))\(notice)")
+                    Text("\(Text(mode).foregroundStyle(permissionColor(mode)))\(notice)")
                 }
             }
             Spacer(minLength: 4)
@@ -493,7 +542,7 @@ private struct ModeCaption: View {
                     .padding(.trailing, 2)
             }
             if let model {
-                CaptionChip(name: "Model", value: model, busy: opening == "/model") {
+                CaptionChip(name: "Model", value: model, busy: openingCommand == "/model") {
                     open("/model")
                 } label: {
                     Text(model)
@@ -501,7 +550,7 @@ private struct ModeCaption: View {
                 .layoutPriority(1)
             }
             if let thinking = header?.thinking {
-                CaptionChip(name: "Thinking", value: thinking, busy: opening == "/thinking") {
+                CaptionChip(name: "Thinking", value: thinking, busy: openingCommand == "/thinking") {
                     open("/thinking")
                 } label: {
                     Text(thinking)
@@ -511,7 +560,7 @@ private struct ModeCaption: View {
         .font(.mono(11))
         .lineLimit(1)
         .padding(.horizontal, 4)
-        .sensoryFeedback(.selection, trigger: opening) { _, new in new != nil }
+        .sensoryFeedback(.selection, trigger: openingCommand) { _, new in new != nil }
     }
 
     private func tone(_ tone: Header.Gauge.Tone) -> Color {

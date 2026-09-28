@@ -3,11 +3,11 @@ import SwiftUI
 // The rows, kept to the bottom while the reader is at the bottom and left
 // alone once they scroll up to read. Rows are replaced in place as they
 // stream, so nothing above the reader moves. They use the full width; the
-// sidebar's rail floats over them.
+// sidebar's rail floats over them. The rows are read here rather than by
+// the conversation, so a streaming row redraws the transcript alone.
 struct Transcript: View {
-    let rows: [Row]
+    let client: RemoteClient
     let names: Set<String>
-    let loading: Bool
     @State private var position = ScrollPosition(edge: .bottom)
     @State private var pinned = true
 
@@ -18,6 +18,7 @@ struct Transcript: View {
     }
 
     var body: some View {
+        let rows = client.rows
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
@@ -46,7 +47,7 @@ struct Transcript: View {
             }
         }
         .overlay {
-            if loading {
+            if client.header == nil {
                 Pulse(color: Palette.subtle, size: 7)
             } else if rows.isEmpty {
                 VStack(spacing: 12) {
@@ -83,6 +84,11 @@ struct Transcript: View {
             }
         }
         .animation(.easeOut(duration: 0.18), value: pinned)
+        // Agents write links, and a sirus: one would ask to move the app to
+        // another Mac; one in a conversation is never the user's own.
+        .environment(\.openURL, OpenURLAction { url in
+            url.scheme == "sirus" ? .discarded : .systemAction
+        })
     }
 }
 
@@ -119,7 +125,7 @@ struct RowView: View, Equatable {
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
                     .background {
-                        RoundedRectangle(cornerRadius: 20, style: .continuous).fill(.white.opacity(0.08))
+                        RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Palette.fill)
                     }
                     .padding(.leading, 40)
             case .tool:

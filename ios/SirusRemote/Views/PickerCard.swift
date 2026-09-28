@@ -8,8 +8,9 @@ import SwiftUI
 struct PickerCard: View {
     let picker: CommandPicker
     let dismiss: () -> Void
-    // Sends a command, returning why it failed.
-    let send: (String) async -> String?
+    // Runs an entry's command; what Sirus answers is the conversation's to
+    // apply.
+    let run: (String) async throws -> Void
     @State private var prompted: CommandPicker.Entry?
     @State private var value = ""
     @State private var busy: String?
@@ -74,7 +75,7 @@ struct PickerCard: View {
                     .font(.system(size: 12, weight: .bold))
                     .foregroundStyle(Palette.muted)
                     .frame(width: 30, height: 30)
-                    .background(Circle().fill(.white.opacity(0.08)))
+                    .background(Circle().fill(Palette.fill))
                     .frame(width: 44, height: 44)
                     .contentShape(Circle())
             }
@@ -153,7 +154,7 @@ struct PickerCard: View {
                 .frame(minHeight: 50)
                 .background {
                     if entry.current || prompted?.id == entry.id {
-                        RoundedRectangle(cornerRadius: 20, style: .continuous).fill(.white.opacity(0.08))
+                        RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Palette.fill)
                     }
                 }
                 .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
@@ -237,23 +238,23 @@ struct PickerCard: View {
             if prompted?.id != entry.id { value = "" }
             prompted = entry
         } else {
-            run(command, entry.id)
+            start(command, entry.id)
         }
     }
 
     private func submit() {
         guard let prompted, let command = prompted.command, !entered.isEmpty, busy == nil else { return }
         entryFocused = false
-        run("\(command) \(entered)", prompted.id)
+        start("\(command) \(entered)", prompted.id)
     }
 
     // Sirus's answer closes the menu, or puts the next one in its place;
     // until then the entry says it is working.
-    private func run(_ command: String, _ id: String) {
+    private func start(_ command: String, _ id: String) {
         busy = id
         failure = nil
         Task {
-            failure = await send(command)
+            do { try await run(command) } catch { failure = error.localizedDescription }
             busy = nil
         }
     }

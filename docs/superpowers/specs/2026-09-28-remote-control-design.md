@@ -30,8 +30,9 @@ aesthetic in Sirus's own design language, near-zero maintenance.
   Approvals carry lock-screen action buttons.
 - Keep-awake: the Mac stays awake while any agent in any session of this
   process is working, and while any session of this process has `/rc` on.
-- No `/rc always`. No session creation, model/thinking changes, files, diffs,
-  images, rewind or Live Activities from the phone. No background session host
+- No `/rc always`. No session creation, files, diffs, images, rewind or Live
+  Activities from the phone (model, thinking and permission mode change
+  through the command pickers described under `send`). No background session host
   (sessions still die with their terminal; deferred to a later version).
 
 ## Sirus side
@@ -204,7 +205,7 @@ by `-w` if Sirus dies). Idle sleep only; a closed lid still sleeps the Mac.
 
 ## iOS app
 
-`ios/SirusRemote/`, SwiftUI, iOS 18+, no third-party packages. Xcode project
+`ios/SirusRemote/`, SwiftUI, iOS 26+ (Liquid Glass), no third-party packages. Xcode project
 with folder-synchronised groups (objectVersion 77) so adding a file never
 touches the project file. Bundle id `com.sirus.remote` (placeholder the owner
 changes), URL scheme `sirus`, push entitlement, ATS exception for `ts.net`
@@ -218,16 +219,19 @@ Structure, each a few files:
 - `Connection/`: `RemoteClient` (URLSessionWebSocketTask, request ids, results,
   reconnect with backoff on foreground and network change), `HostScanner`
   (probes `/v1/hello` on 47470–47479, merges sessions from every process).
-  Host stored in UserDefaults; nothing secret to store.
-- `Views/`: Sessions list → Conversation (participant tabs like the TUI header,
-  rows, status line with the current thought and elapsed time, input bar,
-  stop button while working) → request cards in place of the input bar, as the
-  TUI does. Setup screen when no host is set (paste/type host, or scan via the
-  QR link).
+  Host and last session viewed stored in UserDefaults; nothing secret to store.
+- `Views/`: Conversation (participant tabs like the TUI header, rows, status
+  line with the current thought and elapsed time, input bar, stop button while
+  working) with the sessions in a sidebar over its leading edge. An approval
+  takes the input bar's place, as the TUI does; a question grows out of the
+  status line. The `/` and `@` menu and command pickers float over the
+  conversation. Setup screen when no host is set (paste/type host, or scan via
+  the QR link), which explains a failed connection.
 - `Push/`: registration, categories and actions (answer approvals from the lock
   screen without opening the app), deep links from `sirus://connect` and from
   notification taps.
-- Opens at `focus` if present, else the last session viewed.
+- Opens at `focus` if present, else the last session viewed, else the most
+  recent. A `sirus://connect` link to a different Mac asks before switching.
 
 Design language, from `src/frontend/styles/theme.ts`: near-black ground,
 platinum `#C8CDD5` accents, arctic white `#F2F3F5` for the user's voice,

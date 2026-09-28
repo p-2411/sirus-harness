@@ -431,6 +431,11 @@ struct ClientFrame: Encodable, Sendable {
     static func device(_ token: String, _ environment: String) -> Self {
         Self(type: "device", apnsToken: token, environment: environment)
     }
+
+    // The frame as the text message the socket sends.
+    func encoded() throws -> String {
+        String(decoding: try JSONEncoder().encode(self), as: UTF8.self)
+    }
 }
 
 // questions.ts QuestionAnswer: accept with content, or decline without.

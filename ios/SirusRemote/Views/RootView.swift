@@ -11,6 +11,9 @@ struct RootView: View {
     // would snap instead of springing.
     @State private var sidebarExpanded = UserDefaults.standard.bool(forKey: "sidebarExpanded")
     @State private var menuOpen = false
+    // A link to another Mac, waiting for the user to say yes.
+    @State private var otherMac: String?
+    @State private var confirmingOtherMac = false
 
     // A menu over the conversation takes its whole width, so the rail steps
     // aside until it closes.
@@ -33,6 +36,7 @@ struct RootView: View {
                         .ignoresSafeArea(.keyboard)
                         .opacity(railAside ? 0 : 1)
                         .allowsHitTesting(!railAside)
+                        .symbolEffectsRemoved(railAside)
                 }
                 .animation(.smooth(duration: 0.25), value: store.openSession)
                 .animation(.smooth(duration: 0.2), value: railAside)
@@ -44,13 +48,25 @@ struct RootView: View {
         .onChange(of: sidebarExpanded) { _, expanded in
             UserDefaults.standard.set(expanded, forKey: "sidebarExpanded")
         }
-        .onChange(of: store.sessions.first?.id, initial: true) { _, first in
-            // Nothing opened at launch: show the most recent session.
-            if store.openSession == nil, let first { store.open(first) }
-        }
         .onOpenURL { url in
             guard url.scheme == "sirus", url.host() == "connect" else { return }
-            Task { await store.connect(to: url.absoluteString) }
+            // A link can come from anywhere. Moving to another Mac sends it
+            // messages, answers and this phone's push token, so that asks
+            // first; the first Mac, or the same one again, does not.
+            let target = HostScanner.normalize(url.absoluteString)
+            if store.host.isEmpty || target == store.host {
+                Task { await store.connect(to: url.absoluteString) }
+            } else if let target {
+                otherMac = target
+                confirmingOtherMac = true
+            }
+        }
+        .confirmationDialog("Switch to another Mac?", isPresented: $confirmingOtherMac,
+                            titleVisibility: .visible, presenting: otherMac) { target in
+            Button("Connect to \(target)") { Task { await store.connect(to: target) } }
+            Button("Stay on \(store.host)", role: .cancel) {}
+        } message: { target in
+            Text("Sirus Remote is connected to \(store.host). After switching, your messages and approvals go to \(target).")
         }
         .task { store.foreground() }
         .onChange(of: phase) { _, phase in
@@ -69,7 +85,7 @@ private struct Lobby: View {
     let store: RemoteStore
 
     // Unreachable is nearly always Tailscale, so what to check comes with it.
-    private var helps: Bool {
+    private var showsChecklist: Bool {
         store.link == .offline && (store.problem?.concernsTailscale ?? true)
     }
 
@@ -89,7 +105,7 @@ private struct Lobby: View {
                     .font(.system(size: 15))
                     .foregroundStyle(Palette.muted)
             }
-            if helps {
+            if showsChecklist {
                 ConnectionHelp()
                     .frame(maxWidth: 400)
                     .padding(.top, 10)
@@ -107,7 +123,7 @@ private struct Lobby: View {
                         .frame(minHeight: 36)
                 }
                 .buttonStyle(.glass)
-                .padding(.top, helps ? 4 : 12)
+                .padding(.top, showsChecklist ? 4 : 12)
             }
         }
         .multilineTextAlignment(.center)
@@ -132,7 +148,7 @@ private struct Lobby: View {
             return nil
         case .offline:
             if case .refused? = store.problem { return store.problem?.errorDescription }
-            return helps ? nil : store.problem?.errorDescription
+            return showsChecklist ? nil : store.problem?.errorDescription
         case .live:
             return "Run `/rc` in a Sirus session on your Mac."
         }

@@ -25,8 +25,9 @@ protocol is in `docs/superpowers/specs/2026-09-28-remote-control-design.md`.
    scan the QR code it shows with the Camera. You can also type the Mac's
    Tailscale name (for example `mac.tailnet.ts.net`) into the app.
 
-Approval notifications carry Allow, Always Allow and Deny. Allowing asks for
-Face ID first; the answer goes straight to Sirus without opening the app.
+Approval notifications carry Allow and Deny, plus Always Allow when the
+request offers it. Allowing needs the phone unlocked (Face ID or passcode);
+the answer goes straight to Sirus without opening the app.
 
 ## Simulator
 

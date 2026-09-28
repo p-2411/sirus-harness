@@ -124,7 +124,7 @@ private struct ApprovalBody: View {
                         .padding(.horizontal, 18)
                         .padding(.vertical, 8)
                         .frame(maxWidth: .infinity, minHeight: 48)
-                        .background(Capsule().fill(primary ? AnyShapeStyle(Palette.platinum) : AnyShapeStyle(.white.opacity(0.08))))
+                        .background(Capsule().fill(primary ? AnyShapeStyle(Palette.platinum) : AnyShapeStyle(Palette.fill)))
                         .contentShape(Capsule())
                     }
                     .buttonStyle(RowPress())
@@ -200,7 +200,7 @@ private struct QuestionBody: View {
                         .foregroundStyle(Palette.muted)
                         .padding(.horizontal, 20)
                         .frame(minHeight: 44)
-                        .background(Capsule().fill(.white.opacity(0.08)))
+                        .background(Capsule().fill(Palette.fill))
                         .contentShape(Capsule())
                 }
                 Spacer()
@@ -306,11 +306,10 @@ private struct QuestionBody: View {
     }
 
     private func numberPrompt(_ field: QuestionField) -> String {
-        let format = { (value: Double) in value.rounded() == value ? String(Int(value)) : String(value) }
         switch (field.minimum, field.maximum) {
-        case let (low?, high?): return "\(format(low))–\(format(high))"
-        case let (low?, nil): return "At least \(format(low))"
-        case let (nil, high?): return "At most \(format(high))"
+        case let (low?, high?): return "\(numberText(low))–\(numberText(high))"
+        case let (low?, nil): return "At least \(numberText(low))"
+        case let (nil, high?): return "At most \(numberText(high))"
         default: return field.integer ? "A whole number" : "A number"
         }
     }
@@ -350,12 +349,14 @@ private struct QuestionBody: View {
                 if otherOn.contains(field.key) && custom.isEmpty { return fail("Enter your own answer for \(title).") }
                 if field.multiple {
                     let values = picked[field.key, default: []]
-                    let minimum = max(field.required ? 1 : 0, Int(field.minimum ?? 0))
-                    if custom.isEmpty && (field.required || !values.isEmpty) && values.count < minimum {
-                        return fail("Choose at least \(minimum) for \(title).")
+                    // Counted in Double: the bounds come from the agent, and
+                    // one past Int's range would trap in a conversion.
+                    let minimum = max(field.required ? 1 : 0, (field.minimum ?? 0).rounded(.towardZero))
+                    if custom.isEmpty && (field.required || !values.isEmpty) && Double(values.count) < minimum {
+                        return fail("Choose at least \(numberText(minimum)) for \(title).")
                     }
-                    if let maximum = field.maximum, values.count > Int(maximum) {
-                        return fail("Choose at most \(Int(maximum)) for \(title).")
+                    if let maximum = field.maximum?.rounded(.towardZero), Double(values.count) > maximum {
+                        return fail("Choose at most \(numberText(maximum)) for \(title).")
                     }
                     if !values.isEmpty || field.required || !custom.isEmpty { content[field.key] = .strings(values) }
                 } else if let value = chosen[field.key] {
@@ -394,8 +395,9 @@ private struct QuestionBody: View {
         send(.accept(content))
     }
 
+    // A whole number without its ".0", when it fits in an Int.
     private func numberText(_ value: Double) -> String {
-        value.rounded() == value ? String(Int(value)) : String(value)
+        value.rounded() == value && abs(value) < 1e15 ? String(Int(value)) : String(value)
     }
 
     private func fail(_ message: String) { failure = message }
@@ -410,7 +412,7 @@ private struct QuestionBody: View {
         }
     }
 
-    // questions.ts questionText: Claude puts a lone question in the message
+    // QuestionCard.tsx questionText: Claude puts a lone question in the message
     // and a short header in the title; Codex the question in the title and a
     // header in the description.
     private func questionText(_ field: QuestionField) -> (question: String, label: String?) {

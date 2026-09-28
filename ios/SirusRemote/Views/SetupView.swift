@@ -12,10 +12,10 @@ struct SetupView: View {
     // staying put through a retry, and steps aside while a new name is
     // typed. Typing folds the introduction away too, so the field has room
     // above the keyboard.
-    private var helps: Bool {
+    private var showsChecklist: Bool {
         !typing && store.problem?.concernsTailscale == true
     }
-    private var compact: Bool { typing || helps }
+    private var compact: Bool { typing || showsChecklist }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -35,7 +35,7 @@ struct SetupView: View {
                 .tracking(3)
                 .foregroundStyle(Palette.muted)
                 .padding(.top, 4)
-            if helps {
+            if showsChecklist {
                 ConnectionHelp()
                     .padding(.top, 24)
                     .transition(.opacity)
@@ -75,7 +75,7 @@ struct SetupView: View {
                     }
                     .foregroundStyle(canConnect || store.scanning ? Palette.ground : Palette.subtle)
                     .frame(width: 40, height: 40)
-                    .background(Circle().fill(canConnect || store.scanning ? Palette.platinum : .white.opacity(0.08)))
+                    .background(Circle().fill(canConnect || store.scanning ? Palette.platinum : Palette.fill))
                     .frame(width: 44, height: 44)
                     .contentShape(Circle())
                 }
@@ -103,7 +103,7 @@ struct SetupView: View {
                 .contentShape(Rectangle())
                 .onTapGesture { typing = false }
         }
-        .animation(.smooth(duration: 0.3), value: helps)
+        .animation(.smooth(duration: 0.3), value: showsChecklist)
         .animation(.smooth(duration: 0.3), value: typing)
         .animation(.easeOut(duration: 0.2), value: store.scanning)
         .sensoryFeedback(.error, trigger: store.problem?.errorDescription) { _, new in new != nil }

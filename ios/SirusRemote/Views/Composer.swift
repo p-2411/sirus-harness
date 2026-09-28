@@ -1,28 +1,21 @@
 import SwiftUI
 
-// Command feedback, or why a message did not go, shown a moment over the
-// composer: long enough to read, then out of the way. A failure stays a
-// little longer.
-struct Note: Equatable {
-    let text: String
-    let failed: Bool
-
-    static func duration(failed: Bool) -> Double { failed ? 6 : 3.5 }
-}
-
 // The input bar, drawn on the glass the conversation gives it. While the
 // agent works, an empty draft turns send into stop; a message typed then is
-// queued or steers, as in the terminal.
+// queued or steers, as in the terminal. The conversation sends what it is
+// given, so a picker it opens lands where the conversation keeps them, and
+// shows the notes.
 struct Composer: View {
     let client: RemoteClient
     let sessionId: String
     let participant: String
     let working: Bool
     @Binding var draft: String
-    @Binding var note: Note?
     @Binding var selection: TextSelection?
     let onFocus: (Bool) -> Void
-    let onResult: (ResultFrame) -> Void
+    let send: (String) async throws -> Void
+    // Shows a note, or with nil puts the last one away.
+    let notify: (Note?) -> Void
     @State private var sending = false
     @State private var sent = 0
     @State private var stopped = 0
@@ -42,7 +35,7 @@ struct Composer: View {
                 .focused($focused)
                 .padding(.leading, 18)
                 .padding(.vertical, 11)
-            Button { if stops { stop() } else { send() } } label: { trailing }
+            Button { if stops { stop() } else { submit() } } label: { trailing }
             .buttonStyle(.plain)
             .disabled(!stops && (empty || sending))
             .accessibilityLabel(stops ? "Stop" : "Send")
@@ -67,33 +60,34 @@ struct Composer: View {
         #endif
     }
 
-    // Send, turning into an amber stop while the agent works.
+    // Send, turning into a stop while the agent works; faint while there is
+    // nothing to send.
     private var trailing: some View {
-        Image(systemName: stops ? "stop.fill" : "arrow.up")
+        let lit = stops || !empty
+        return Image(systemName: stops ? "stop.fill" : "arrow.up")
             .font(.system(size: stops ? 13 : 16, weight: .bold))
             .contentTransition(.symbolEffect(.replace))
-            .foregroundStyle(stops || !empty ? Palette.ground : Palette.subtle)
+            .foregroundStyle(lit ? Palette.ground : Palette.subtle)
             .frame(width: 34, height: 34)
-            .background(Circle().fill(stops ? Palette.platinum : empty ? Color.white.opacity(0.08) : Palette.platinum))
+            .background(Circle().fill(lit ? Palette.platinum : Palette.fill))
             .frame(width: 44, height: 44)
             .contentShape(Circle())
     }
 
-    private func send() {
+    private func submit() {
         let message = text
         guard !message.isEmpty, !sending else { return }
         sending = true
         sent += 1
         draft = ""
-        note = nil
+        notify(nil)
         Task {
             defer { sending = false }
             do {
-                let result = try await client.send(message, sessionId: sessionId, participant: participant)
-                onResult(result)
+                try await send(message)
             } catch {
                 if draft.isEmpty { draft = message }
-                show(error.localizedDescription, failed: true)
+                notify(Note(text: error.localizedDescription, failed: true))
             }
         }
     }
@@ -101,16 +95,8 @@ struct Composer: View {
     private func stop() {
         stopped += 1
         Task {
-            do { try await client.cancel(sessionId: sessionId) } catch { show(error.localizedDescription, failed: true) }
-        }
-    }
-
-    private func show(_ text: String, failed: Bool) {
-        let shown = Note(text: text, failed: failed)
-        note = shown
-        Task {
-            try? await Task.sleep(for: .seconds(Note.duration(failed: failed)))
-            if note == shown { note = nil }
+            do { try await client.cancel(sessionId: sessionId) }
+            catch { notify(Note(text: error.localizedDescription, failed: true)) }
         }
     }
 }
