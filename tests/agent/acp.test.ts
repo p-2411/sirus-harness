@@ -37,8 +37,13 @@ process.stdin.on('data', chunk => {
     const message = JSON.parse(buffer.slice(0, newline));
     buffer = buffer.slice(newline + 1);
     if (message.method === script.hang) continue;
-    if (message.method === 'initialize') send({ id: message.id, result: { protocolVersion: 1, agentCapabilities: {} } });
+    if (message.method === 'initialize') send({ id: message.id, result: { protocolVersion: 1, agentCapabilities: script.forkDelayMs === undefined ? {} : { sessionCapabilities: { fork: {} } } } });
     else if (message.method === 'session/new') send({ id: message.id, result: { sessionId: 'stand-in' } });
+    else if (message.method === 'session/fork') setTimeout(() => send({ id: message.id, result: { sessionId: 'forked' } }), script.forkDelayMs);
+    else if (message.method === 'session/close') {
+      require('fs').writeFileSync(process.env.STAND_IN_CLOSE_FILE, message.params.sessionId);
+      send({ id: message.id, result: {} });
+    }
     else if (message.method === 'session/prompt') void prompt(message.id, message.params.sessionId);
     else if (message.method === 'session/cancel') cancels.splice(0).forEach(resolve => resolve());
     else if (message.id !== undefined) send({ id: message.id, result: {} });
@@ -59,11 +64,11 @@ afterEach(() => {
   rmSync(directory, { recursive: true, force: true });
 });
 
-function standIn(script: { hang?: string; prompts?: Step[][] }): Launch {
+function standIn(script: { hang?: string; prompts?: Step[][]; forkDelayMs?: number }): Launch {
   return {
     command: process.execPath,
     args: ['-e', STAND_IN_ADAPTER],
-    env: { ...process.env, STAND_IN_SCRIPT: JSON.stringify(script), STAND_IN_PID_FILE: path.join(directory, 'pid') },
+    env: { ...process.env, STAND_IN_SCRIPT: JSON.stringify(script), STAND_IN_PID_FILE: path.join(directory, 'pid'), STAND_IN_CLOSE_FILE: path.join(directory, 'closed') },
     mode: 'ask',
     session: () => ({ mcpServers: [] }),
     forkNeedsResume: false,
@@ -196,5 +201,20 @@ test('cancelling a turn ends an adapter that never finishes starting', async () 
     await until(() => !alive(pid), 'the adapter to exit');
   } finally {
     if (alive(pid)) process.kill(pid, 'SIGKILL');
+  }
+});
+
+test('cancelling a pending fork closes its late session and leaves the owner usable', async () => {
+  const runtime = await startAcpRuntime(runtimeOptions(), standIn({ forkDelayMs: 60 }));
+  try {
+    const controller = new AbortController();
+    const fork = runtime.fork({ ...runtimeOptions(), setupSignal: controller.signal });
+    controller.abort(new TurnCancelledError());
+    await expect(fork).rejects.toThrow('Cancelled');
+    await until(() => existsSync(path.join(directory, 'closed')), 'late fork to close');
+    expect(readFileSync(path.join(directory, 'closed'), 'utf8')).toBe('forked');
+    await expect(runtime.prompt({ text: 'Still here', images: [] }, new AbortController().signal)).resolves.toBeDefined();
+  } finally {
+    runtime.dispose();
   }
 });

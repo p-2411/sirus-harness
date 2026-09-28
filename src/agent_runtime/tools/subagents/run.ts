@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { abortable, errorMessage, isAbortError, TurnCancelledError } from '../../../abort';
+import { abortable, errorMessage, isAbortError, throwIfAborted, TurnCancelledError } from '../../../abort';
 import type { SessionAgent } from '../../agent';
 import { FORKED_WORKER_HANDOVER } from '../../prompt';
 import { requireKnownModel } from '../../providers';
@@ -16,6 +16,7 @@ export interface SubagentSpawnOptions extends SpawnOptions {
   thinkingLevel?: ThinkingLevel;
   callId?: string;
   definition?: AgentDefinition;
+  signal?: AbortSignal;
 }
 
 const WORKER_IDLE_MS = 15 * 60_000;
@@ -30,54 +31,64 @@ const interrupted = new Set<string>();
 
 export async function startSubagent(owner: SessionAgent, prompt: string, options: SubagentSpawnOptions): Promise<SubagentRun> {
   requireKnownModel(options.model);
+  throwIfAborted(options.signal);
   const id = `sub-${crypto.randomUUID().slice(0, 8)}`;
   const baseDirectory = options.cwd ?? owner.directory;
-  const worktree = options.isolation === 'worktree' ? await createWorktree(baseDirectory, owner.sessionId, id) : null;
+  const worktree = options.isolation === 'worktree' ? await createWorktree(baseDirectory, owner.sessionId, id, options.signal) : null;
   const directory = worktree?.directory ?? baseDirectory;
-  const worker = owner.createSubagent(id, options.model, options.thinkingLevel, directory, options.definition);
-  let text = prompt;
-  let recordedTask = prompt;
-  if (options.context === 'owner') {
-    const history = transcriptText(owner.transcript.entries());
-    if (history) recordedTask = ['Earlier conversation of the agent that spawned you, for context:', history, '', prompt].join('\n');
-    text = await worker.forkFrom(owner)
-      ? [FORKED_WORKER_HANDOVER, options.definition?.prompt ?? '', 'Your task:', prompt].filter(Boolean).join('\n')
-      : recordedTask;
+  let worker: SessionAgent | undefined;
+  try {
+    throwIfAborted(options.signal);
+    worker = owner.createSubagent(id, options.model, options.thinkingLevel, directory, options.definition);
+    let text = prompt;
+    let recordedTask = prompt;
+    if (options.context === 'owner') {
+      const history = transcriptText(owner.transcript.entries());
+      if (history) recordedTask = ['Earlier conversation of the agent that spawned you, for context:', history, '', prompt].join('\n');
+      text = await worker.forkFrom(owner, options.signal)
+        ? [FORKED_WORKER_HANDOVER, options.definition?.prompt ?? '', 'Your task:', prompt].filter(Boolean).join('\n')
+        : recordedTask;
+    }
+    throwIfAborted(options.signal);
+    const run: SubagentRun = {
+      id,
+      name: options.name,
+      description: options.description,
+      callId: options.callId ?? null,
+      sessionId: owner.sessionId,
+      owner: owner.name,
+      worker,
+      model: options.model,
+      thinkingLevel: options.thinkingLevel,
+      context: options.context ?? 'fresh',
+      prompt,
+      directory,
+      baseDirectory,
+      branch: worktree?.branch ?? null,
+      startHead: worktree?.startHead,
+      isolation: options.isolation ?? 'none',
+      runInBackground: options.runInBackground ?? true,
+      definition: options.definition,
+      status: 'working',
+      startedAt: Date.now(),
+      finishedAt: null,
+      updatedAt: Date.now(),
+      transcript: worker.transcript.entries() as Message[],
+      content: [],
+      finalMessage: null,
+      changes: [],
+      error: null,
+      reported: false,
+      dismissed: false,
+    };
+    registerSubagent(run);
+    startTurn(run, owner, text, recordedTask);
+    return run;
+  } catch (error) {
+    worker?.resetRuntime();
+    if (worktree) await removeUnchangedWorktree(baseDirectory, worktree);
+    throw error;
   }
-  const run: SubagentRun = {
-    id,
-    name: options.name,
-    description: options.description,
-    callId: options.callId ?? null,
-    sessionId: owner.sessionId,
-    owner: owner.name,
-    worker,
-    model: options.model,
-    thinkingLevel: options.thinkingLevel,
-    context: options.context ?? 'fresh',
-    prompt,
-    directory,
-    baseDirectory,
-    branch: worktree?.branch ?? null,
-    startHead: worktree?.startHead,
-    isolation: options.isolation ?? 'none',
-    runInBackground: options.runInBackground ?? true,
-    definition: options.definition,
-    status: 'working',
-    startedAt: Date.now(),
-    finishedAt: null,
-    updatedAt: Date.now(),
-    transcript: worker.transcript.entries() as Message[],
-    content: [],
-    finalMessage: null,
-    changes: [],
-    error: null,
-    reported: false,
-    dismissed: false,
-  };
-  registerSubagent(run);
-  startTurn(run, owner, text, recordedTask);
-  return run;
 }
 
 export function checkSubagent(run: SubagentRun): Record<string, unknown> {

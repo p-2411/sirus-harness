@@ -385,13 +385,16 @@ export class SessionAgent {
   // the ordinary credential loop start a fresh runtime. A lost fork (the
   // owner's runtime was disposed) reopens its own durable session on the
   // next turn, like any other lost runtime.
-  async forkFrom(owner: SessionAgent): Promise<boolean> {
+  async forkFrom(owner: SessionAgent, signal?: AbortSignal): Promise<boolean> {
+    throwIfAborted(signal);
     const source = owner.runtime;
     if (!source || this.runtime || this.vendor !== owner.vendor) return false;
     // Codex config is per process, so a definition with a different tool
     // policy needs a fresh runtime seeded with the owner's record.
     if (this.vendor === 'gpt' && this.definition?.tools !== undefined) return false;
     try {
+      const mcpServer = await abortable(this.host.mcpServer(this), signal);
+      throwIfAborted(signal);
       const forked = await source.fork({
         directory: this.host.directory,
         model: this.model,
@@ -400,11 +403,16 @@ export class SessionAgent {
         tools: this.definition?.tools,
         readOnly: readOnlyTools(this.definition?.tools),
         permissionMode: this.host.permissionMode(),
-        mcpServer: await this.host.mcpServer(this),
+        mcpServer,
+        setupSignal: signal,
         onPermission: (request, promptSignal) => this.askPermission(request, promptSignal),
         onElicitation: (request, promptSignal) => this.askUser(request, promptSignal),
         onUpdate: update => this.hear(update),
       });
+      if (signal?.aborted) {
+        forked.dispose();
+        throw abortReason(signal);
+      }
       this.runtime = trackRuntime(forked);
       this.generation = runtimeGeneration();
       // The fork runs on the credential the owner's process was started on,
@@ -415,6 +423,7 @@ export class SessionAgent {
       this.saveNativeSession(forked, owner.source, owner.savedSession?.profileHome);
       return true;
     } catch {
+      throwIfAborted(signal);
       return false;
     }
   }
@@ -916,7 +925,8 @@ export class SessionAgent {
     else this.modeNotice = `${PERMISSION_MODE_NAMES[requested]} is unavailable to @${this.name}, which is on ${mode}`;
   }
 
-  async spawnSubagent(prompt: string, options: SpawnOptions = {}, callId?: string): Promise<SubagentRun> {
+  async spawnSubagent(prompt: string, options: SpawnOptions = {}, callId?: string, signal?: AbortSignal): Promise<SubagentRun> {
+    throwIfAborted(signal);
     const name = options.name;
     if (name && (this.pendingNames.has(name) || this.listSubagents().some(run => run.name === name || run.id === name))) {
       if (callId) this.claimedSpawnCallIds.delete(callId);
@@ -929,7 +939,7 @@ export class SessionAgent {
       const definition = options.agentType ? definitions.find(entry => entry.name === options.agentType) : undefined;
       if (options.agentType && !definition) throw new Error(`Unknown agent type "${options.agentType}". Available: ${definitions.map(entry => entry.name).join(', ') || '(none)'}`);
       setUp = startSubagent(this, prompt, {
-        ...options, definition,
+        ...options, definition, signal,
         model: this.host.subagentModel() ?? options.model ?? definitionModel(definition?.model, this.model),
         thinkingLevel: options.thinkingLevel ?? definition?.thinkingLevel ?? this.thinkingLevel,
         ...(callId ? { callId } : {}),
@@ -1030,9 +1040,10 @@ export class SessionAgent {
         // the call, so the wait follows the turn as well as the call.
         const turn = this.turn?.signal;
         const callId = this.spawnCallId(call.vendorCallId);
-        const run = await this.spawnSubagent(prompt, options, callId ?? call.callId);
+        const setupSignal = turn && signal ? AbortSignal.any([turn, signal]) : turn ?? signal;
+        const run = await this.spawnSubagent(prompt, options, callId ?? call.callId, setupSignal);
         if (options.runInBackground === false) {
-          await awaitForeground(run, deadline - Date.now(), turn && signal ? AbortSignal.any([turn, signal]) : turn ?? signal);
+          await awaitForeground(run, deadline - Date.now(), setupSignal);
         }
         const note = run.status !== 'working' ? null
           : options.runInBackground === false

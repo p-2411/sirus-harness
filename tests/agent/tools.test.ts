@@ -132,8 +132,8 @@ test('worktree cleanup preserves a branch that advances after the checkout is re
   git('commit', '-q', '--allow-empty', '-m', 'later');
   const advanced = git('rev-parse', 'HEAD');
   const projectGit = checkpointStore.projectGit;
-  const remove = spyOn(checkpointStore, 'projectGit').mockImplementation(async (directory, args, timeout) => {
-    const result = await projectGit(directory, args, timeout);
+  const remove = spyOn(checkpointStore, 'projectGit').mockImplementation(async (directory, args, timeout, signal) => {
+    const result = await projectGit(directory, args, timeout, signal);
     if (args[0] === 'worktree' && args[1] === 'remove') {
       git('update-ref', `refs/heads/${worktree!.branch}`, advanced);
     }

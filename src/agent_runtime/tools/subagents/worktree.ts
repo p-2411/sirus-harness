@@ -1,6 +1,6 @@
 import { rmSync } from 'fs';
 import path from 'path';
-import { errorMessage } from '../../../abort';
+import { errorMessage, throwIfAborted } from '../../../abort';
 import { projectGit } from '../../../checkpoints';
 import { dataDirectory } from '../../../dataDirectory';
 
@@ -16,8 +16,8 @@ export interface Worktree {
   startHead: string;
 }
 
-function git(directory: string, args: readonly string[]): Promise<string> {
-  return projectGit(directory, args, GIT_TIMEOUT_MS);
+function git(directory: string, args: readonly string[], signal?: AbortSignal): Promise<string> {
+  return projectGit(directory, args, GIT_TIMEOUT_MS, signal);
 }
 
 export function worktreePath(sessionId: string, runId: string): string {
@@ -28,25 +28,30 @@ export async function createWorktree(
   project: string,
   sessionId: string,
   runId: string,
+  signal?: AbortSignal,
 ): Promise<Worktree | null> {
   const directory = worktreePath(sessionId, runId);
   const branch = `sirus/${runId}`;
+  throwIfAborted(signal);
   let inside: string;
   try {
-    inside = (await git(project, ['rev-parse', '--is-inside-work-tree'])).trim();
+    inside = (await git(project, ['rev-parse', '--is-inside-work-tree'], signal)).trim();
   } catch (error) {
+    throwIfAborted(signal);
     if (/not a git repository(?:\s|\()/i.test(errorMessage(error))) return null;
     throw new Error(`Could not inspect the repository for the worker: ${errorMessage(error)}`);
   }
   if (inside !== 'true') throw new Error('Could not create a worktree for the worker: the directory is not a Git working tree.');
   let startHead: string;
   try {
-    startHead = (await git(project, ['rev-parse', '--verify', 'HEAD'])).trim();
+    startHead = (await git(project, ['rev-parse', '--verify', 'HEAD'], signal)).trim();
   } catch (error) {
+    throwIfAborted(signal);
     throw new Error(`Could not create a worktree for the worker: ${errorMessage(error)}`);
   }
   try {
-    await git(project, ['worktree', 'add', '--quiet', '-b', branch, directory, 'HEAD']);
+    await git(project, ['worktree', 'add', '--quiet', '-b', branch, directory, 'HEAD'], signal);
+    throwIfAborted(signal);
   } catch (error) {
     // A repository that cannot make one fails the spawn: running the worker
     // in the user's own checkout instead is not a fallback. Git may have
@@ -54,6 +59,7 @@ export async function createWorktree(
     // its ref only if nobody has moved it beyond the starting commit.
     await discardWorktree(project, directory);
     await git(project, ['update-ref', '-d', `refs/heads/${branch}`, startHead]).catch(() => {});
+    throwIfAborted(signal);
     throw new Error(`Could not create a worktree for the worker: ${errorMessage(error)}`);
   }
   return { directory, branch, startHead };

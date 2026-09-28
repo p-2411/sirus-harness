@@ -186,7 +186,11 @@ export interface PromptResult {
 // first prompt.
 export type ForkOptions = Pick<RuntimeOptions,
   'directory' | 'model' | 'thinkingLevel' | 'systemPrompt' | 'permissionMode' | 'mcpServer' | 'onPermission'
-  | 'onElicitation' | 'onUpdate' | 'tools' | 'readOnly'>;
+  | 'onElicitation' | 'onUpdate' | 'tools' | 'readOnly'> & {
+  // The caller's current setup cancellation, distinct from RuntimeOptions'
+  // signal, which expires when the original runtime finishes starting.
+  setupSignal?: AbortSignal;
+};
 
 export interface Runtime {
   readonly vendor: Vendor;

@@ -910,54 +910,68 @@ export async function startAcpRuntime(options: RuntimeOptions, testLaunch?: Laun
 
   async function fork(parent: SessionState, forked: ForkOptions): Promise<Runtime> {
     live(parent);
+    throwIfAborted(forked.setupSignal);
     if (!canFork) throw new Error(`The ${vendorName} adapter cannot fork a session`);
-    const params: SessionParams = launch.session({
-      directory: forked.directory,
-      systemPrompt: forked.systemPrompt,
-      mcpServer: forked.mcpServer,
-      tools: forked.tools,
-    });
-    const extras = {
-      mcpServers: params.mcpServers,
-      ...(params.meta ? { _meta: params.meta } : {}),
-      ...(params.additionalDirectories ? { additionalDirectories: params.additionalDirectories } : {}),
-    };
-    let created;
-    let state: SessionState;
-    try {
-      ({ opened: created, state } = await openSession(() => connection.agent.request(methods.agent.session.fork, {
-        sessionId: parent.id,
-        // Where the adapter finds the session being forked when the fork only
-        // copies its transcript, and where the new session runs when it does
-        // not; the launch spec says which this vendor does.
-        cwd: options.vendor === 'claude' ? parent.directory : forked.directory,
-        ...extras,
-      }), forked.directory, forked, parent.model));
-    } catch (error) {
-      throw settled(error);
-    }
-    // Registered before the resume, since the adapter starts pushing updates
-    // for the new session the moment it opens it.
-    try {
-      state.reopening = launch.forkNeedsResume;
-      const opened = launch.forkNeedsResume
-        ? await connection.agent.request(methods.agent.session.resume, {
-          sessionId: created.sessionId,
-          cwd: forked.directory,
+    const opening = openFork();
+    // The vendor may answer a fork request after its caller has gone away.
+    // Let cancellation release the caller promptly, then close that session
+    // when the outstanding request finally settles.
+    void opening.then(runtime => {
+      if (forked.setupSignal?.aborted) runtime.dispose();
+    }).catch(() => undefined);
+    return abortable(opening, forked.setupSignal);
+
+    async function openFork(): Promise<Runtime> {
+      const params: SessionParams = launch.session({
+        directory: forked.directory,
+        systemPrompt: forked.systemPrompt,
+        mcpServer: forked.mcpServer,
+        tools: forked.tools,
+      });
+      const extras = {
+        mcpServers: params.mcpServers,
+        ...(params.meta ? { _meta: params.meta } : {}),
+        ...(params.additionalDirectories ? { additionalDirectories: params.additionalDirectories } : {}),
+      };
+      let created;
+      let state: SessionState;
+      try {
+        ({ opened: created, state } = await openSession(() => connection.agent.request(methods.agent.session.fork, {
+          sessionId: parent.id,
+          // Where the adapter finds the session being forked when the fork only
+          // copies its transcript, and where the new session runs when it does
+          // not; the launch spec says which this vendor does.
+          cwd: options.vendor === 'claude' ? parent.directory : forked.directory,
           ...extras,
-        })
-        : created;
-      if (state.reopening) await finishReopening(state);
-      state.modes = opened.modes?.availableModes ?? [];
-      state.currentModeId = opened.modes?.currentModeId ?? '';
-      state.configOptions = opened.configOptions ?? [];
-      await configure(state, forked.readOnly ? 'ask' : forked.permissionMode, forked.model, forked.thinkingLevel);
-    } catch (error) {
-      const failure = settled(error);
-      closeSession(state);
-      throw failure;
+        }), forked.directory, forked, parent.model));
+      } catch (error) {
+        throw settled(error);
+      }
+      // Registered before the resume, since the adapter starts pushing updates
+      // for the new session the moment it opens it.
+      try {
+        throwIfAborted(forked.setupSignal);
+        state.reopening = launch.forkNeedsResume;
+        const opened = launch.forkNeedsResume
+          ? await connection.agent.request(methods.agent.session.resume, {
+            sessionId: created.sessionId,
+            cwd: forked.directory,
+            ...extras,
+          })
+          : created;
+        if (state.reopening) await finishReopening(state);
+        state.modes = opened.modes?.availableModes ?? [];
+        state.currentModeId = opened.modes?.currentModeId ?? '';
+        state.configOptions = opened.configOptions ?? [];
+        await configure(state, forked.readOnly ? 'ask' : forked.permissionMode, forked.model, forked.thinkingLevel);
+        throwIfAborted(forked.setupSignal);
+      } catch (error) {
+        const failure = settled(error);
+        closeSession(state);
+        throw failure;
+      }
+      return runtimeFor(state, () => closeSession(state));
     }
-    return runtimeFor(state, () => closeSession(state));
   }
 
   function runtimeFor(state: SessionState, dispose: () => void): Runtime {

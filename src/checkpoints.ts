@@ -163,11 +163,13 @@ export function projectGit(
   directory: string,
   args: readonly string[],
   timeoutMs: number = GIT_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile('git', ['-C', directory, ...args], {
       cwd: directory,
       timeout: timeoutMs,
+      signal,
       maxBuffer: 64 * 1024 * 1024,
       env: gitEnvironment(),
     }, (error, stdout, stderr) => {
