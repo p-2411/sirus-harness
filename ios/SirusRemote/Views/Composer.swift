@@ -12,14 +12,15 @@ struct Composer: View {
     let working: Bool
     @Binding var draft: String
     @Binding var selection: TextSelection?
-    let onFocus: (Bool) -> Void
+    // Whether the composer has the keyboard, owned by the conversation,
+    // which shows the `/` and `@` menu while it does.
+    let focus: FocusState<Bool>.Binding
     let send: (String) async throws -> Void
     // Shows a note, or with nil puts the last one away.
     let notify: (Note?) -> Void
     @State private var sending = false
     @State private var sent = 0
     @State private var stopped = 0
-    @FocusState private var focused: Bool
 
     private var text: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var empty: Bool { text.isEmpty }
@@ -34,7 +35,7 @@ struct Composer: View {
                 .font(.body)
                 .foregroundStyle(Palette.white)
                 .lineLimit(1...6)
-                .focused($focused)
+                .focused(focus)
                 .padding(.leading, 18)
                 .padding(.vertical, 11)
             Button { if stops { stop() } else { submit() } } label: { trailing }
@@ -47,18 +48,12 @@ struct Composer: View {
         .animation(.easeOut(duration: 0.15), value: empty)
         .sensoryFeedback(.impact(weight: .light), trigger: sent)
         .sensoryFeedback(.impact(weight: .medium), trigger: stopped)
-        .onChange(of: focused) { _, now in
-            #if DEBUG
-            NSLog("composer focused %@", now ? "yes" : "no")
-            #endif
-            onFocus(now)
-        }
         #if DEBUG
         .task {
             // Screenshot hooks: -composerDraft <text> and -composerFocused YES.
             let preset = UserDefaults.standard.string(forKey: "composerDraft")
             if let preset { draft = preset }
-            focused = UserDefaults.standard.bool(forKey: "composerFocused")
+            focus.wrappedValue = UserDefaults.standard.bool(forKey: "composerFocused")
             if preset != nil {
                 await Task.yield()
                 selection = TextSelection(range: draft.endIndex..<draft.endIndex)

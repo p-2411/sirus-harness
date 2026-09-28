@@ -74,7 +74,9 @@ private struct Conversation: View {
     @State private var draft = ""
     @State private var note: Note?
     @State private var selection: TextSelection?
-    @State private var composerFocused = false
+    // Owned here rather than reported up by the composer: a report of it
+    // never arrived, so the menu never had a query.
+    @FocusState private var composerFocused: Bool
     @State private var completions = Completions()
     @State private var picker: CommandPicker?
     @State private var pickerRevision = 0
@@ -135,13 +137,22 @@ private struct Conversation: View {
 
     private var completionQuery: CompletionQuery? {
         guard composerFocused, picker == nil, waitingApproval == nil, client.link == .live else { return nil }
-        var cursor = draft.utf16.count
-        if case .selection(let range) = selection?.indices {
-            cursor = max(0, min(range.lowerBound.utf16Offset(in: draft), cursor))
-        }
+        let cursor = caret
         let before = String(decoding: draft.utf16.prefix(cursor), as: UTF16.self)
         guard before.contains("/") || before.contains("@") else { return nil }
         return CompletionQuery(text: draft, cursor: cursor)
+    }
+
+    // The caret's place in the draft in UTF-16 units, as Sirus counts: the
+    // selection's start when it lies in this draft, else the end. A
+    // selection can briefly belong to the text before the last change, and
+    // measuring the draft with its index would trap.
+    private var caret: Int {
+        let end = draft.utf16.count
+        guard case .selection(let range)? = selection?.indices,
+              range.lowerBound >= draft.startIndex, range.lowerBound <= draft.endIndex,
+              let position = range.lowerBound.samePosition(in: draft.utf16) else { return end }
+        return min(end, draft.utf16.distance(from: draft.utf16.startIndex, to: position))
     }
 
     var body: some View {
@@ -152,14 +163,8 @@ private struct Conversation: View {
             .task(id: "\(client.endpoint.port)/\(sessionId)/\(participant)") { await subscribe() }
             .task(id: completionQuery) {
                 #if DEBUG
-                let caret: String
-                switch selection?.indices {
-                case .selection(let range)?: caret = "selection \(range.lowerBound.utf16Offset(in: draft))"
-                case .none: caret = "no selection"
-                default: caret = "multiple selections"
-                }
                 let query = completionQuery.map { "\($0.text)@\($0.cursor)" } ?? "none"
-                let line = "menu query \(query): focused \(composerFocused), picker \(picker != nil), approval \(waitingApproval != nil), live \(client.link == .live), draft \(draft), \(caret)"
+                let line = "menu query \(query): focused \(composerFocused), picker \(picker != nil), approval \(waitingApproval != nil), live \(client.link == .live), draft \(draft), caret \(caret)"
                 screensLog.notice("\(line, privacy: .public)")
                 #endif
                 await complete(completionQuery)
@@ -309,7 +314,7 @@ private struct Conversation: View {
         } else {
             Composer(client: client, sessionId: sessionId, participant: participant, working: working,
                      draft: $draft, selection: $selection,
-                     onFocus: { composerFocused = $0 },
+                     focus: $composerFocused,
                      send: { try await send($0, from: .composer) },
                      notify: notify)
                 .glassEffect(inputGlass, in: .rect(cornerRadius: 23, style: .continuous))
@@ -401,8 +406,8 @@ private struct Conversation: View {
               let range = Range(NSRange(location: item.start, length: item.end - item.start), in: draft) else { return }
         let offset = item.start + item.insert.utf16.count
         draft.replaceSubrange(range, with: item.insert)
-        let caret = String.Index(utf16Offset: offset, in: draft)
-        selection = TextSelection(range: caret..<caret)
+        let after = String.Index(utf16Offset: offset, in: draft)
+        selection = TextSelection(range: after..<after)
         chosenCompletion += 1
     }
 

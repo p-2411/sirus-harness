@@ -80,6 +80,7 @@ stop_mock() {
 launch() {
   local udid=$1
   shift
+  touch "$out/../launched"
   limit 30 xcrun simctl terminate "$udid" "$bundle" >/dev/null 2>&1 || true
   limit 60 xcrun simctl uninstall "$udid" "$bundle" >/dev/null 2>&1 || true
   limit 120 xcrun simctl install "$udid" "$app" || echo "install timed out" >&2
@@ -93,8 +94,11 @@ shot() {
   # loops, crashes and the debug build's own notes.
   sed 's/^/  mock: /' "$out/../mock.log" 2>/dev/null | tail -n 8 || true
   limit 30 xcrun simctl spawn "$1" log show --last 25s --style compact \
-    --predicate 'process == "SirusRemote" AND (subsystem == "com.sirus.remote" OR eventMessage CONTAINS "composer focused" OR messageType == error OR eventMessage CONTAINS[c] "per frame" OR eventMessage CONTAINS[c] "cycle")' \
+    --predicate 'process == "SirusRemote" AND (subsystem == "com.sirus.remote" OR messageType == error OR eventMessage CONTAINS[c] "per frame" OR eventMessage CONTAINS[c] "cycle")' \
     2>/dev/null | tail -n 12 | sed 's/^/  app: /' || true
+  # A crash since the launch, which otherwise only shows as the home screen.
+  find "$HOME/Library/Logs/DiagnosticReports" -name 'SirusRemote*' -newer "$out/../launched" 2>/dev/null \
+    | xargs python3 "$here/crash.py" 2>&1 | sed 's/^/  crash: /' || true
   : >"$out/../mock.log"
 }
 
