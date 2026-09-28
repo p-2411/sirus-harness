@@ -6,6 +6,7 @@ import SwiftUI
 struct RootView: View {
     @Bindable var store: RemoteStore
     @Environment(\.scenePhase) private var phase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     // Plain state, written through to the defaults: a change to @AppStorage
     // reaches the view outside the animation it was made in, so the sidebar
     // would snap instead of springing.
@@ -21,6 +22,11 @@ struct RootView: View {
     // A menu over the conversation takes its whole width, so the rail steps
     // aside until it closes.
     private var railAside: Bool { menuOpen && !sidebarExpanded }
+    // Far enough off the leading edge for the rail's glass to clear the
+    // screen, edge and all.
+    private static var railAway: CGFloat { Sidebar.inset * 2 + Sidebar.railWidth }
+
+    private var motion: Motion { Motion(reduced: reduceMotion) }
 
     var body: some View {
         Group {
@@ -28,6 +34,8 @@ struct RootView: View {
                 SetupView(store: store)
             } else {
                 ZStack {
+                    // Sessions are peers, not a stack, so one gives way to
+                    // another in place rather than sliding in.
                     if let id = store.openSession {
                         ConversationView(store: store, sessionId: id, menuOpen: $menuOpen, chromeTop: $chromeTop)
                             .id(id)
@@ -38,14 +46,17 @@ struct RootView: View {
                     // Laid out above the keyboard like the conversation: one
                     // that ignored it slid down over the composer. Opening it
                     // puts the keyboard away, so the panel still runs full
-                    // height.
+                    // height. Stepping aside, the rail slides back off the
+                    // edge the sidebar opens from, on the sidebar's spring,
+                    // and returns the same way; with Reduce Motion it fades.
                     Sidebar(store: store, selected: store.openSession, expanded: $sidebarExpanded, railEnd: chromeTop)
-                        .opacity(railAside ? 0 : 1)
+                        .offset(x: railAside && !reduceMotion ? -Self.railAway : 0)
+                        .opacity(railAside && reduceMotion ? 0 : 1)
                         .allowsHitTesting(!railAside)
                         .symbolEffectsRemoved(railAside)
                 }
-                .animation(.smooth(duration: 0.25), value: store.openSession)
-                .animation(.smooth(duration: 0.2), value: railAside)
+                .animation(Motion.fade, value: store.openSession)
+                .animation(motion.panel, value: railAside)
             }
         }
         .background(Palette.ground.ignoresSafeArea())
