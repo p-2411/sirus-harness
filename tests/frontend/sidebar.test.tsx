@@ -45,7 +45,7 @@ function mountSidebar() {
     <Sidebar sessions={sessions} currSession={selected} selectSession={session => {
       selected = session;
       app.rerender(view());
-    }} addSession={() => { added++; }} deleteSession={session => { deleted.push(session); sessions = sessions.filter(item => item !== session); app.rerender(view()); }}
+    }} focusDraftSession={() => { added++; }} deleteSession={session => { deleted.push(session); sessions = sessions.filter(item => item !== session); app.rerender(view()); }}
       onArchive={session => { archived.push(session); sessions = sessions.filter(item => item !== session); app.rerender(view()); }}
       onFocusChange={value => { focused = value; }} collapsed={collapsed} />
   </Box>;
@@ -275,7 +275,7 @@ describe('sidebar header', () => {
         sessions={[]}
         currSession={null}
         selectSession={noOp}
-        addSession={noOp}
+        focusDraftSession={noOp}
         deleteSession={noOp}
       />,
       { columns: 40 },

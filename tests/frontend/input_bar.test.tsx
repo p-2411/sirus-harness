@@ -160,7 +160,7 @@ describe('session input drafts', () => {
           sessions={[first, second]}
           currSession={session}
           selectSession={setSession}
-          addSession={() => {}}
+          focusDraftSession={() => {}}
           deleteSession={() => {}}
         />
         <Pane key={session.getId()} session={session} />

@@ -46,7 +46,7 @@ test('shows the active subscription and follows fallback, removal and API select
     current.sources.list().find(source => source.kind === 'subscription' && source.profile === profile)!;
   // Capture the initial sidebar output while all provider reads are pending.
   const firstFrame = stripAnsi(renderToString(<Sidebar sessions={[]} currSession={null}
-    selectSession={() => {}} addSession={() => {}} deleteSession={() => {}} />, { columns: 26 }));
+    selectSession={() => {}} focusDraftSession={() => {}} deleteSession={() => {}} />, { columns: 26 }));
   reader.mockClear();
   const app = render(<SubscriptionLimits />, { stdout: stdout as unknown as NodeJS.WriteStream,
     debug: true, patchConsole: false, exitOnCtrlC: false });

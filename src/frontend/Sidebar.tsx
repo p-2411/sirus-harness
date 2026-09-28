@@ -201,14 +201,14 @@ export function SessionItem({ session, isSelected, onSelect, onDelete, onRename,
   );
 }
 
-export default function SideBar({ sessions, currSession, selectSession, addSession, deleteSession, collapsed = false, directory = process.cwd(), onArchive, onFocusChange, isActive = true }: {
-  sessions: Session[]; currSession: Session | null; selectSession: (session: Session) => void; addSession: () => void; deleteSession: (session: Session) => void; collapsed?: boolean;
+export default function SideBar({ sessions, currSession, selectSession, focusDraftSession, deleteSession, collapsed = false, directory = process.cwd(), onArchive, onFocusChange, isActive = true }: {
+  sessions: Session[]; currSession: Session | null; selectSession: (session: Session) => void; focusDraftSession: () => void; deleteSession: (session: Session) => void; collapsed?: boolean;
   directory?: string; onArchive?: (session: Session) => void; onFocusChange?: (focused: boolean) => void; isActive?: boolean;
 }) {
   const ref = useRef<DOMElement>(null);
   useSelectionRegion(ref);
   const newSessionRef = useRef<DOMElement>(null);
-  const newSessionHovered = useClickable(newSessionRef, () => { if (isActive) { focus(false); addSession(); } });
+  const newSessionHovered = useClickable(newSessionRef, () => { if (isActive) { focus(false); focusDraftSession(); } });
   const now = useMinuteClock();
   // Activity in any session can change the order, so the list follows them all.
   const subscribeAll = useCallback((listener: () => void) => {
@@ -329,7 +329,7 @@ export default function SideBar({ sessions, currSession, selectSession, addSessi
       else if (!key.ctrl && !key.meta && !key.tab && !key.leftArrow && !key.rightArrow) { setQuery(previous => previous + input); setHighlightedId(null); }
       return;
     }
-    if (key.ctrl && input === 'n') addSession();
+    if (key.ctrl && input === 'n') focusDraftSession();
     // Option+arrows switch sessions even while the input bar shows a picker.
     if (!key.meta || ordered.length === 0) return;
     if (key.downArrow) {

@@ -363,7 +363,7 @@ export default function App({ launchDirectory = process.cwd(), startup }: { laun
     setWorkspace(current => ({ ...current, sessions: current.sessions.map(item => item === session ? selected : item), selectedSession: selected }));
   }
 
-  function addSession() {
+  function focusDraftSession() {
     setWorkspace(current => ({ ...current, selectedSession: null }));
   }
 
@@ -416,7 +416,7 @@ export default function App({ launchDirectory = process.cwd(), startup }: { laun
       <Sidebar isActive={resumeQuery === null} sessions={sessions.filter(session => !session.isArchived())} directory={launchDirectory} onArchive={archiveSession} onFocusChange={focused => {
         setSidebarFocused(focused);
         if (focused) setSidebarCollapsed(false);
-      }} currSession={selectedSession} selectSession={selectSession} addSession={addSession} deleteSession={deleteSession} collapsed={sidebarCollapsed} />
+      }} currSession={selectedSession} selectSession={selectSession} focusDraftSession={focusDraftSession} deleteSession={deleteSession} collapsed={sidebarCollapsed} />
       <Box flexDirection="column" flexGrow={1} flexBasis={0} minWidth={0}>
       {updateVersion && <Text color={theme.success} wrap="truncate-end">Sirus {updateVersion} available · /update</Text>}
       {storageNotice && <Text color="yellow">{storageNotice}</Text>}
