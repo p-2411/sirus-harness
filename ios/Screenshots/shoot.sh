@@ -219,7 +219,7 @@ if wanted conversation-largest-text || wanted question-largest-text; then
 fi
 # The largest accessibility text size (Larger Accessibility Sizes on), on
 # the smallest screen.
-accessible=(setup-ax lobby-offline-ax conversation-ax question-ax approval-ax menu-command-ax picker-model-ax sidebar-ax)
+accessible=(setup-ax lobby-offline-ax conversation-ax question-ax approval-ax menu-command-ax picker-model-ax sidebar-ax composer-long-ax question-keyboard-ax)
 if any_wanted "${accessible[@]}"; then
   xcrun simctl ui "$small" content_size accessibility-extra-extra-extra-large
   sleep 3
@@ -239,6 +239,9 @@ if any_wanted "${accessible[@]}"; then
   scene "$small" small menu-command-ax conversation 10 -composerDraft /mo -composerFocused YES
   scene "$small" small picker-model-ax conversation 10 -openPicker /model
   scene "$small" small sidebar-ax conversation 8 -sidebarExpanded YES
+  scene "$small" small composer-long-ax conversation 10 -composerFocused YES \
+    -composerDraft "Before you change the pickers, check how they look on the smallest phone with the keyboard up and the text as large as it goes."
+  scene "$small" small question-keyboard-ax question 10 -composerFocused YES
   xcrun simctl ui "$small" content_size large
 fi
 limit 120 xcrun simctl shutdown "$small" || echo "shutdown timed out" >&2
