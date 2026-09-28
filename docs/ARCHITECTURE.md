@@ -134,7 +134,7 @@ no automatic step of Sirus's own and nothing to switch off.
 The status row shows the selected agent's context gauge, model and thinking level, the tab
 the chat is on. The gauge warns from `CONTEXT_LOW_PERCENT` on, and a window smaller than one
 already seen for the model is taken for the adapter's placeholder. What each turn used is kept on the assistant entry it
-wrote (`Message.usage`), which its footer shows; a participant's total, which `/status` and
+wrote (`Message.usage`), whose output count its footer shows; a participant's total, which `/status` and
 `/usage` show, is the sum over its entries (`getTurnUsage`), a figure of the breakdown only
 when every turn reported one.
 

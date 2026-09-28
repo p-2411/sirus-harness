@@ -739,21 +739,23 @@ describe('a finished turn', () => {
     seq: 1, role: 'assistant', participant: 'sirus', content: [{ type: 'text', text: 'Done.' }], ...message,
   });
 
-  test('closes with who answered, for how long, when, and how many tokens it wrote', () => {
+  test('closes with how long it took, when it ended, and how many tokens it wrote', () => {
     const finishedAt = new Date(2026, 8, 28, 16, 4).getTime();
     const output = stripAnsi(renderToString(<ChatMessage message={reply({
       startedAt: finishedAt - 12_400, finishedAt,
       usage: { inputTokens: 20_000, outputTokens: 3_100, totalTokens: 23_100 },
     })} />, { columns: 120 }));
-    expect(output).toMatch(/@sirus · 12s · 4:04\s?PM · 23k tokens · ↓ 3\.1k/);
-    // A Codex turn of several model calls has a total alone.
+    expect(output).toMatch(/\n\s*12s · 4:04\s?PM · ↓ 3\.1k\n/);
+    // The whole turn's tokens are for /status and /usage.
+    expect(output).not.toContain('23k');
+    // A Codex turn of several model calls reports nothing written.
     expect(stripAnsi(renderToString(<ChatMessage message={reply({
       startedAt: finishedAt - 12_400, finishedAt, usage: { totalTokens: 87_349 },
-    })} />, { columns: 120 }))).toMatch(/@sirus · 12s · 4:04\s?PM · 87k tokens\n/);
+    })} />, { columns: 120 }))).toMatch(/\n\s*12s · 4:04\s?PM\n/);
     // Not while it runs, nor for a turn saved before turns were timed.
     expect(stripAnsi(renderToString(<ChatMessage message={reply({ startedAt: finishedAt, finishedAt })} live />)))
-      .not.toContain('@sirus');
-    expect(stripAnsi(renderToString(<ChatMessage message={reply({})} />))).not.toContain('@sirus');
+      .not.toContain('4:04');
+    expect(stripAnsi(renderToString(<ChatMessage message={reply({})} />))).not.toContain(' · ');
   });
 
   test('keeps two messages of one reply apart', () => {
