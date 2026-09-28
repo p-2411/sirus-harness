@@ -380,7 +380,6 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     replaceAttachments(view.attachments.filter(item => item.path !== image.path));
   };
   const queued = currSession.getQueuedMessageCount();
-  const nextQueuedId = currSession.getQueuedMessages().find(message => !message.editing)?.id;
   const history = promptHistory(messages);
   // Only the selected agent and its workers can take over this input. Other
   // agents advertise their pending requests in the header.
@@ -665,7 +664,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     if (next !== undefined) {
       send(next.text, next.images, next.content ? [...next.content] : undefined, next.to?.[0] ?? selected, next.to);
     }
-  }, [currSession, active, inputIsBusy, imageIsLoading, queued, nextQueuedId, effectiveInputMode.type]);
+  }, [currSession, active, inputIsBusy, imageIsLoading, queued, effectiveInputMode.type]);
 
   const historyContent = (
     <>
@@ -774,9 +773,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         history={history}
         queuedMessages={currSession.getQueuedMessages().filter(message => !message.to?.length || message.to.includes(selected))}
         onSendNow={sendNow}
-        onBeginQueuedEdit={id => currSession.beginQueuedMessageEdit(id)}
-        onCancelQueuedEdit={id => currSession.cancelQueuedMessageEdit(id)}
-        onUpdateQueued={(id, text) => currSession.commitQueuedMessageEdit(id, text)}
+        onTakeQueued={ids => currSession.takeQueuedMessages(ids)}
         contextUsage={currSession.getContextUsage(selected)}
         nativeCommands={() => currSession.getNativeCommands()}
         tasksVisible={plans.length > 0 ? showTasks : undefined}

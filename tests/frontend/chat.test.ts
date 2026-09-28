@@ -313,7 +313,7 @@ test('/update shows its own progress and reserves thinking for an actual agent t
   }
 });
 
-test('thinking runs immediately while other commands queue and remain editable', async () => {
+test('thinking runs immediately while other commands queue and can be taken back', async () => {
   const model = 'test-chat-command-queue';
   let release!: () => void;
   let started!: () => void;
@@ -339,12 +339,13 @@ test('thinking runs immediately while other commands queue and remain editable',
     expect(session.getQueuedMessages().map(message => message.text)).toEqual(['/help']);
     await chat.flush();
     await chat.type('\u001b[A');
-    expect(session.getQueuedMessages()[0].editing).toBe(true);
+    expect(session.getQueuedMessageCount()).toBe(0);
+    expect(session.getInputContent()).toBe('/help');
     release();
     await turn;
     await chat.flush();
-    expect(session.getQueuedMessageCount()).toBe(1);
-    expect(chat.output()).not.toContain('list commands and keys');
+    // The draft's command menu names /help; its panel has not opened.
+    expect(chat.output()).not.toContain('pgup / pgdn · ctrl+home / end · esc closes');
     await chat.type('\r');
     await chat.flush();
     expect(session.getQueuedMessageCount()).toBe(0);
@@ -378,6 +379,14 @@ test.each(['\u001b[13;5u', '\u0018\u0013'])('Enter queues, Tab completes only, %
     await chat.type('\r');
     expect(session.getInputContent()).toBe('');
     expect(session.getQueuedMessages().map(message => message.text)).toEqual(['First follow-up']);
+    await chat.type('Second follow-up');
+    await chat.type('\r');
+    // ↑ takes both back as one draft, and Enter queues it again as one entry.
+    await chat.type('\u001b[A');
+    expect(session.getQueuedMessageCount()).toBe(0);
+    expect(session.getInputContent()).toBe('First follow-up\nSecond follow-up');
+    await chat.type('\r');
+    expect(session.getQueuedMessages().map(message => message.text)).toEqual(['First follow-up\nSecond follow-up']);
     expect(binding.runtimes[0].steers).toEqual([]);
     await chat.type('Draft sent now');
     // The alternate chord must work across separate keyboard events.
@@ -385,7 +394,7 @@ test.each(['\u001b[13;5u', '\u0018\u0013'])('Enter queues, Tab completes only, %
       await chat.type('\u0018');
       await chat.type('\u0013');
     } else await chat.type(shortcut);
-    expect(binding.runtimes[0].steers).toEqual(['First follow-up', 'Draft sent now']);
+    expect(binding.runtimes[0].steers).toEqual(['First follow-up\nSecond follow-up', 'Draft sent now']);
     expect(session.getQueuedMessageCount()).toBe(0);
     await chat.type('After interrupt');
     await chat.type('\r');

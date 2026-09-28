@@ -32,26 +32,22 @@ export function InputFeedback({ feedback, participantColors }: {
   );
 }
 
-// Waiting messages, with the one being edited highlighted.
-export function QueuedRow({ messages, selected = null, participantColors }: {
+// Waiting messages, oldest first, one line each.
+export function QueuedRow({ messages, participantColors }: {
   messages: readonly string[];
-  selected?: number | null;
   participantColors?: ParticipantColors;
 }) {
   if (messages.length === 0) return null;
   return (
     <Box paddingX={3} flexDirection="column" flexShrink={0}>
-      {messages.map((message, index) => {
-        const active = index === selected;
-        return (
-          <Box key={index} justifyContent="space-between">
-            <Text color={active ? theme.text : theme.textMuted} wrap="truncate-end">
-              <Text color={active ? theme.accent : theme.textSubtle}>{active ? '› ' : '⋮ '}</Text>
-              <MentionText colors={participantColors}>{message.replace(/\s+/g, ' ').trim()}</MentionText>
-            </Text>
-          </Box>
-        );
-      })}
+      {messages.map((message, index) => (
+        <Box key={index} justifyContent="space-between">
+          <Text color={theme.textMuted} wrap="truncate-end">
+            <Text color={theme.textSubtle}>⋮ </Text>
+            <MentionText colors={participantColors}>{message.replace(/\s+/g, ' ').trim()}</MentionText>
+          </Text>
+        </Box>
+      ))}
     </Box>
   );
 }

@@ -864,7 +864,7 @@ export class Session {
     try {
       const count = this.queue.length;
       for (let index = 0; index < count; index++) {
-        const next = this.queue.all().find(message => !message.editing);
+        const next = this.queue.all()[0];
         if (!next) break;
         if (!isAutoSendable(next.text) || next.images?.length) {
           if (!atSafePoint) this.cancel();
@@ -912,28 +912,11 @@ export class Session {
     return next;
   }
 
-  takeQueuedMessage(): QueuedMessage | undefined {
-    const next = this.queue.take();
-    if (next) this.changes.notify();
-    return next;
-  }
-
-  beginQueuedMessageEdit(id: string): QueuedMessage | undefined {
-    const original = this.queue.beginEdit(id);
-    if (original) this.changes.notify();
-    return original;
-  }
-
-  commitQueuedMessageEdit(id: string, text: string, images?: readonly ImageBlock[], content?: readonly MessageBlock[]): void {
-    if (!this.queue.finishEdit(id, text, images, content)) return;
-    this.changes.notify();
-    this.sendNextQueuedPrompt();
-  }
-
-  cancelQueuedMessageEdit(id: string): void {
-    if (!this.queue.finishEdit(id)) return;
-    this.changes.notify();
-    this.sendNextQueuedPrompt();
+  // ↑ in the input bar takes the messages it shows back into its draft.
+  takeQueuedMessages(ids: readonly string[]): QueuedMessage[] {
+    const taken = this.queue.take(ids);
+    if (taken.length > 0) this.changes.notify();
+    return taken;
   }
 
   // What is waiting behind the turn that just ended, when nothing about it
@@ -959,10 +942,6 @@ export class Session {
 
   getQueuedMessages(): readonly QueuedMessage[] {
     return this.queue.all();
-  }
-
-  updateQueuedMessage(id: string, text: string): void {
-    if (this.queue.update(id, text)) this.changes.notify();
   }
 
   getActiveTurnStartedAt(): number | null {

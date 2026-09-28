@@ -80,15 +80,13 @@ interface InputBarProps {
   queuedMessages?: readonly QueuedMessage[];
   // Ctrl+Enter (or Ctrl+X Ctrl+S) delivers the waiting messages now.
   onSendNow?: (text?: string, images?: readonly ImageBlock[], content?: MessageBlock[]) => void;
-  onBeginQueuedEdit?: (id: string) => void;
-  onCancelQueuedEdit?: (id: string) => void;
+  // ↑ takes these messages out of the queue; returns the ones it removed.
+  onTakeQueued?: (ids: readonly string[]) => readonly QueuedMessage[];
   onEscape?: () => void;
   onRewind?: () => void;
   onInterrupt?: () => boolean;
   onExit?: () => void;
   onExitHint?: () => void;
-  // Enter commits the private queue draft; empty text removes a text-only item.
-  onUpdateQueued?: (id: string, text: string) => void;
   contextUsage?: ContextUsage | null;
   // The vendor's own commands `/name` reaches, read while a slash command is
   // being typed.
@@ -130,14 +128,12 @@ export function InputBar({
   history = NO_HISTORY,
   queuedMessages = NO_QUEUE,
   onSendNow,
-  onBeginQueuedEdit,
-  onCancelQueuedEdit,
+  onTakeQueued,
   onEscape,
   onRewind,
   onInterrupt,
   onExit,
   onExitHint,
-  onUpdateQueued,
   contextUsage,
   nativeCommands,
   tasksVisible,
@@ -148,14 +144,14 @@ export function InputBar({
   const memory = useRef(draftState ?? createInputDraftState()).current;
   const pastes = useRef(memory.pastes);
   const expandPastes = (text: string) => [...text].map(character => pastes.current.get(character)?.text ?? character).join('');
-  const [inputContent, setLocalInputContent] = useState(externalInputContent);
+  const [input, setLocalInput] = useState(externalInputContent);
   const setInputContent = (text: string) => {
-    setLocalInputContent(text);
+    setLocalInput(text);
     // Session snapshots always keep the full text, including while a paste is folded.
     setExternalInputContent(expandPastes(text));
   };
   useEffect(() => {
-    if (externalInputContent !== expandPastes(inputContent)) setLocalInputContent(externalInputContent);
+    if (externalInputContent !== expandPastes(input)) setLocalInput(externalInputContent);
   }, [externalInputContent]);
   const [savedHistory, setSavedHistory] = useState(() => directory ? readPromptHistory(directory) : []);
   useEffect(() => { setSavedHistory(directory ? readPromptHistory(directory) : []); }, [directory]);
@@ -173,81 +169,33 @@ export function InputBar({
   const participantColors = participantColorMap(participants);
   const status: StatusRowProps = { permissionMode, modeNotice, model, thinkingLevel, contextUsage, tasksVisible };
 
-  // ── The draft, and the waiting message standing in front of it ──────────
-  // Identity survives edits and earlier messages draining from the queue.
-  const [queueSelection, setQueueSelection] = useState<string | null>(null);
-  const [queueText, setQueueText] = useState('');
+  // ── The draft ──────────────────────────────────────────────────────────
   const editHistory = useRef(createInputHistory());
   const clearedPrompts = useRef<{ text: string; after: number }[]>([]);
   const lastEscape = useRef(0);
   const lastInterrupt = useRef(0);
-  const editingRef = useRef<string | null>(null);
-  const cancelEditRef = useRef(onCancelQueuedEdit);
-  cancelEditRef.current = onCancelQueuedEdit;
-  useEffect(() => () => {
-    if (editingRef.current) cancelEditRef.current?.(editingRef.current);
-  }, []);
-  const selectedQueued = queuedMessages.find(message => message.id === queueSelection);
-  const selectedQueueIndex = selectedQueued ? queuedMessages.indexOf(selectedQueued) : null;
-  const draftCursor = useRef(inputContent.length);
-  const [cursor, setCursor] = useState(memory.cursor ?? inputContent.length);
+  const [cursor, setCursor] = useState(memory.cursor ?? input.length);
   useEffect(() => { memory.cursor = cursor; }, [cursor, memory]);
-  const previousInputContent = useRef(inputContent);
+  const previousInputContent = useRef(input);
   useEffect(() => {
     // A rejected attachment restores the cleared draft from Chat. Resume
     // editing at its end, just as when recalling a previous prompt.
-    if (!previousInputContent.current && inputContent && cursor === 0 && queueSelection === null) {
-      setCursor(inputContent.length);
-    }
-    previousInputContent.current = inputContent;
-  }, [inputContent, cursor, queueSelection]);
-  const input = selectedQueued ? queueText : inputContent;
+    if (!previousInputContent.current && input && cursor === 0) setCursor(input.length);
+    previousInputContent.current = input;
+  }, [input, cursor]);
   const editor: InputState = { text: input, cursor: Math.min(cursor, input.length) };
-  function leaveQueue(commit = false): void {
-    if (queueSelection) {
-      if (commit) onUpdateQueued?.(queueSelection, expandPastes(queueText));
-      else onCancelQueuedEdit?.(queueSelection);
-    }
-    editingRef.current = null;
-    setQueueSelection(null);
-    editHistory.current.undo = [];
-    setCursor(Math.min(draftCursor.current, inputContent.length));
-  }
-  function selectQueued(message: QueuedMessage): void {
-    if (!selectedQueued) draftCursor.current = editor.cursor;
-    else if (queueSelection) onCancelQueuedEdit?.(queueSelection);
-    onBeginQueuedEdit?.(message.id);
-    editingRef.current = message.id;
-    setQueueSelection(message.id);
-    setQueueText(message.text);
-    editHistory.current.undo = [];
-    setRecall(null);
-    setCursor(message.text.length);
-  }
   function setEditor(next: InputState): void {
-    if (selectedQueued) setQueueText(next.text);
-    else setInputContent(next.text);
+    setInputContent(next.text);
     setCursor(next.cursor);
   }
-  useEffect(() => {
-    if (queueSelection !== null && !selectedQueued) leaveQueue();
-  }, [queueSelection, selectedQueued]);
-  useEffect(() => {
-    if (mode.type !== 'text' && queueSelection !== null) leaveQueue();
-  }, [mode]);
 
   // ── Attached images ────────────────────────────────────────────────────
   const { imageFor, isKnownPlaceholder, placedImages, trailingImages } = useDraftImages({
     state: memory.images,
     attachments,
     text: input,
-    // The images belong to the draft even while a queued message is showing.
-    getDraft: () => ({ text: inputContent, cursor: selectedQueued ? draftCursor.current : editor.cursor }),
-    setDraft: next => {
-      setInputContent(next.text);
-      if (selectedQueued) draftCursor.current = next.cursor;
-      else setCursor(next.cursor);
-    },
+    getDraft: () => editor,
+    setDraft: setEditor,
   });
   const draftMessage = () => {
     const content = composeContent(expandPastes(input).trim(), imageFor, trailingImages);
@@ -262,7 +210,7 @@ export function InputBar({
     setMenusDismissed(false);
   }, [input]);
   const nativeList = input.startsWith('/') ? nativeCommands?.() ?? NO_NATIVE_COMMANDS : NO_NATIVE_COMMANDS;
-  const commands = useCommandMenu(input, mode.type === 'text' && !selectedQueued && !menusDismissed, nativeList);
+  const commands = useCommandMenu(input, mode.type === 'text' && !menusDismissed, nativeList);
   // A Sirus command takes no @mentions; a vendor command's arguments are a
   // prompt and do, once its name is complete.
   const commandText = input.startsWith('/') && !(input.includes(' ') && isNativeCommand(input, nativeList));
@@ -310,6 +258,23 @@ export function InputBar({
     setEditor({ text: recallHistory[index], cursor: recallHistory[index].length });
   };
 
+  // ── Queued messages ────────────────────────────────────────────────────
+  // ↑ from the draft's first line takes back everything queued for this
+  // agent: the messages leave the queue and open the draft, one per line
+  // ahead of what was typed. From there it is an ordinary draft, so Enter
+  // sends or queues it as one message and clearing it drops them.
+  const takeBackQueued = (): boolean => {
+    if (!onTakeQueued || queuedMessages.length === 0) return false;
+    const taken = onTakeQueued(queuedMessages.map(message => message.id));
+    if (taken.length === 0) return false;
+    const text = taken.map(message => message.text).filter(Boolean).join('\n');
+    editHistory.current.undo = [];
+    setEditor({ text: text && input ? `${text}\n${input}` : text + input, cursor: text.length });
+    // Their images rejoin the draft's attachments, which land at the cursor.
+    for (const image of taken.flatMap(message => message.images ?? [])) onAttachImage?.(image);
+    return true;
+  };
+
   // ── The worker strip ───────────────────────────────────────────────────
   // ↓ from the last line of the draft, where nothing else wants it, puts the
   // keyboard on the strip. The list is frozen as focus arrives, so the runs
@@ -349,9 +314,10 @@ export function InputBar({
     setEditor(next);
   };
   const insertText = (text: string) => edit({ type: 'insert', text: normalizeNewlines(text) });
-  // What Enter does sits at the right of the draft's first line, and the
-  // draft wraps short of it; a long draft's position shows on its last line.
-  const enterHint = selectedQueued ? 'enter saves · esc restores' : disabled ? '' : 'enter ↵';
+  // What Enter does, or with messages queued how to reach them, sits at the
+  // right of the draft's first line, and the draft wraps short of it; a long
+  // draft's position shows on its last line.
+  const enterHint = queuedMessages.length > 0 ? '↑ edit queued · ctrl+enter sends now' : disabled ? '' : 'enter ↵';
   const hintWidth = Math.max(stringWidth(enterHint), stringWidth('copied ✓'), 11) + 1;
   const rows = draftRows(input, Math.max(1, (boxWidth || stdout.columns || 80) - 6 - hintWidth), character => {
     const image = imageFor(character);
@@ -419,7 +385,6 @@ export function InputBar({
   const pasteTextRef = useRef(pasteText);
   pasteTextRef.current = pasteText;
   const pasteClipboard = () => {
-    if (selectedQueued) leaveQueue();
     void Promise.resolve(onPasteClipboard?.()).then(text => {
       if (text) pasteTextRef.current(text);
     });
@@ -466,7 +431,6 @@ export function InputBar({
       if (input || attachments.length > 0) {
         const text = draftMessage().text;
         if (text) clearedPrompts.current.push({ text, after: history.length });
-        if (selectedQueued) leaveQueue();
         for (const image of attachments) onRemoveAttachment?.(image);
         setInputContent('');
         setCursor(0);
@@ -532,9 +496,6 @@ export function InputBar({
       if (commands.matches.length > 0 || mentionActive) {
         setMenusDismissed(true);
         lastEscape.current = 0;
-      } else if (queueSelection !== null) {
-        leaveQueue();
-        lastEscape.current = 0;
       } else {
         const now = Date.now();
         if (now - lastEscape.current < 500) {
@@ -592,7 +553,8 @@ export function InputBar({
         return;
       }
       // inside a long prompt the arrows move between its lines; past its
-      // first or last line they walk the session's earlier prompts
+      // first line ↑ takes back what is queued, and past its first or last
+      // line they walk the session's earlier prompts
       if (key.upArrow && cursorRow > 0) {
         setEditor(moveDraftRow(editor, rows, -1));
         return;
@@ -601,24 +563,7 @@ export function InputBar({
         setEditor(moveDraftRow(editor, rows, 1));
         return;
       }
-      if (onUpdateQueued && queuedMessages.length > 0 && !recall && (selectedQueued || key.upArrow)) {
-        if (key.upArrow) {
-          if (selectedQueueIndex === 0) {
-            leaveQueue();
-            if (recallHistory.length > 0) {
-              const index = recallHistory.length - 1;
-              setRecall({ index, draft: { text: inputContent, cursor: draftCursor.current } });
-              setInputContent(recallHistory[index]);
-              setCursor(recallHistory[index].length);
-            }
-          } else selectQueued(queuedMessages[selectedQueueIndex === null ? queuedMessages.length - 1 : selectedQueueIndex - 1]);
-        } else if (selectedQueueIndex === queuedMessages.length - 1) {
-          leaveQueue();
-        } else if (selectedQueueIndex !== null) {
-          selectQueued(queuedMessages[selectedQueueIndex + 1]);
-        }
-        return;
-      }
+      if (key.upArrow && !recall && takeBackQueued()) return;
       // ↓ with no earlier prompt to walk forward to would do nothing; the
       // strip takes it instead.
       if (key.downArrow && !recall && focusWorkers()) return;
@@ -628,7 +573,7 @@ export function InputBar({
     }
     const mappedEdit = inputEditForKey(enteredInput, key);
     if (mappedEdit) {
-      if (mappedEdit.type === 'backspace' && !selectedQueued && input.length === 0 && trailingImages.length > 0) {
+      if (mappedEdit.type === 'backspace' && input.length === 0 && trailingImages.length > 0) {
         onRemoveAttachment?.(trailingImages[trailingImages.length - 1]);
       } else edit(mappedEdit);
       return;
@@ -645,11 +590,6 @@ export function InputBar({
       if (!sendImmediately && editor.cursor === input.length && input.endsWith('\\')) {
         setRecall(null);
         setEditor({ text: `${input.slice(0, -1)}\n`, cursor: input.length });
-        return;
-      }
-      if (selectedQueued) {
-        leaveQueue(true);
-        if (sendImmediately) onSendNow?.();
         return;
       }
       const selectedCommand = !sendImmediately && commands.matches[commands.selected];
@@ -696,7 +636,7 @@ export function InputBar({
 
   return (
     <>
-      {!selectedQueued && !menusDismissed && <CommandMenu
+      {!menusDismissed && <CommandMenu
         input={input}
         selected={commands.selected}
         offset={commands.offset}
@@ -711,7 +651,7 @@ export function InputBar({
         error={fileSuggestions.error}
       />}
       <InputFeedback feedback={localFeedback ?? feedback} participantColors={participantColors} />
-      <QueuedRow messages={queuedMessages.map(message => message.text)} selected={selectedQueueIndex} participantColors={participantColors} />
+      <QueuedRow messages={queuedMessages.map(message => message.text)} participantColors={participantColors} />
       {shortcuts !== null && <Box marginX={1} paddingX={1} borderStyle="round" borderColor={theme.border} flexDirection="column">
         <Text color={theme.accent}>Keyboard shortcuts · ↑/↓ scroll · esc closes</Text>
         {KEY_BINDINGS.slice(shortcuts, shortcuts + Math.max(1, Math.min(12, Math.floor(((stdout.rows || 24) - 12) / 3)))).map(([keys, action]) =>
@@ -739,7 +679,7 @@ export function InputBar({
                 : null}
           </Box>
         </Box>)}
-        {!selectedQueued && trailingImages.length > 0 && <TrailingImages images={trailingImages} after={false} />}
+        {trailingImages.length > 0 && <TrailingImages images={trailingImages} after={false} />}
       </Box>
       <WorkerStrip workers={workers} selection={workerSelection} />
       <SubagentStatusRow {...status} />

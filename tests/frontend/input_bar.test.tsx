@@ -1125,9 +1125,7 @@ function renderQueueInput(session: Session, history: readonly string[] = []) {
       participants={[]}
       history={history}
       queuedMessages={session.getQueuedMessages()}
-      onBeginQueuedEdit={id => { session.beginQueuedMessageEdit(id); }}
-      onCancelQueuedEdit={id => session.cancelQueuedMessageEdit(id)}
-      onUpdateQueued={(id, text) => session.commitQueuedMessageEdit(id, text)}
+      onTakeQueued={ids => session.takeQueuedMessages(ids)}
       onEscape={() => events.push('escape')}
       onRewind={() => events.push('rewind')}
       onInterrupt={() => { if (interrupt) events.push('interrupt'); return interrupt; }}
@@ -1155,77 +1153,71 @@ function renderQueueInput(session: Session, history: readonly string[] = []) {
 }
 
 describe('input queue and interrupt precedence', () => {
-  test('keeps queue edits private until Enter and restores the original on Escape', async () => {
+  test('↑ takes the queue back into the draft, one per line ahead of it, and Escape leaves it queued', async () => {
     const session = new Session({ name: 'Queue input' });
     session.setInputContent('saved draft');
-    // Commands remain queued when the editor releases them in an idle session.
-    session.queueMessage('/first');
-    session.queueMessage('/second');
-    const ids = session.getQueuedMessages().map(item => item.id);
+    session.queueMessage('first');
+    session.queueMessage('second');
     const bar = renderQueueInput(session);
     try {
       await bar.flush();
-      await bar.press('\u001b[A');
-      await bar.press(' unfinished');
-      expect(bar.output).toContain('› /second unfinished');
-      expect(session.getQueuedMessages().map(item => item.text)).toEqual(['/first', '/second']);
-      expect(session.getQueuedMessages()[1]!.editing).toBe(true);
-      expect(session.getInputContent()).toBe('saved draft');
+      expect(bar.output).toContain('↑ edit queued · ctrl+enter sends now');
       await bar.press('\u001b');
-      expect(session.getQueuedMessages().map(item => item.id)).toEqual(ids);
-      expect(session.getQueuedMessages()[1]!.editing).toBeUndefined();
-      expect(bar.output).toContain('› saved draft');
-      expect(bar.events).toEqual([]);
+      expect(bar.events).toEqual(['escape']);
+      expect(session.getQueuedMessages().map(item => item.text)).toEqual(['first', 'second']);
+      expect(session.getInputContent()).toBe('saved draft');
       await bar.press('\u001b[A');
-      await bar.press(' completed');
+      expect(session.getQueuedMessageCount()).toBe(0);
+      expect(session.getInputContent()).toBe('first\nsecond\nsaved draft');
+      expect(bar.output).not.toContain('⋮');
+      expect(bar.output).toContain('enter ↵');
+      // The cursor ends the taken-back text, ahead of the old draft.
+      await bar.press(' edited');
       await bar.press('\r');
-      expect(session.getQueuedMessages().map(item => item.text)).toEqual(['/first', '/second completed']);
-      expect(session.getQueuedMessages()[1]!.editing).toBeUndefined();
-      expect(bar.output).toContain('› saved draft');
-      expect(bar.events).toEqual([]);
+      expect(bar.events).toEqual(['escape', 'send:first\nsecond edited\nsaved draft']);
+      expect(session.getInputContent()).toBe('');
     } finally {
       bar.unmount();
       await session.dispose();
     }
   });
 
-  test('walks from the queue into prompt history and restores the draft', async () => {
+  test('after the take-back ↑ walks prompt history, ↓ restores the draft, and clearing drops it', async () => {
     const session = new Session({ name: 'Queue history' });
     session.setInputContent('draft');
-    session.queueMessage('/first');
-    session.queueMessage('/second');
+    session.queueMessage('first');
+    session.queueMessage('second');
     const bar = renderQueueInput(session, ['older prompt', 'recent prompt']);
     try {
       await bar.flush();
       await bar.press('\u001b[A');
-      expect(bar.output).toContain('› /second');
+      expect(session.getInputContent()).toBe('first\nsecond\ndraft');
       await bar.press('\u001b[A');
-      expect(bar.output).toContain('› /first');
-      expect(session.getQueuedMessages()[1]!.editing).toBeUndefined();
       await bar.press('\u001b[A');
       expect(session.getInputContent()).toBe('recent prompt');
-      expect(session.getQueuedMessages().every(item => !item.editing)).toBe(true);
       await bar.press('\u001b[A');
       expect(session.getInputContent()).toBe('older prompt');
       await bar.press('\u001b[B');
       expect(session.getInputContent()).toBe('recent prompt');
       await bar.press('\u001b[B');
-      expect(session.getInputContent()).toBe('draft');
+      expect(session.getInputContent()).toBe('first\nsecond\ndraft');
+      await bar.press('\u0003');
+      expect(session.getInputContent()).toBe('');
+      expect(session.getQueuedMessageCount()).toBe(0);
     } finally {
       bar.unmount();
       await session.dispose();
     }
   });
 
-  test('never drains the visible half-written queue item when a real session turn ends', async () => {
-    const model = 'test-input-queue-reservation';
+  test('a taken-back message stays in the draft when a real session turn ends', async () => {
+    const model = 'test-input-queue-take-back';
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const binding = bindScriptedRuntime(model, async () => { await gate; });
-    const session = new Session({ name: 'Reserved prompt', model });
+    const session = new Session({ name: 'Taken back', model });
     const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Start' }] });
-    session.queueMessage('Other queued prompt');
-    session.queueMessage('Original');
+    session.queueMessage('Queued prompt');
     const bar = renderQueueInput(session);
     try {
       await bar.flush();
@@ -1237,17 +1229,9 @@ describe('input queue and interrupt precedence', () => {
       while (session.getStatus() !== 'idle' && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
       await bar.flush();
       expect(session.getStatus()).toBe('idle');
-      expect(binding.runtimes[0]!.prompts.map(prompt => prompt.text)).toEqual(['Start', 'Other queued prompt']);
-      expect(session.getQueuedMessages()).toHaveLength(1);
-      expect(session.getQueuedMessages()[0]!.text).toBe('Original');
-      expect(session.getQueuedMessages()[0]!.editing).toBe(true);
-      expect(bar.output).toContain('› Original half');
-      await bar.press(' finished');
-      await bar.press('\r');
-      const commitDeadline = Date.now() + 2000;
-      while (session.getStatus() !== 'idle' && Date.now() < commitDeadline) await new Promise(resolve => setTimeout(resolve, 5));
-      expect(binding.runtimes[0]!.prompts.map(prompt => prompt.text)).toEqual(['Start', 'Other queued prompt', 'Original half finished']);
-      expect(session.getQueuedMessages()).toHaveLength(0);
+      expect(binding.runtimes[0]!.prompts.map(prompt => prompt.text)).toEqual(['Start']);
+      expect(session.getQueuedMessageCount()).toBe(0);
+      expect(bar.output).toContain('› Queued prompt half');
     } finally {
       release();
       bar.unmount();
