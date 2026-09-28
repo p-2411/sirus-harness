@@ -443,58 +443,61 @@ export class SessionAgent {
       throw new Error('Only reporting commands without arguments can run outside a turn.');
     }
     text = text.trim();
-    const source = this.candidateSources()[0];
-    if (source === undefined) throw new Error(`No ${VENDOR_INFO[this.vendor].displayName} credentials. Run /login to sign in to Claude or Codex, or add an API key.`);
-    const output: AsideOutput = { text: '', mcpServers: null };
-    const hooks: Pick<RuntimeOptions, 'onPermission' | 'onElicitation' | 'onUpdate'> = {
-      // A reporting command asks nothing; anything that does is declined.
-      onPermission: async () => ({ outcome: { outcome: 'cancelled' } }),
-      onElicitation: async () => ({ action: 'decline' }),
-      onUpdate: update => {
-        if (update.type === 'text') output.text += update.text;
-        else if (update.type === 'notice') output.text += `\n${[update.title, update.description].filter(Boolean).join(': ')}\n`;
-        else if (update.type === 'mcp_servers') output.mcpServers = update.servers;
-      },
-    };
-    const aside = {
-      directory: this.host.directory,
-      model: this.model,
-      thinkingLevel: this.thinkingLevel,
-      systemPrompt: this.systemPrompt(),
-      tools: [],
-      readOnly: true,
-      permissionMode: 'ask' as const,
-      mcpServer: null,
-      ...hooks,
-    };
-    // A warmed runtime has a vendor session but no conversation in it yet.
-    const conversation = this.runtime ? this.seededRuntime
-      : this.savedSession !== undefined && this.transcript.entries().length > 0;
-    let opening: Promise<Runtime>;
-    if (conversation) {
-      const runtime = this.busy && this.runtime ? this.runtime : (await this.ensureRuntime(source, signal)).runtime;
-      opening = runtime.fork({ ...aside, setupSignal: signal });
-    } else {
-      const vendor = this.vendor;
-      opening = createRuntime({
-        ...aside, vendor, signal,
-        env: source && vendorOf(this.model) ? sourceEnvironment(vendor, source) : { ...process.env },
-      });
+    // A live conversation reports from its own process and credential. A cold
+    // report can try the same credential fallbacks as an ordinary turn.
+    const live = this.runtime && this.seededRuntime && !this.runtime.lost ? this.runtime : null;
+    const sources = live ? [this.source] : this.candidateSources();
+    if (sources.length === 0) throw new Error(`No ${VENDOR_INFO[this.vendor].displayName} credentials. Run /login to sign in to Claude or Codex, or add an API key.`);
+    const conversation = live !== null || (this.savedSession !== undefined && this.transcript.entries().length > 0);
+    let failure: unknown;
+    for (const source of sources) {
+      throwIfAborted(signal);
+      const output: AsideOutput = { text: '', mcpServers: null };
+      const aside = {
+        directory: this.host.directory,
+        model: this.model,
+        thinkingLevel: this.thinkingLevel,
+        systemPrompt: this.systemPrompt(),
+        // Reporting commands get no native tools or Sirus MCP credentials.
+        tools: [],
+        readOnly: true,
+        permissionMode: 'ask' as const,
+        mcpServer: null,
+        onPermission: async () => ({ outcome: { outcome: 'cancelled' as const } }),
+        onElicitation: async () => ({ action: 'decline' as const }),
+        onUpdate: (update: RuntimeUpdate) => {
+          if (update.type === 'text') output.text += update.text;
+          else if (update.type === 'notice') output.text += `\n${[update.title, update.description].filter(Boolean).join(': ')}\n`;
+          else if (update.type === 'mcp_servers') output.mcpServers = update.servers;
+        },
+      };
+      let opening: Promise<Runtime> | undefined;
+      let runtime: Runtime | undefined;
+      try {
+        if (conversation) {
+          const owner = live ?? (await this.ensureRuntime(source, signal)).runtime;
+          opening = owner.fork({ ...aside, setupSignal: signal });
+        } else {
+          const vendor = this.vendor;
+          opening = createRuntime({
+            ...aside, vendor, signal,
+            env: source && vendorOf(this.model) ? sourceEnvironment(vendor, source) : { ...process.env },
+          });
+        }
+        runtime = await abortable(opening, signal);
+        await runtime.prompt({ text, images: [] }, signal);
+        const note = text === '/mcp' ? '\n\nSirus tools are disabled in this reporting session.' : '';
+        return { ...output, text: output.text.trim() + note };
+      } catch (error) {
+        if (!runtime) void opening?.then(late => late.dispose(), () => undefined);
+        throwIfAborted(signal);
+        if (isAbortError(error)) throw error;
+        failure = error;
+      } finally {
+        runtime?.dispose();
+      }
     }
-    let runtime: Runtime;
-    try {
-      runtime = await abortable(opening, signal);
-    } catch (error) {
-      void opening.then(late => late.dispose(), () => undefined);
-      throw error;
-    }
-    try {
-      await runtime.prompt({ text, images: [] }, signal);
-    } finally {
-      runtime.dispose();
-    }
-    const note = text === '/mcp' ? '\n\nSirus tools are disabled in this reporting session.' : '';
-    return { ...output, text: output.text.trim() + note };
+    throw new Error(maskKeys(errorMessage(failure), sources));
   }
 
   // The runtime's window, or a larger one already seen for the model: the

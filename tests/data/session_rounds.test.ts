@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { textOf, type ImageBlock } from '../../src/agent_runtime/types';
 import { Session } from '../../src/agent_runtime/session';
+import { providerFor } from '../../src/agent_runtime/providers';
 import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
 
 const streamingModel = 'test-round-streaming-model';
@@ -20,6 +24,52 @@ afterEach(() => {
 });
 
 describe('Session rounds', () => {
+  test('cold reporting retries credentials without retaining failed output or tool authority', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'sirus-report-fallback-'));
+    const previousData = process.env.SIRUS_DATA_DIR;
+    process.env.SIRUS_DATA_DIR = directory;
+    const model = 'gpt-5.6-luna';
+    const sources = providerFor('gpt').sources;
+    sources.addApiKey('report-good-key');
+    const rejected = sources.addApiKey('report-expired-key');
+    const binding = bindScriptedRuntime(model, (input, emit, options) => {
+      if (input.text === '/status') {
+        expect(options.tools).toEqual([]);
+        expect(options.mcpServer).toBeNull();
+      }
+      if (options.env.OPENAI_API_KEY === 'report-expired-key') {
+        emit({ type: 'text', text: 'Discard this failed attempt' });
+        throw new Error('401 expired credential');
+      }
+      emit({ type: 'text', text: 'Ready' });
+    });
+    const session = new Session({ model, directory });
+    try {
+      const result = await session.runCommandAside('sirus', '/status', new AbortController().signal);
+      expect(result.text).toBe('Ready');
+      expect(binding.starts.map(start => start.env.OPENAI_API_KEY)).toEqual(['report-expired-key', 'report-good-key']);
+      expect(binding.runtimes.every(runtime => runtime.disposed)).toBe(true);
+      expect(session.isEmpty()).toBe(true);
+
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Hello' }] });
+      const starts = binding.starts.length;
+      const owner = binding.runtimes.at(-1)!;
+      sources.promote(rejected.id);
+      expect((await session.runCommandAside('sirus', '/status', new AbortController().signal)).text).toBe('Ready');
+      expect(binding.starts).toHaveLength(starts);
+      expect(binding.forks).toHaveLength(1);
+      expect(binding.forks[0]!.mcpServer).toBeNull();
+      expect(binding.forks[0]!.tools).toEqual([]);
+      expect(owner.disposed).toBe(false);
+    } finally {
+      await session.dispose();
+      unbindRuntime(model);
+      if (previousData === undefined) delete process.env.SIRUS_DATA_DIR;
+      else process.env.SIRUS_DATA_DIR = previousData;
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   test('reporting rejects instructions and command arguments before opening a runtime', async () => {
     const binding = bindScriptedRuntime(streamingModel, () => {});
     const session = new Session({ model: streamingModel });
@@ -31,6 +81,29 @@ describe('Session rounds', () => {
       expect(session.isEmpty()).toBe(true);
     } finally {
       await session.dispose();
+    }
+  });
+
+  test('cancelling a reporting attempt does not start the next credential', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'sirus-report-cancel-'));
+    const previousData = process.env.SIRUS_DATA_DIR;
+    process.env.SIRUS_DATA_DIR = directory;
+    const model = 'gpt-5.6-luna';
+    providerFor('gpt').sources.addApiKey('report-unused-key');
+    providerFor('gpt').sources.addApiKey('report-first-key');
+    const controller = new AbortController();
+    const binding = bindScriptedRuntime(model, () => { controller.abort(new Error('Report cancelled')); });
+    const session = new Session({ model, directory });
+    try {
+      await expect(session.runCommandAside('sirus', '/status', controller.signal)).rejects.toThrow('Report cancelled');
+      expect(binding.starts).toHaveLength(1);
+      expect(binding.runtimes[0]!.disposed).toBe(true);
+    } finally {
+      await session.dispose();
+      unbindRuntime(model);
+      if (previousData === undefined) delete process.env.SIRUS_DATA_DIR;
+      else process.env.SIRUS_DATA_DIR = previousData;
+      rmSync(directory, { recursive: true, force: true });
     }
   });
 
