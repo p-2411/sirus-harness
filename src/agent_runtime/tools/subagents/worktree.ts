@@ -5,9 +5,8 @@ import { projectGit } from '../../../checkpoints';
 import { dataDirectory } from '../../../dataDirectory';
 
 // Explicit worktree isolation: a branch from HEAD, retained only when changed.
-// A directory that is not a repository, or a repository with no commit yet,
-// runs the worker in place. A repository git fails to cut a worktree from
-// fails the spawn.
+// Only a directory outside a repository runs the worker in place. A
+// repository without a commit, or one Git cannot inspect, fails the spawn.
 
 const GIT_TIMEOUT_MS = 60_000;
 
@@ -32,13 +31,19 @@ export async function createWorktree(
 ): Promise<Worktree | null> {
   const directory = worktreePath(sessionId, runId);
   const branch = `sirus/${runId}`;
+  let inside: string;
+  try {
+    inside = (await git(project, ['rev-parse', '--is-inside-work-tree'])).trim();
+  } catch (error) {
+    if (/not a git repository(?:\s|\()/i.test(errorMessage(error))) return null;
+    throw new Error(`Could not inspect the repository for the worker: ${errorMessage(error)}`);
+  }
+  if (inside !== 'true') throw new Error('Could not create a worktree for the worker: the directory is not a Git working tree.');
   let startHead: string;
   try {
-    // An unborn HEAD has no commit to branch from, and a directory outside a
-    // repository fails the same way.
     startHead = (await git(project, ['rev-parse', '--verify', 'HEAD'])).trim();
-  } catch {
-    return null;
+  } catch (error) {
+    throw new Error(`Could not create a worktree for the worker: ${errorMessage(error)}`);
   }
   try {
     await git(project, ['worktree', 'add', '--quiet', '-b', branch, directory, 'HEAD']);

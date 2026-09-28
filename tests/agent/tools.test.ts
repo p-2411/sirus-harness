@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
+import { execFileSync } from 'child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import http from 'http';
 import { tmpdir } from 'os';
@@ -35,6 +36,7 @@ const {
 } = await import('../../src/agent_runtime/tools/server');
 const { closeAllMemoryStores } = await import('../../src/memory/store');
 const { openSettings } = await import('../../src/persistence/settings');
+const { createWorktree, removeUnchangedWorktree } = await import('../../src/agent_runtime/tools/subagents/worktree');
 
 type SubagentHost = import('../../src/agent_runtime/tools/types').SubagentHost;
 type SubagentSpawnCall = import('../../src/agent_runtime/tools/types').SubagentSpawnCall;
@@ -102,6 +104,18 @@ afterAll(() => {
   stopSirusMcpServer();
   // Idempotent: the app's shutdown may run it after a test already has.
   stopSirusMcpServer();
+});
+
+test('worktree setup falls back only outside Git and rejects unborn or invalid repositories', async () => {
+  const project = join(testDirectory, 'project');
+  mkdirSync(project);
+  expect(await createWorktree(project, SESSION, 'nonrepo')).toBeNull();
+  execFileSync('git', ['init', '-q', project]);
+  await expect(createWorktree(project, SESSION, 'unborn')).rejects.toThrow('Could not create a worktree');
+  const invalid = join(testDirectory, 'invalid');
+  mkdirSync(invalid);
+  writeFileSync(join(invalid, '.git'), 'invalid gitfile');
+  await expect(createWorktree(invalid, SESSION, 'invalid')).rejects.toThrow('Could not inspect the repository');
 });
 
 // The MCP client as a runtime would be configured: the entry's URL and
