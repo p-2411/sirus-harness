@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import {
   boundRuntimes,
   type ForkOptions,
@@ -27,6 +28,7 @@ export interface ScriptedBinding {
   // forked runtime itself is the matching entry appended to `runtimes`.
   forks: ForkOptions[];
   runtimes: ScriptedRuntime[];
+  nativeSessions?: boolean;
 }
 
 export interface ScriptedRuntime extends Omit<Runtime, 'context' | 'model' | 'fork'> {
@@ -38,6 +40,7 @@ export interface ScriptedRuntime extends Omit<Runtime, 'context' | 'model' | 'fo
   thinkingLevel: string;
   // Every text `steer` took, in order.
   steers: string[];
+  stoppedTasks: string[];
   // Called by `steer` while the prompt is still running, so a scripted turn
   // can react to being steered: set it from inside the turn, on the runtime
   // the turn was handed, and emit whatever the vendor would have folded into
@@ -60,6 +63,8 @@ function scriptedRuntime(model: string, options: RuntimeOptions, binding: Script
   let running = false;
   const runtime: ScriptedRuntime = {
     vendor: options.vendor,
+    // Tests opt into persistence with a nonempty vendor session id.
+    sessionId: options.resume?.sessionId ?? (binding.nativeSessions ? randomUUID() : ''),
     model: options.model,
     modes: [],
     context: null,
@@ -69,6 +74,7 @@ function scriptedRuntime(model: string, options: RuntimeOptions, binding: Script
     permissionMode: options.permissionMode,
     thinkingLevel: options.thinkingLevel,
     steers: [],
+    stoppedTasks: [],
     async prompt(input, signal) {
       runtime.prompts.push(input);
       if (signal.aborted) throw signal.reason;
@@ -108,13 +114,18 @@ function scriptedRuntime(model: string, options: RuntimeOptions, binding: Script
     async fork(forked) {
       if (runtime.disposed) throw new Error(`The scripted ${model} runtime was disposed`);
       binding.forks.push(forked);
-      return scriptedRuntime(model, { ...options, ...forked }, binding);
+      return scriptedRuntime(model, { ...options, ...forked, resume: undefined }, binding);
     },
     async steer(text) {
       if (runtime.disposed) throw new Error(`The scripted ${model} runtime was disposed`);
       if (!running) throw new Error(`The scripted ${model} runtime is not running a prompt`);
       runtime.steers.push(text);
       runtime.onSteer?.(text);
+    },
+    async stopTask(id) {
+      if (runtime.disposed) throw new Error(`The scripted ${model} runtime was disposed`);
+      runtime.stoppedTasks.push(id);
+      return true;
     },
     dispose() {
       runtime.disposed = true;
@@ -126,8 +137,8 @@ function scriptedRuntime(model: string, options: RuntimeOptions, binding: Script
 
 // Binds a scripted runtime to a model id so sessions run without an agent
 // process. Unbind in afterEach.
-export function bindScriptedRuntime(model: string, turn: ScriptedTurn): ScriptedBinding {
-  const binding: ScriptedBinding = { starts: [], forks: [], runtimes: [] };
+export function bindScriptedRuntime(model: string, turn: ScriptedTurn, nativeSessions = false): ScriptedBinding {
+  const binding: ScriptedBinding = { starts: [], forks: [], runtimes: [], nativeSessions };
   turns.set(model, turn);
   boundRuntimes[model] = options => {
     binding.starts.push(options);

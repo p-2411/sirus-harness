@@ -1,4 +1,4 @@
-import type { WorkerContext } from '../types';
+import type { ThinkingLevel, WorkerContext } from '../types';
 
 // The tool layer's vocabulary. It depends on nothing above itself: no agent,
 // no session, no permission context. Everything a tool needs at call time
@@ -18,20 +18,6 @@ export interface ToolAudience {
   subagent?: boolean;
 }
 
-// What one run of a subagent looks like to the tool that started it.
-export interface SubagentHandle {
-  id: string;
-  model: string;
-  thinkingLevel: string;
-  status: string;
-  // The git branch the worker works on in its own worktree, or null when the
-  // project is not a git repository and it works in place.
-  branch: string | null;
-  // How the worker's conversation started: from nothing, or as a fork of
-  // the conversation of the agent that spawned it.
-  context: WorkerContext;
-}
-
 // The identity of the tool call that is spawning a subagent, so the run can
 // be tied back to it. A worker outlives the call: nothing here stops it.
 export interface SubagentSpawnCall {
@@ -40,18 +26,25 @@ export interface SubagentSpawnCall {
   vendorCallId?: string;
 }
 
-// The narrow port the agent tools speak to. The session hands the MCP server
-// one per participant that may delegate; a worker gets none, which is why a
-// subagent cannot spawn a grandchild. The subagent's model is a session
-// setting or Jev's pick, not the spawner's choice. Every worker is a
-// background task: spawn returns once the worker is on its way, and the
-// worker's report reaches its owner as a message when it ends.
+export interface SpawnOptions {
+  context?: WorkerContext;
+  description?: string;
+  name?: string;
+  model?: string;
+  thinkingLevel?: ThinkingLevel;
+  agentType?: string;
+  isolation?: 'none' | 'worktree';
+  cwd?: string;
+  runInBackground?: boolean;
+}
+
+// The caller can address only its own workers, by id or by name.
 export interface SubagentHost {
-  spawn(prompt: string, context: WorkerContext, call: SubagentSpawnCall): Promise<SubagentHandle>;
+  spawn(prompt: string, options: SpawnOptions, call: SubagentSpawnCall, signal?: AbortSignal): Promise<Record<string, unknown>>;
   check(id: string): Record<string, unknown>;
   cancel(id: string, signal?: AbortSignal): Promise<Record<string, unknown>>;
-  // Sends text into a running worker's turn. A worker that has ended refuses.
-  message(id: string, text: string): Promise<Record<string, unknown>>;
+  message(id: string, text: string, interrupt?: boolean): Promise<Record<string, unknown>>;
+  wait(ids: string[], timeoutMs: number, signal?: AbortSignal): Promise<Record<string, unknown>[]>;
   list(): Record<string, unknown>[];
 }
 

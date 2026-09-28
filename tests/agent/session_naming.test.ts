@@ -111,7 +111,7 @@ describe('generateSessionName', () => {
   test('its timeout also ends an adapter that never finishes starting', async () => {
     process.env.OPENAI_SECRET = 'test-openai-key';
     // An adapter whose startup ends only when it is told to stop.
-    const start = spyOn(acp, 'startAcpRuntime').mockImplementation((_options, signal) => new Promise((_resolve, reject) => {
+    const start = spyOn(acp, 'startAcpRuntime').mockImplementation(({ signal }) => new Promise((_resolve, reject) => {
       signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
     }));
     try {

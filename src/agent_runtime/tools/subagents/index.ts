@@ -1,6 +1,7 @@
 import path from 'path';
 import type { SessionAgent } from '../../agent';
-import type { Message, MessageBlock, SubagentStatus, ThinkingLevel, WorkerContext } from '../../types';
+import type { Message, MessageBlock, NativeSession, SubagentStatus, ThinkingLevel, WorkerContext } from '../../types';
+import type { AgentDefinition } from './definitions';
 
 // Subagents: one detached runtime per delegated task, a worker like a
 // participant with a record of its own. This file is the process-wide index
@@ -16,7 +17,15 @@ import type { Message, MessageBlock, SubagentStatus, ThinkingLevel, WorkerContex
 // What the session file keeps of a worker: enough to show its record, tell
 // where its branch is, and give its owner the report it never received.
 export interface WorkerRecord {
+  nativeSession?: NativeSession;
   id: string;
+  name?: string;
+  description?: string;
+  runInBackground?: boolean;
+  isolation?: 'none' | 'worktree';
+  baseDirectory?: string;
+  startHead?: string;
+  definition?: AgentDefinition;
   // The SpawnAgent tool call that started the run, so the UI can decorate it.
   callId: string | null;
   // The participant that spawned the run.
@@ -25,8 +34,8 @@ export interface WorkerRecord {
   thinkingLevel: ThinkingLevel;
   context: WorkerContext;
   prompt: string;
-  // Where the worker runs: its own worktree in a git project, the project
-  // itself otherwise.
+  // Where the worker runs: the owner's directory, an explicit cwd, or an
+  // isolated worktree when requested.
   directory: string;
   // The branch its worktree is on, or null when it works in place.
   branch: string | null;
@@ -36,12 +45,16 @@ export interface WorkerRecord {
   // When the run last changed: something streamed in, a message was sent to
   // it, or its status moved. The worker strip shows the freshest run first.
   updatedAt: number;
-  // The worker's own record: the task, the steering messages sent to it,
-  // and the one assistant entry its turn fills in. Live while it works.
+  // The worker's own record: its tasks, steering messages and responses,
+  // including any turns started by SendMessage. Live while it works.
   transcript: Message[];
   finalMessage: string | null;
   changes: string[];
   error: string | null;
+  // The context its runtime last reported when its turn ended, in tokens:
+  // the figure Claude Code's Agent row gives as the run's tokens. Absent
+  // while it works, and for a runtime that reported none.
+  tokens?: number;
   // Its report has been delivered to the owner's transcript.
   reported: boolean;
   // The user cleared its line from the worker strip.
@@ -145,6 +158,14 @@ export function activeSubagentCount(directory?: string): number {
 export function workerRecord(run: SubagentRun): WorkerRecord {
   return {
     id: run.id,
+    name: run.name,
+    description: run.description,
+    runInBackground: run.runInBackground,
+    isolation: run.isolation,
+    baseDirectory: run.baseDirectory,
+    startHead: run.startHead,
+    definition: run.definition,
+    nativeSession: run.worker ? run.worker.nativeSession : run.nativeSession,
     callId: run.callId,
     owner: run.owner,
     model: run.model,
@@ -161,6 +182,7 @@ export function workerRecord(run: SubagentRun): WorkerRecord {
     finalMessage: run.finalMessage,
     changes: [...run.changes],
     error: run.error,
+    ...(run.tokens !== undefined ? { tokens: run.tokens } : {}),
     reported: run.reported,
     dismissed: run.dismissed,
   };

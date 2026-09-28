@@ -1,3 +1,5 @@
+import { doctorCommandSpec } from './doctor/commands';
+import { tasksCommandSpec } from './tasks/commands';
 import { agentsCommandSpec, modelCommand, thinkingCommandSpec } from './agents/commands';
 import {
   loginCommandSpec,
@@ -6,13 +8,13 @@ import {
 } from './authentication/commands';
 import { helpCommand } from './help/commands';
 import { memoryCommandSpec } from './memory/commands';
-import { jevCommandSpec } from './jev/commands';
-import { clearCommand, compactCommandSpec, exitCommand, permissionsCommandSpec, renameCommand } from './session/commands';
+import { newCommand, resumeCommand, archiveCommand, deleteCommand, forkCommand, exportCommand, copyCommand, clearCommand, compactCommandSpec, exitCommand, quitCommand, permissionsCommandSpec, renameCommand } from './session/commands';
 import { updateCommandSpec, versionCommandSpec } from './update/commands';
 import { rewindCommandSpec, undoCommandSpec } from './checkpoints/commands';
 import { imageCommandSpec } from './images/commands';
 import { notifyCommandSpec } from './notifications/commands';
 import type { NativeCommand } from '../agent_runtime/runtime/commands';
+import { isAutoSendable } from '../agent_runtime/session/messageQueue';
 import {
   commandUsage,
   type CommandCapabilities,
@@ -31,12 +33,13 @@ export const commandRegistry: readonly CommandSpec[] = [
   compactCommandSpec,
   thinkingCommandSpec,
   agentsCommandSpec,
+  tasksCommandSpec,
   loginCommandSpec,
   logoutCommandSpec,
   usageCommandSpec,
-  jevCommandSpec,
   updateCommandSpec,
   versionCommandSpec,
+  doctorCommandSpec,
   memoryCommandSpec,
   permissionsCommandSpec,
   undoCommandSpec,
@@ -44,22 +47,33 @@ export const commandRegistry: readonly CommandSpec[] = [
   imageCommandSpec,
   notifyCommandSpec,
   renameCommand,
+  newCommand,
+  resumeCommand,
+  archiveCommand,
+  deleteCommand,
+  forkCommand,
+  exportCommand,
+  copyCommand,
+
   helpCommand(() => commandRegistry),
   exitCommand,
+  quitCommand,
 ];
 
 // Typed (or menu-composed) command text into its name and arguments:
 // '/login gpt api' → { name: 'login', args: ['gpt', 'api'] }. The one place
 // that splits command text, so the input bar and the secret-menu path can't
-// drift apart in how they parse it. `rest` is everything after the name as
-// it was typed, runs of spaces and all.
+// drift apart in how they parse it. Words are split on any run of
+// whitespace; `rest` is everything after the name as it was typed, runs of
+// spaces and all.
 export function parseCommandLine(text: string): { name: string; args: string[]; rest: string } {
-  const words = text.split(' ');
-  const space = text.indexOf(' ');
+  const trimmed = text.trim();
+  const words = trimmed.split(/\s+/);
+  const space = trimmed.search(/\s/);
   return {
     name: words[0].slice(1),
     args: words.slice(1).filter(Boolean),
-    rest: space === -1 ? '' : text.slice(space + 1),
+    rest: space === -1 ? '' : trimmed.slice(space + 1),
   };
 }
 
@@ -84,11 +98,12 @@ function isNativeCommand(text: string, commands: readonly NativeCommand[]): bool
   return name !== undefined && invocableNativeCommands(commands).some(command => command.name === name);
 }
 
-// Text the chat runs as one of Sirus's commands: any `/` line but one that
-// calls a vendor command. The chat's send and the input bar's menus both go
-// by this one test.
+// Text the chat runs as one of Sirus's commands: a `/name` line, as the
+// queue tells one from a message (a path such as /usr/bin is a message),
+// unless it calls a vendor command. The chat's send and the input bar's
+// menus both go by this one test.
 export function isSirusCommand(text: string, nativeCommands: readonly NativeCommand[]): boolean {
-  return text.startsWith('/') && !isNativeCommand(text, nativeCommands);
+  return !isAutoSendable(text) && !isNativeCommand(text, nativeCommands);
 }
 
 // Prefix matches while a command name is being typed ('/' alone matches

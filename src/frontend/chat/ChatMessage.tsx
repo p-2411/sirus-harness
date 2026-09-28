@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { createContext, memo, useCallback, useContext, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import {
 	DEFAULT_PARTICIPANT,
 	isPlanCall,
@@ -7,9 +7,9 @@ import {
 	type ImageBlock,
 	type Message,
 	type MessageBlock,
+	type NoticeBlock,
 	type PlanEntry,
 	type SubagentStatus,
-	type ThoughtBlock,
 	type ToolCallBlock,
 	type ToolCallDiff,
 	type ToolCallStatus,
@@ -29,6 +29,9 @@ import {
 	type SubagentRun,
 } from '../../agent_runtime/tools/subagents';
 import { isSpawnAgentTitle } from '../../agent_runtime/tools/agents';
+import { INTERRUPTED_REASON } from '../../agent_runtime/tools/subagents/report';
+import { formatTokens } from '../../agent_runtime/usage';
+import { workerAge } from '../../commands/agents/behavior';
 import {
 	getPermissionsVersion,
 	isAwaitingApproval,
@@ -124,21 +127,41 @@ export function editPreview(call: ToolCallBlock): DiffLine[] {
 // the run it started rather than the call, and carries the run's report once
 // there is one.
 function isSpawnAgent(call: ToolCallBlock): boolean {
-	return call.kind === 'other' && isSpawnAgentTitle(call.title);
+	return isSpawnAgentTitle(call.title);
 }
 
 // The report the session put on the call when the worker it started ended.
 // The call's own content is the handle the vendor was given back, which is
 // not what the user came to read.
 function spawnReport(call: ToolCallBlock): string {
-	return isSpawnAgent(call) && typeof call.output === 'string' ? call.output.trim() : '';
+	return typeof call.output === 'string' ? call.output.trim() : '';
 }
 
-// What the call produced: the worker's report on a SpawnAgent row, otherwise
-// its text content, or failing that a string output.
+// What SpawnAgent was asked, as the vendor recorded the call: the arguments
+// themselves from Claude, nested under `arguments` from Codex.
+function spawnArguments(call: ToolCallBlock): Record<string, unknown> {
+	const record = (value: unknown) => value !== null && typeof value === 'object' && !Array.isArray(value)
+		? value as Record<string, unknown> : null;
+	const input = record(call.input) ?? {};
+	return record(input.arguments) ?? input;
+}
+
+// Why a spawn failed before any worker existed: the error the tool returned,
+// which Claude carries as the call's text and Codex as its raw output.
+function spawnFailure(call: ToolCallBlock): string {
+	const text = call.content.flatMap(block => block.type === 'text' ? [block.text] : []).join(' ');
+	if (text.trim()) return singleLine(text);
+	const output = call.output !== null && typeof call.output === 'object' ? call.output as Record<string, unknown> : {};
+	const error = output.error;
+	if (typeof error === 'string' && error.trim()) return singleLine(error);
+	const message = error !== null && typeof error === 'object' ? (error as { message?: unknown }).message : undefined;
+	if (typeof message === 'string') return singleLine(message);
+	const result = output.result as { content?: { text?: unknown }[] } | undefined;
+	return singleLine((result?.content ?? []).flatMap(block => typeof block.text === 'string' ? [block.text] : []).join(' '));
+}
+
+// What the call produced: its text content, or failing that a string output.
 function outputPreview(call: ToolCallBlock): DiffLine[] {
-	const report = spawnReport(call);
-	if (report) return diffLines(' ', report);
 	const text = call.content
 		.flatMap(block => block.type === 'text' ? [block.text] : [])
 		.join('\n');
@@ -170,7 +193,7 @@ interface ToolRun {
 	calls: ToolCallBlock[];
 }
 
-// An agent's plan, shown open as a checklist rather than as a call.
+// An agent's plan, with its checklist behind a compact update row.
 interface PlanSegment {
 	type: 'plan';
 	call: ToolCallBlock;
@@ -181,9 +204,18 @@ export type MessageSegment = MessageBlock | ToolRun | PlanSegment;
 // A call that is part of a run of ordinary tool calls, which a group folds
 // away behind "Ran N commands". A SpawnAgent call is not: its row is a
 // worker's anchor, showing the run's status and carrying its report, so it
-// keeps a row of its own however many calls sit beside it.
+// keeps a row of its own however many calls sit beside it. Plan updates
+// also stand alone so each checklist can be opened where it happened.
 function groupable(block: MessageBlock): block is ToolCallBlock {
-	return block.type === 'tool_call' && !isSpawnAgent(block);
+	return block.type === 'tool_call' && !isSpawnAgent(block) && !isPlanCall(block);
+}
+
+// A thought shows only while it is what the model is doing now: the last
+// block of a reply still being written. Once the model moves on it goes, and
+// the tool calls on either side of it group as though it was never there.
+export function visibleContent(content: readonly MessageBlock[], live: boolean): MessageBlock[] {
+	const last = content.length - 1;
+	return content.filter((block, index) => block.type !== 'thought' || (live && index === last));
 }
 
 /** Collapse only adjacent tool calls, and only two or more of them. */
@@ -218,27 +250,100 @@ const PLAN_MARKS: Record<PlanEntry['status'], { mark: string; color: string }> =
 	pending: { mark: '○', color: theme.textSubtle },
 };
 
-// The plan as the agent last set it: how far along it is, then every step
-// with its state, the step in hand picked out.
-function PlanRow({ call }: { call: ToolCallBlock }) {
-	const entries = planEntriesOf(call);
-	const done = entries.filter(entry => entry.status === 'completed').length;
+// Every step with its state, the step in hand picked out, shared by the
+// pinned plan and the checklist a transcript row reveals.
+export function PlanChecklist({ entries }: { entries: readonly PlanEntry[] }) {
 	return (
-		<Box flexDirection="column" paddingX={1} paddingY={1}>
-			<Text color={theme.textMuted}>  Plan · {done} of {entries.length} done</Text>
+		<Box flexDirection="column">
 			{entries.map((entry, index) => (
-				<Box key={index} marginLeft={4}>
+				<Box key={index}>
 					<Box width={2} flexShrink={0}>
 						<Text color={PLAN_MARKS[entry.status].color}>{PLAN_MARKS[entry.status].mark}</Text>
 					</Box>
 					<Text
 						color={entry.status === 'in_progress' ? theme.text : theme.textMuted}
+						bold={entry.status === 'in_progress'}
 						strikethrough={entry.status === 'completed'}
 					>
 						{terminalText(entry.content)}
 					</Text>
 				</Box>
 			))}
+		</Box>
+	);
+}
+
+// Which rows the user opened or closed, kept apart from the components that
+// show them. Copying a selection renders the history again off screen to
+// reach what has scrolled away, and that render has to open the rows the
+// screen has open, or the copy reads the wrong lines. Held per message, the
+// entry the session keeps rather than the copy a render draws from, so a
+// message that goes takes what was opened in it along.
+const openedRows = new WeakMap<Message, Map<string, boolean>>();
+const openedRowListeners = new Set<() => void>();
+
+function subscribeOpenedRows(listener: () => void): () => void {
+	openedRowListeners.add(listener);
+	return () => {
+		openedRowListeners.delete(listener);
+	};
+}
+
+// The message the rows below belong to. A row drawn outside one keeps its
+// own state.
+const RowScope = createContext<Message | null>(null);
+
+// Whether one row of a message is open: the user's choice once they have
+// made one, `fallback` until then. The toggle records the opposite of what
+// is showing.
+function useRowExpansion(row: string, fallback: boolean): [boolean, () => void] {
+	const scope = useContext(RowScope);
+	const [own, setOwn] = useState<boolean | undefined>(undefined);
+	const chosen = useSyncExternalStore(subscribeOpenedRows, () => scope ? openedRows.get(scope)?.get(row) : own);
+	const expanded = chosen ?? fallback;
+	const toggle = useCallback(() => {
+		if (!scope) {
+			setOwn(!expanded);
+			return;
+		}
+		const rows = openedRows.get(scope) ?? new Map<string, boolean>();
+		rows.set(row, !expanded);
+		openedRows.set(scope, rows);
+		for (const listener of openedRowListeners) listener();
+	}, [scope, row, expanded]);
+	return [expanded, toggle];
+}
+
+function PlanRow({ call }: { call: ToolCallBlock }) {
+	const [expanded, toggle] = useRowExpansion(`call:${call.id}`, false);
+	const ref = useRef<DOMElement>(null);
+	const hovered = useClickable(ref, toggle);
+	const entries = planEntriesOf(call);
+	const done = entries.filter(entry => entry.status === 'completed').length;
+	return (
+		<Box flexDirection="column" paddingX={1} paddingY={1}>
+			<Box ref={ref}>
+				<Text color={hovered ? theme.accentSoft : theme.textMuted} wrap="truncate-end">
+					{'  '}Updated plan · {done} of {entries.length} done
+				</Text>
+			</Box>
+			{expanded && (
+				<Box marginLeft={4}>
+					<PlanChecklist entries={entries} />
+				</Box>
+			)}
+		</Box>
+	);
+}
+
+function NoticeRow({ block }: { block: NoticeBlock }) {
+	const color = block.severity === 'warning' ? theme.pending
+		: block.severity === 'error' ? theme.danger : theme.textMuted;
+	return (
+		<Box paddingX={1} paddingY={1}>
+			<Text color={color} dimColor wrap="truncate-end">
+				{'  '}{singleLine(block.title)}{block.description ? ` · ${singleLine(block.description)}` : ''}
+			</Text>
 		</Box>
 	);
 }
@@ -267,12 +372,11 @@ export const subagentColors: Record<SubagentIndicator, string> = {
 // carries what the call never did: the model it got, its id and its branch.
 function useSubagentRun(call: ToolCallBlock, sessionId?: string): {
 	run?: SubagentRun;
-	status: SubagentIndicator | null;
+	status: SubagentIndicator;
 } {
 	useSyncExternalStore(subscribeSubagents, getSubagentsVersion);
 	const run = sessionId === undefined ? undefined : findSubagentByCall(call.id, sessionId);
 	if (run) return { run, status: run.status };
-	if (!isSpawnAgent(call)) return { status: null };
 	if (call.status === 'failed') return { status: 'failed' };
 	return { status: call.status === 'completed' ? 'unknown' : 'working' };
 }
@@ -302,22 +406,16 @@ function ToolSummary({ call, indent = '', hovered = false, sessionId }: {
 	indent?: string;
 	hovered?: boolean;
 }) {
-	const { run, status: subagent } = useSubagentRun(call, sessionId);
 	const permission = usePermissionStatus(call, sessionId);
-	const color = subagent ? subagentColors[subagent] : statusColors[call.status];
 	const title = singleLine(call.title);
 	const counts = editCounts(call);
 	return (
 		<Text wrap="truncate-end">
-			<Text color={color}>{indent}●</Text>
+			<Text color={statusColors[call.status]}>{indent}●</Text>
 			<Text color={hovered ? theme.textMuted : theme.textSubtle}> {toolVerb(call.kind)}</Text>
-			{run && <Text color={theme.textSubtle} dimColor> {run.model}</Text>}
 			{title && <Text color={theme.textSubtle} dimColor> {title}</Text>}
 			{counts && <Text color={theme.success}> +{counts.added}</Text>}
 			{counts && counts.removed > 0 && <Text color={theme.danger}> −{counts.removed}</Text>}
-			{run && <Text color={theme.textSubtle} dimColor> · {run.id}</Text>}
-			{subagent && subagent !== 'unknown' && <Text color={color}> · {subagent}</Text>}
-			{run?.branch && <Text color={theme.textSubtle} dimColor> · {run.branch}</Text>}
 			{permission && <Text color={permission.color}> · {permission.text}</Text>}
 		</Text>
 	);
@@ -342,49 +440,14 @@ function DiffPreview({ lines }: { lines: readonly DiffLine[] }) {
 	);
 }
 
-// Which rows the user opened or closed, kept apart from the components that
-// show them. Copying a selection renders the history again off screen to
-// reach what has scrolled away, and that render has to open the rows the
-// screen has open, or the copy reads the wrong lines. Held per message, so a
-// rewind that drops a message drops what was opened in it too.
-const openedRows = new WeakMap<Message, Map<string, boolean>>();
-const openedRowListeners = new Set<() => void>();
-
-function subscribeOpenedRows(listener: () => void): () => void {
-	openedRowListeners.add(listener);
-	return () => {
-		openedRowListeners.delete(listener);
-	};
-}
-
-// Whether one row of a message is open: the user's choice once they have
-// made one, `fallback` until then. The toggle records the opposite of what
-// is showing.
-function useRowExpansion(message: Message, row: string, fallback: boolean): [boolean, () => void] {
-	const chosen = useSyncExternalStore(subscribeOpenedRows, () => openedRows.get(message)?.get(row));
-	const expanded = chosen ?? fallback;
-	const toggle = useCallback(() => {
-		const rows = openedRows.get(message) ?? new Map<string, boolean>();
-		rows.set(row, !expanded);
-		openedRows.set(message, rows);
-		for (const listener of openedRowListeners) listener();
-	}, [message, row, expanded]);
-	return [expanded, toggle];
-}
-
 // One call, collapsed to its summary line until clicked; expanded, it also
-// shows what the call carried. A worker's report is the exception: it is what
-// the user has been waiting for, so the SpawnAgent row opens itself once the
-// run has ended, and a click still closes it.
-function ToolCallEntry({ message, call, indent, sessionId }: {
-	message: Message;
+// shows what the call carried.
+function ToolCallEntry({ call, indent, sessionId }: {
 	sessionId?: string;
 	call: ToolCallBlock;
 	indent?: string;
 }) {
-	const { status } = useSubagentRun(call, sessionId);
-	const showsReport = spawnReport(call) !== '' && status !== 'working';
-	const [expanded, toggle] = useRowExpansion(message, `call:${call.id}`, showsReport);
+	const [expanded, toggle] = useRowExpansion(`call:${call.id}`, false);
 	const ref = useRef<DOMElement>(null);
 	const hovered = useClickable(ref, toggle);
 	const detail = expanded ? callDetail(call) : [];
@@ -407,15 +470,15 @@ function AnimatedCommandStatus({ count }: { count: number }) {
 	return <>Running {count} commands{'.'.repeat(dots)}</>;
 }
 
-// A group is known by its first call, which stays first as the run grows.
-export function ToolRunGroup({ message, calls, sessionId }: {
-	message: Message;
+export function ToolRunGroup({ calls, defaultExpanded = false, sessionId }: {
 	sessionId?: string;
 	calls: readonly ToolCallBlock[];
+	defaultExpanded?: boolean;
 }) {
 	const hasCompletedEdit = calls.some(call => call.status === 'completed' && editPreview(call).length > 0);
 	// Follow arriving file changes until the user chooses whether to expand.
-	const [expanded, toggle] = useRowExpansion(message, `group:${calls[0]?.id}`, hasCompletedEdit);
+	// A group is known by its first call, which stays first as the run grows.
+	const [expanded, toggle] = useRowExpansion(`group:${calls[0]?.id}`, defaultExpanded || hasCompletedEdit);
 	const ref = useRef<DOMElement>(null);
 	const hovered = useClickable(ref, toggle);
 	const complete = calls.every(finished);
@@ -431,7 +494,7 @@ export function ToolRunGroup({ message, calls, sessionId }: {
 			{expanded ? (
 				<Box flexDirection="column" marginLeft={2}>
 					{calls.map(call => (
-						<ToolCallEntry key={call.id} message={message} call={call} sessionId={sessionId} />
+						<ToolCallEntry key={call.id} call={call} sessionId={sessionId} />
 					))}
 				</Box>
 			) : null}
@@ -439,10 +502,99 @@ export function ToolRunGroup({ message, calls, sessionId }: {
 	);
 }
 
+// How a run stands, in the words of Claude Code's Agent row: "Done (4 tool
+// uses · 12k tokens · 45s)". A call the user declined fails like any other,
+// and the count says so, so that "Done" never reads as everything went
+// through.
+function runSummary(run: SubagentRun): string {
+	const calls = run.content.filter((block): block is ToolCallBlock => block.type === 'tool_call' && !isPlanCall(block));
+	const failed = calls.filter(call => call.status === 'failed');
+	const declined = failed.filter(call => lastDecision(call.id, run.sessionId) === 'deny').length;
+	const ended = run.status !== 'working';
+	const parts = [
+		`${calls.length} tool use${calls.length === 1 ? '' : 's'}`,
+		...(declined > 0 ? [`${declined} declined`] : []),
+		...(failed.length > declined ? [`${failed.length - declined} failed`] : []),
+		...(ended && run.tokens !== undefined ? [`${formatTokens(run.tokens)} tokens`] : []),
+		...(ended ? [workerAge(run)] : []),
+	].join(' · ');
+	switch (run.status) {
+		case 'working': {
+			const latest = calls.at(-1);
+			return `Working (${parts})${latest ? ` · ${toolLine(latest, 60)}` : ''}`;
+		}
+		case 'done':
+			return `Done (${parts})`;
+		case 'failed':
+			return `Failed (${parts}): ${singleLine(run.error ?? 'unknown error')}`;
+		case 'cancelled':
+			// "Cancelled by CancelAgent" says it already; a watchdog's reason does not.
+			return run.error && /^cancelled\b/i.test(run.error)
+				? `${singleLine(run.error)} (${parts})`
+				: `Cancelled (${parts})${run.error ? `: ${singleLine(run.error)}` : ''}`;
+		case 'interrupted':
+			return `Interrupted (${parts}): ${singleLine(run.error ?? INTERRUPTED_REASON)}`;
+	}
+}
+
+// A SpawnAgent call is the anchor of the worker it started, laid out the way
+// Claude Code lays out an Agent row: the worker's name, or "Agent" for one
+// given none, with its task; under it how the run stands; and once it has
+// ended, the report its owner received, whole and as Markdown. A spawn that
+// never started a worker says why. A click folds the report away and back,
+// and opens a running one's task in full.
+function SpawnAgentEntry({ call, sessionId }: { call: ToolCallBlock; sessionId?: string }) {
+	const { run, status } = useSubagentRun(call, sessionId);
+	const permission = usePermissionStatus(call, sessionId);
+	const report = spawnReport(call);
+	const [expanded, toggle] = useRowExpansion(`call:${call.id}`, report !== '' && status !== 'working');
+	const ref = useRef<DOMElement>(null);
+	const hovered = useClickable(ref, toggle);
+	const args = spawnArguments(call);
+	const argument = (key: string) => typeof args[key] === 'string' ? singleLine(args[key] as string) : '';
+	const name = run?.name ?? (argument('name') || 'Agent');
+	const prompt = run?.prompt ?? (typeof args.prompt === 'string' ? args.prompt : '');
+	const task = run ? run.description || singleLine(run.prompt) : argument('description') || singleLine(prompt);
+	const color = subagentColors[status];
+	// A spawn waiting on the user's approval has not started anything yet;
+	// its title says what it waits for.
+	const summary = run ? runSummary(run)
+		: status === 'failed' ? ['Failed', spawnFailure(call)].filter(Boolean).join(': ')
+			: status === 'working' && !permission ? 'Starting' : '';
+	return (
+		<Box flexDirection="column">
+			<Box ref={ref} flexDirection="column">
+				<Text wrap="truncate-end">
+					<Text color={color}>{'  '}●</Text>
+					<Text color={hovered ? theme.accentSoft : theme.text} bold> {name}</Text>
+					{task && <Text color={hovered ? theme.accentSoft : theme.textMuted}>({task})</Text>}
+					{run && <Text color={theme.textSubtle} dimColor> · {run.model} {run.thinkingLevel} · {run.id}</Text>}
+					{run?.branch && <Text color={theme.textSubtle} dimColor> · {run.branch}</Text>}
+					{permission && <Text color={permission.color}> · {permission.text}</Text>}
+				</Text>
+				{summary && (
+					<Box marginLeft={4}>
+						<Text color={status === 'failed' ? theme.danger : theme.textMuted} wrap="truncate-end">⎿ {summary}</Text>
+					</Box>
+				)}
+			</Box>
+			{expanded && report && (
+				<Box marginLeft={6}>
+					<Markdown>{report}</Markdown>
+				</Box>
+			)}
+			{expanded && !report && prompt.trim() && (
+				<Box marginLeft={6}>
+					<Text color={theme.textMuted} wrap="wrap">{terminalText(prompt).trim()}</Text>
+				</Box>
+			)}
+		</Box>
+	);
+}
+
 // A row on its own is set off by a blank line; rows that follow one another
 // stack directly, as the entries of a group do.
-function ToolCallRow({ message, call, sessionId, joinsPrevious = false, joinsNext = false }: {
-	message: Message;
+function ToolCallRow({ call, sessionId, joinsPrevious = false, joinsNext = false }: {
 	call: ToolCallBlock;
 	sessionId?: string;
 	joinsPrevious?: boolean;
@@ -450,29 +602,49 @@ function ToolCallRow({ message, call, sessionId, joinsPrevious = false, joinsNex
 }) {
 	return (
 		<Box flexDirection="column" paddingX={1} paddingTop={joinsPrevious ? 0 : 1} paddingBottom={joinsNext ? 0 : 1}>
-			<ToolCallEntry message={message} call={call} indent="  " sessionId={sessionId} />
+			{isSpawnAgent(call)
+				? <SpawnAgentEntry call={call} sessionId={sessionId} />
+				: <ToolCallEntry call={call} indent="  " sessionId={sessionId} />}
 		</Box>
 	);
 }
 
-// Reasoning the runtime streamed: one dim line until clicked, then the whole
-// thought, laid out like a tool row.
-function ThoughtRow({ message, block }: { message: Message; block: ThoughtBlock }) {
-	const [expanded, toggle] = useRowExpansion(message, `block:${message.content.indexOf(block)}`, false);
+// A thought that opens with a bold title, as summarised reasoning does, is
+// named by that title; any other by its own opening words, and unfolds in
+// place rather than repeating them underneath.
+function thoughtHeading(text: string): { title: string | null; body: string } {
+	const trimmed = text.trim();
+	const titled = /^\*\*(.+?)\*\*\s*/.exec(trimmed);
+	if (titled) return { title: singleLine(titled[1]!), body: trimmed.slice(titled[0].length) };
+	return { title: null, body: trimmed };
+}
+
+// Reasoning the runtime streamed: its step on one dim line until clicked,
+// then the whole thought, laid out like a tool row.
+function ThoughtRow({ row, text }: { row: string; text: string }) {
+	const [expanded, toggle] = useRowExpansion(row, false);
 	const ref = useRef<DOMElement>(null);
 	const hovered = useClickable(ref, toggle);
-	const text = block.text;
+	const { title, body } = thoughtHeading(terminalText(text));
+	if (!title && expanded) {
+		return (
+			<Box flexDirection="column" padding={1}>
+				<Box ref={ref} marginLeft={2}>
+					<Text color={hovered ? theme.textMuted : theme.textSubtle} dimColor={!hovered} wrap="wrap">{body}</Text>
+				</Box>
+			</Box>
+		);
+	}
 	return (
 		<Box flexDirection="column" padding={1}>
 			<Box ref={ref}>
-				<Text wrap="truncate-end">
-					<Text color={hovered ? theme.textMuted : theme.textSubtle}>  thinking</Text>
-					{!expanded && <Text color={theme.textSubtle} dimColor> {singleLine(text)}</Text>}
+				<Text color={hovered ? theme.textMuted : theme.textSubtle} dimColor={!hovered} wrap="truncate-end">
+					{'  '}{title ?? singleLine(body)}
 				</Text>
 			</Box>
-			{expanded && (
+			{expanded && body && (
 				<Box marginLeft={4}>
-					<Text color={theme.textSubtle} dimColor wrap="wrap">{terminalText(text).trim()}</Text>
+					<Text color={theme.textSubtle} dimColor wrap="wrap">{body}</Text>
 				</Box>
 			)}
 		</Box>
@@ -482,12 +654,12 @@ function ThoughtRow({ message, block }: { message: Message; block: ThoughtBlock 
 // The runtime folded its own conversation here: one rule across the message,
 // and on a click the summary it reported, since that is all the participant
 // now knows of the conversation above it.
-function CompactionRule({ message, block, participantColors }: {
-	message: Message;
+function CompactionRule({ row, block, participantColors }: {
+	row: string;
 	block: CompactionBlock;
 	participantColors?: ParticipantColors;
 }) {
-	const [expanded, toggle] = useRowExpansion(message, `block:${message.content.indexOf(block)}`, false);
+	const [expanded, toggle] = useRowExpansion(row, false);
 	const ref = useRef<DOMElement>(null);
 	const hovered = useClickable(ref, toggle);
 	const summary = block.summary?.trim() || null;
@@ -512,23 +684,101 @@ function ImageLine({ image }: { image: ImageBlock }) {
 	return <Text color={theme.textMuted}>▣ {describeImage(image)}</Text>;
 }
 
-export function ChatMessage({
-	message,
-	model,
-	participantColors,
-	sessionId,
-}: {
+interface ChatMessageProps {
 	sessionId?: string;
 	message: Message;
 	model?: string;
 	participantColors?: ParticipantColors;
+	// The reply is still being written.
+	live?: boolean;
+}
+
+// What the message body draws from: a copy of the entry, and the entry
+// itself, which the rows the user opened are kept against.
+interface MessageBodyProps extends ChatMessageProps {
+	entry: Message;
+}
+
+function sameFields<T extends object>(left: T, right: T): boolean {
+	const keys = Object.keys(left) as (keyof T)[];
+	return keys.length === Object.keys(right).length
+		&& keys.every(key => Object.is(left[key], right[key]));
+}
+
+function sameColors(left?: ParticipantColors, right?: ParticipantColors): boolean {
+	if (left === right) return true;
+	return left !== undefined && right !== undefined && left.size === right.size
+		&& [...left].every(([name, color]) => right.get(name) === color);
+}
+
+function messageSnapshot(message: Message): Message {
+	return { ...message, content: message.content.map(block => ({ ...block })) };
+}
+
+function sameMessage(previous: Message, next: Message): boolean {
+	return previous.seq === next.seq && previous.role === next.role
+		&& previous.participant === next.participant
+		&& previous.content.length === next.content.length
+		&& previous.content.every((block, index) => sameFields(block, next.content[index]!));
+}
+
+// Entries and their text blocks are mutated in place. Capture their fields
+// before memoising, including tool outputs that arrive after a turn finishes.
+// Nested tool data is replaced by the runtime reducer, so it keeps its identity.
+export function ChatMessage(props: ChatMessageProps) {
+	return <MessageBody {...props} entry={props.message} message={messageSnapshot(props.message)} />;
+}
+
+export function ChatHistory({ messages, participants, isMessageLive, ...props }: {
+	messages: readonly Message[];
+	participants: readonly { name: string; model: string }[];
+	isMessageLive: (message: Message) => boolean;
+	sessionId: string;
+	participantColors: ParticipantColors;
 }) {
+	const models = new Map(participants.map(participant => [participant.name.toLocaleLowerCase(), participant.model]));
+	const entries = messages.map(message => ({
+		entry: message,
+		message: messageSnapshot(message),
+		model: message.model ?? (message.role === 'assistant' ? models.get((message.participant ?? DEFAULT_PARTICIPANT).toLocaleLowerCase()) : undefined),
+		live: isMessageLive(message),
+	}));
+	return <HistoryBody {...props} entries={entries} />;
+}
+
+// A draft edit leaves the entire history subtree alone; streaming only
+// passes the changed entries through the message-level boundary below.
+const HistoryBody = memo(function HistoryBody({ entries, ...props }: {
+	entries: readonly Pick<MessageBodyProps, 'entry' | 'message' | 'model' | 'live'>[];
+	sessionId: string;
+	participantColors: ParticipantColors;
+}) {
+	return entries.map(entry => <MessageBody key={entry.message.seq} {...props} {...entry} />);
+}, (previous, next) => previous.sessionId === next.sessionId
+	&& sameColors(previous.participantColors, next.participantColors)
+	&& previous.entries.length === next.entries.length
+	&& previous.entries.every((entry, index) => {
+		const other = next.entries[index]!;
+		return entry.entry === other.entry && entry.model === other.model && entry.live === other.live
+			&& sameMessage(entry.message, other.message);
+	}));
+
+const MessageBody = memo(function MessageBody({
+	entry,
+	message,
+	model,
+	participantColors,
+	sessionId,
+	live = false,
+}: MessageBodyProps) {
 	const isUser = message.role === "user";
 	const participantName = message.participant ?? DEFAULT_PARTICIPANT;
-	const segments = messageSegments(message.content);
+	const segments = messageSegments(visibleContent(message.content, live));
+	if (message.content.length > 0 && segments.length === 0) return null;
 	return (
 		// no bars, no boxes — bold speaker label, body aligned flush beneath,
 		// whitespace doing the separating
+		<RowScope.Provider value={entry}>
 		<Box
 			flexDirection="column"
 			alignItems={isUser ? 'flex-end' : 'flex-start'}
@@ -553,18 +803,26 @@ export function ChatMessage({
 					case 'image':
 						return <ImageLine key={index} image={block} />;
 					case 'thought':
-						return <ThoughtRow key={index} message={message} block={block} />;
+						return <ThoughtRow key={index} row={`block:${message.content.indexOf(block)}`} text={block.text} />;
 					case 'plan':
 						return <PlanRow key={index} call={block.call} />;
+					case 'notice':
+						return <NoticeRow key={index} block={block} />;
 					case 'compaction':
-						return <CompactionRule key={index} message={message} block={block} participantColors={participantColors} />;
+						return (
+							<CompactionRule
+								key={index}
+								row={`block:${message.content.indexOf(block)}`}
+								block={block}
+								participantColors={participantColors}
+							/>
+						);
 					case 'tool_run':
-						return <ToolRunGroup key={index} message={message} calls={block.calls} sessionId={sessionId} />;
+						return <ToolRunGroup key={index} calls={block.calls} sessionId={sessionId} />;
 					case 'tool_call':
 						return (
 							<ToolCallRow
 								key={index}
-								message={message}
 								call={block}
 								sessionId={sessionId}
 								joinsPrevious={segments[index - 1]?.type === 'tool_call'}
@@ -574,5 +832,11 @@ export function ChatMessage({
 				}
 			})}
 		</Box>
+		</RowScope.Provider>
 	);
-}
+}, (previous, next) => previous.entry === next.entry
+	&& previous.sessionId === next.sessionId
+	&& previous.model === next.model
+	&& previous.live === next.live
+	&& sameColors(previous.participantColors, next.participantColors)
+	&& sameMessage(previous.message, next.message));

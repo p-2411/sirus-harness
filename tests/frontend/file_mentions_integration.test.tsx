@@ -71,7 +71,7 @@ function terminal(component: ReactNode) {
 }
 
 describe('file mentions through the terminal', () => {
-  test('matching agents stay selected at the bottom while files load, and exact names retain file choices', async () => {
+  test('files take priority when they load and exact agent names remain available', async () => {
     const directory = project({ 'reviewer.md': 'Review notes', 'reviewer.ts': 'export const review = true;' });
     const sent: string[] = [];
     let draft = '';
@@ -94,44 +94,61 @@ describe('file mentions through the terminal', () => {
       await ui.flush();
       await ui.type('@rev');
       expect(ui.output()).toContain('› @Reviewer');
-      expect(ui.output()).not.toContain('@reviewer.md');
       release();
       await ui.until(() => ui.output().includes('@reviewer.md'));
-      expect(ui.output()).toContain('› @Reviewer');
-      expect(ui.output().indexOf('@Reviewer')).toBeGreaterThan(ui.output().indexOf('@reviewer.md'));
-      await ui.type('\t');
-      expect(draft).toBe('@Reviewer ');
-      expect(sent).toEqual([]);
-
-      await ui.type('@rev');
-      await ui.until(() => ui.output().includes('@reviewer.md'));
-      await ui.type('\u001b[A');
-      expect(ui.output()).toContain('› @rev <model>');
-      await ui.type('\u001b[A');
       expect(ui.output()).toContain('› @reviewer.md');
       await ui.type('\t');
-      expect(draft).toBe('@Reviewer @reviewer.md ');
+      expect(draft).toBe('@reviewer.md ');
+      expect(sent).toEqual([]);
       await ui.type('\r');
-      expect(sent).toEqual(['@Reviewer @reviewer.md']);
+      expect(sent).toEqual(['@reviewer.md']);
 
       await ui.type('@Reviewer');
       await ui.until(() => ui.output().includes('@reviewer.ts'));
+      await ui.type('\u001b[A');
+      await ui.type('\u001b[A');
       expect(ui.output()).toContain('› @Reviewer');
       await ui.type('\r');
       expect(draft).toBe('@Reviewer ');
-      expect(sent).toHaveLength(1);
       await ui.type('\r');
-      expect(sent).toEqual(['@Reviewer @reviewer.md', '@Reviewer']);
+      expect(sent).toEqual(['@reviewer.md', '@Reviewer']);
 
       writeFileSync(path.join(directory, 'Reviewer'), 'An extensionless file, not the agent.');
       await ui.type('@Reviewer');
       await ui.until(() => ui.output().includes('@"Reviewer"'));
-      expect(ui.output()).toContain('› @Reviewer');
-      await ui.type('\u001b[A');
       expect(ui.output()).toContain('› @"Reviewer"');
       await ui.type('\t');
       expect(draft).toBe('@"Reviewer" ');
-      expect(sent).toHaveLength(2);
+    } finally { release(); listing.mockRestore(); ui.close(); }
+  });
+
+  test('keeps a manually selected participant visible when many files arrive', async () => {
+    const directory = project(Object.fromEntries(Array.from({ length: 8 }, (_, index) => [`reviewer${index}.md`, 'notes'])));
+    let release!: () => void;
+    const loaded = new Promise<void>(resolve => { release = resolve; });
+    const originalList = fileSearch.listMentionFiles;
+    const listing = spyOn(fileSearch, 'listMentionFiles').mockImplementation(async (...args) => {
+      await loaded;
+      return originalList(...args);
+    });
+    let draft = '';
+    function Editor() {
+      const [input, setInput] = useState('');
+      draft = input;
+      return <InputBar inputContent={input} setInputContent={setInput} send={() => {}}
+        directory={directory} disabled={false} feedback={null} participants={[{ name: 'Reviewer', model }]} />;
+    }
+    const ui = terminal(<Editor />);
+    try {
+      await ui.flush();
+      await ui.type('@rev');
+      await ui.type('\u001b[A');
+      await ui.type('\u001b[B');
+      release();
+      await ui.until(() => ui.output().includes('attach file'));
+      expect(ui.output()).toContain('› @Reviewer');
+      await ui.type('\t');
+      expect(draft).toBe('@Reviewer ');
     } finally { release(); listing.mockRestore(); ui.close(); }
   });
 
@@ -151,8 +168,6 @@ describe('file mentions through the terminal', () => {
       for (let count = 0; count < ' after'.length; count++) await ui.type('\u001b[D');
       await ui.type('@match');
       await ui.until(() => ui.output().includes('match-b space.txt'));
-      expect(ui.output()).toContain('› @match <model>');
-      await ui.type('\u001b[A');
       expect(ui.output()).toContain('› @match-a.txt');
       await ui.type('\u001b[A');
       expect(ui.output()).toContain('› @"match-b space.txt"');
@@ -163,7 +178,6 @@ describe('file mentions through the terminal', () => {
       for (let count = 0; count < ' after'.length; count++) await ui.type('\u001b[C');
       await ui.type(' @match-a');
       await ui.until(() => ui.output().includes('@match-a.txt'));
-      await ui.type('\u001b[A');
       expect(ui.output()).toContain('› @match-a.txt');
       await ui.type('\r');
       expect(draft).toBe('Compare @"match-b space.txt"  after @match-a.txt ');
@@ -173,7 +187,6 @@ describe('file mentions through the terminal', () => {
 
       await ui.type('@match');
       await ui.until(() => ui.output().includes('@match-a.txt'));
-      await ui.type('\u001b[A');
       expect(ui.output()).toContain('› @match-a.txt');
       await ui.type('\u001b');
       expect(ui.output()).not.toContain('tab / enter select');
@@ -240,7 +253,6 @@ describe('file mentions through the terminal', () => {
       for (const query of ['@docs/de', '@design']) {
         await ui.type(query);
         await ui.until(() => ui.output().includes('@docs/design.md'));
-        if (!query.includes('/')) await ui.type('\u001b[A');
         expect(ui.output()).toContain('› @docs/design.md');
         expect(ui.output()).not.toContain('other.txt');
         await ui.type('\t');
@@ -274,7 +286,6 @@ describe('file mentions through the terminal', () => {
       await ui.flush();
       await ui.type('@reviewer Read @note');
       await ui.until(() => ui.output().includes('@notes.txt'));
-      await ui.type('\u001b[A');
       expect(ui.output()).toContain('› @notes.txt');
       await ui.type('\r');
       expect(session.getInputContent()).toBe('@reviewer Read @notes.txt ');

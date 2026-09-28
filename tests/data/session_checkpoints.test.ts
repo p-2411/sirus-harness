@@ -55,18 +55,19 @@ afterEach(() => {
 // and reports the call the way an adapter would.
 function writeResponse(content: string = 'agent edit'): ScriptedBinding {
   return bindScriptedRuntime(model, (_input, emit, options) => {
+    const oldText = readFileSync(path.join(options.directory, 'file.txt'), 'utf8');
     writeFileSync(path.join(options.directory, 'file.txt'), content);
     emit({ type: 'tool_call', call: {
       type: 'tool_call', id: `write-${content}`, title: 'file.txt', kind: 'edit', status: 'completed',
       locations: [{ path: path.join(options.directory, 'file.txt') }],
-      content: [{ type: 'diff', path: path.join(options.directory, 'file.txt'), oldText: null, newText: content }],
+      content: [{ type: 'diff', path: path.join(options.directory, 'file.txt'), oldText, newText: content }],
     } });
     emit({ type: 'text', text: 'Edited.' });
   });
 }
 
 describe('session checkpoint integration', () => {
-  test('the snapshot is taken before the runtime is prompted, and rewind restores files and history', async () => {
+  test('rewind restores proven agent files and forks without changing the source', async () => {
     const binding = writeResponse();
     await session.sendMessage(prompt);
     expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('agent edit');
@@ -76,10 +77,73 @@ describe('session checkpoint integration', () => {
     expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('user draft');
     expect(result.droppedMessages).toBe(2);
     expect(result.files?.restored).toEqual(['file.txt']);
-    expect(session.getMessages()).toEqual([]);
-    expect(session.getCheckpoints()).toEqual([]);
-    // The runtime's conversation must not outlive the record it mirrored.
-    expect(binding.runtimes[0].disposed).toBe(true);
+    expect(session.getMessages()).toHaveLength(2);
+    expect(session.getCheckpoints()).toEqual([checkpoint]);
+    expect(result.fork?.messages).toEqual([]);
+    expect(result.fork?.checkpoints).toEqual([]);
+    expect(result.fork?.inputContent).toBe('Change the file');
+    expect(result.fork?.id).not.toBe(session.getId());
+    expect(binding.runtimes[0].disposed).toBe(false);
+  });
+
+  test('location-only calls preserve edits made by the user while the tool ran', async () => {
+    bindScriptedRuntime(model, (_input, emit) => {
+      emit({ type: 'tool_call', call: { type: 'tool_call', id: 'edit', title: 'Edit', kind: 'edit', status: 'in_progress', locations: [{ path: 'file.txt' }], content: [] } });
+      writeFileSync(path.join(project, 'file.txt'), 'user edit during tool');
+      emit({ type: 'tool_call', call: { type: 'tool_call', id: 'edit', title: 'Edit', kind: 'edit', status: 'completed', locations: [{ path: 'file.txt' }], content: [] } });
+      emit({ type: 'text', text: 'Done' });
+    });
+    await session.sendMessage(prompt);
+    const checkpoint = session.getCheckpoints()[0];
+    const preview = await session.previewRewind(checkpoint.id, { files: true, chat: false });
+    expect(preview.files?.conflicts).toEqual(['file.txt']);
+    expect((await session.rewind(checkpoint.id, { files: true, chat: false })).files?.restored).toEqual([]);
+    expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('user edit during tool');
+  });
+
+  test('in-place worker diffs belong to the checkpoint before the worker started', async () => {
+    let spawned = false;
+    bindScriptedRuntime(model, async (_input, emit, options) => {
+      if (isWorker(options)) {
+        writeFileSync(path.join(project, 'file.txt'), 'worker edit');
+        emit({ type: 'tool_call', call: { type: 'tool_call', id: 'worker-edit', title: 'Edit', kind: 'edit', status: 'completed', locations: [{ path: 'file.txt' }],
+          content: [{ type: 'diff', path: 'file.txt', oldText: 'user draft', newText: 'worker edit' }],
+        } });
+      } else if (!spawned) {
+        spawned = true;
+        await session.subagentHostFor('sirus')!.spawn('Edit file', { context: 'fresh', runInBackground: false }, { callId: 'spawn' });
+      }
+      emit({ type: 'text', text: 'Done' });
+    });
+    await session.sendMessage(prompt);
+    const checkpoint = session.getCheckpoints()[0];
+    expect(checkpoint.changes).toHaveLength(1);
+    const restored = Session.fromSnapshot({ ...structuredClone(session.toSnapshot()), id: 'worker-evidence-reloaded' });
+    restored.setInputContent('trigger notification');
+    expect(restored.getCheckpoints()[0].changes).toHaveLength(1);
+    const result = await restored.rewind(checkpoint.id, { files: true, chat: true });
+    expect(result.files?.restored).toEqual(['file.txt']);
+    expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('user draft');
+    await restored.dispose();
+  });
+
+  test('restored evidence stays independent and detects edits after a preview', async () => {
+    writeResponse();
+    await session.sendMessage(prompt);
+    const snapshot = structuredClone(session.toSnapshot());
+    const checkpoint = session.getCheckpoints()[0];
+    const originalCount = checkpoint.changes?.length;
+    const restored = Session.fromSnapshot({ ...snapshot, id: 'restored-evidence' });
+    restored.setInputContent('draft triggers a notification');
+    expect(restored.getCheckpoints()[0].changes?.length).toBe(originalCount);
+    expect((await restored.previewRewind(checkpoint.id, { files: true, chat: false })).files?.restored).toEqual(['file.txt']);
+    writeFileSync(path.join(project, 'file.txt'), 'user edit after preview');
+    const result = await restored.rewind(checkpoint.id, { files: true, chat: true });
+    expect(result.files?.conflicts).toEqual(['file.txt']);
+    expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('user edit after preview');
+    expect(result.fork?.inputContent).toBe('Change the file');
+    expect(restored.getMessages()).toHaveLength(2);
+    await restored.dispose();
   });
 
   test('file-only and chat-only rewinds preserve the unselected scope', async () => {
@@ -91,9 +155,10 @@ describe('session checkpoint integration', () => {
     expect(session.getMessages()).toEqual(history);
     expect(session.getCheckpoints()).toEqual([checkpoint]);
     writeFileSync(path.join(project, 'file.txt'), 'new user edit');
-    await session.rewind(checkpoint.id, { files: false, chat: true });
+    const result = await session.rewind(checkpoint.id, { files: false, chat: true });
     expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('new user edit');
-    expect(session.getMessages()).toEqual([]);
+    expect(session.getMessages()).toEqual(history);
+    expect(result.fork?.messages).toEqual([]);
   });
 
   test('a chat rewind rebuilds the runtime from what is left of the record', async () => {
@@ -113,10 +178,11 @@ describe('session checkpoint integration', () => {
     expect(binding.runtimes[0].disposed).toBe(false);
     expect(session.getContextUsage()).toEqual({ tokens: 220, window: 200_000 });
 
-    await session.rewind(checkpoints[1].id, { files: false, chat: true });
-    expect(binding.runtimes[0].disposed).toBe(true);
-    expect(session.getMessages()).toHaveLength(2);
-    await session.sendMessage(prompt);
+    const result = await session.rewind(checkpoints[1].id, { files: false, chat: true });
+    expect(binding.runtimes[0].disposed).toBe(false);
+    expect(session.getMessages()).toHaveLength(4);
+    const fork = Session.fromSnapshot(result.fork!);
+    await fork.sendMessage(prompt);
     expect(binding.runtimes[1].prompts[0].text).toBe([
       'Earlier conversation, for context:',
       'User: Change the file',
@@ -124,7 +190,56 @@ describe('session checkpoint integration', () => {
       '',
       'Change the file',
     ].join('\n'));
-    expect(session.getContextUsage()).toEqual({ tokens: 330, window: 200_000 });
+    expect(fork.getContextUsage()).toEqual({ tokens: 330, window: 200_000 });
+  });
+
+  test.each(['fork', 'rewind'] as const)('%s starts a separate native session while the source remains resumable', async operation => {
+    const previousHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = root;
+    let response = 0;
+    const binding = bindScriptedRuntime(model, (_input, emit) => {
+      emit({ type: 'text', text: `Response ${++response}` });
+    }, true);
+    let fork: Session | undefined;
+    try {
+      await session.sendMessage(prompt);
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'A later turn' }] });
+      const originalNative = session.toSnapshot().participants[0].nativeSession!;
+      const snapshot = operation === 'fork' ? session.fork()
+        : (await session.rewind(session.getCheckpoints()[1].id, { files: false, chat: true })).fork!;
+      expect(snapshot.participants.every(participant => participant.nativeSession === undefined)).toBe(true);
+      expect(snapshot.defaultModel.nativeSession).toBeUndefined();
+      expect(session.toSnapshot().participants[0].nativeSession).toEqual(originalNative);
+      fork = Session.fromSnapshot(snapshot);
+      await fork.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Continue separately' }] });
+      expect(binding.starts[1].resume).toBeUndefined();
+      expect(binding.runtimes[1].prompts[0].text).toContain('Earlier conversation, for context:');
+      expect(binding.runtimes[1].prompts[0].text).toContain('Response 1');
+      if (operation === 'rewind') {
+        expect(binding.runtimes[1].prompts[0].text).not.toContain('Response 2');
+        expect(binding.runtimes[1].prompts[0].text).not.toContain('A later turn');
+      }
+      expect(fork.toSnapshot().participants[0].nativeSession!.sessionId).not.toBe(originalNative.sessionId);
+
+      binding.runtimes[0].dispose();
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Continue the original' }] });
+      expect(binding.starts[2].resume).toEqual(originalNative);
+      expect(binding.runtimes[2].prompts[0].text).toBe('Continue the original');
+      expect(session.toSnapshot().participants[0].nativeSession!.sessionId).toBe(originalNative.sessionId);
+
+      const forkNative = fork.toSnapshot().participants[0].nativeSession!;
+      fork.clear();
+      expect(fork.toSnapshot().participants[0].nativeSession).toBeUndefined();
+      expect(fork.toSnapshot().defaultModel.nativeSession).toBeUndefined();
+      await fork.sendMessage({ role: 'user', content: [{ type: 'text', text: 'After clear' }] });
+      expect(binding.starts[3].resume).toBeUndefined();
+      expect(binding.runtimes[3].prompts[0].text).toBe('After clear');
+      expect(fork.toSnapshot().participants[0].nativeSession!.sessionId).not.toBe(forkNative.sessionId);
+    } finally {
+      await fork?.dispose();
+      await session.dispose();
+      if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome;
+    }
   });
 
   test('queued prompts capture their own pre-turn files and history position', async () => {
@@ -134,10 +249,12 @@ describe('session checkpoint integration', () => {
     bindScriptedRuntime(model, async (_input, emit, options) => {
       const number = ++turnNumber;
       if (number === 1) await firstGate;
+      const oldText = readFileSync(path.join(options.directory, 'file.txt'), 'utf8');
       writeFileSync(path.join(options.directory, 'file.txt'), `edit ${number}`);
       emit({ type: 'tool_call', call: {
         type: 'tool_call', id: `write-${number}`, title: 'file.txt', kind: 'edit', status: 'completed',
-        locations: [{ path: path.join(options.directory, 'file.txt') }], content: [],
+        locations: [{ path: path.join(options.directory, 'file.txt') }],
+        content: [{ type: 'diff', path: 'file.txt', oldText, newText: `edit ${number}` }],
       } });
       emit({ type: 'text', text: `Response ${number}` });
     });
@@ -163,19 +280,21 @@ describe('session checkpoint integration', () => {
     expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('edit 2');
     expect(session.getQueuedMessageCount()).toBe(0);
 
-    await session.rewind(checkpoints[1].id, { files: true, chat: true });
+    const secondFork = await session.rewind(checkpoints[1].id, { files: true, chat: true });
     expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('edit 1');
-    expect(session.getMessages()).toHaveLength(2);
+    expect(secondFork.fork?.messages).toHaveLength(2);
+    expect(session.getMessages()).toHaveLength(4);
 
-    await session.rewind(checkpoints[0].id, { files: true, chat: true });
+    const firstFork = await Session.fromSnapshot(secondFork.fork!).rewind(checkpoints[0].id, { files: true, chat: true });
     expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('user draft');
-    expect(session.getMessages()).toHaveLength(0);
+    expect(firstFork.fork?.messages).toHaveLength(0);
+    expect(session.getMessages()).toHaveLength(4);
   });
 
   test.each([new Error('runtime failed'), new TurnCancelledError()])(
     'settles a snapshot before a failed or cancelled turn can be cleared: %s', async error => {
       bindScriptedRuntime(model, () => { throw error; });
-      await expect(session.sendMessage(prompt)).rejects.toThrow(error.message);
+      await expect(session.sendMessage(prompt)).rejects.toThrow(error instanceof TurnCancelledError ? error.message : 'refused or could not complete');
       expect(session.getCheckpoints()).toHaveLength(1);
       expect(session.getStatus()).toBe(error.name === 'AbortError' ? 'idle' : 'error');
       expect(session.wasLastTurnCancelled()).toBe(error.name === 'AbortError');
@@ -194,10 +313,10 @@ describe('session checkpoint integration', () => {
     expect(() => session.clear()).toThrow('Wait for the current operation');
     await expect(session.rewind(checkpoint.id, { files: false, chat: true }))
       .rejects.toThrow('Wait for the current rewind');
-    await rewind;
-    expect(session.getMessages()).toEqual([]);
-    await session.sendMessage(prompt);
+    expect((await rewind).fork?.messages).toEqual([]);
     expect(session.getMessages()).toHaveLength(2);
+    await session.sendMessage(prompt);
+    expect(session.getMessages()).toHaveLength(4);
   });
 
   test('leaves history intact when file restoration fails', async () => {
@@ -214,8 +333,8 @@ describe('session checkpoint integration', () => {
     await expect(session.rewind(invalidCheckpoint.id, { files: true, chat: true })).rejects.toThrow();
     expect(session.getMessages()).toEqual([{ ...prompt, seq: 0 }]);
     expect(session.getCheckpoints()).toEqual([invalidCheckpoint]);
-    await session.rewind(invalidCheckpoint.id, { files: false, chat: true });
-    expect(session.getMessages()).toEqual([]);
+    expect((await session.rewind(invalidCheckpoint.id, { files: false, chat: true })).fork?.messages).toEqual([]);
+    expect(session.getMessages()).toHaveLength(1);
   });
 
   test('protects a shared directory while another session is working or restoring files', async () => {
@@ -257,7 +376,7 @@ describe('session checkpoint integration', () => {
         if (isWorker(options)) await gate;
         else if (!spawned) {
           spawned = true;
-          await owner.subagentHostFor('sirus')!.spawn('Keep working', 'fresh', { callId: 'spawn' });
+          await owner.subagentHostFor('sirus')!.spawn('Keep working', { context: 'fresh' }, { callId: 'spawn' });
         }
         emit({ type: 'text', text: 'Done' });
       });
@@ -282,9 +401,10 @@ describe('session checkpoint integration', () => {
         await subagentDone(worker);
         await until(() => owner.getStatus() !== 'working', 'the report turn to finish');
       }
-      await session.rewind(checkpoint.id, { files: true, chat: true });
+      const result = await session.rewind(checkpoint.id, { files: true, chat: true });
       expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('user draft');
-      expect(session.getMessages()).toEqual([]);
+      expect(result.fork?.messages).toEqual([]);
+      expect(session.getMessages().length).toBeGreaterThan(0);
     },
   );
 
@@ -302,7 +422,7 @@ describe('session checkpoint integration', () => {
       if (isWorker(options)) await gate;
       else if (!spawned) {
         spawned = true;
-        await other.subagentHostFor('sirus')!.spawn('Keep working', 'fresh', { callId: 'spawn' });
+        await other.subagentHostFor('sirus')!.spawn('Keep working', { context: 'fresh' }, { callId: 'spawn' });
       }
       emit({ type: 'text', text: 'Done' });
     });
@@ -310,9 +430,10 @@ describe('session checkpoint integration', () => {
       await other.sendMessage(prompt);
       const [worker] = other.getWorkers();
       expect(other.getStatus()).toBe('idle');
-      await session.rewind(checkpoint.id, { files: true, chat: true });
+      const result = await session.rewind(checkpoint.id, { files: true, chat: true });
       expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('user draft');
-      expect(session.getMessages()).toEqual([]);
+      expect(result.fork?.messages).toEqual([]);
+      expect(session.getMessages().length).toBeGreaterThan(0);
       expect(worker.status).toBe('working');
     } finally {
       release();
@@ -320,8 +441,16 @@ describe('session checkpoint integration', () => {
     }
   });
 
-  test('a worker in a git project gets its own worktree, which goes when the session does', async () => {
-    const repository = committedRepository();
+  test('explicit worktree isolation starts at HEAD and removes unchanged work on completion', async () => {
+    const repository = path.join(root, 'repository');
+    mkdirSync(repository);
+    git(repository, ['init', '--quiet', '-b', 'main']);
+    git(repository, ['config', 'user.email', 'worker@example.com']);
+    git(repository, ['config', 'user.name', 'Worker Test']);
+    writeFileSync(path.join(repository, 'file.txt'), 'committed');
+    git(repository, ['add', 'file.txt']);
+    git(repository, ['commit', '--quiet', '-m', 'first']);
+
     const owner = new Session({ id: 'worktree-session', name: 'Worktree', directory: repository, model });
     owner.setPermissionMode('bypass');
     let release!: () => void;
@@ -334,9 +463,12 @@ describe('session checkpoint integration', () => {
       }
       if (!spawned) {
         spawned = true;
-        await owner.subagentHostFor('sirus')!.spawn('Work on your own branch', 'fresh', { callId: 'spawn' });
+        await owner.subagentHostFor('sirus')!.spawn('Work on your own branch', { context: 'fresh', isolation: 'worktree' }, { callId: 'spawn' });
       }
       writeFileSync(path.join(options.directory, 'file.txt'), 'agent edit');
+      emit({ type: 'tool_call', call: { type: 'tool_call', id: 'edit', title: 'Edit file', kind: 'edit', status: 'completed', locations: [],
+        content: [{ type: 'diff', path: 'file.txt', oldText: 'committed', newText: 'agent edit' }],
+      } });
       emit({ type: 'text', text: 'Done' });
     });
     let worktree = '';
@@ -364,7 +496,7 @@ describe('session checkpoint integration', () => {
     }
     // The worktree goes with the session; the branch is left to be merged.
     expect(existsSync(worktree)).toBe(false);
-    expect(git(repository, ['branch', '--list', branch])).toContain(branch);
+    expect(git(repository, ['branch', '--list', branch]).trim()).toBe('');
     expect(git(repository, ['worktree', 'list'])).not.toContain(worktree);
   });
 
@@ -383,13 +515,15 @@ describe('session checkpoint integration', () => {
       }
       prompts.push(input.text);
       if (input.text === 'Delegate it') {
-        await owner.subagentHostFor('sirus')!.spawn('Work on your own branch', 'fresh', { callId: 'spawn' });
+        await owner.subagentHostFor('sirus')!.spawn('Work on your own branch', { isolation: 'worktree' }, { callId: 'spawn' });
       }
       emit({ type: 'text', text: 'Done' });
     });
     let finishRestore = () => {};
     const restore = spyOn(checkpointStore, 'restoreCheckpoint')
-      .mockImplementation(() => new Promise(resolve => { finishRestore = () => resolve({ restored: [], removed: [] }); }));
+      .mockImplementation(() => new Promise(resolve => {
+        finishRestore = () => resolve({ restored: [], removed: [], conflicts: [] });
+      }));
     try {
       await restorer.sendMessage(prompt);
       const [checkpoint] = restorer.getCheckpoints();
@@ -406,7 +540,7 @@ describe('session checkpoint integration', () => {
       await rewind;
       // Nothing else happens in the owner's session, and the report goes out.
       await until(() => worker.reported && owner.getStatus() === 'idle', 'the report turn');
-      expect(prompts.at(-1)).toStartWith(`@${worker.id} wrote:`);
+      expect(prompts.at(-1)).toContain('Worker result');
     } finally {
       restore.mockRestore();
       releaseWorker();
@@ -425,7 +559,7 @@ describe('session checkpoint integration', () => {
     bindScriptedRuntime(model, () => {});
     const owner = new Session({ id: 'worktree-failure', name: 'Worktree failure', directory: repository, model });
     try {
-      await expect(owner.subagentHostFor('sirus')!.spawn('Work on your own branch', 'fresh', { callId: 'spawn' }))
+      await expect(owner.subagentHostFor('sirus')!.spawn('Work on your own branch', { isolation: 'worktree' }, { callId: 'spawn' }))
         .rejects.toThrow('Could not create a worktree for the worker: fatal: could not create leading directories');
       // No worker went to work in the project instead.
       expect(owner.getWorkers()).toEqual([]);
@@ -435,6 +569,48 @@ describe('session checkpoint integration', () => {
       await owner.dispose();
     }
   });
+});
+
+test('changed worktrees survive completion and disposal, including committed changes', async () => {
+  const scratch = mkdtempSync(path.join(os.tmpdir(), 'sirus-kept-worktrees-'));
+  const previous = process.env.SIRUS_DATA_DIR;
+  process.env.SIRUS_DATA_DIR = path.join(scratch, 'data');
+  const repository = path.join(scratch, 'repository');
+  mkdirSync(repository);
+  git(repository, ['init', '--quiet', '-b', 'main']);
+  git(repository, ['config', 'user.email', 'worker@example.com']);
+  git(repository, ['config', 'user.name', 'Worker Test']);
+  writeFileSync(path.join(repository, 'file.txt'), 'original');
+  git(repository, ['add', 'file.txt']);
+  git(repository, ['commit', '--quiet', '-m', 'first']);
+  const session = new Session({ id: 'kept-worktrees', name: 'Kept', directory: repository, model });
+  bindScriptedRuntime(model, (input, emit, options) => {
+    writeFileSync(path.join(options.directory, 'file.txt'), input.text);
+    if (input.text === 'commit') {
+      git(options.directory, ['add', 'file.txt']);
+      git(options.directory, ['commit', '--quiet', '-m', 'worker change']);
+    }
+    emit({ type: 'text', text: 'Changed file.txt' });
+  });
+  try {
+    for (const prompt of ['dirty', 'commit']) {
+      const report = await session.subagentHostFor('sirus')!.spawn(prompt, { isolation: 'worktree', runInBackground: false }, { callId: prompt });
+      expect(report).toMatchObject({ status: 'done', branch: expect.stringContaining('sirus/'), worktree: expect.any(String) });
+      expect(report.changes).toContain('Changed file.txt');
+    }
+    await session.dispose();
+    for (const run of session.getWorkers()) {
+      expect(existsSync(run.directory)).toBe(true);
+      expect(readFileSync(path.join(run.directory, 'file.txt'), 'utf8')).toBe(run.prompt);
+    }
+    expect(readFileSync(path.join(repository, 'file.txt'), 'utf8')).toBe('original');
+  } finally {
+    await session.dispose();
+    unbindRuntime(model);
+    if (previous === undefined) delete process.env.SIRUS_DATA_DIR;
+    else process.env.SIRUS_DATA_DIR = previous;
+    rmSync(scratch, { recursive: true, force: true });
+  }
 });
 
 // A git project with one commit, which a worker's worktree can be cut from.

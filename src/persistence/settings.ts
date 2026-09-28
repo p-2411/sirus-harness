@@ -59,12 +59,6 @@ const settingsFileSchema = z.object({
   sirusModel: z.string().min(1).optional(),
   // When to send desktop notifications; absent means background only.
   notifications: z.enum(NOTIFICATION_PREFERENCES).optional(),
-  // The TypeSafe AI key Jev routes with, and whether Sirus has already asked
-  // for one once; absent means neither.
-  jev: z.object({
-    apiKey: z.string().min(1).optional(),
-    keyRequested: z.boolean().optional(),
-  }).passthrough().optional(),
 }).passthrough();
 
 // The sections of the file this build could read. One that failed its schema
@@ -81,10 +75,6 @@ export interface SettingsShape {
   apiKeys: StoredApiKeys;
   sirusModel: string | null;
   notifications: NotificationPreference;
-  // The Jev key the user pasted, or null to leave routing to the environment.
-  jevApiKey: string | null;
-  // The one-time request for a Jev key has been made, answered or declined.
-  jevKeyRequested: boolean;
 }
 
 // The single list of settings: its keys drive both the fallbacks a read uses
@@ -96,13 +86,11 @@ const DEFAULTS: SettingsShape = {
   apiKeys: {},
   sirusModel: null,
   notifications: 'background',
-  jevApiKey: null,
-  jevKeyRequested: false,
 };
 
 // How one setting maps onto the file. Most are a plain key of the same name;
-// `memoryEnabled` is `memory.enabled`, a cleared Sirus model is an absent
-// key, and the two Jev settings share the `jev` section.
+// `memoryEnabled` is `memory.enabled`, and a cleared Sirus model is an absent
+// key.
 interface Codec<K extends keyof SettingsShape> {
   // The top-level key of the file the setting is stored under.
   section: SectionName;
@@ -113,13 +101,6 @@ interface Codec<K extends keyof SettingsShape> {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-// Both Jev settings share one section, so each write keeps the other's field
-// as the file already carries it. A section that is not an object has nothing
-// worth keeping.
-function jevSection(file: Record<string, unknown>): Record<string, unknown> {
-  return isObject(file.jev) ? { ...file.jev } : {};
 }
 
 const CODECS: { [K in keyof SettingsShape]: Codec<K> } = {
@@ -154,20 +135,6 @@ const CODECS: { [K in keyof SettingsShape]: Codec<K> } = {
     section: 'notifications',
     read: file => file.notifications,
     write: (file, value) => { file.notifications = value; },
-  },
-  jevApiKey: {
-    section: 'jev',
-    read: file => file.jev?.apiKey ?? (file.jev ? null : undefined),
-    write: (file, value) => {
-      const jev = jevSection(file);
-      if (value === null) delete jev.apiKey; else jev.apiKey = value;
-      file.jev = jev;
-    },
-  },
-  jevKeyRequested: {
-    section: 'jev',
-    read: file => file.jev?.keyRequested,
-    write: (file, value) => { file.jev = { ...jevSection(file), keyRequested: value }; },
   },
 };
 
@@ -249,10 +216,4 @@ export function openSettings(directory: string = dataDirectory()): Settings {
       return writeJson(settingsPath(directory), next);
     },
   };
-}
-
-// Saving a Jev key, or clearing one, also settles the one-time request for a
-// key: the user has been through this already.
-export function saveJevApiKey(key: string | null, directory?: string): boolean {
-  return openSettings(directory).set({ jevApiKey: key, jevKeyRequested: true });
 }

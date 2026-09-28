@@ -1,12 +1,15 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { execFileSync } from 'child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { linkSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import {
   captureCheckpoint,
   checkpointFailure,
   checkpointRepository,
+  contentFingerprint,
+  previewCheckpoint,
+  type AgentFileChange,
   enableCheckpoints,
   restoreCheckpoint,
 } from '../src/checkpoints';
@@ -37,84 +40,53 @@ afterEach(() => {
   for (const directory of temporaryRoots.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
-describe('worktree checkpoints', () => {
-  test('restores the exact pre-turn tracked and non-ignored state without touching excluded files', async () => {
-    const root = temporaryDirectory('checkpoint');
-    const project = path.join(root, 'project');
-    mkdirSync(project);
-    process.env.SIRUS_DATA_DIR = path.join(root, 'state');
-    enableCheckpoints();
+function change(file: string, before: string | null, after: string | null): AgentFileChange {
+  return { path: file, before: before === null ? null : contentFingerprint(before), after: after === null ? null : contentFingerprint(after) };
+}
 
+function setup(name: string): string {
+  const root = temporaryDirectory(name);
+  const project = path.join(root, 'project');
+  mkdirSync(project);
+  process.env.SIRUS_DATA_DIR = path.join(root, 'state');
+  enableCheckpoints();
+  return project;
+}
+
+describe('worktree checkpoints', () => {
+  test('previews and restores only proven agent changes, preserving user files and the source index', async () => {
+    const project = setup('checkpoint');
     git(project, 'init', '-q');
     git(project, 'config', 'user.name', 'Test');
     git(project, 'config', 'user.email', 'test@example.com');
-    writeFileSync(path.join(project, '.gitignore'), '*.ignored\n');
-    writeFileSync(path.join(project, 'tracked.txt'), 'committed\n');
-    writeFileSync(path.join(project, 'tracked.ignored'), 'committed ignored\n');
-    git(project, 'add', '-f', '.gitignore', 'tracked.txt', 'tracked.ignored');
+    writeFileSync(path.join(project, 'file.txt'), 'committed');
+    git(project, 'add', '.');
     git(project, 'commit', '-q', '-m', 'initial');
-    writeFileSync(path.join(project, '.git', 'info', 'exclude'), 'excluded.txt\n');
-
-    // These are the user's pre-existing changes and must be the undo target.
-    writeFileSync(path.join(project, 'tracked.txt'), 'user change\n');
-    writeFileSync(path.join(project, 'tracked.ignored'), 'user ignored change\n');
-    writeFileSync(path.join(project, 'untracked.txt'), 'user untracked\n');
-    writeFileSync(path.join(project, 'excluded.txt'), 'private before\n');
-    const originalHead = git(project, 'rev-parse', 'HEAD');
     const originalIndex = readFileSync(path.join(project, '.git', 'index'));
-    const checkpoint = await captureCheckpoint(project, 'before agent');
-    expect(checkpoint).not.toBeNull();
-
-    writeFileSync(path.join(project, 'tracked.txt'), 'agent change\n');
-    writeFileSync(path.join(project, 'tracked.ignored'), 'agent ignored change\n');
-    writeFileSync(path.join(project, 'untracked.txt'), 'agent untracked change\n');
-    writeFileSync(path.join(project, 'excluded.txt'), 'private after\n');
-    writeFileSync(path.join(project, 'added.txt'), 'agent added\n');
-
-    const restored = await restoreCheckpoint(project, checkpoint!.id);
-
-    expect(readFileSync(path.join(project, 'tracked.txt'), 'utf8')).toBe('user change\n');
-    expect(readFileSync(path.join(project, 'tracked.ignored'), 'utf8')).toBe('user ignored change\n');
-    expect(readFileSync(path.join(project, 'untracked.txt'), 'utf8')).toBe('user untracked\n');
-    expect(readFileSync(path.join(project, 'excluded.txt'), 'utf8')).toBe('private after\n');
+    const originalHead = git(project, 'rev-parse', 'HEAD');
+    writeFileSync(path.join(project, 'file.txt'), 'user draft');
+    writeFileSync(path.join(project, 'user.txt'), 'user before');
+    writeFileSync(path.join(project, 'deleted.txt'), 'delete me');
+    const checkpoint = (await captureCheckpoint(project, 'before agent'))!;
+    writeFileSync(path.join(project, 'file.txt'), 'agent');
+    writeFileSync(path.join(project, 'user.txt'), 'user after');
+    writeFileSync(path.join(project, 'added.txt'), 'created');
+    rmSync(path.join(project, 'deleted.txt'));
+    const changes = [change('file.txt', 'user draft', 'agent'), change('added.txt', null, 'created'), change('deleted.txt', 'delete me', null)];
+    const preview = await previewCheckpoint(project, checkpoint.id, changes);
+    expect(preview).toEqual({ restored: ['file.txt', 'deleted.txt'], removed: ['added.txt'], conflicts: [] });
+    expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('agent');
+    expect(await restoreCheckpoint(project, checkpoint.id, changes)).toEqual(preview);
+    expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('user draft');
+    expect(readFileSync(path.join(project, 'user.txt'), 'utf8')).toBe('user after');
+    expect(readFileSync(path.join(project, 'deleted.txt'), 'utf8')).toBe('delete me');
     expect(() => readFileSync(path.join(project, 'added.txt'))).toThrow();
-    expect(restored.removed).toContain('added.txt');
     expect(git(project, 'rev-parse', 'HEAD')).toBe(originalHead);
     expect(readFileSync(path.join(project, '.git', 'index'))).toEqual(originalIndex);
   });
 
-  test('captures pre-existing deletions and restores files deleted during a turn', async () => {
-    const root = temporaryDirectory('deleted-checkpoint');
-    const project = path.join(root, 'project');
-    mkdirSync(project);
-    process.env.SIRUS_DATA_DIR = path.join(root, 'state');
-    enableCheckpoints();
-    git(project, 'init', '-q');
-    for (const file of ['user-deleted.txt', 'agent-deleted.txt']) {
-      writeFileSync(path.join(project, file), 'original\n');
-    }
-    git(project, 'add', '.');
-    rmSync(path.join(project, 'user-deleted.txt'));
-    symlinkSync('missing-target', path.join(project, 'dangling-link'));
-    const checkpoint = await captureCheckpoint(project, 'deletions');
-    expect(checkpoint).not.toBeNull();
-
-    writeFileSync(path.join(project, 'user-deleted.txt'), 'recreated\n');
-    rmSync(path.join(project, 'agent-deleted.txt'));
-    rmSync(path.join(project, 'dangling-link'));
-    const result = await restoreCheckpoint(project, checkpoint!.id);
-    expect(result.restored).toEqual(['agent-deleted.txt', 'dangling-link']);
-    expect(result.removed).toEqual(['user-deleted.txt']);
-    expect(readFileSync(path.join(project, 'agent-deleted.txt'), 'utf8')).toBe('original\n');
-    expect(() => readFileSync(path.join(project, 'user-deleted.txt'))).toThrow();
-  });
-
   test('drops files that left the file set since the previous capture', async () => {
-    const root = temporaryDirectory('shrinking-checkpoint');
-    const project = path.join(root, 'project');
-    mkdirSync(project);
-    process.env.SIRUS_DATA_DIR = path.join(root, 'state');
-    enableCheckpoints();
+    const project = setup('shrinking-checkpoint');
     git(project, 'init', '-q');
     for (const file of ['kept.txt', 'removed.txt', 'ignored.txt']) {
       writeFileSync(path.join(project, file), `${file}\n`);
@@ -131,11 +103,7 @@ describe('worktree checkpoints', () => {
   });
 
   test('captures again after a rewind whose restored files were edited since', async () => {
-    const root = temporaryDirectory('after-rewind');
-    const project = path.join(root, 'project');
-    mkdirSync(project);
-    process.env.SIRUS_DATA_DIR = path.join(root, 'state');
-    enableCheckpoints();
+    const project = setup('after-rewind');
     git(project, 'init', '-q');
     writeFileSync(path.join(project, 'edited.txt'), 'checkpoint\n');
     writeFileSync(path.join(project, 'ignored.txt'), 'checkpoint\n');
@@ -143,10 +111,12 @@ describe('worktree checkpoints', () => {
     expect(checkpoint).not.toBeNull();
     writeFileSync(path.join(project, 'edited.txt'), 'agent\n');
     writeFileSync(path.join(project, 'ignored.txt'), 'agent\n');
-    await restoreCheckpoint(project, checkpoint!.id);
+    const restored = await restoreCheckpoint(project, checkpoint!.id, [
+      change('edited.txt', 'checkpoint\n', 'agent\n'),
+      change('ignored.txt', 'checkpoint\n', 'agent\n'),
+    ]);
+    expect(restored.restored).toEqual(['edited.txt', 'ignored.txt']);
 
-    // The restore left the shadow index at the checkpoint and its HEAD at the
-    // agent's state, so both files now differ from each.
     writeFileSync(path.join(project, 'edited.txt'), 'user\n');
     writeFileSync(path.join(project, '.gitignore'), 'ignored.txt\n');
     writeFileSync(path.join(project, 'ignored.txt'), 'private\n');
@@ -157,11 +127,7 @@ describe('worktree checkpoints', () => {
   });
 
   test('restores the exact bytes whatever the project attributes say, in older shadow repositories too', async () => {
-    const root = temporaryDirectory('exact-bytes');
-    const project = path.join(root, 'project');
-    mkdirSync(project);
-    process.env.SIRUS_DATA_DIR = path.join(root, 'state');
-    enableCheckpoints();
+    const project = setup('exact-bytes');
     git(project, 'init', '-q');
     // A shadow repository made by a build that did not write its attributes.
     expect(await captureCheckpoint(project, 'empty')).not.toBeNull();
@@ -174,18 +140,18 @@ describe('worktree checkpoints', () => {
     expect(checkpoint).not.toBeNull();
     writeFileSync(path.join(project, 'lf.txt'), 'agent\n');
     writeFileSync(path.join(project, 'crlf.txt'), 'agent\n');
-    await restoreCheckpoint(project, checkpoint!.id);
+    const restored = await restoreCheckpoint(project, checkpoint!.id, [
+      change('lf.txt', 'one\ntwo\n', 'agent\n'),
+      change('crlf.txt', 'one\r\ntwo\r\n', 'agent\n'),
+    ]);
 
+    expect(restored.restored).toEqual(['lf.txt', 'crlf.txt']);
     expect(readFileSync(path.join(project, 'lf.txt'), 'utf8')).toBe('one\ntwo\n');
     expect(readFileSync(path.join(project, 'crlf.txt'), 'utf8')).toBe('one\r\ntwo\r\n');
   });
 
   test('reads file names literally, so glob characters in one capture no ignored file', async () => {
-    const root = temporaryDirectory('literal-names');
-    const project = path.join(root, 'project');
-    mkdirSync(project);
-    process.env.SIRUS_DATA_DIR = path.join(root, 'state');
-    enableCheckpoints();
+    const project = setup('literal-names');
     git(project, 'init', '-q');
     writeFileSync(path.join(project, '.gitignore'), 'secret.txt\n');
     writeFileSync(path.join(project, 'secret.txt'), 'private before\n');
@@ -193,67 +159,103 @@ describe('worktree checkpoints', () => {
     const checkpoint = await captureCheckpoint(project, 'glob characters');
     expect(checkpoint).not.toBeNull();
     expect(checkpointTree(project, checkpoint!.id)).toEqual(['*.txt', '.gitignore']);
-
-    writeFileSync(path.join(project, 'secret.txt'), 'private after\n');
-    await restoreCheckpoint(project, checkpoint!.id);
-    expect(readFileSync(path.join(project, 'secret.txt'), 'utf8')).toBe('private after\n');
   });
 
-  test('refuses a restore that would overwrite a newly ignored file', async () => {
-    const root = temporaryDirectory('ignored-conflict');
-    const project = path.join(root, 'project');
-    mkdirSync(project);
-    process.env.SIRUS_DATA_DIR = path.join(root, 'state');
-    enableCheckpoints();
-    git(project, 'init', '-q');
-    writeFileSync(path.join(project, 'file.txt'), 'before\n');
-    const checkpoint = await captureCheckpoint(project, 'before ignore');
-    expect(checkpoint).not.toBeNull();
-    writeFileSync(path.join(project, '.gitignore'), 'file.txt\n');
-    writeFileSync(path.join(project, 'file.txt'), 'private content\n');
-
-    await expect(restoreCheckpoint(project, checkpoint!.id)).rejects.toThrow();
-    expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('private content\n');
+  test('preserves user changes made after the preview and between agent edits', async () => {
+    const project = setup('conflicts');
+    writeFileSync(path.join(project, 'after.txt'), 'before');
+    writeFileSync(path.join(project, 'between.txt'), 'before');
+    const checkpoint = (await captureCheckpoint(project, 'before agent'))!;
+    writeFileSync(path.join(project, 'after.txt'), 'agent');
+    writeFileSync(path.join(project, 'between.txt'), 'agent two');
+    const changes = [change('after.txt', 'before', 'agent'), change('between.txt', 'before', 'agent one'), change('between.txt', 'user interleaving', 'agent two')];
+    expect((await previewCheckpoint(project, checkpoint.id, changes)).restored).toEqual(['after.txt']);
+    writeFileSync(path.join(project, 'after.txt'), 'user after preview');
+    const result = await restoreCheckpoint(project, checkpoint.id, changes);
+    expect(result.restored).toEqual([]);
+    expect(result.conflicts).toEqual(['after.txt', 'between.txt']);
+    expect(readFileSync(path.join(project, 'after.txt'), 'utf8')).toBe('user after preview');
+    expect(readFileSync(path.join(project, 'between.txt'), 'utf8')).toBe('agent two');
   });
 
-  test('protects ignored children when restoring a file over a directory', async () => {
-    const root = temporaryDirectory('ignored-directory-conflict');
-    const project = path.join(root, 'project');
-    mkdirSync(project);
-    process.env.SIRUS_DATA_DIR = path.join(root, 'state');
-    enableCheckpoints();
-    writeFileSync(path.join(project, '.gitignore'), '*.private\n');
-    writeFileSync(path.join(project, 'target'), 'before\n');
-    const checkpoint = await captureCheckpoint(project, 'before directory');
-    expect(checkpoint).not.toBeNull();
+  test('never restores unproven files from older checkpoints', async () => {
+    const project = setup('legacy');
+    writeFileSync(path.join(project, 'file.txt'), 'before');
+    const checkpoint = (await captureCheckpoint(project, 'legacy checkpoint'))!;
+    writeFileSync(path.join(project, 'file.txt'), 'user edit');
+    expect(await restoreCheckpoint(project, checkpoint.id)).toEqual({ restored: [], removed: [], conflicts: [] });
+    expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('user edit');
+  });
+
+  test('refuses symlinks, directory replacements and paths outside the project', async () => {
+    const project = setup('safe-paths');
+    writeFileSync(path.join(project, 'target'), 'before');
+    writeFileSync(path.join(project, 'link'), 'before');
+    const checkpoint = (await captureCheckpoint(project, 'before'))!;
     rmSync(path.join(project, 'target'));
     mkdirSync(path.join(project, 'target'));
-    writeFileSync(path.join(project, 'target', 'cache.private'), 'private content\n');
+    writeFileSync(path.join(project, 'target', 'private'), 'user');
+    rmSync(path.join(project, 'link'));
+    const outside = path.join(project, '..', 'outside');
+    writeFileSync(outside, 'private');
+    symlinkSync(outside, path.join(project, 'link'));
+    const result = await restoreCheckpoint(project, checkpoint.id, [change('target', 'before', 'agent'), change('link', 'before', 'private'), change('../outside', null, 'private')]);
+    expect(result.conflicts).toEqual(['target', 'link']);
+    expect(readFileSync(outside, 'utf8')).toBe('private');
+    expect(readFileSync(path.join(project, 'target', 'private'), 'utf8')).toBe('user');
+  });
 
-    await expect(restoreCheckpoint(project, checkpoint!.id)).rejects.toThrow('excluded from checkpoints');
-    expect(readFileSync(path.join(project, 'target', 'cache.private'), 'utf8')).toBe('private content\n');
+  test('a user reset to an earlier agent result is a conflict', async () => {
+    const project = setup('historical-state');
+    writeFileSync(path.join(project, 'file'), 'A');
+    const checkpoint = (await captureCheckpoint(project, 'before'))!;
+    writeFileSync(path.join(project, 'file'), 'B');
+    const result = await restoreCheckpoint(project, checkpoint.id, [change('file', 'A', 'B'), change('file', 'B', 'C')]);
+    expect(result.conflicts).toEqual(['file']);
+    expect(readFileSync(path.join(project, 'file'), 'utf8')).toBe('B');
+  });
+
+  test('restoring a hardlink replaces only the project path', async () => {
+    const project = setup('hardlinks');
+    const file = path.join(project, 'file');
+    writeFileSync(file, 'A');
+    const checkpoint = (await captureCheckpoint(project, 'before'))!;
+    writeFileSync(file, 'B');
+    const outside = path.join(project, '..', 'outside');
+    linkSync(file, outside);
+    expect((await restoreCheckpoint(project, checkpoint.id, [change('file', 'A', 'B')])).restored).toEqual(['file']);
+    expect(readFileSync(file, 'utf8')).toBe('A');
+    expect(readFileSync(outside, 'utf8')).toBe('B');
+  });
+
+  test('refuses a project root redirected through a symlink', async () => {
+    const project = setup('root-symlink');
+    writeFileSync(path.join(project, 'file'), 'A');
+    const checkpoint = (await captureCheckpoint(project, 'before'))!;
+    const outside = path.join(project, '..', 'outside');
+    mkdirSync(outside);
+    writeFileSync(path.join(outside, 'file'), 'B');
+    renameSync(project, `${project}-original`);
+    symlinkSync(outside, project);
+    await expect(restoreCheckpoint(project, checkpoint.id, [change('file', 'A', 'B')])).rejects.toThrow('symlink');
+    expect(readFileSync(path.join(outside, 'file'), 'utf8')).toBe('B');
   });
 
   test('ignores inherited Git index paths and preserves the source index', async () => {
-    const root = temporaryDirectory('inherited-git');
-    const project = path.join(root, 'project');
-    mkdirSync(project);
-    process.env.SIRUS_DATA_DIR = path.join(root, 'state');
-    enableCheckpoints();
+    const project = setup('inherited-git');
     git(project, 'init', '-q');
-    writeFileSync(path.join(project, 'tracked.txt'), 'staged\n');
+    writeFileSync(path.join(project, 'tracked.txt'), 'staged');
     git(project, 'add', '.');
     const indexPath = path.join(project, '.git', 'index');
     const index = readFileSync(indexPath);
-    writeFileSync(path.join(project, 'tracked.txt'), 'unstaged\n');
+    writeFileSync(path.join(project, 'tracked.txt'), 'unstaged');
     const originalIndexPath = process.env.GIT_INDEX_FILE;
     try {
       process.env.GIT_INDEX_FILE = indexPath;
-      const checkpoint = await captureCheckpoint(project, 'inherited index');
-      expect(checkpoint).not.toBeNull();
-      writeFileSync(path.join(project, 'tracked.txt'), 'agent\n');
-      await restoreCheckpoint(project, checkpoint!.id);
-      expect(readFileSync(path.join(project, 'tracked.txt'), 'utf8')).toBe('unstaged\n');
+      const checkpoint = (await captureCheckpoint(project, 'inherited index'))!;
+      writeFileSync(path.join(project, 'tracked.txt'), 'agent');
+      await restoreCheckpoint(project, checkpoint.id, [change('tracked.txt', 'unstaged', 'agent')]);
+      expect(readFileSync(path.join(project, 'tracked.txt'), 'utf8')).toBe('unstaged');
       expect(readFileSync(indexPath)).toEqual(index);
     } finally {
       if (originalIndexPath === undefined) delete process.env.GIT_INDEX_FILE;
@@ -261,38 +263,10 @@ describe('worktree checkpoints', () => {
     }
   });
 
-  test('works outside git while leaving ignored files alone', async () => {
-    const root = temporaryDirectory('plain-checkpoint');
-    const project = path.join(root, 'project');
-    mkdirSync(path.join(project, 'ignored'), { recursive: true });
-    process.env.SIRUS_DATA_DIR = path.join(root, 'state');
-    enableCheckpoints();
-
-    writeFileSync(path.join(project, '.gitignore'), 'ignored/\n');
-    writeFileSync(path.join(project, 'file.txt'), 'before\n');
-    writeFileSync(path.join(project, 'ignored', 'cache.txt'), 'cache before\n');
-    const checkpoint = await captureCheckpoint(project, 'plain directory');
-    expect(checkpoint).not.toBeNull();
-
-    writeFileSync(path.join(project, 'file.txt'), 'after\n');
-    writeFileSync(path.join(project, 'ignored', 'cache.txt'), 'cache after\n');
-    writeFileSync(path.join(project, 'new.txt'), 'new\n');
-    await restoreCheckpoint(project, checkpoint!.id);
-
-    expect(readFileSync(path.join(project, 'file.txt'), 'utf8')).toBe('before\n');
-    expect(readFileSync(path.join(project, 'ignored', 'cache.txt'), 'utf8')).toBe('cache after\n');
-    expect(() => readFileSync(path.join(project, 'new.txt'))).toThrow();
-  });
-
-  test('rejects malformed identifiers before invoking git and scopes failures by directory', async () => {
-    const root = temporaryDirectory('checkpoint-errors');
-    const project = path.join(root, 'project');
-    mkdirSync(project);
-    process.env.SIRUS_DATA_DIR = path.join(root, 'state');
-    enableCheckpoints();
-
+  test('rejects malformed identifiers and scopes capture failures by directory', async () => {
+    const project = setup('errors');
     await expect(restoreCheckpoint(project, '--help')).rejects.toThrow('Invalid checkpoint identifier');
-    const missing = path.join(root, 'missing');
+    const missing = path.join(project, 'missing');
     expect(await captureCheckpoint(missing, 'fails')).toBeNull();
     expect(checkpointFailure(missing)).toContain('ENOENT');
     expect(checkpointFailure(project)).toBeNull();

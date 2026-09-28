@@ -6,6 +6,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { SIRUS_VERSION } from '../../version';
 import { errorMessage } from '../../abort';
+import { spawnDescription } from './agents';
 import { isVisible, toolRegistry, visibleTools } from './index';
 import type { SubagentHost, ToolAudience } from './types';
 
@@ -22,6 +23,7 @@ export interface ToolSessionBinding {
   memoryEnabled: () => boolean;
   // The participant's own delegation port; null when it may not delegate.
   hostFor(participant: string): SubagentHost | null;
+  toolsFor?(requester: string): readonly string[] | undefined;
 }
 
 interface ToolSession {
@@ -118,7 +120,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
   const mcp = serverFor(session.binding, requester);
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   // Closing aborts the handlers still running, so a call whose caller went
-  // away stops waiting (CheckAgent with wait true).
+  // away stops waiting (WaitAgent or a foreground SpawnAgent).
   res.on('close', () => { void mcp.close(); });
   try {
     await mcp.connect(transport);
@@ -162,11 +164,14 @@ function serverFor(binding: ToolSessionBinding, requester: string): Server {
   const audience: ToolAudience = worker ? { subagent: true } : {};
   const subagents = worker ? null : binding.hostFor(requester);
 
+  const allowed = binding.toolsFor?.(requester);
+  const permitted = (name: string) => allowed === undefined || allowed.some(tool =>
+    tool === name || tool === `mcp__sirus__${name}` || tool === 'mcp__sirus__*');
   const mcp = new Server({ name: 'sirus', version: SIRUS_VERSION }, { capabilities: { tools: {} } });
   mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: visibleTools(toolRegistry, audience, binding.memoryEnabled).map(tool => ({
+    tools: visibleTools(toolRegistry, audience, binding.memoryEnabled).filter(tool => permitted(tool.name)).map(tool => ({
       name: tool.name,
-      description: tool.description,
+      description: tool.name === 'SpawnAgent' ? spawnDescription(binding.directory) : tool.description,
       // The argument schemas are JSON Schema as written. An argument is
       // required unless it declares a default, which is the one way a tool
       // says the caller may leave it out.
@@ -185,7 +190,7 @@ function serverFor(binding: ToolSessionBinding, requester: string): Server {
     // Otherwise a tool this caller was never offered does not exist for it:
     // a subagent asking for SpawnAgent is refused here by the same predicate
     // that hid it from the listing, not by the listing alone.
-    if (!tool || !isVisible(tool, audience, binding.memoryEnabled)) {
+    if (!tool || !permitted(tool.name) || !isVisible(tool, audience, binding.memoryEnabled)) {
       return failure(`Unknown tool: ${params.name}`);
     }
     try {

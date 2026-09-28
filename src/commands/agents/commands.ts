@@ -19,10 +19,10 @@ export const modelCommand: CommandSpec = {
       return subagentModelCommand(args.slice(1), context.session);
     }
     if (args.length === 1) {
-      return changeModel(DEFAULT_PARTICIPANT, args[0], context.session);
+      return changeModel(DEFAULT_PARTICIPANT, args[0], context.session, context.notify);
     }
     if (args.length === 2) {
-      return changeModel(args[0], args[1], context.session);
+      return changeModel(args[0], args[1], context.session, context.notify);
     }
     throw new Error(`Usage: ${commandUsage(modelCommand)}`);
   },
@@ -31,7 +31,7 @@ export const modelCommand: CommandSpec = {
 
 export const agentsCommandSpec: CommandSpec = {
   name: 'agents',
-  args: '[show|message|cancel|dismiss] [id]',
+  args: '[show|message|cancel|dismiss] [name]',
   description: 'watch, steer, stop or clear the session\'s background workers',
   run: (args, context) => agentsCommand(args, context.session),
   menu: agentsMenuItems,

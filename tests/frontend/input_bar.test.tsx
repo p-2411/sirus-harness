@@ -1,10 +1,14 @@
-import { describe, expect, test } from 'bun:test';
-import { render as renderInk, renderToString } from 'ink';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import os from 'os';
+import path from 'path';
+import { Box, render as renderInk, renderToString } from 'ink';
 import { PassThrough } from 'node:stream';
 import { useState, useSyncExternalStore, type ReactElement } from 'react';
 import stripAnsi from 'strip-ansi';
 import { InputBar } from '../../src/frontend/chat/InputBar';
 import { ApprovalPrompt, approvalChoices } from '../../src/frontend/chat/ApprovalPrompt';
+import { PromptBar, type PromptMode } from '../../src/frontend/chat/PromptBar';
 import { QuestionCard } from '../../src/frontend/chat/QuestionCard';
 import { EntryInput, InputFeedback, QueuedRow } from '../../src/frontend/chat/InputRows';
 import { StatusRow } from '../../src/frontend/chat/StatusRow';
@@ -21,10 +25,101 @@ import type { CommandMenuEntry, CommandMenuItem } from '../../src/commands/types
 import type { Feedback } from '../../src/commands/feedback';
 import { Session } from '../../src/agent_runtime/session';
 import Sidebar from '../../src/frontend/Sidebar';
-import type { ApprovalRequest } from '../../src/agent_runtime/permissions/approvals';
+import { lastDecision, pendingApprovals, requestPermission, resolveApproval, type ApprovalDecision, type ApprovalRequest } from '../../src/agent_runtime/permissions/approvals';
+import type { QuestionAnswer, QuestionField, QuestionRequest } from '../../src/agent_runtime/permissions/questions';
 import type { PermissionOption } from '@agentclientprotocol/sdk';
 import { notifySubagents, type SubagentRun } from '../../src/agent_runtime/tools/subagents';
 import type { MessageBlock, ToolCallBlock } from '../../src/agent_runtime/types';
+import { pressAt, releaseAt } from '../../src/frontend/interaction/clickable';
+import stringWidth from 'string-width';
+import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
+import { editInExternalEditor } from '../../src/frontend/chat/externalEditor';
+
+describe('external draft editor', () => {
+  let directory: string;
+  let previousVisual: string | undefined;
+  let previousEditor: string | undefined;
+
+  beforeEach(() => {
+    directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-editor-test-'));
+    previousVisual = process.env.VISUAL;
+    previousEditor = process.env.EDITOR;
+  });
+
+  afterEach(() => {
+    if (previousVisual === undefined) delete process.env.VISUAL;
+    else process.env.VISUAL = previousVisual;
+    if (previousEditor === undefined) delete process.env.EDITOR;
+    else process.env.EDITOR = previousEditor;
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  function editorCommand(source: string, ...args: string[]): string {
+    const script = path.join(directory, 'fake editor.ts');
+    writeFileSync(script, source);
+    return [process.execPath, script, ...args].map(value => JSON.stringify(value)).join(' ');
+  }
+
+  test('VISUAL accepts quoted paths and arguments and edits a private temporary draft', async () => {
+    const report = path.join(directory, 'report.json');
+    process.env.EDITOR = 'missing-editor';
+    process.env.VISUAL = editorCommand(`
+      import { readFileSync, writeFileSync, statSync } from 'fs';
+      import path from 'path';
+      const file = process.argv.at(-1)!;
+      writeFileSync(process.argv[2]!, JSON.stringify({
+        file, fileMode: statSync(file).mode & 0o777,
+        directoryMode: statSync(path.dirname(file)).mode & 0o777,
+        original: readFileSync(file, 'utf8'), argument: process.argv[3],
+      }));
+      writeFileSync(file, 'edited\\ntext');
+    `, report, 'an argument with spaces');
+    const terminal: string[] = [];
+    const edited = await editInExternalEditor('original\ndraft', async callback => {
+      terminal.push('suspend');
+      try { await callback(); } finally { terminal.push('resume'); }
+    });
+    expect(edited).toBe('edited\ntext');
+    expect(terminal).toEqual(['suspend', 'resume']);
+    const metadata = JSON.parse(readFileSync(report, 'utf8'));
+    expect(metadata).toMatchObject({
+      original: 'original\ndraft', argument: 'an argument with spaces',
+      fileMode: 0o600, directoryMode: 0o700,
+    });
+    expect(existsSync(path.dirname(metadata.file))).toBe(false);
+  });
+
+  test('falls back to EDITOR and preserves an intentionally empty edited draft', async () => {
+    delete process.env.VISUAL;
+    process.env.EDITOR = editorCommand(`
+      import { writeFileSync } from 'fs';
+      writeFileSync(process.argv.at(-1)!, '');
+    `);
+    expect(await editInExternalEditor('draft', callback => callback())).toBe('');
+  });
+
+  test('rejects editor failure after restoring the terminal and removing its draft', async () => {
+    const report = path.join(directory, 'draft-path');
+    process.env.VISUAL = editorCommand(`
+      import { writeFileSync } from 'fs';
+      writeFileSync(process.argv[2]!, process.argv.at(-1)!);
+      process.exit(7);
+    `, report);
+    let restored = false;
+    await expect(editInExternalEditor('draft', async callback => {
+      try { await callback(); } finally { restored = true; }
+    })).rejects.toThrow('Editor exited with status 7.');
+    expect(restored).toBe(true);
+    expect(existsSync(path.dirname(readFileSync(report, 'utf8')))).toBe(false);
+  });
+
+  test('reports unavailable executables and malformed editor commands', async () => {
+    process.env.VISUAL = path.join(directory, 'missing-editor');
+    await expect(editInExternalEditor('draft', callback => callback())).rejects.toThrow('Could not open editor');
+    process.env.VISUAL = '"unclosed';
+    await expect(editInExternalEditor('draft', callback => callback())).rejects.toThrow('unclosed quote');
+  });
+});
 
 describe('session input drafts', () => {
   test('edits and restores drafts when switching session panes with Option+arrows', async () => {
@@ -86,18 +181,18 @@ describe('session input drafts', () => {
     const type = async (input: string) => { stdin.write(input); await flush(); };
     try {
       await flush();
-      expect(output).toContain('First draft▌');
+      expect(output).toContain('› First draft');
       await type('!');
       expect(first.getInputContent()).toBe('First draft!');
-      expect(output).toContain('First draft!▌');
+      expect(output).toContain('› First draft!');
 
       await type('\u001b[1;3B');
-      expect(output).toContain('Second draft▌');
+      expect(output).toContain('› Second draft');
       await type('\u007f');
       expect(second.getInputContent()).toBe('Second draf');
 
       await type('\u001b[1;3A');
-      expect(output).toContain('First draft!▌');
+      expect(output).toContain('› First draft!');
       await type('\r');
       expect(sent).toEqual(['First draft!']);
       expect(first.getInputContent()).toBe('');
@@ -106,10 +201,10 @@ describe('session input drafts', () => {
       // An open command menu must not capture the session shortcut.
       await type('/');
       await type('\u001b[1;3B');
-      expect(output).toContain('Second draf▌');
+      expect(output).toContain('› Second draf');
       await type('\u001b[1;3A');
       expect(first.getInputContent()).toBe('/');
-      expect(output).toContain('/▌');
+      expect(output).toContain('› /');
     } finally {
       app.unmount();
       stdin.destroy();
@@ -117,6 +212,13 @@ describe('session input drafts', () => {
     }
   });
 });
+
+function render(feedback: Feedback | null): string {
+  return stripAnsi(renderToString(
+    <InputFeedback feedback={feedback} />,
+    { columns: 80 },
+  ));
+}
 
 describe('the command menu', () => {
   test('enter on a vendor command sends the command, not the prefix typed to find it', async () => {
@@ -159,13 +261,6 @@ describe('the command menu', () => {
   });
 });
 
-function render(feedback: Feedback | null): string {
-  return stripAnsi(renderToString(
-    <InputFeedback feedback={feedback} />,
-    { columns: 80 },
-  ));
-}
-
 describe('input feedback', () => {
   test('renders successful commands with a check', () => {
     expect(render({ kind: 'success', text: 'Session history cleared.' }))
@@ -201,6 +296,19 @@ describe('input feedback', () => {
 });
 
 describe('input status', () => {
+  test('makes the vendor difference in ask mode visible', () => {
+    const codex = stripAnsi(renderToString(
+      <StatusRow permissionMode="ask" model="gpt-5.6-luna" />,
+      { columns: 120 },
+    ));
+    expect(codex).toContain('ask for approval (workspace edits allowed)');
+    const claude = stripAnsi(renderToString(
+      <StatusRow permissionMode="ask" model="claude-sonnet-5" />,
+      { columns: 120 },
+    ));
+    expect(claude).toContain('ask for approval (asks before writes)');
+  });
+
   test('shows the active model and thinking level together', () => {
     const output = stripAnsi(renderToString(
       <StatusRow model="gpt-5.6-sol" thinkingLevel="high" />,
@@ -345,7 +453,7 @@ describe('approval prompt', () => {
   }
 
   const render = (request: ApprovalRequest, waiting = 0) => stripAnsi(renderToString(
-    <ApprovalPrompt request={request} waiting={waiting} onDecide={() => {}} />,
+    <ApprovalPrompt request={request} waiting={waiting} selected={0} />,
     { columns: 100 },
   ));
 
@@ -368,7 +476,7 @@ describe('approval prompt', () => {
     for (const option of OPTIONS) expect(output).toContain(option.name);
   });
 
-  test('offers only what the vendor offered', () => {
+  test('keeps vendor options and adds rejection with feedback', () => {
     const output = render(approval({
       type: 'tool_call',
       id: 'call-2',
@@ -390,14 +498,16 @@ describe('approval prompt', () => {
       status: 'pending', locations: [], content: [],
     };
     expect(approvalChoices(approval(call)).map(choice => `${choice.key}:${JSON.stringify(choice.decision)}`))
-      .toEqual(['y:{"optionId":"allow"}', 'a:{"optionId":"always"}', 'n:{"optionId":"reject"}', 'd:{"optionId":"never"}']);
+      .toEqual(['y:{"optionId":"allow"}', 'a:{"optionId":"always"}', 'n:{"optionId":"reject"}', 'd:{"optionId":"never"}', 'tab:"deny"']);
     // Two options of one kind are both offered, numbered.
     expect(approvalChoices(approval(call, [
       { optionId: 'once', name: 'Yes, proceed', kind: 'allow_once' },
       { optionId: 'decline', name: 'No, continue without running it', kind: 'reject_once' },
       { optionId: 'cancel', name: 'No, and tell Codex what to do differently', kind: 'reject_once' },
     ])).map(choice => `${choice.key}:${choice.label}`))
-      .toEqual(['1:Yes, proceed', '2:No, continue without running it', '3:No, and tell Codex what to do differently']);
+      .toEqual(['1:Yes, proceed', '2:No, continue without running it', '3:No, and tell Codex what to do differently', 'tab:No, and tell it what to do instead']);
+    expect(output).toContain('No, and tell it what to do instead');
+    expect(output).toContain('esc decline');
   });
 
   test('shows what the vendor sent as plain text', () => {
@@ -409,7 +519,7 @@ describe('approval prompt', () => {
           status: 'pending', locations: [{ path: hostile }], content: [], input: { command: hostile },
         }, [{ optionId: 'allow', name: hostile, kind: 'allow_once' }])}
         waiting={0}
-        onDecide={() => {}}
+        selected={0}
       />,
       { columns: 140 },
     );
@@ -439,10 +549,78 @@ describe('approval prompt', () => {
     // On a row wide enough to show it whole, the cut line is 200 characters,
     // its ellipsis included.
     const wide = stripAnsi(renderToString(
-      <ApprovalPrompt request={request} waiting={0} onDecide={() => {}} />,
+      <ApprovalPrompt request={request} waiting={0} selected={0} />,
       { columns: 260 },
     ));
     expect(wide.match(/\{"note":"x*…/)?.[0]).toHaveLength(200);
+  });
+
+  test.each(['escape', 'feedback', 'feedback-escape', 'selection'] as const)('answers a worker approval through %s across streaming updates', async action => {
+    const request = approval({
+      type: 'tool_call', id: 'worker-call', kind: 'execute', title: 'bun test',
+      status: 'pending', locations: [], content: [],
+    });
+    request.requester = { subagent: 'sub-worker-id' };
+    const decisions: { decision: ApprovalDecision; feedback?: string }[] = [];
+    const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {}, ref() {}, unref() {} });
+    const stdout = Object.assign(new PassThrough(), { columns: 100, rows: 35 });
+    let output = '';
+    stdout.on('data', chunk => { const frame = stripAnsi(chunk.toString()); if (frame.trim()) output = frame; });
+    const view = () => {
+      const mode: PromptMode = {
+        type: 'approval', request, waiting: 0, requesterName: 'Reader',
+        onDecide: (decision, feedback) => decisions.push({ decision, feedback }),
+      };
+      return <PromptBar mode={mode} feedback={null} queuedMessages={[]} workers={[]} status={{}} />;
+    };
+    const app = renderInk(view(), {
+      stdin: stdin as unknown as NodeJS.ReadStream, stdout: stdout as unknown as NodeJS.WriteStream,
+      debug: true, patchConsole: false, exitOnCtrlC: false,
+    });
+    const flush = async () => { await new Promise(resolve => setImmediate(resolve)); await app.waitUntilRenderFlush(); };
+    const type = async (input: string) => {
+      stdin.write(input);
+      if (input === '\u001b') await new Promise(resolve => setTimeout(resolve, 60));
+      await flush();
+    };
+    try {
+      await flush();
+      expect(output).toContain('Reader wants to run bun test');
+      expect(output).not.toContain('sub-worker-id');
+      if (action === 'feedback' || action === 'feedback-escape') {
+        await type('\t');
+        await type('Read it');
+        app.rerender(view());
+        await flush();
+        expect(output).toContain('Read it▌');
+        await type(' first');
+      } else if (action === 'selection') {
+        await type('\u001b[B');
+        app.rerender(view());
+        await flush();
+      }
+      await type(action === 'feedback' || action === 'selection' ? '\r' : '\u001b');
+      expect(decisions).toEqual([{
+        decision: action === 'selection' ? { optionId: 'always' } : 'deny',
+        feedback: action === 'feedback' ? 'Read it first' : undefined,
+      }]);
+      await type('\u001b');
+      expect(decisions).toHaveLength(1);
+    } finally {
+      app.unmount(); await app.waitUntilExit(); app.cleanup(); stdin.destroy(); stdout.destroy();
+    }
+  });
+
+  test.each(['allow_once', 'reject_always'] as const)('denial cancels only the request when the vendor offers only %s', async kind => {
+    const sessionId = 'approval-without-reject';
+    const response = requestPermission({ sessionId, requester: { participant: 'sirus' } }, {
+      sessionId: 'runtime', toolCall: { toolCallId: 'allow-only-call', title: 'Write file' },
+      options: [{ optionId: 'only-option', name: 'Only option', kind }],
+    });
+    const [request] = pendingApprovals(sessionId);
+    expect(resolveApproval(request.id, 'deny')).toBe(true);
+    expect(await response).toEqual({ outcome: { outcome: 'cancelled' } });
+    expect(lastDecision('allow-only-call', sessionId)).toBe('deny');
   });
 });
 
@@ -457,7 +635,7 @@ describe('question card', () => {
           requester: { participant: 'sirus' },
           message: hostile,
           fields: [{
-            kind: 'choice', key: 'pick', title: hostile, description: hostile, multiple: false,
+            kind: 'choice', key: 'pick', title: hostile, description: hostile, multiple: false, required: true,
             options: [{ label: hostile, value: 'a', description: hostile }],
           }],
         }}
@@ -471,6 +649,340 @@ describe('question card', () => {
     expect(plain).toContain('100% done docs.example.com');
     expect(plain).not.toContain('50%');
     expect(plain).not.toContain('elsewhere.example');
+  });
+
+  const choices = [
+    { value: 'fast', label: 'Fast', description: 'A small change with a quick check.' },
+    { value: 'careful', label: 'Careful', description: 'A detailed review before making changes.' },
+    { value: 'manual', label: 'Manual', description: 'Work through every step yourself.' },
+  ];
+  const choice = (field: Partial<Extract<QuestionField, { kind: 'choice' }>> = {}): QuestionField => ({
+    kind: 'choice', key: 'approach', title: 'Which approach?', options: choices,
+    multiple: false, required: true, ...field,
+  });
+
+  function card(fields: QuestionField[], columns = 90, rows = 30, inPane = false) {
+    const request: QuestionRequest = {
+      id: 'question-1', sessionId: 'session-1', requester: { participant: 'sirus' },
+      message: fields.length === 1 ? fields[0].title : 'Choose how to proceed.', fields,
+    };
+    const answers: QuestionAnswer[] = [];
+    const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {}, ref() {}, unref() {} });
+    const stdout = Object.assign(new PassThrough(), { columns, rows });
+    let output = '';
+    stdout.on('data', chunk => {
+      const frame = stripAnsi(chunk.toString());
+      if (frame.trim()) output = frame;
+    });
+    const view = () => {
+      const question = <QuestionCard request={request} waiting={0} onAnswer={answer => answers.push(answer)} />;
+      return inPane ? (
+        <Box width={stdout.columns} height={stdout.rows}>
+          <Box width={26} flexShrink={0} />
+          <Box flexDirection="column" flexGrow={1} flexBasis={0} minWidth={0} height="100%" minHeight={0}>
+            <Box flexGrow={1} minHeight={0} />
+            {question}
+          </Box>
+        </Box>
+      ) : question;
+    };
+    const app = renderInk(view(), {
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      stdout: stdout as unknown as NodeJS.WriteStream,
+      debug: true, patchConsole: false, exitOnCtrlC: false, interactive: true,
+    });
+    const flush = async () => {
+      await new Promise(resolve => setImmediate(resolve));
+      await app.waitUntilRenderFlush();
+    };
+    const cellOf = (text: string) => {
+      const lines = output.split('\n');
+      const line = lines.findIndex(value => value.includes(text));
+      expect(line).toBeGreaterThanOrEqual(0);
+      return { line, col: stringWidth(lines[line].slice(0, lines[line].indexOf(text))) + 1 };
+    };
+    return {
+      answers,
+      output: () => output,
+      cellOf,
+      flush,
+      async type(input: string) { stdin.write(input); await flush(); },
+      async resize(columns: number, rows: number) {
+        stdout.columns = columns;
+        stdout.rows = rows;
+        stdout.emit('resize');
+        if (inPane) app.rerender(view());
+        await flush();
+      },
+      async click(text: string) {
+        await new Promise(resolve => setImmediate(resolve));
+        const cell = cellOf(text);
+        expect(pressAt(cell)).toBe(true);
+        expect(releaseAt(cell)).toBe(true);
+        await flush();
+      },
+      async close() {
+        app.unmount();
+        await app.waitUntilExit();
+        app.cleanup();
+        stdin.destroy();
+        stdout.destroy();
+      },
+    };
+  }
+
+  test('Escape declines a partially answered form once without submitting its answers', async () => {
+    const view = card([choice(), { kind: 'text', key: 'note', title: 'What else?', required: true, secret: false }]);
+    try {
+      await view.flush();
+      await view.type('2');
+      await view.type('An unfinished note');
+      await view.type('\u001b');
+      await new Promise(resolve => setTimeout(resolve, 60));
+      await view.flush();
+      expect(view.answers).toEqual([{ action: 'decline' }]);
+      await view.type('\r');
+      expect(view.answers).toHaveLength(1);
+    } finally {
+      await view.close();
+    }
+  });
+
+  test('numbers the choices and immediately submits a clicked single answer', async () => {
+    const view = card([choice()]);
+    try {
+      await view.flush();
+      expect(view.output()).toMatch(/1[.)]\s+Fast/);
+      expect(view.output()).toMatch(/2[.)]\s+Careful/);
+      expect(view.output()).toContain('A detailed review before making changes.');
+      await view.click('Careful');
+      expect(view.answers).toEqual([{ action: 'accept', content: { approach: 'careful' } }]);
+    } finally {
+      await view.close();
+    }
+  });
+
+  test('edits a typed answer at the cursor without splitting Unicode characters', async () => {
+    const view = card([{ kind: 'text', key: 'answer', title: 'Your answer?', required: true, secret: false }]);
+    try {
+      await view.flush();
+      await view.type('\r');
+      expect(view.answers).toEqual([]);
+      expect(view.output()).toContain('Enter your answer.');
+      await view.type('A🐎B');
+      await view.type('\u001b[D');
+      await view.type('\u007f');
+      await view.type('é');
+      expect(view.output()).toContain('Aé▌B');
+      await view.type('\r');
+      expect(view.answers).toEqual([{ action: 'accept', content: { answer: 'AéB' } }]);
+    } finally {
+      await view.close();
+    }
+  });
+
+  test.each([['Claude', undefined], ['Codex', 'None of the above']] as const)('sends a custom choice in the %s form', async (_vendor, value) => {
+    const other = { key: 'custom', ...(value ? { value } : {}) };
+    const view = card([choice({ other })]);
+    try {
+      await view.flush();
+      await view.click('Other…');
+      await view.type('A different approach');
+      await view.type('\r');
+      expect(view.answers).toEqual([{
+        action: 'accept', content: { custom: 'A different approach', ...(value ? { approach: value } : {}) },
+      }]);
+    } finally {
+      await view.close();
+    }
+  });
+
+  test('validates multiple choices on Continue and submits the toggled values', async () => {
+    const view = card([choice({ multiple: true, minimum: 2, maximum: 2 })]);
+    try {
+      await view.flush();
+      await view.click('Continue');
+      expect(view.answers).toEqual([]);
+      expect(view.output()).toMatch(/at least 2/i);
+      await view.type('1');
+      await view.type('\t');
+      expect(view.answers).toEqual([]);
+      expect(view.output()).toMatch(/at least 2/i);
+      await view.type('2');
+      await view.click('Manual');
+      await view.type('\t');
+      expect(view.answers).toEqual([]);
+      expect(view.output()).toMatch(/at most 2/i);
+      await view.click('Manual');
+      await view.click('Continue');
+      expect(view.answers).toEqual([{ action: 'accept', content: { approach: ['fast', 'careful'] } }]);
+    } finally {
+      await view.close();
+    }
+  });
+
+  test('does not send an empty required selection', async () => {
+    const view = card([choice({ multiple: true })]);
+    try {
+      await view.flush();
+      await view.type('\t');
+      expect(view.answers).toEqual([]);
+      expect(view.output()).toMatch(/at least (?:one|1)/i);
+      await view.type(' ');
+      await view.click('Continue');
+      expect(view.answers).toEqual([{ action: 'accept', content: { approach: ['fast'] } }]);
+    } finally {
+      await view.close();
+    }
+  });
+
+  test('reviews several answers before submitting, lets an answer be edited, and masks secrets', async () => {
+    const view = card([
+      choice(),
+      { kind: 'text', key: 'token', title: 'Access token?', required: true, secret: true },
+    ]);
+    try {
+      await view.flush();
+      expect(view.output()).toMatch(/1 of 2/);
+      await view.type('1');
+      expect(view.output()).toMatch(/2 of 2/);
+      await view.type('private-token');
+      expect(view.output()).not.toContain('private-token');
+      expect(view.output()).toContain('••••');
+      await view.type('\r');
+      expect(view.answers).toEqual([]);
+      expect(view.output()).toContain('Submit answers');
+      expect(view.output()).toContain('Fast');
+      expect(view.output()).not.toContain('private-token');
+      expect(view.output()).toContain('••••');
+
+      await view.click('Which approach?');
+      await view.click('Careful');
+      expect(view.answers).toEqual([]);
+      expect(view.output()).toContain('Submit answers');
+      expect(view.output()).toContain('Careful');
+      expect(view.output()).not.toContain('private-token');
+      await view.type('\r');
+      expect(view.answers).toEqual([{ action: 'accept', content: { approach: 'careful', token: 'private-token' } }]);
+    } finally {
+      await view.close();
+    }
+  });
+
+  test('keeps custom text, selected options, and unfinished drafts when going back', async () => {
+    const view = card([
+      choice({ multiple: true, other: { key: 'custom' } }),
+      { kind: 'text', key: 'reason', title: 'Why this approach?', required: true, secret: false },
+    ]);
+    try {
+      await view.flush();
+      await view.type(' ');
+      await view.click('Other…');
+      await view.type('Custom source');
+      await view.type('\r');
+      expect(view.output()).toContain('Why this approach?');
+      await view.type('Remember this');
+
+      await view.type('\u001b[Z');
+      expect(view.output()).toContain('Custom source▌');
+      await view.click('Back to options');
+      expect(view.output()).toContain('[x] Fast');
+      await view.click('Other…');
+      expect(view.output()).toContain('Custom source▌');
+      await view.type('\u001b[H');
+      await view.type('A ');
+      await view.type('\r');
+      expect(view.output()).toContain('Remember this▌');
+
+      await view.click('Back');
+      expect(view.output()).toContain('A ▌Custom source');
+      await view.type('\r');
+      await view.type('\r');
+      expect(view.answers).toEqual([]);
+      expect(view.output()).toContain('Submit answers');
+      expect(view.output()).toContain('Fast, A Custom source');
+      expect(view.output()).toContain('Remember this');
+      await view.type('\r');
+      expect(view.answers).toEqual([{
+        action: 'accept', content: { approach: ['fast'], custom: 'A Custom source', reason: 'Remember this' },
+      }]);
+    } finally {
+      await view.close();
+    }
+  });
+
+  test('wraps option descriptions and keeps the selected row visible in a narrow terminal', async () => {
+    const description = 'A longer explanation that stays readable across several narrow rows, right through its final words.';
+    const options = Array.from({ length: 12 }, (_, index) => ({
+      value: `value-${index}`, label: `Choice ${index + 1}`,
+      description: index === 0 ? description : `Details for choice ${index + 1}.`,
+    }));
+    const view = card([choice({ options })], 48, 24);
+    try {
+      await view.flush();
+      const words = view.output().replace(/[│\n]/g, ' ').replace(/\s+/g, ' ');
+      expect(words).toContain(description);
+      for (const line of view.output().split('\n')) expect(stringWidth(line)).toBeLessThanOrEqual(48);
+      for (let index = 1; index < 12; index++) await view.type('\u001b[B');
+      expect(view.output()).toContain('Choice 12');
+      expect(view.output()).not.toContain('Choice 1 ');
+      expect(view.output().split('\n').length).toBeLessThanOrEqual(24);
+      await view.type('\r');
+      expect(view.answers).toEqual([{ action: 'accept', content: { approach: 'value-11' } }]);
+    } finally {
+      await view.close();
+    }
+  });
+
+  test('scrolled-out choices cannot intercept clicks on Back or the footer', async () => {
+    const options = Array.from({ length: 20 }, (_, index) => ({ value: `${index}`, label: `Choice ${index + 1}` }));
+    const view = card([
+      { kind: 'text', key: 'context', title: 'Your context?', required: true, secret: false },
+      choice({ options }),
+    ], 70, 24);
+    try {
+      await view.flush();
+      await view.type('Keep this context');
+      await view.type('\r');
+      for (let index = 0; index < 11; index++) await view.type('\u001b[B');
+      expect(view.output()).toContain('Choice 12');
+      expect(view.output()).not.toContain('Choice 20');
+      // Hidden rows still have layout boxes below the viewport, where the
+      // frame and Back sit. Those boxes must not remain mouse targets.
+      const footer = view.cellOf('esc declines');
+      expect(pressAt(footer)).toBe(false);
+      expect(releaseAt(footer)).toBe(false);
+      await view.click('Back');
+      expect(view.output()).toContain('Your context?');
+      expect(view.output()).toContain('Keep this context▌');
+      expect(view.answers).toEqual([]);
+    } finally {
+      await view.close();
+    }
+  });
+
+  test('keeps a short review compact after resizing and editing an answer', async () => {
+    const view = card([choice(), choice({ key: 'checks', title: 'Which checks?' })], 150, 48, true);
+    try {
+      await view.flush();
+      await view.type('1');
+      await view.resize(80, 24);
+      await view.type('2');
+      expect(view.output()).toContain('Submit answers');
+      await view.resize(150, 48);
+      await view.type('1');
+      await view.type('2');
+      const lines = view.output().split('\n');
+      const submit = lines.findIndex(line => line.includes('Submit answers'));
+      const footer = lines.findIndex(line => line.includes('╰'));
+      expect(submit).toBeGreaterThanOrEqual(0);
+      expect(footer - submit).toBe(2);
+      expect(view.answers).toEqual([]);
+      await view.type('\r');
+      expect(view.answers).toEqual([{ action: 'accept', content: { approach: 'careful', checks: 'careful' } }]);
+    } finally {
+      await view.close();
+    }
   });
 });
 
@@ -564,6 +1076,14 @@ describe('entry prompts', () => {
 });
 
 describe('entry input', () => {
+  test('gives a secret one dot per character, however many code points each takes', () => {
+    const output = stripAnsi(renderToString(
+      <EntryInput prompt="Key" value="a👍🏽b" masked />,
+      { columns: 80 },
+    ));
+    expect(output).toContain('Key: •••▌');
+  });
+
   test('shows the prompt and one dot per character, never the value', () => {
     const output = stripAnsi(renderToString(
       <EntryInput prompt="Paste your Anthropic API key" value="sk-ant-1234" masked />,
@@ -572,14 +1092,6 @@ describe('entry input', () => {
     expect(output).toContain('Paste your Anthropic API key');
     expect(output).toContain('•'.repeat('sk-ant-1234'.length));
     expect(output).not.toContain('sk-ant');
-  });
-
-  test('gives a secret one dot per character, however many code points each takes', () => {
-    const output = stripAnsi(renderToString(
-      <EntryInput prompt="Key" value="a👍🏽b" masked />,
-      { columns: 80 },
-    ));
-    expect(output).toContain('Key: •••▌');
   });
 
   test('shows an ordinary value as it is typed', () => {
@@ -606,21 +1118,20 @@ function worker(run: Partial<SubagentRun> & { id: string }): SubagentRun {
 }
 
 describe('worker strip', () => {
-  const now = Date.now();
-  const running = [
-    worker({
-      id: 'sub-one', model: 'gpt-5.6-terra', thinkingLevel: 'high',
-      startedAt: now - 45_000, updatedAt: now - 2_000, branch: 'sirus/sub-one',
-      content: [
-        { type: 'tool_call', id: 'one', kind: 'read', title: 'notes.md', status: 'completed', locations: [], content: [] },
-        { type: 'tool_call', id: 'two', kind: 'execute', title: 'bun test', status: 'pending', locations: [], content: [] },
-      ],
-    }),
-    worker({ id: 'sub-two', startedAt: now - 45_000, updatedAt: now - 1_000 }),
-    worker({ id: 'sub-three', startedAt: now - 45_000, updatedAt: now }),
-  ];
-
   test('shows the run that changed last, and how many are behind it', () => {
+    const now = Date.now();
+    const running = [
+      worker({
+        id: 'sub-one', model: 'gpt-5.6-terra', thinkingLevel: 'high',
+        startedAt: now - 45_000, updatedAt: now - 2_000, branch: 'sirus/sub-one',
+        content: [
+          { type: 'tool_call', id: 'one', kind: 'read', title: 'notes.md', status: 'completed', locations: [], content: [] },
+          { type: 'tool_call', id: 'two', kind: 'execute', title: 'bun test', status: 'pending', locations: [], content: [] },
+        ],
+      }),
+      worker({ id: 'sub-two', startedAt: now - 45_000, updatedAt: now - 1_000 }),
+      worker({ id: 'sub-three', startedAt: now - 45_000, updatedAt: now }),
+    ];
     const lines = stripAnsi(renderToString(
       <WorkerStrip workers={[running[0], running[1]]} />,
       { columns: 120 },
@@ -765,12 +1276,253 @@ describe('walking the worker strip from the input bar', () => {
       expect(line()).toContain('›');
       await press('h');
       expect(line()).not.toContain('›');
-      expect(output).toContain('h▌');
+      expect(output).toContain('› h');
     } finally {
       app.unmount();
       await app.waitUntilExit();
       stdin.destroy();
       stdout.destroy();
+    }
+  });
+});
+
+
+function renderQueueInput(session: Session, history: readonly string[] = []) {
+  const events: string[] = [];
+  let interrupt = false;
+  let output = '';
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {}, ref() {}, unref() {} });
+  const stdout = Object.assign(new PassThrough(), { columns: 100, rows: 35 });
+  stdout.on('data', chunk => { const frame = stripAnsi(chunk.toString()); if (frame.trim()) output = frame; });
+  function Harness() {
+    useSyncExternalStore(listener => session.subscribe(listener), () => session.getVersion());
+    return <InputBar
+      inputContent={session.getInputContent()}
+      setInputContent={text => session.setInputContent(text)}
+      send={text => events.push(`send:${text}`)}
+      disabled={session.getStatus() === 'working'}
+      feedback={null}
+      participants={[]}
+      history={history}
+      queuedMessages={session.getQueuedMessages()}
+      onBeginQueuedEdit={id => { session.beginQueuedMessageEdit(id); }}
+      onCancelQueuedEdit={id => session.cancelQueuedMessageEdit(id)}
+      onUpdateQueued={(id, text) => session.commitQueuedMessageEdit(id, text)}
+      onEscape={() => events.push('escape')}
+      onRewind={() => events.push('rewind')}
+      onInterrupt={() => { if (interrupt) events.push('interrupt'); return interrupt; }}
+      onExit={() => events.push('exit')}
+      onExitHint={() => events.push('exit-hint')}
+    />;
+  }
+  const app = renderInk(<Harness />, {
+    stdin: stdin as unknown as NodeJS.ReadStream, stdout: stdout as unknown as NodeJS.WriteStream,
+    debug: true, patchConsole: false, exitOnCtrlC: false,
+  });
+  const flush = async () => { await new Promise(resolve => setImmediate(resolve)); await app.waitUntilRenderFlush(); };
+  return {
+    events,
+    get output() { return output; },
+    set interrupt(value: boolean) { interrupt = value; },
+    flush,
+    async press(input: string) {
+      stdin.write(input);
+      if (input === '\u001b') await new Promise(resolve => setTimeout(resolve, 60));
+      await flush();
+    },
+    unmount() { app.unmount(); stdin.destroy(); stdout.destroy(); },
+  };
+}
+
+describe('input queue and interrupt precedence', () => {
+  test('keeps queue edits private until Enter and restores the original on Escape', async () => {
+    const session = new Session({ name: 'Queue input' });
+    session.setInputContent('saved draft');
+    // Commands remain queued when the editor releases them in an idle session.
+    session.queueMessage('/first');
+    session.queueMessage('/second');
+    const ids = session.getQueuedMessages().map(item => item.id);
+    const bar = renderQueueInput(session);
+    try {
+      await bar.flush();
+      await bar.press('\u001b[A');
+      await bar.press(' unfinished');
+      expect(bar.output).toContain('› /second unfinished');
+      expect(session.getQueuedMessages().map(item => item.text)).toEqual(['/first', '/second']);
+      expect(session.getQueuedMessages()[1]!.editing).toBe(true);
+      expect(session.getInputContent()).toBe('saved draft');
+      await bar.press('\u001b');
+      expect(session.getQueuedMessages().map(item => item.id)).toEqual(ids);
+      expect(session.getQueuedMessages()[1]!.editing).toBeUndefined();
+      expect(bar.output).toContain('› saved draft');
+      expect(bar.events).toEqual([]);
+      await bar.press('\u001b[A');
+      await bar.press(' completed');
+      await bar.press('\r');
+      expect(session.getQueuedMessages().map(item => item.text)).toEqual(['/first', '/second completed']);
+      expect(session.getQueuedMessages()[1]!.editing).toBeUndefined();
+      expect(bar.output).toContain('› saved draft');
+      expect(bar.events).toEqual([]);
+    } finally {
+      bar.unmount();
+      await session.dispose();
+    }
+  });
+
+  test('walks from the queue into prompt history and restores the draft', async () => {
+    const session = new Session({ name: 'Queue history' });
+    session.setInputContent('draft');
+    session.queueMessage('/first');
+    session.queueMessage('/second');
+    const bar = renderQueueInput(session, ['older prompt', 'recent prompt']);
+    try {
+      await bar.flush();
+      await bar.press('\u001b[A');
+      expect(bar.output).toContain('› /second');
+      await bar.press('\u001b[A');
+      expect(bar.output).toContain('› /first');
+      expect(session.getQueuedMessages()[1]!.editing).toBeUndefined();
+      await bar.press('\u001b[A');
+      expect(session.getInputContent()).toBe('recent prompt');
+      expect(session.getQueuedMessages().every(item => !item.editing)).toBe(true);
+      await bar.press('\u001b[A');
+      expect(session.getInputContent()).toBe('older prompt');
+      await bar.press('\u001b[B');
+      expect(session.getInputContent()).toBe('recent prompt');
+      await bar.press('\u001b[B');
+      expect(session.getInputContent()).toBe('draft');
+    } finally {
+      bar.unmount();
+      await session.dispose();
+    }
+  });
+
+  test('never drains the visible half-written queue item when a real session turn ends', async () => {
+    const model = 'test-input-queue-reservation';
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const binding = bindScriptedRuntime(model, async () => { await gate; });
+    const session = new Session({ name: 'Reserved prompt', model });
+    const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Start' }] });
+    session.queueMessage('Other queued prompt');
+    session.queueMessage('Original');
+    const bar = renderQueueInput(session);
+    try {
+      await bar.flush();
+      await bar.press('\u001b[A');
+      await bar.press(' half');
+      release();
+      await turn;
+      const deadline = Date.now() + 2000;
+      while (session.getStatus() !== 'idle' && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+      await bar.flush();
+      expect(session.getStatus()).toBe('idle');
+      expect(binding.runtimes[0]!.prompts.map(prompt => prompt.text)).toEqual(['Start', 'Other queued prompt']);
+      expect(session.getQueuedMessages()).toHaveLength(1);
+      expect(session.getQueuedMessages()[0]!.text).toBe('Original');
+      expect(session.getQueuedMessages()[0]!.editing).toBe(true);
+      expect(bar.output).toContain('› Original half');
+      await bar.press(' finished');
+      await bar.press('\r');
+      const commitDeadline = Date.now() + 2000;
+      while (session.getStatus() !== 'idle' && Date.now() < commitDeadline) await new Promise(resolve => setTimeout(resolve, 5));
+      expect(binding.runtimes[0]!.prompts.map(prompt => prompt.text)).toEqual(['Start', 'Other queued prompt', 'Original half finished']);
+      expect(session.getQueuedMessages()).toHaveLength(0);
+    } finally {
+      release();
+      bar.unmount();
+      await turn.catch(() => {});
+      await session.dispose();
+      unbindRuntime(model);
+    }
+  });
+
+  test('Escape dismisses a command menu before invoking the chat fallback', async () => {
+    const session = new Session({ name: 'Menu Escape' });
+    const bar = renderQueueInput(session);
+    try {
+      await bar.flush();
+      await bar.press('/help');
+      await bar.press('\u001b');
+      expect(bar.events).toEqual([]);
+      expect(session.getInputContent()).toBe('/help');
+      await bar.press('\u001b');
+      expect(bar.events).toEqual(['escape']);
+      expect(session.getInputContent()).toBe('/help');
+    } finally {
+      bar.unmount();
+      await session.dispose();
+    }
+  });
+
+  test('double Escape clears a recallable draft and opens rewind when empty', async () => {
+    const session = new Session({ name: 'Double Escape' });
+    const bar = renderQueueInput(session);
+    try {
+      await bar.flush();
+      await bar.press('keep this draft');
+      await bar.press('\u001b');
+      expect(session.getInputContent()).toBe('keep this draft');
+      await bar.press('\u001b');
+      expect(session.getInputContent()).toBe('');
+      expect(bar.events).toEqual(['escape']);
+      await bar.press('\u001b[A');
+      expect(session.getInputContent()).toBe('keep this draft');
+      await bar.press('\u0015');
+      await bar.press('\u001b');
+      await bar.press('\u001b');
+      expect(bar.events).toEqual(['escape', 'escape', 'rewind']);
+    } finally {
+      bar.unmount();
+      await session.dispose();
+    }
+  });
+
+  test('keeps cleared drafts before prompts sent later in recall history', async () => {
+    const session = new Session({ name: 'Recall order' });
+    const history: string[] = [];
+    const bar = renderQueueInput(session, history);
+    try {
+      await bar.flush();
+      await bar.press('cleared draft');
+      await bar.press('\u0003');
+      await bar.press('later prompt');
+      history.push('later prompt');
+      await bar.press('\r');
+      session.setInputContent('');
+      await bar.flush();
+      await bar.press('\u001b[A');
+      expect(session.getInputContent()).toBe('later prompt');
+      await bar.press('\u001b[A');
+      expect(session.getInputContent()).toBe('cleared draft');
+    } finally {
+      bar.unmount();
+      await session.dispose();
+    }
+  });
+
+  test('Ctrl+C interrupts first, then clears for recall, and only a consecutive empty press exits', async () => {
+    const session = new Session({ name: 'Control C' });
+    const bar = renderQueueInput(session);
+    try {
+      await bar.flush();
+      await bar.press('keep this draft');
+      bar.interrupt = true;
+      await bar.press('\u0003');
+      expect(bar.events).toEqual(['interrupt']);
+      expect(session.getInputContent()).toBe('keep this draft');
+      bar.interrupt = false;
+      await bar.press('\u0003');
+      expect(session.getInputContent()).toBe('');
+      expect(bar.events).toEqual(['interrupt', 'exit-hint']);
+      await bar.press('\u001b[A');
+      expect(session.getInputContent()).toBe('keep this draft');
+      await bar.press('\u0003');
+      await bar.press('\u0003');
+      expect(bar.events).toEqual(['interrupt', 'exit-hint', 'exit-hint', 'exit']);
+    } finally {
+      bar.unmount();
+      await session.dispose();
     }
   });
 });

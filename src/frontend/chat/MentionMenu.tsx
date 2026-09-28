@@ -61,27 +61,28 @@ export interface MentionMenuItem {
 // package names for participant input.
 const activeMentionPattern = new RegExp(`(?<![\\w@])@(${NAME_PATTERN_SOURCE}|)$`);
 
-// The menu's rows, top to bottom: the matching files, then the participant
-// the name typed so far would create unless one already has it, then the
-// participants whose names start with it. The closest match sits at the
-// bottom, next to the input.
+// The menu's rows, top to bottom: the participant the name typed so far
+// would create unless one already has it, the participants whose names start
+// with it, longest first, then the matching files, which sit nearest the
+// input and take the selection once they arrive.
 export function mentionMenuItems(
   input: string,
   participants: readonly Participant[],
   files: readonly string[],
 ): MentionMenuItem[] {
-  const items: MentionMenuItem[] = [...files].reverse().map(file => {
+  const fileItems: MentionMenuItem[] = [...files].reverse().map(file => {
     const label = formatFileMention(file);
     return { key: `file:${file}`, label, description: 'attach file', replacement: `${label} `, kind: 'file' };
   });
   const fragment = activeMentionPattern.exec(input)?.[1];
-  if (fragment === undefined) return items;
+  if (fragment === undefined) return fileItems;
 
   const typed = fragment.toLocaleLowerCase();
   // Longest name first, so the shortest, and so the closest, is last.
   const matching = participants
     .filter(participant => participant.name.toLocaleLowerCase().startsWith(typed))
     .sort((left, right) => right.name.length - left.name.length || right.name.localeCompare(left.name));
+  const items: MentionMenuItem[] = [];
   if (!matching.some(participant => participant.name.toLocaleLowerCase() === typed)) {
     const name = fragment || 'name';
     items.push({
@@ -101,12 +102,13 @@ export function mentionMenuItems(
       kind: 'participant',
     });
   }
-  return items;
+  return [...items, ...fileItems];
 }
 
 // Which item the menu has selected and which slice of it is on screen. The
 // closest match sits at the bottom, so the window is tracked from its bottom
-// edge: file results arriving above the agents leave the selection where it is.
+// edge. Matching files take precedence once they arrive; explicit keyboard
+// selection stays on the item the user chose.
 export function useMentionMenu({ active, input, cursor, participants, files }: {
   active: boolean;
   input: string;
@@ -117,10 +119,14 @@ export function useMentionMenu({ active, input, cursor, participants, files }: {
   const [navigation, setNavigation] = useState({ key: '', selected: '', bottomGap: 0 });
   const items = active ? mentionMenuItems(input.slice(0, cursor), participants, files) : [];
   const key = `${input}\0${cursor}`;
+  useEffect(() => {
+    setNavigation({ key, selected: '', bottomGap: 0 });
+  }, [key]);
   const saved = navigation.key === key ? items.findIndex(item => item.key === navigation.selected) : -1;
   const selected = saved >= 0 ? saved : Math.max(0, items.length - 1);
-  const offset = Math.max(0, items.length - MENTION_MENU_VISIBLE_ITEMS
+  const bottomOffset = Math.max(0, items.length - MENTION_MENU_VISIBLE_ITEMS
     - (saved >= 0 ? navigation.bottomGap : 0));
+  const offset = Math.max(0, Math.min(selected, Math.max(bottomOffset, selected - MENTION_MENU_VISIBLE_ITEMS + 1)));
   return {
     items,
     selected,

@@ -4,6 +4,7 @@ import { DEFAULT_PARTICIPANT, textOf, type SubagentStatus } from '../agent_runti
 import { pendingApprovals, subscribePermissions } from '../agent_runtime/permissions/approvals';
 import { pendingQuestions, subscribeQuestions } from '../agent_runtime/permissions/questions';
 import { listAllSubagents, subscribeSubagents } from '../agent_runtime/tools/subagents';
+import { workerName } from '../agent_runtime/tools/subagents/report';
 import { approvalTitle } from './chat/ApprovalPrompt';
 import { titleText } from './chat/FramedCard';
 import { questionText, questionTitle } from './chat/QuestionCard';
@@ -107,7 +108,7 @@ export function subscribeWorkerNotifications(
       const closing = firstLine(run.finalMessage ?? run.error ?? '');
       send(
         `Sirus · ${session?.getName() ?? 'worker'}`,
-        `Worker ${run.id} ${run.status}; its report went to @${run.owner}${closing ? `: ${closing}` : '.'}`,
+        `Worker ${workerName(run)} ${run.status}; its report went to @${run.owner}${closing ? `: ${closing}` : '.'}`,
       );
     }
   });

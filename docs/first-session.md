@@ -13,7 +13,7 @@ sirus /path/to/your/project
 
 Replace the project path with your own. Use a project where you are comfortable allowing file edits, or start with a read-only review.
 
-Inside Sirus, type `/login` to connect a provider. Repeat for your other provider if you want Claude and GPT in the same session. Enter keys only through the masked login input. Use `/model` to see available models and pick your starting model. Left alone, a new session chooses one itself from your first prompt if you have given Sirus a TypeSafe AI key for Jev, which it asks for on first launch and `/jev` sets later; if only one of your connected providers has allowance left, it takes that provider's latest model, key or no key. Otherwise it starts on the default. The model label under the input says which.
+Inside Sirus, type `/login` to connect a provider. Repeat for your other provider if you want Claude and GPT in the same session. Enter keys only through the masked login input. Use `/model` to see available models and pick your starting model; left alone, a new session starts on your saved model preference or the default, and the model label under the input says which.
 
 ## Give it one task
 

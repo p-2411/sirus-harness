@@ -61,7 +61,7 @@ describe('session conversation recency', () => {
       expect(session.getConversationStartedAt()).toBe(1_000);
       now += 5 * 60_000 + 1;
       const finished = session.toSnapshot().lastResponseFinishedAt;
-      await expect(session.sendMessage({ role: 'user', content: [{ type: 'text', text: '@missing' }] })).rejects.toThrow();
+      await expect(session.sendMessage({ role: 'user', content: [{ type: 'text', text: `@subagent ${model} help` }] })).rejects.toThrow();
       expect(session.getConversationStartedAt()).toBe(1_000);
       expect(session.toSnapshot().lastResponseFinishedAt).toBe(finished);
       const started = now;

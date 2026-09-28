@@ -5,10 +5,10 @@ import { requestPermission } from '../permissions/approvals';
 import { requestAnswers } from '../permissions/questions';
 import { DEFAULT_PERMISSION_MODE } from '../permissions/policy';
 import { sirusPrompt } from '../prompt';
-import { jevApiKey, routeSessionModel, routingCandidates } from '../router';
 import { requireKnownModel } from '../providers';
 import { DEFAULT_MODEL, vendorOf } from '../providers/catalog';
 import { nativeCommands, type NativeCommand } from '../runtime/commands';
+import type { BackgroundTask } from '../runtime/runtime';
 import { registerToolSession, sirusMcpServerEntry, unregisterToolSession, workerRequester } from '../tools/server';
 import {
   notifySubagents,
@@ -18,29 +18,31 @@ import {
   type SubagentRun,
   type WorkerRecord,
 } from '../tools/subagents';
-import { INTERRUPTED_REASON, workerReport } from '../tools/subagents/report';
+import { INTERRUPTED_REASON, workerName, workerReport } from '../tools/subagents/report';
 import { cancelSubagent, messageSubagent } from '../tools/subagents/run';
-import { removeWorktree } from '../tools/subagents/worktree';
 import type { SubagentHost } from '../tools/types';
 import {
   DEFAULT_PARTICIPANT,
   textOf,
+  type ImageBlock,
+  type MessageBlock,
   type Message,
+  type NoticeBlock,
   type PermissionMode,
   type ThinkingLevel,
   type ToolCallBlock,
 } from '../types';
 import type { ContextUsage } from '../usage';
 import { parseFileMentions, resolveFileMentions } from '../../fileMentions';
-import { isAbortError, throwIfAborted, TurnCancelledError } from '../../abort';
+import { isAbortError, TurnCancelledError } from '../../abort';
 import type { Checkpoint } from '../../checkpoints';
 import { ChangeFeed } from './changeFeed';
-import { CheckpointLog, type RewindOptions, type RewindResult } from './checkpointLog';
-import { MessageQueue, type QueuedMessage } from './messageQueue';
+import { CheckpointLog, type RewindOptions, type RewindPreview, type RewindResult } from './checkpointLog';
+import { MessageQueue, isAutoSendable, type QueuedMessage } from './messageQueue';
 import { generateSessionName } from './naming';
 import { keyOf, ParticipantRoster, stripCreationModels } from './roster';
 import { Timeline, type Draft } from './timeline';
-import { TurnRunner } from './turnRunner';
+import { TurnRunner, withIntroductions } from './turnRunner';
 
 export type SessionStatus = 'idle' | 'working' | 'error';
 
@@ -59,6 +61,7 @@ export interface SessionTiming {
 export interface SessionOptions {
   id?: string;
   name?: string;
+  archived?: boolean;
   directory?: string;
   // The default participant's model. Ignored when the participant list
   // already contains the default participant.
@@ -69,8 +72,7 @@ export interface SessionOptions {
   messages?: readonly (Message | Draft)[];
   checkpoints?: readonly Checkpoint[];
   permissionMode?: PermissionMode;
-  // The model spawned subagents run on; null lets Jev pick one per task,
-  // and without a key or an answer from Jev a worker runs on its owner's.
+  // The model spawned subagents run on; null for the owner's own.
   subagentModel?: string | null;
   // Workers of this session as the snapshot kept them. One still working
   // when it was saved is restored as interrupted.
@@ -78,13 +80,11 @@ export interface SessionOptions {
   inputContent?: string;
   // A newly-created session may still take its name from its first prompt.
   autoNamePending?: boolean;
-  // A newly-created session whose model nobody chose: its first prompt asks
-  // Jev which model fits, unless /model picks one first.
-  routePending?: boolean;
   timing?: SessionTiming;
 }
 
 export interface SessionSnapshot {
+  archived?: boolean;
   id: string;
   name: string;
   directory: string;
@@ -96,8 +96,7 @@ export interface SessionSnapshot {
   inputContent?: string;
   // How tool calls are approved in this session; absent in older snapshots.
   permissionMode?: PermissionMode;
-  // The model spawned subagents run on; absent when Jev picks, as for null
-  // in SessionOptions.
+  // The model spawned subagents run on; absent for the owner's own.
   subagentModel?: string;
   // Every worker the session's participants spawned, oldest first; absent
   // when none.
@@ -127,7 +126,6 @@ interface ResolvedSessionOptions {
   workers: readonly WorkerRecord[];
   inputContent: string;
   autoNamePending: boolean;
-  routePending: boolean;
   updatedAt: number;
   conversationStartedAt: number;
   lastResponseFinishedAt: number | null;
@@ -151,7 +149,6 @@ function resolveSessionOptions(options: SessionOptions = {}): ResolvedSessionOpt
     workers: options.workers ?? [],
     inputContent: options.inputContent ?? '',
     autoNamePending: options.autoNamePending ?? false,
-    routePending: options.routePending ?? false,
     updatedAt,
     conversationStartedAt: timing.conversationStartedAt ?? updatedAt,
     // A session restored with history has already had a response, even when
@@ -178,13 +175,14 @@ export class Session {
   private readonly id: string;
   private readonly directory: string;
   private name: string;
+  private archived: boolean;
   private permissionMode: PermissionMode;
   private subagentModel: string | null;
+  private notice: { participant: string; notice: NoticeBlock } | null = null;
   // Drafts typed while a turn is active belong to the session, so switching
   // away and back does not discard them.
   private inputContent: string;
   private autoNamePending: boolean;
-  private routePending: boolean;
   private namingController: AbortController | null = null;
 
   // Workers that ended while the session was busy, oldest first. Their
@@ -192,9 +190,8 @@ export class Session {
   private readonly pendingReports: SubagentRun[] = [];
 
   private activeSends = 0;
-  // What Esc aborts: the turn under way, from the moment it was accepted.
-  // Null while no turn of the session is running.
-  private turnAbort: AbortController | null = null;
+  private sendGeneration = 0;
+  private readonly starting = new Map<SessionAgent, Promise<void>>();
   private status: SessionStatus = 'idle';
   private turnFailed = false;
   private lastTurnCancelled = false;
@@ -207,12 +204,12 @@ export class Session {
     const resolved = resolveSessionOptions(options);
     this.id = resolved.id;
     this.name = resolved.name;
+    this.archived = options.archived ?? false;
     this.directory = resolved.directory;
     this.permissionMode = resolved.permissionMode;
     this.subagentModel = resolved.subagentModel;
     this.inputContent = resolved.inputContent;
     this.autoNamePending = resolved.autoNamePending;
-    this.routePending = resolved.routePending;
     this.roster = new ParticipantRoster(this.changes, {
       sessionId: this.id,
       model: resolved.model,
@@ -228,13 +225,21 @@ export class Session {
     this.restore(resolved.messages);
     this.restoreWorkers(resolved.workers);
     this.checkpoints = new CheckpointLog(this.directory, resolved.checkpoints, this.changes);
-    this.turns = new TurnRunner({ timeline: this.timeline, roster: this.roster });
+    this.checkpoints.observe(this.timeline.entries(), true);
+    for (const worker of resolved.workers) this.checkpoints.observe(worker.transcript, true, worker);
+    this.changes.subscribe(() => this.checkpoints.observe(this.timeline.entries()));
+    this.turns = new TurnRunner({
+      timeline: this.timeline,
+      roster: this.roster,
+      onPause: () => this.showNotice('Agent exchange paused after 8 rounds. Send a message to continue.'),
+    });
   }
 
   // What the snapshot leaves out, resolveSessionOptions fills in.
   static fromSnapshot(snapshot: SessionSnapshot): Session {
     return new Session({
       id: snapshot.id,
+      archived: snapshot.archived,
       name: snapshot.name,
       directory: snapshot.directory,
       model: snapshot.defaultModel.model,
@@ -269,6 +274,11 @@ export class Session {
         requestPermission({ sessionId: this.id, requester: agent.requester }, request, signal),
       requestAnswers: (agent, request, signal) =>
         requestAnswers({ sessionId: this.id, requester: agent.requester }, request, signal),
+      notice: (agent, notice) => {
+        const run = agent.subagentId ? this.getWorkers().find(candidate => candidate.id === agent.subagentId) : undefined;
+        this.notice = { participant: run ? workerName(run) : agent.subagentId ?? agent.name, notice };
+        this.changes.notify();
+      },
       subagentModel: () => this.subagentModel,
       forWorker: (id, directory) => ({
         ...host,
@@ -300,7 +310,7 @@ export class Session {
         error: interrupted ? INTERRUPTED_REASON : record.error,
         sessionId: this.id,
         worker: null,
-        content: transcript.find(entry => entry.role === 'assistant')?.content ?? [],
+        content: [...transcript].reverse().find(entry => entry.role === 'assistant')?.content ?? [],
       };
       owner.adoptSubagent(run);
       registerSubagent(run);
@@ -352,8 +362,9 @@ export class Session {
     }
     if (this.compacting) throw new Error('Wait for the context compaction to finish before sending a message.');
 
-    const signal = this.beginTurn();
+    this.beginTurn();
     let accepted = false;
+    const generation = this.sendGeneration;
     try {
       const messageText = textOf(message);
       // File mentions share the @ sigil with participants. Blank them out,
@@ -362,47 +373,84 @@ export class Session {
       for (const file of parseFileMentions(messageText, this.directory).reverse()) {
         routingText = routingText.slice(0, file.start) + ' '.repeat(file.end - file.start) + routingText.slice(file.end);
       }
-      const mentions = this.roster.readMentions(routingText);
+      const mentions = message.to?.length ? [] : this.roster.readMentions(routingText);
       // Resolve every attachment before creating participants or adding history.
       // Keep this synchronous so the input can observe acceptance immediately.
       const resolved = resolveFileMentions(message, this.directory);
-      const targets = this.roster.resolveMentions(mentions);
+      const targets = message.to?.length
+        ? [...new Set(message.to.map(name => this.roster.require(name)))]
+        : this.roster.resolveMentions(mentions);
 
       // A model following a newly introduced @name is host routing metadata,
       // not part of the conversation. Strip it before either the UI history or
       // any runtime sees the turn.
       const stored = stripCreationModels(resolved, mentions);
-      // Jev and the naming read the user's own words, not the contents of
-      // resolved attachments.
-      const ownWords = textOf(stripCreationModels(message, mentions));
-      const firstPrompt = this.timeline.isEmpty();
+      const queued = stripCreationModels(message, mentions);
+      const introduced = mentions.filter(mention => mention.model);
+      if (this.timeline.isEmpty() && this.autoNamePending) {
+        // Name from the user's text, not the contents of resolved attachments.
+        this.startNaming(textOf(stripCreationModels(message, mentions)));
+      }
       if (this.activeSends === 1) this.timeline.startConversationIfNeeded(Date.now());
       accepted = true;
       this.appendRestoredReports();
-      // The prompt enters the transcript of every participant it addresses,
-      // and nothing else's.
+      const busy = targets.filter(target => target.busy || this.starting.has(target));
+      const images = stored.content.filter((block): block is ImageBlock => block.type === 'image');
+      const idle = targets.filter(target => !busy.includes(target));
+      const queueBusy = images.length > 0 || !isAutoSendable(messageText);
+      if (busy.length > 0 && queueBusy) {
+        this.queue.push(textOf(queued), images, queued.content, busy.map(target => target.name));
+        if (images.length > 0) this.showNotice('Images cannot be steered into a running turn. Message queued.');
+        else this.changes.notify();
+        if (idle.length === 0) return this.timeline.entries();
+      }
+
+      const paused = this.turns.userMessage();
+      let releaseStart!: () => void;
+      const started = new Promise<void>(resolve => { releaseStart = resolve; });
+      for (const target of idle) this.starting.set(target, started);
+      const finishStarting = () => {
+        for (const target of idle) {
+          if (this.starting.get(target) === started) this.starting.delete(target);
+        }
+        releaseStart();
+      };
+      // Only confirmed deliveries enter the transcript. A refused steer is
+      // queued for that participant alone, without re-sending to its peers.
       const entry = this.timeline.add(
-        { ...stored, to: targets.map(target => target.name) },
-        targets.map(target => target.transcript),
+        { ...stored, to: idle.map(target => target.name) },
+        idle.map(target => target.transcript),
         false,
       );
-      // Jev's pick must land before any runtime starts, so the turn waits
-      // for it, but only once the prompt is in the history: the input reads
-      // acceptance straight after the call.
-      if (this.routePending) {
-        this.routePending = false;
-        const pick = await routeSessionModel({ prompt: ownWords, directory: this.directory }, routingCandidates(), { signal });
-        if (pick && pick.model !== this.roster.default.model) this.roster.changeModel(this.roster.default.name, pick.model);
-      }
-      // The naming runs on the model the pick left, and for a prompt
-      // cancelled meanwhile too, since that prompt stays in the history.
-      if (firstPrompt && this.autoNamePending) this.startNaming(ownWords);
-      throwIfAborted(signal);
-      // The runtimes run their tools themselves and cannot wait on a barrier,
-      // so the pre-turn snapshot is taken before any of them is prompted.
-      await this.checkpoints.capture(entry.seq, messageText || '[image]');
-      throwIfAborted(signal);
-      await this.turns.run(targets.map(participant => ({ participant, entries: [entry] })), signal);
+      const steering = (queueBusy ? [] : busy).map(async target => {
+        try {
+          await this.starting.get(target);
+          if (generation !== this.sendGeneration) throw new TurnCancelledError();
+          await target.steer(withIntroductions(textOf(stored), introduced, target.name));
+          this.timeline.deliver(entry, [{ name: target.name, transcript: target.transcript }]);
+        } catch (error) {
+          if (isAbortError(error)) throw error;
+          this.queue.push(textOf(queued), images, queued.content, [target.name]);
+          this.showNotice(`@${target.name} could not accept steering. Message queued.`, target.name);
+        }
+      });
+      const responding = async () => {
+        if (idle.length === 0 && paused.length === 0) return;
+        // Capture before starting any new runtime prompt; steering continues
+        // the existing turn and uses that turn's checkpoint.
+        try {
+          await this.checkpoints.capture(entry.seq, messageText || '[image]');
+          if (generation !== this.sendGeneration) throw new TurnCancelledError();
+          const turn = this.turns.run([...paused, ...idle.map(participant => ({ participant, entries: [entry], introduced }))]);
+          finishStarting();
+          await turn;
+        } finally {
+          finishStarting();
+        }
+      };
+      const delivered = await Promise.allSettled([...steering, responding()]);
+      const failed = delivered.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+      if (failed) throw failed.reason;
       return this.timeline.entries();
     } catch (error) {
       this.recordTurnError(error);
@@ -413,21 +461,16 @@ export class Session {
   }
 
   // A turn of the session starts: a prompt or a report was accepted. The
-  // first one from idle clears the last turn's outcome and opens the
-  // controller Esc aborts. Jev's pick and the checkpoint come before any
-  // participant is answering, so the turn checks the signal after each of
-  // them rather than running in full after the user stopped it.
-  private beginTurn(): AbortSignal {
-    if (!this.turnAbort) {
+  // first one from idle clears the last turn's outcome.
+  private beginTurn(): void {
+    if (this.activeSends === 0) {
       this.turnFailed = false;
       this.lastTurnCancelled = false;
       this.activeTurnStartedAt = Date.now();
-      this.turnAbort = new AbortController();
     }
     this.activeSends++;
     this.checkpoints.beginTurn();
     this.setStatus('working');
-    return this.turnAbort.signal;
   }
 
   // A cancelled turn was the user's doing and the notifications keep quiet
@@ -444,10 +487,7 @@ export class Session {
     if (responded) this.timeline.markResponseFinished();
     this.activeSends--;
     this.checkpoints.endTurn();
-    if (this.activeSends === 0) {
-      this.activeTurnStartedAt = null;
-      this.turnAbort = null;
-    }
+    if (this.activeSends === 0) this.activeTurnStartedAt = null;
     this.setStatus(this.activeSends > 0
       ? 'working'
       : this.turnFailed ? 'error' : 'idle');
@@ -459,7 +499,7 @@ export class Session {
   }
 
   // One participant's delegation port: what its SpawnAgent, CheckAgent,
-  // MessageAgent, CancelAgent and ListAgents calls reach through the tool
+  // SendMessage, WaitAgent, CancelAgent and ListAgents calls reach through the tool
   // server.
   subagentHostFor(participantName: string): SubagentHost | null {
     return this.roster.find(participantName)?.subagentHost() ?? null;
@@ -478,18 +518,36 @@ export class Session {
         directory: this.directory,
         memoryEnabled: isMemoryAccessEnabled,
         hostFor: name => this.subagentHostFor(name),
+        toolsFor: worker => this.getWorkers().find(run => workerRequester(run.id) === worker)?.definition?.tools,
       });
     }
     return sirusMcpServerEntry(this.id, requester);
   }
 
-  // A worker of this session ended. Its report goes to the agent that
-  // spawned it and wakes it, the way a message from another participant
-  // does; while the session is busy the report waits, and it goes out ahead
-  // of whatever the user queued behind the turn.
+  // A result decorates its SpawnAgent row. Background completion is a
+  // notification to the owner, steered into a live turn whenever possible.
   private workerFinished(run: SubagentRun): void {
-    if (run.reported || this.pendingReports.includes(run)) return;
-    this.pendingReports.push(run);
+    this.checkpoints.observe(run.transcript, false, run);
+    const owner = this.roster.find(run.owner) ?? this.roster.default;
+    const call = run.callId ? this.toolCallOf(owner, run.callId) : null;
+    if (call) call.output = workerReport(run);
+    this.changes.notify();
+    if (run.runInBackground === false || this.disposed) {
+      run.reported = true;
+      return;
+    }
+    if (run.reported || this.pendingReports.some(report => report.id === run.id && report.content === run.content)) return;
+    const completed = { ...run };
+    if (owner.busy) {
+      void owner.steer(workerReport(completed)).then(() => {
+        this.reportEntry(completed, owner);
+      }).catch(() => {
+        this.pendingReports.push(completed);
+        this.flushReports();
+      });
+      return;
+    }
+    this.pendingReports.push(completed);
     this.flushReports();
   }
 
@@ -516,12 +574,14 @@ export class Session {
     const pending = this.pendingReports.splice(0);
     const invocations = this.reportInvocations(pending);
     if (invocations.length === 0) return;
-    const signal = this.beginTurn();
+    this.beginTurn();
+    const generation = this.sendGeneration;
     try {
       const [first] = invocations[0].entries;
-      await this.checkpoints.capture(first.seq, `Report from ${pending.map(run => `@${run.id}`).join(', ')}`);
-      throwIfAborted(signal);
-      await this.turns.run(invocations, signal);
+      await this.checkpoints.capture(first.seq, `Report from ${pending.map(workerName).join(', ')}`);
+      // Esc during the capture stops the turn before the owner is prompted.
+      if (generation !== this.sendGeneration) throw new TurnCancelledError();
+      await this.turns.run(invocations);
     } catch (error) {
       this.recordTurnError(error);
     } finally {
@@ -543,21 +603,22 @@ export class Session {
     return [...invocations.values()];
   }
 
-  // The report itself: a message from the worker, addressed to its owner and
-  // attributed to the run, so the owner's runtime reads it in the record
-  // like any other participant's message. The chat does not show it as one:
-  // the same text goes onto the SpawnAgent call that started the worker, as
-  // that call's output, which is where the user reads it.
+  // Keep the notification in the owner's record so a rebuilt runtime reads
+  // it too. It has no participant identity and no separate chat row.
   private reportEntry(run: SubagentRun, owner: SessionAgent): Message {
     run.reported = true;
     const report = workerReport(run);
-    const call = run.callId ? this.toolCallOf(owner, run.callId) : null;
-    if (call) call.output = report;
+    const current = owner.listSubagents().find(candidate => candidate.id === run.id);
+    // A resumed worker may already be on another turn by the time steering
+    // acknowledges this report. Keep each notification tied to its own result.
+    if (current?.content === run.content) {
+      current.reported = true;
+      const call = run.callId ? this.toolCallOf(owner, run.callId) : null;
+      if (call) call.output = report;
+    }
     notifySubagents();
     return this.timeline.add({
-      role: 'assistant',
-      participant: run.id,
-      model: run.model,
+      role: 'user',
       content: [{ type: 'text', text: report }],
       to: [owner.name],
       hidden: true,
@@ -584,23 +645,19 @@ export class Session {
     }
   }
 
-  // Stops this session's turn, whether its participants are answering or it
-  // is still waiting on Jev or the checkpoint. Workers are background tasks
-  // and keep working: `cancelWorker`, CancelAgent and `dispose` stop those.
-  // True if there was a turn to stop.
+  // Stops this session's turns. Workers are background tasks and keep
+  // working: `cancelWorker`, CancelAgent and `dispose` stop those.
   cancel(): boolean {
-    const answering = this.roster.cancel();
-    const turn = this.turnAbort;
-    if (!turn || turn.signal.aborted) return answering;
-    turn.abort(new TurnCancelledError());
-    return true;
+    this.sendGeneration++;
+    this.turns.cancel();
+    const cancelled = this.roster.cancel();
+    return cancelled || this.activeSends > 0;
   }
 
   // Asks the default participant's runtime to fold its own conversation now:
   // `/compact` is a slash command both vendors take as a prompt. What the
   // runtime reports lands in the record like any other turn. Like a rewind,
-  // it is refused while anything else is running, and nothing else runs
-  // meanwhile.
+  // it waits for nothing else to be running and nothing else runs meanwhile.
   async compact(signal?: AbortSignal): Promise<void> {
     if (this.activeSends > 0 || this.rewinding || this.compacting) {
       throw new Error('Wait for the current operation to finish before compacting.');
@@ -648,6 +705,7 @@ export class Session {
     if (this.roster.hasWorkingSubagents()) throw new Error('Wait for this session’s subagents to finish before clearing it.');
     if (this.timeline.isEmpty()) return;
     this.stopNaming();
+    this.turns.cancel();
     this.timeline.clear();
     this.checkpoints.clear();
     this.roster.resetRuntimes();
@@ -658,13 +716,47 @@ export class Session {
     return this.checkpoints.list();
   }
 
-  // Puts the directory, the chat, or both back to a checkpoint. Restoring
-  // the chat drops that checkpoint and every later one, since the entries
-  // they belong to are gone; restoring only files keeps them all.
+  isArchived(): boolean {
+    return this.archived;
+  }
+
+  setArchived(archived: boolean): void {
+    if (this.archived === archived) return;
+    this.archived = archived;
+    this.changes.notify();
+  }
+
+  // A fork carries independent records and starts its own runtimes on demand.
+  // Live workers belong to the original session and must not be registered twice.
+  fork(): SessionSnapshot {
+    const snapshot = structuredClone(this.toSnapshot());
+    delete snapshot.workers;
+    // A copied or rewound Sirus record must never reopen and append to the
+    // original vendor session, whose history may include later turns.
+    for (const participant of snapshot.participants) delete participant.nativeSession;
+    delete snapshot.defaultModel.nativeSession;
+    return {
+      ...snapshot, id: crypto.randomUUID(), name: `${this.name} (fork)`,
+      archived: false, updatedAt: Date.now(), autoNamePending: false,
+    };
+  }
+
+  async previewRewind(checkpointId: string, options: RewindOptions): Promise<RewindPreview> {
+    const found = this.checkpoints.find(checkpointId);
+    if (!found) throw new Error('That checkpoint no longer exists in this session.');
+    return {
+      checkpoint: found.checkpoint,
+      files: options.files ? await this.checkpoints.previewFiles(checkpointId) : null,
+      droppedMessages: options.chat ? this.timeline.entries().filter(message => message.seq >= found.checkpoint.seq).length : 0,
+    };
+  }
+
+  // Restoring conversation creates a new session. The source transcript and
+  // its runtime remain usable, including all turns after the selected point.
   async rewind(checkpointId: string, options: RewindOptions): Promise<RewindResult> {
     if (!options.files && !options.chat) throw new Error('Nothing to restore: choose files, chat, or both.');
     if (this.rewinding) throw new Error('Wait for the current rewind to finish.');
-    if (this.activeSends > 0) throw new Error('Wait for the current turn to finish before rewinding.');
+    if (this.activeSends > 0 || this.compacting) throw new Error('Wait for the current turn to finish before rewinding.');
     if (options.chat && this.roster.hasWorkingSubagents()) {
       throw new Error('Wait for this session’s subagents to finish before rewinding its chat.');
     }
@@ -680,18 +772,19 @@ export class Session {
     this.rewinding = true;
     if (options.files) this.checkpoints.beginRestore();
     try {
-      const files = options.files ? await this.checkpoints.restoreFiles(found.checkpoint.id) : null;
+      const files = options.files ? await this.checkpoints.restoreFiles(found.checkpoint.id, options.approvedFiles) : null;
+      let fork: SessionSnapshot | null = null;
       let droppedMessages = 0;
       if (options.chat) {
-        if (found.checkpoint.seq === 0) this.stopNaming();
-        // Every participant loses what came from that seq on, and every
-        // runtime is rebuilt from what is left.
-        droppedMessages = this.timeline.truncateFrom(found.checkpoint.seq);
-        this.checkpoints.dropFrom(found.index);
-        this.roster.resetRuntimes();
+        fork = this.fork();
+        const prompt = fork.messages.find(message => message.seq === found.checkpoint.seq);
+        const retained = fork.messages.filter(message => message.seq < found.checkpoint.seq);
+        droppedMessages = fork.messages.length - retained.length;
+        fork.messages = retained;
+        fork.checkpoints = fork.checkpoints?.slice(0, found.index);
+        fork.inputContent = prompt?.role === 'user' ? textOf(prompt) : '';
       }
-      this.changes.notify();
-      return { checkpoint: found.checkpoint, files, droppedMessages };
+      return { checkpoint: found.checkpoint, files, droppedMessages, fork };
     } finally {
       this.rewinding = false;
       if (options.files) this.checkpoints.endRestore();
@@ -734,15 +827,48 @@ export class Session {
     this.changes.notify();
   }
 
-  queueMessage(message: string): void {
-    this.queue.push(message);
+  private showNotice(title: string, participant: string = this.roster.default.name): void {
+    this.notice = { participant, notice: { type: 'notice', severity: 'info', title } };
+    this.changes.notify();
+  }
+
+  queueMessage(message: string, images?: readonly ImageBlock[], content?: readonly MessageBlock[]): void {
+    this.queue.push(message, images, content);
     this.changes.notify();
   }
 
   shiftQueuedMessage(): string | undefined {
-    const text = this.queue.shift();
-    if (text !== undefined) this.changes.notify();
-    return text;
+    return this.shiftQueuedPrompt()?.text;
+  }
+
+  shiftQueuedPrompt(): QueuedMessage | undefined {
+    const next = this.queue.shift();
+    if (next) this.changes.notify();
+    return next;
+  }
+
+  takeQueuedMessage(): QueuedMessage | undefined {
+    const next = this.queue.take();
+    if (next) this.changes.notify();
+    return next;
+  }
+
+  beginQueuedMessageEdit(id: string): QueuedMessage | undefined {
+    const original = this.queue.beginEdit(id);
+    if (original) this.changes.notify();
+    return original;
+  }
+
+  commitQueuedMessageEdit(id: string, text: string, images?: readonly ImageBlock[], content?: readonly MessageBlock[]): void {
+    if (!this.queue.finishEdit(id, text, images, content)) return;
+    this.changes.notify();
+    this.sendNextQueuedPrompt();
+  }
+
+  cancelQueuedMessageEdit(id: string): void {
+    if (!this.queue.finishEdit(id)) return;
+    this.changes.notify();
+    this.sendNextQueuedPrompt();
   }
 
   // What is waiting behind the turn that just ended, when nothing about it
@@ -759,7 +885,8 @@ export class Session {
     }
     const next = this.queue.shiftAutoSendable();
     if (next === undefined) return;
-    void this.sendMessage({ role: 'user', content: [{ type: 'text', text: next }] })
+    void this.sendMessage({ role: 'user', ...(next.to ? { to: [...next.to] } : {}),
+      content: next.content ? [...next.content] : [{ type: 'text', text: next.text }, ...(next.images ?? [])] })
       .catch(() => { /* sendMessage records the failure in the session status. */ });
   }
 
@@ -817,8 +944,17 @@ export class Session {
       ?? null;
   }
 
+  getNotice(): { participant: string; notice: NoticeBlock } | null {
+    return this.notice;
+  }
+
   getMessages(): Message[] {
     return this.timeline.entries();
+  }
+
+  isMessageLive(message: Message): boolean {
+    return message.role === 'assistant'
+      && this.roster.find(message.participant ?? DEFAULT_PARTICIPANT)?.activeReply === message;
   }
 
   isEmpty(): boolean {
@@ -854,12 +990,12 @@ export class Session {
     return this.roster.default.model;
   }
 
-  // A draft whose model nobody has chosen yet, with Jev configured to choose
-  // one on the first prompt: the model it holds is the fallback, not a
-  // choice, so the status row shows none until the pick lands or /model
-  // makes one.
-  isModelPending(): boolean {
-    return this.routePending && jevApiKey() !== null;
+  async warmup(): Promise<void> {
+    if (!this.disposed && this.isEmpty()) await this.roster.default.warmup();
+  }
+
+  releaseWarmup(): void {
+    this.roster.default.releaseWarmup();
   }
 
   getThinkingLevel(participantName?: string): ThinkingLevel {
@@ -870,15 +1006,27 @@ export class Session {
     this.roster.setThinkingLevel(level, participantName);
   }
 
-  // The user's own pick for the default participant settles the draft's
-  // model: Jev is not asked.
   changeParticipantModel(participantName: string, newModel: string): void {
     this.roster.changeModel(participantName, newModel);
-    if (keyOf(participantName.replace(/^@/, '')) === keyOf(this.roster.default.name)) this.routePending = false;
   }
 
   getSubagentModel(): string | null {
     return this.subagentModel;
+  }
+
+  getBackgroundTasks(): (BackgroundTask & { participant: string })[] {
+    return [
+      ...this.roster.all().flatMap(agent =>
+        agent.listBackgroundTasks().map(task => ({ ...task, participant: agent.name }))),
+      ...this.getWorkers().flatMap(run =>
+        (run.worker?.listBackgroundTasks() ?? []).map(task => ({ ...task, participant: run.id }))),
+    ];
+  }
+
+  async stopBackgroundTask(participant: string, id: string): Promise<boolean> {
+    const name = participant.replace(/^@/, '');
+    const agent = this.getWorkers().find(run => run.id === name)?.worker ?? this.roster.require(name);
+    return agent.stopBackgroundTask(id);
   }
 
   // The session's workers, oldest first, restored records included.
@@ -891,9 +1039,10 @@ export class Session {
     await cancelSubagent(this.requireWorker(id));
   }
 
-  // Sends text into a running worker's turn; rejects for one that has ended.
+  // Steers a running worker or resumes its conversation after it has ended.
   async messageWorker(id: string, text: string): Promise<void> {
-    await messageSubagent(this.requireWorker(id), text);
+    const run = this.requireWorker(id);
+    await messageSubagent(run, this.roster.find(run.owner) ?? this.roster.default, text);
   }
 
   // Clears a finished worker's line from the strip; its record stays.
@@ -906,7 +1055,7 @@ export class Session {
   }
 
   private requireWorker(id: string): SubagentRun {
-    const run = this.roster.workers().find(candidate => candidate.id === id);
+    const run = this.roster.workers().find(candidate => candidate.id === id || candidate.name === id);
     if (!run) throw new Error(`This session has no worker "${id}".`);
     return run;
   }
@@ -969,6 +1118,7 @@ export class Session {
     return {
       id: this.id,
       name: this.name,
+      archived: this.archived,
       directory: this.directory,
       participants: this.getParticipants(),
       defaultModel: this.roster.default.toParticipant(),
@@ -987,7 +1137,7 @@ export class Session {
 
   // A deleted session takes its runtimes, its workers and its tool server
   // binding with it. The workers are the slow part — each one is stopped and
-  // waited for before its worktree can be removed — so this resolves when
+  // waited for before its runtime is closed — so this resolves when
   // the last of them is gone; callers that only need the session out of the
   // way need not wait. A spawn still setting up its worker is waited for
   // first, so the run it started is among them.
@@ -1001,9 +1151,8 @@ export class Session {
     await Promise.all(this.getWorkers().map(run => this.disposeWorker(run)));
   }
 
-  // One worker at the end of the session: stopped if it was still working,
-  // then its worktree removed and its record dropped from the process index.
-  // The branch it worked on stays behind for whoever merges it.
+  // Stop the runtime and drop the live index entry. Changed worktrees stay
+  // available at the path named in the report, including uncommitted work.
   private async disposeWorker(run: SubagentRun): Promise<void> {
     try {
       await cancelSubagent(run);
@@ -1011,7 +1160,7 @@ export class Session {
       // A worker that refuses to stop must not keep the worktree, or the
       // session, alive.
     }
-    if (run.branch) await removeWorktree(this.directory, run.directory);
+    run.worker?.resetRuntime();
     unregisterSubagent(run.id);
     notifySubagents();
   }

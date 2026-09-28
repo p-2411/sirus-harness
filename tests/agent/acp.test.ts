@@ -117,7 +117,7 @@ const textsIn = (updates: readonly RuntimeUpdate[]): string[] =>
 // on streaming that turn until it gives it. None of that is the next reply's.
 test('what a cancelled prompt still streams stays out of the next one', async () => {
   const updates: RuntimeUpdate[] = [];
-  const runtime = await startAcpRuntime(runtimeOptions(updates), undefined, standIn({
+  const runtime = await startAcpRuntime(runtimeOptions(updates), standIn({
     prompts: [
       [
         { update: text('Working') },
@@ -153,7 +153,7 @@ test('what a cancelled prompt still streams stays out of the next one', async ()
 // with the turn. A later update for one of them starts from nothing.
 test('a finished turn keeps none of its tool calls', async () => {
   const updates: RuntimeUpdate[] = [];
-  const runtime = await startAcpRuntime(runtimeOptions(updates), undefined, standIn({
+  const runtime = await startAcpRuntime(runtimeOptions(updates), standIn({
     prompts: [
       [
         { update: { sessionUpdate: 'tool_call', toolCallId: 'call-1', title: 'Read notes.txt', kind: 'read', status: 'in_progress' } },
@@ -184,7 +184,7 @@ test('a finished turn keeps none of its tool calls', async () => {
 
 test('cancelling a turn ends an adapter that never finishes starting', async () => {
   const controller = new AbortController();
-  const starting = startAcpRuntime(runtimeOptions(), controller.signal, standIn({ hang: 'initialize' }));
+  const starting = startAcpRuntime({ ...runtimeOptions(), signal: controller.signal }, standIn({ hang: 'initialize' }));
   const pid = await adapterPid();
   try {
     controller.abort(new TurnCancelledError());

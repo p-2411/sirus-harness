@@ -1,29 +1,21 @@
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import * as childProcess from 'child_process';
 import { EventEmitter } from 'events';
-import { existsSync, mkdtempSync, rmSync } from 'fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { PassThrough } from 'stream';
 import { TurnCancelledError } from '../../src/abort';
 import { providerFor, servableModelIds, servesModel } from '../../src/agent_runtime/providers';
-import { MODELS, modelInfo, VENDOR_INFO, type Vendor } from '../../src/agent_runtime/providers/catalog';
+import { modelInfo, VENDOR_INFO } from '../../src/agent_runtime/providers/catalog';
 import { browserCommand } from '../../src/agent_runtime/providers/login';
 import { loginCodex, readCodexAccount, readCodexRateLimits } from '../../src/agent_runtime/providers/openai/codex-account';
 import { sourceEnvironment } from '../../src/agent_runtime/providers/profiles';
 import { maskApiKey, type Source } from '../../src/agent_runtime/providers/sources';
 import * as acp from '../../src/agent_runtime/runtime/acp';
 import { launchFor } from '../../src/agent_runtime/runtime/launch';
+import { claudeSkillPlugins, codexSkillDirectories } from '../../src/agent_runtime/runtime/skills';
 import { createRuntime, type RuntimeOptions } from '../../src/agent_runtime/runtime/runtime';
-import {
-  routeSessionModel,
-  routeWorker,
-  vendorAllowance,
-  workerCandidates,
-  type RoutingCandidate,
-  type RoutingClient,
-} from '../../src/agent_runtime/router';
-import { loadSubscriptionLimitCache, saveSubscriptionLimitCache } from '../../src/persistence/subscriptionLimits';
 import { bindScriptedRuntime, textTurn, unbindRuntime } from '../support/runtime';
 
 test('maps a model id to its vendor', () => {
@@ -263,21 +255,55 @@ describe('credential environments', () => {
   });
 });
 
-// What Jev may give a worker, and what each vendor has left to spend on it.
-describe('worker candidates and allowance', () => {
+test('worker launch policies disable native delegation and apply definition tool restrictions', async () => {
+  const { launchFor } = await import('../../src/agent_runtime/runtime/launch');
+  const options = {
+    vendor: 'claude' as const, model: 'claude-sonnet-5', thinkingLevel: 'low' as const,
+    directory: os.tmpdir(), systemPrompt: 'Worker', env: {}, mcpServer: null,
+    permissionMode: 'bypass' as const, tools: ['Read', 'Grep'], readOnly: true,
+    onPermission: async () => ({ outcome: { outcome: 'cancelled' as const } }), onUpdate: () => {},
+  };
+  const claude = launchFor(options);
+  const session = claude.session(options);
+  const sdk = (session.meta?.claudeCode as { options: { tools: string[]; disallowedTools: string[] } }).options;
+  expect(sdk.tools).toEqual(['Read', 'Grep']);
+  expect(sdk.disallowedTools).toEqual(expect.arrayContaining(['Agent', 'SendMessage', 'ListAgents', 'mcp__*']));
+  const codex = launchFor({ ...options, vendor: 'gpt', model: 'gpt-5.6-luna' });
+  expect(codex.env.INITIAL_AGENT_MODE).toBe('read-only');
+  expect(JSON.parse(codex.env.CODEX_CONFIG!).features.multi_agent).toBe(false);
+  // 1.13.1 unsubscribes forks: a resume is required to receive updates.
+  expect(codex.forkNeedsResume).toBe(true);
+});
+
+// Every source and generated file lives in a scratch home. The vendors still
+// own discovery; these tests check only the folders Sirus hands to them.
+describe('shared vendor skills', () => {
   let directory: string;
+  let project: string;
+  let claudeHome: string;
+  let codexHome: string;
+  let agentsSkills: string;
   let previous: Record<string, string | undefined>;
+  let claudeInstalls: Record<string, unknown[]>;
+  let claudeEnabled: Record<string, boolean>;
+  let codexConfig: string[];
 
   beforeEach(() => {
-    directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-worker-routing-'));
-    previous = {
-      SIRUS_DATA_DIR: process.env.SIRUS_DATA_DIR,
-      ANTHROPIC_API: process.env.ANTHROPIC_API,
-      OPENAI_SECRET: process.env.OPENAI_SECRET,
-    };
-    process.env.SIRUS_DATA_DIR = directory;
-    delete process.env.ANTHROPIC_API;
-    delete process.env.OPENAI_SECRET;
+    directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-shared-skills-'));
+    previous = Object.fromEntries(['HOME', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'SIRUS_DATA_DIR']
+      .map(name => [name, process.env[name]]));
+    process.env.HOME = path.join(directory, 'home');
+    claudeHome = process.env.CLAUDE_CONFIG_DIR = path.join(directory, 'claude');
+    codexHome = process.env.CODEX_HOME = path.join(directory, 'codex');
+    process.env.SIRUS_DATA_DIR = path.join(directory, 'data');
+    agentsSkills = path.join(process.env.HOME, '.agents', 'skills');
+    project = path.join(directory, 'project');
+    for (const folder of [process.env.HOME, claudeHome, codexHome, agentsSkills, project]) {
+      mkdirSync(folder, { recursive: true });
+    }
+    claudeInstalls = {};
+    claudeEnabled = {};
+    codexConfig = [];
   });
 
   afterEach(() => {
@@ -288,221 +314,288 @@ describe('worker candidates and allowance', () => {
     rmSync(directory, { recursive: true, force: true });
   });
 
-  // A signed-in subscription whose window the sidebar has already read.
-  const subscribe = (vendor: Vendor, profile: string, remaining: number): void => {
-    providerFor(vendor).sources.addSubscription(profile);
-    saveSubscriptionLimitCache([...loadSubscriptionLimitCache(), {
-      vendor, profile, period: VENDOR_INFO[vendor].limitPeriod, remaining, checkedAt: Date.now(), resetsAt: null,
-    }]);
-  };
-  const candidateIds = (): string[] => workerCandidates().map(candidate => candidate.model).sort();
+  function write(file: string, value: string): void {
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, value);
+  }
 
-  test('offers every model of a vendor with allowance except the ones kept off the list', () => {
-    subscribe('claude', 'default', 80);
-    subscribe('gpt', 'default', 60);
-    expect(candidateIds()).toEqual(MODELS.filter(model => model.worker !== false).map(model => model.id).sort());
-    expect(candidateIds()).not.toContain('claude-haiku-4-5');
-    // Every candidate arrives with a whole profile and the vendor whose
-    // allowance is rendered alongside it.
-    expect(workerCandidates().every(candidate => candidate.vendor === modelInfo(candidate.model)?.vendor
-      && candidate.profile.strengths.length > 0
-      && candidate.profile.benchmarks.length > 0
-      && candidate.profile.reviews.length > 0
-      && candidate.profile.cost.input > 0 && candidate.profile.cost.output > 0)).toBe(true);
-  });
+  function json(file: string, value: unknown): void {
+    write(file, JSON.stringify(value));
+  }
 
-  test('drops a vendor whose window is spent and keeps one holding an API key', () => {
-    subscribe('claude', 'default', 0);
-    process.env.OPENAI_SECRET = 'sk-proj-worker-1234';
-    expect(candidateIds()).not.toContain('claude-opus-5');
-    expect(candidateIds()).toContain('gpt-5.6-terra');
-    providerFor('claude').sources.addApiKey('sk-ant-worker-abcd');
-    expect(candidateIds()).toContain('claude-opus-5');
-  });
+  function skill(root: string, folder: string, fields: Record<string, string | boolean | null> = {}): string {
+    const target = path.join(root, folder);
+    const metadata = { name: folder, description: `Use ${folder}.`, ...fields };
+    const frontmatter = Object.entries(metadata).filter(([, value]) => value !== null)
+      .map(([key, value]) => `${key}: ${JSON.stringify(value)}`).join('\n');
+    write(path.join(target, 'SKILL.md'), `---\n${frontmatter}\n---\nFollow these instructions.\n`);
+    return target;
+  }
 
-  test('a subscription the sidebar has not read yet is available, and no credential offers nothing', () => {
-    expect(workerCandidates()).toEqual([]);
-    expect(vendorAllowance()).toEqual([]);
-    providerFor('gpt').sources.addSubscription('default');
-    expect(candidateIds()).toContain('gpt-5.6-sol');
-    expect(vendorAllowance()).toEqual([{ vendor: 'gpt', remaining: null }]);
-  });
+  function claudePlugin(id: string, name: string, enabled = true, manifest: Record<string, unknown> = {}): string {
+    const target = path.join(claudeHome, 'plugins', 'cache', 'community', id, '1.0.0');
+    json(path.join(target, '.claude-plugin', 'plugin.json'), { name, ...manifest });
+    claudeInstalls[`${id}@community`] = [{ scope: 'user', installPath: target, version: '1.0.0' }];
+    claudeEnabled[`${id}@community`] = enabled;
+    json(path.join(claudeHome, 'plugins', 'installed_plugins.json'), { version: 2, plugins: claudeInstalls });
+    json(path.join(claudeHome, 'settings.json'), { enabledPlugins: claudeEnabled });
+    return target;
+  }
 
-  test('reports the most generous window per vendor, and nothing for an API key', () => {
-    subscribe('claude', 'default', 12);
-    subscribe('claude', 'work', 63);
-    process.env.OPENAI_SECRET = 'sk-proj-worker-1234';
-    expect(vendorAllowance()).toEqual([
-      { vendor: 'claude', remaining: 63 },
-      { vendor: 'gpt', remaining: null },
-    ]);
-  });
-});
+  function configureCodex(value: string): void {
+    codexConfig.push(value);
+    write(path.join(codexHome, 'config.toml'), codexConfig.join('\n'));
+  }
 
-describe('routing a worker', () => {
-  const project = path.resolve(import.meta.dir, '../..');
-  const input = { task: 'Rename `count` to `total` in @src/agent_runtime/router.ts', directory: project };
-  const candidates: RoutingCandidate[] = [
-    {
-      model: 'claude-sonnet-5',
-      vendor: 'claude',
-      profile: {
-        strengths: 'Speed and intelligence in balance.',
-        benchmarks: ['SWE-bench Pro 63.2 (June 2026)', 'Arena creative writing Elo 1437 (Sept 2026)'],
-        reviews: 'Over-thinks a small edit.',
-        cost: { input: 3, output: 15 },
-      },
-    },
-    {
-      model: 'claude-fable-5-1',
-      vendor: 'claude',
-      profile: {
-        strengths: 'The most demanding reasoning.',
-        benchmarks: ['SWE-bench Pro 81.2 (Sept 2026)'],
-        reviews: 'Asks before it decides.',
-        cost: { input: 10, output: 50, note: 'cache reads $0.25' },
-      },
-    },
-    {
-      model: 'gpt-5.6-luna',
-      vendor: 'gpt',
-      profile: {
-        strengths: 'Cheap and fast for routine work.',
-        benchmarks: ['MRCR v2 long-context recall 41.3% (July 2026)'],
-        reviews: 'Comes apart on open-ended reasoning.',
-        cost: { input: 0.2, output: 1.2 },
-      },
-    },
-  ];
-  const allowance = [
-    { vendor: 'claude' as const, remaining: 47 },
-    { vendor: 'gpt' as const, remaining: null },
-  ];
+  function codexPlugin(
+    id: string, name: string, enabled: boolean | null = true, marketplace = 'community', manifest: Record<string, unknown> = {},
+  ): string {
+    const target = path.join(codexHome, 'plugins', 'cache', marketplace, id, '2.0.0');
+    json(path.join(target, '.codex-plugin', 'plugin.json'), { name, ...manifest });
+    configureCodex(`[plugins.${JSON.stringify(`${id}@${marketplace}`)}]\n${enabled === null ? '' : `enabled = ${enabled}\n`}`);
+    return target;
+  }
 
-  type Ask = Parameters<RoutingClient['systemOne']>[0];
-  const fakeClient = (answers: Record<string, { choice: string; confidence: number }>) => {
-    const asked: Ask[] = [];
-    const client: RoutingClient = {
-      systemOne: async request => {
-        asked.push(request);
-        return { answers };
-      },
-    };
-    return { client, asked };
-  };
-
-  test('asks for a model and a level, and states the task and the project', async () => {
-    const { client, asked } = fakeClient({
-      model: { choice: 'gpt-5.6-luna', confidence: 0.83 },
-      thinkingLevel: { choice: 'low', confidence: 0.71 },
+  // Stop at each link: descending through it would mistake the user's own
+  // files for generated files and would hide accidental copied skill trees.
+  function links(root: string): string[] {
+    return readdirSync(root).flatMap(name => {
+      const entry = path.join(root, name);
+      const stat = lstatSync(entry);
+      if (stat.isSymbolicLink()) return [entry];
+      return stat.isDirectory() ? links(entry) : [];
     });
-    expect(await routeWorker(input, candidates, allowance, { client }))
-      .toEqual({ model: 'gpt-5.6-luna', thinkingLevel: 'low' });
-    expect(asked).toHaveLength(1);
-    expect(Object.keys(asked[0].questions)).toEqual(['model', 'thinkingLevel']);
-    expect(Object.keys(asked[0].questions.model.criteria)).toEqual(candidates.map(candidate => candidate.model));
-    expect(Object.keys(asked[0].questions.thinkingLevel.criteria)).toEqual(['low', 'medium', 'high', 'xhigh']);
-    expect(asked[0].state.task).toBe(input.task);
-    expect(asked[0].state.mentionedFiles).toEqual(['src/agent_runtime/router.ts']);
-    expect(asked[0].state.project).toBe(path.basename(project));
-    // The allowance is part of each candidate's criteria now, not a list of
-    // its own for Jev to match up with the models itself.
-    expect(asked[0].state.allowance).toBeUndefined();
-  });
+  }
 
-  test('renders each candidate as its profile plus the allowance its vendor has left', async () => {
-    const { client, asked } = fakeClient({
-      model: { choice: 'claude-fable-5-1', confidence: 0.9 },
-      thinkingLevel: { choice: 'high', confidence: 0.9 },
+  function pluginNames(root: string): string[] {
+    return readdirSync(root).flatMap(name => {
+      const entry = path.join(root, name);
+      const stat = lstatSync(entry);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) return [];
+      if (name === '.claude-plugin') return [JSON.parse(readFileSync(path.join(entry, 'plugin.json'), 'utf8')).name];
+      return pluginNames(entry);
     });
-    await routeWorker(input, candidates, allowance, { client });
-    const criteria = asked[0].questions.model.criteria;
-    expect(criteria['claude-fable-5-1']).toBe([
-      'Strengths: The most demanding reasoning.',
-      'Benchmarks: SWE-bench Pro 81.2 (Sept 2026).',
-      'In practice: Asks before it decides.',
-      'Cost: $10 per million input tokens, $50 per million output (cache reads $0.25).',
-      'Allowance: Anthropic has 47% of the 5-hour window remaining.',
-    ].join('\n'));
-    // Several benchmarks run together on one line, and sub-dollar prices keep
-    // their cents.
-    expect(criteria['claude-sonnet-5']).toContain(
-      'Benchmarks: SWE-bench Pro 63.2 (June 2026); Arena creative writing Elo 1437 (Sept 2026).',
-    );
-    expect(criteria['gpt-5.6-luna']).toContain('Cost: $0.20 per million input tokens, $1.20 per million output.');
-    expect(criteria['gpt-5.6-luna']).toContain('Allowance: OpenAI has API key, no window.');
-  });
+  }
 
-  test('a vendor the allowance says nothing about is unread rather than spent', async () => {
-    const { client, asked } = fakeClient({ model: { choice: 'gpt-5.6-luna', confidence: 0.9 } });
-    await routeWorker(input, candidates, [{ vendor: 'claude', remaining: 12 }], { client });
-    expect(asked[0].questions.model.criteria['gpt-5.6-luna']).toContain('Allowance: OpenAI has not read yet.');
-    expect(asked[0].questions.model.criteria['claude-sonnet-5'])
-      .toContain('Allowance: Anthropic has 12% of the 5-hour window remaining.');
-  });
+  function targets(roots: string[]): string[] {
+    return roots.flatMap(links).map(link => realpathSync(link)).sort();
+  }
 
-  test('routes nothing when Jev is unsure of the model or names one that was not offered', async () => {
-    const unsure = fakeClient({
-      model: { choice: 'claude-fable-5-1', confidence: 0.42 },
-      thinkingLevel: { choice: 'high', confidence: 0.9 },
-    });
-    expect(await routeWorker(input, candidates, allowance, { client: unsure.client })).toBeNull();
-    const stranger = fakeClient({
-      model: { choice: 'claude-opus-5', confidence: 0.95 },
-      thinkingLevel: { choice: 'high', confidence: 0.9 },
-    });
-    expect(await routeWorker(input, candidates, allowance, { client: stranger.client })).toBeNull();
-  });
+  function expectedTargets(...folders: string[]): string[] {
+    return folders.map(folder => realpathSync(folder)).sort();
+  }
 
-  test('an unsure or unoffered level leaves the model pick standing on the owner level', async () => {
-    for (const thinkingLevel of [
-      { choice: 'xhigh', confidence: 0.31 },
-      { choice: 'max', confidence: 0.9 },
-      { choice: 'ludicrous', confidence: 0.9 },
-    ]) {
-      const { client } = fakeClient({ model: { choice: 'claude-fable-5-1', confidence: 0.9 }, thinkingLevel });
-      expect(await routeWorker(input, candidates, allowance, { client, fallbackLevel: 'medium' }))
-        .toEqual({ model: 'claude-fable-5-1', thinkingLevel: 'medium' });
+  function claudeBridges(): string[] {
+    const plugins = claudeSkillPlugins(project);
+    for (const plugin of plugins) {
+      expect(plugin.type).toBe('local');
+      expect(plugin.skipMcpDiscovery).toBe(true);
+      expect(plugin.path).toStartWith(process.env.SIRUS_DATA_DIR! + path.sep);
     }
-    const { client } = fakeClient({ model: { choice: 'claude-sonnet-5', confidence: 0.9 } });
-    expect(await routeWorker(input, candidates, allowance, { client }))
-      .toEqual({ model: 'claude-sonnet-5', thinkingLevel: 'high' });
+    return plugins.map(plugin => plugin.path);
+  }
+
+  test('shares personal skills once by frontmatter name or folder and preserves the source files', () => {
+    const fromClaude = skill(path.join(claudeHome, 'skills'), 'claude-only');
+    const fromCodex = skill(path.join(codexHome, 'skills'), 'codex-only');
+    const fromAgents = skill(agentsSkills, 'agents-only');
+    skill(path.join(claudeHome, 'skills'), 'claude-copy', { name: 'shared-name' });
+    skill(agentsSkills, 'codex-copy', { name: 'shared-name' });
+    skill(path.join(claudeHome, 'skills'), 'fallback-name', { name: null });
+    skill(agentsSkills, 'another-copy', { name: 'fallback-name' });
+    skill(path.join(claudeHome, 'skills'), 'system-copy', { name: 'built-in-name' });
+    skill(path.join(codexHome, 'skills', '.system'), 'system-skill', { name: 'built-in-name' });
+    const before = [fromClaude, fromCodex, fromAgents]
+      .map(folder => readFileSync(path.join(folder, 'SKILL.md'), 'utf8'));
+
+    const claude = claudeBridges();
+    expect(targets(claude)).toEqual(expectedTargets(fromCodex, fromAgents));
+    expect(claude).toHaveLength(1);
+    expect(JSON.parse(readFileSync(path.join(claude[0], '.claude-plugin', 'plugin.json'), 'utf8')).name).toBe('codex');
+    const codex = codexSkillDirectories(project);
+    expect(codex).toHaveLength(1);
+    expect(codex[0]).toStartWith(process.env.SIRUS_DATA_DIR! + path.sep);
+    expect(targets(codex)).toEqual(expectedTargets(fromClaude));
+    expect([fromClaude, fromCodex, fromAgents]
+      .map(folder => readFileSync(path.join(folder, 'SKILL.md'), 'utf8'))).toEqual(before);
+    expect([fromClaude, fromCodex, fromAgents].every(folder => !lstatSync(folder).isSymbolicLink())).toBe(true);
   });
 
-  test('a call that fails or times out, and a missing key, route nothing', async () => {
-    const failing: RoutingClient = { systemOne: async () => { throw new Error('request timed out'); } };
-    expect(await routeWorker(input, candidates, allowance, { client: failing })).toBeNull();
-    expect(await routeWorker(input, candidates, allowance, { client: null })).toBeNull();
+  test('keeps third-party plugin namespaces and follows custom skill roots', () => {
+    const claudePluginRoot = claudePlugin('claude-package', 'claude-tools', true, { skills: ['./special', './single'] });
+    const claudeNested = skill(path.join(claudePluginRoot, 'special'), 'nested', { name: 'claude-nested' });
+    const claudeSingle = skill(claudePluginRoot, 'single');
+    const claudeDefault = skill(path.join(claudePluginRoot, 'skills'), 'claude-default');
+    const codexPluginRoot = codexPlugin('codex-package', 'codex-tools', true, 'community', { skills: './special' });
+    const codexNested = skill(path.join(codexPluginRoot, 'special'), 'nested', { name: 'codex-nested' });
+    skill(path.join(codexPluginRoot, 'skills'), 'codex-replaced-default');
+
+    const claude = claudeBridges();
+    expect(targets(claude)).toEqual(expectedTargets(codexNested));
+    expect(JSON.parse(readFileSync(path.join(claude[0], '.claude-plugin', 'plugin.json'), 'utf8')).name).toBe('codex-tools');
+    const codex = codexSkillDirectories(project);
+    expect(targets(codex)).toEqual(expectedTargets(claudeNested, claudeSingle, claudeDefault));
+    expect(pluginNames(path.join(codex[0], '.agents', 'skills'))).toEqual(['claude-tools']);
   });
 
-  test('one candidate is taken on the owner level without asking, and none routes nothing', async () => {
-    const { client, asked } = fakeClient({ model: { choice: 'claude-sonnet-5', confidence: 1 } });
-    expect(await routeWorker(input, candidates.slice(0, 1), allowance, { client, fallbackLevel: 'xhigh' }))
-      .toEqual({ model: 'claude-sonnet-5', thinkingLevel: 'xhigh' });
-    expect(await routeWorker(input, [], allowance, { client })).toBeNull();
-    expect(asked).toHaveLength(0);
+  test('honours disabled source plugins and reserves installed target names even when disabled', () => {
+    skill(path.join(claudePlugin('disabled-claude', 'disabled-claude', false), 'skills'), 'disabled-claude-skill');
+    skill(path.join(codexPlugin('disabled-codex', 'disabled-codex', false), 'skills'), 'disabled-codex-skill');
+    write(path.join(project, '.codex', 'config.toml'),
+      '[plugins."disabled-codex@community".mcp_servers.test]\nenabled = true\n');
+    skill(path.join(claudePlugin('claude-collision', 'same-on-codex'), 'skills'), 'hidden');
+    codexPlugin('other-package-id', 'same-on-codex', false);
+    skill(path.join(codexPlugin('codex-collision', 'same-on-claude'), 'skills'), 'hidden');
+    claudePlugin('different-package-id', 'same-on-claude', false);
+    const claudeVisible = skill(path.join(claudePlugin('claude-visible', 'claude-visible'), 'skills'), 'claude-visible-skill');
+    const codexVisible = skill(path.join(codexPlugin('codex-visible', 'codex-visible'), 'skills'), 'codex-visible-skill');
+
+    expect(targets(claudeBridges())).toEqual(expectedTargets(codexVisible));
+    expect(targets(codexSkillDirectories(project))).toEqual(expectedTargets(claudeVisible));
   });
 
-  // A session's model is chosen from the same profiles, so only the question
-  // and where the allowance comes from differ.
-  test('the session router asks one question over the same rendered profiles', async () => {
-    const { client, asked } = fakeClient({ model: { choice: 'claude-fable-5-1', confidence: 0.77 } });
-    const prompt = 'Work out why @src/agent_runtime/router.ts drops the pick';
-    expect(await routeSessionModel({ prompt, directory: project }, candidates, { client, allowance }))
-      .toEqual({ model: 'claude-fable-5-1', confidence: 0.77 });
-    expect(Object.keys(asked[0].questions)).toEqual(['model']);
-    expect(asked[0].state).toEqual({
-      request: prompt,
-      mentionedFiles: ['src/agent_runtime/router.ts'],
-      project: path.basename(project),
-    });
-    expect(asked[0].questions.model.criteria['claude-fable-5-1']).toBe([
-      'Strengths: The most demanding reasoning.',
-      'Benchmarks: SWE-bench Pro 81.2 (Sept 2026).',
-      'In practice: Asks before it decides.',
-      'Cost: $10 per million input tokens, $50 per million output (cache reads $0.25).',
-      'Allowance: Anthropic has 47% of the 5-hour window remaining.',
+  test('loads configured Codex plugins by default and prefers local then the latest cached version', () => {
+    const old = codexPlugin('versioned', 'versioned', null);
+    skill(path.join(old, 'skills'), 'old-skill');
+    const latestRoot = path.join(path.dirname(old), '10.0.0');
+    json(path.join(latestRoot, '.codex-plugin', 'plugin.json'), { name: 'versioned' });
+    const latest = skill(path.join(latestRoot, 'skills'), 'latest-skill');
+    const orphanRoot = path.join(codexHome, 'plugins', 'cache', 'community', 'uninstalled', '20.0.0');
+    json(path.join(orphanRoot, '.codex-plugin', 'plugin.json'), { name: 'uninstalled' });
+    skill(path.join(orphanRoot, 'skills'), 'orphan-skill');
+    write(path.join(codexHome, 'plugins', 'cache', 'cache-index'), 'stray cache file');
+    write(path.join(codexHome, 'plugins', 'cache', 'community', 'market-index'), 'stray market file');
+
+    expect(targets(claudeBridges())).toEqual(expectedTargets(latest));
+    const localRoot = path.join(path.dirname(old), 'local');
+    json(path.join(localRoot, '.codex-plugin', 'plugin.json'), { name: 'versioned' });
+    const local = skill(path.join(localRoot, 'skills'), 'local-skill');
+    expect(targets(claudeBridges())).toEqual(expectedTargets(local));
+    rmSync(path.join(localRoot, '.codex-plugin', 'plugin.json'));
+    expect(claudeBridges()).toEqual([]);
+  });
+
+  test('excludes vendor skill collections and OpenAI marketplaces', () => {
+    skill(path.join(codexHome, 'skills', '.system'), 'codex-system');
+    skill(path.join(claudeHome, 'skills', 'synced'), 'claude-synced');
+    for (const source of ['anthropic', 'anthropic-example']) {
+      skill(path.join(claudePlugin(source, source, true, { source }), 'skills'), `${source}-skill`);
+    }
+    for (const marketplace of ['openai-bundled', 'openai-primary-runtime', 'openai-curated', 'openai-curated-remote']) {
+      skill(path.join(codexPlugin(`vendor-${marketplace}`, `vendor-${marketplace}`, true, marketplace), 'skills'), 'hidden');
+    }
+    const personalCodex = skill(agentsSkills, 'personal-codex');
+    const personalClaude = skill(path.join(claudeHome, 'skills'), 'personal-claude');
+
+    expect(targets(claudeBridges())).toEqual(expectedTargets(personalCodex));
+    expect(targets(codexSkillDirectories(project))).toEqual(expectedTargets(personalClaude));
+  });
+
+  test('honours disabled Codex skill paths and names including plugin skills', () => {
+    const disabledPath = skill(path.join(codexHome, 'skills'), 'path-disabled');
+    skill(agentsSkills, 'name-disabled-folder', { name: 'name-disabled' });
+    skill(agentsSkills, 'metadata-disabled', { enabled: false });
+    const pluginRoot = codexPlugin('source-tools', 'source-tools', false);
+    skill(path.join(pluginRoot, 'skills'), 'plugin-disabled');
+    const pluginEnabled = skill(path.join(pluginRoot, 'skills'), 'plugin-enabled');
+    const personalEnabled = skill(agentsSkills, 'personal-enabled');
+    configureCodex(`[[skills.config]]\npath = ${JSON.stringify(path.join(disabledPath, 'SKILL.md'))}\nenabled = false\n`);
+    configureCodex('[[skills.config]]\nname = "name-disabled"\nenabled = false\n');
+    configureCodex('[[skills.config]]\nname = "source-tools:plugin-disabled"\nenabled = false\n');
+    write(path.join(project, '.codex', 'config.toml'), [
+      '[plugins."source-tools@community"]', 'enabled = true',
+      '[[skills.config]]', 'name = "name-disabled"', 'enabled = true',
     ].join('\n'));
+
+    expect(targets(claudeBridges())).toEqual(expectedTargets(pluginEnabled, personalEnabled));
+    configureCodex(`[[skills.config]]\npath = ${JSON.stringify(path.join(disabledPath, 'SKILL.md'))}\nenabled = true\n`);
+    expect(targets(claudeBridges())).toEqual(expectedTargets(disabledPath, pluginEnabled, personalEnabled));
+  });
+
+  test('leaves Claude skills requiring manual invocation and invalid Codex metadata out', () => {
+    const source = path.join(claudeHome, 'skills');
+    skill(source, 'manual-only', { 'disable-model-invocation': true });
+    skill(source, 'no-description', { description: null });
+    skill(source, 'empty-description', { description: '' });
+    skill(source, 'long-name', { name: 'x'.repeat(65) });
+    const accepted = skill(source, 'valid-name', { name: 'x'.repeat(64), 'disable-model-invocation': false });
+    const pluginRoot = claudePlugin('manual-tools', 'manual-tools');
+    skill(path.join(pluginRoot, 'skills'), 'manual-plugin', { 'disable-model-invocation': true });
+
+    expect(targets(codexSkillDirectories(project))).toEqual(expectedTargets(accepted));
+  });
+
+  test('reuses an unchanged inventory and builds a fresh bridge when skills change', () => {
+    const first = skill(path.join(claudeHome, 'skills'), 'first');
+    const original = codexSkillDirectories(project);
+    expect(codexSkillDirectories(project)).toEqual(original);
+    const replacement = skill(path.join(claudeHome, 'skills'), 'replacement');
+    rmSync(first, { recursive: true });
+    const refreshed = codexSkillDirectories(project);
+    expect(refreshed).not.toEqual(original);
+    expect(targets(refreshed)).toEqual(expectedTargets(replacement));
+
+    const codexFirst = skill(agentsSkills, 'codex-first');
+    const originalPlugins = claudeBridges();
+    expect(claudeBridges()).toEqual(originalPlugins);
+    const codexReplacement = skill(agentsSkills, 'codex-replacement');
+    rmSync(codexFirst, { recursive: true });
+    const refreshedPlugins = claudeBridges();
+    expect(refreshedPlugins).not.toEqual(originalPlugins);
+    expect(targets(refreshedPlugins)).toEqual(expectedTargets(codexReplacement));
+  });
+
+  test('walks project skill roots up to the repository and deduplicates native project skills', () => {
+    write(path.join(project, '.git'), 'gitdir: /unused-worktree-metadata\n');
+    const nested = path.join(project, 'packages', 'app');
+    mkdirSync(nested, { recursive: true });
+    const claudeRoot = skill(path.join(project, '.claude', 'skills'), 'claude-root');
+    const claudeNested = skill(path.join(nested, '.claude', 'skills'), 'claude-nested');
+    const codexRoot = skill(path.join(project, '.codex', 'skills'), 'codex-root');
+    const codexNested = skill(path.join(nested, '.agents', 'skills'), 'codex-nested');
+    skill(path.join(project, '.claude', 'skills'), 'duplicate-one', { name: 'project-shared' });
+    skill(path.join(nested, '.agents', 'skills'), 'duplicate-two', { name: 'project-shared' });
+    skill(path.join(directory, '.claude', 'skills'), 'outside-repository');
+
+    expect(targets(claudeSkillPlugins(nested).map(plugin => plugin.path))).toEqual(expectedTargets(codexRoot, codexNested));
+    expect(targets(codexSkillDirectories(nested))).toEqual(expectedTargets(claudeRoot, claudeNested));
+  });
+
+  test('keeps one Codex bridge per process across forks and reads default homes under credential profiles', () => {
+    const claudeSource = skill(path.join(claudeHome, 'skills'), 'claude-personal');
+    const codexSource = skill(agentsSkills, 'codex-personal');
+    const nativeSource = skill(path.join(codexHome, 'skills'), 'native-personal');
+    skill(path.join(codexHome, 'skills'), 'disabled-profile');
+    configureCodex('[[skills.config]]\nname = "disabled-profile"\nenabled = false\n');
+    const options: RuntimeOptions = {
+      vendor: 'gpt', model: 'gpt-5.6-luna', thinkingLevel: 'medium', directory: project,
+      systemPrompt: 'Test prompt.', permissionMode: 'ask', mcpServer: null,
+      env: sourceEnvironment('gpt', { id: 'work', kind: 'subscription', profile: 'work' }),
+      onPermission: async () => ({ outcome: { outcome: 'cancelled' } }), onUpdate: () => {},
+    };
+    const launch = launchFor(options);
+    const spec = { directory: project, systemPrompt: 'Test prompt.', mcpServer: null };
+    const parent = launch.session(spec);
+    expect(parent.additionalDirectories).toHaveLength(1);
+    expect(targets(parent.additionalDirectories!)).toEqual(expectedTargets(claudeSource));
+    skill(path.join(claudeHome, 'skills'), 'added-after-launch');
+    const fork = launch.session({ ...spec, directory: path.join(directory, 'worker') });
+    expect(fork.additionalDirectories).toEqual(parent.additionalDirectories);
+    expect(launch.env.CODEX_HOME).toBe(options.env.CODEX_HOME);
+    const profileSkills = path.join(launch.env.CODEX_HOME!, 'skills');
+    expect(targets([profileSkills])).toEqual(expectedTargets(nativeSource));
+    expect(existsSync(path.join(profileSkills, 'disabled-profile'))).toBe(false);
+    expect(launchFor({ ...options, bare: true }).session(spec).additionalDirectories).toBeUndefined();
+
+    const claude = launchFor({
+      ...options, vendor: 'claude', model: 'claude-sonnet-5',
+      env: sourceEnvironment('claude', { id: 'work', kind: 'subscription', profile: 'work' }),
+    });
+    const meta = claude.session(spec).meta as { claudeCode: { options: { plugins: { path: string }[] } } };
+    expect(targets(meta.claudeCode.options.plugins.map(plugin => plugin.path))).toEqual(expectedTargets(codexSource, nativeSource));
+    const bare = launchFor({ ...options, vendor: 'claude', bare: true }).session(spec).meta;
+    expect(bare).toMatchObject({ claudeCode: { options: { tools: [], settingSources: [] } } });
+    expect((bare?.claudeCode as { options: Record<string, unknown> }).options.plugins).toBeUndefined();
   });
 });
 

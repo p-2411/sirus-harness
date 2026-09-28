@@ -1,8 +1,7 @@
 import { openSettings } from '../../persistence/settings';
-import { listedDescription, modelIds, modelsOf, VENDOR_INFO, VENDORS } from '../../agent_runtime/providers/catalog';
+import { listedDescription, modelIds, modelsOf, vendorOf, VENDOR_INFO, VENDORS } from '../../agent_runtime/providers/catalog';
 import type { SubagentRun } from '../../agent_runtime/tools/subagents';
-import { renderTranscript } from '../../agent_runtime/tools/subagents/report';
-import { jevApiKey } from '../../agent_runtime/router';
+import { renderTranscript, workerName, workerTitle } from '../../agent_runtime/tools/subagents/report';
 import {
   DEFAULT_PARTICIPANT,
   THINKING_LEVEL_DESCRIPTIONS,
@@ -66,7 +65,14 @@ export function resolveModelReference(
   throw new Error(`Ambiguous model "${reference}". Matches: ${matches.join(', ')}`);
 }
 
-export function modelMenuItems(args: readonly string[] = []): CommandMenuEntry[] | null {
+function modelRestartWarning(participantName: string, model: string, session?: CommandSession): string | null {
+  if (!session || session.isEmpty()) return null;
+  const participant = session.getParticipants().find(candidate => candidate.name.toLocaleLowerCase() === participantName.toLocaleLowerCase());
+  if (!participant || !vendorOf(participant.model) || vendorOf(participant.model) === vendorOf(model)) return null;
+  return `Switching @${participant.name} to ${model} restarts its session; it keeps the conversation as text.`;
+}
+
+export function modelMenuItems(args: readonly string[] = [], session?: CommandSession): CommandMenuEntry[] | null {
   if (args.length > 1 || (args.length === 1 && !args[0].startsWith('@'))) return null;
   const participant = args[0]?.replace(/^@/, '');
 
@@ -77,7 +83,7 @@ export function modelMenuItems(args: readonly string[] = []): CommandMenuEntry[]
       label: VENDOR_INFO[vendor].displayName,
     },
     ...modelsOf(vendor).map(model => {
-      const description = listedDescription(model);
+      const description = [modelRestartWarning(participant ?? DEFAULT_PARTICIPANT, model, session), listedDescription(model)].filter(Boolean).join(' ');
       return {
         type: 'item' as const,
         key: model,
@@ -93,9 +99,12 @@ export function changeModel(
   participantName: string,
   model: string,
   session: CommandSession,
+  notify?: (text: string) => void,
 ): Feedback {
   const resolvedModel = resolveModelReference(model);
   const normalizedParticipantName = participantName.replace(/^@/, '');
+  const warning = modelRestartWarning(normalizedParticipantName, resolvedModel, session);
+  if (warning) notify?.(warning);
   session.changeParticipantModel(participantName, resolvedModel);
   // Choosing Sirus before a conversation starts also chooses the default for
   // future sessions. Existing sessions retain their own participant models.
@@ -107,18 +116,17 @@ export function changeModel(
     };
   }
   return {
-    kind: 'success',
-    text: `@${normalizedParticipantName} model set to ${resolvedModel}.`,
+    kind: warning ? 'warning' : 'success',
+    text: warning ?? `@${normalizedParticipantName} model set to ${resolvedModel}.`,
   };
 }
 
 // `/model subagent` reads or sets the model spawned subagents run on, a
-// setting of the session. `default` clears it: then Jev picks each worker's
-// model for its task when there is a key, and without one a worker runs on
-// the model of the participant that spawned it.
+// setting of the session. `default` clears it: then each spawn's model
+// argument decides, else the agent definition's, else the spawning
+// participant's own model.
 export function subagentModelCommand(args: readonly string[], session: CommandSession): Feedback {
-  const unset = jevApiKey() ? 'the model Jev picks for each task' : 'each participant\'s own model';
-  const describe = (model: string | null) => `Subagents run on ${model ?? unset}.`;
+  const describe = (model: string | null) => `Subagents run on ${model ?? 'the caller’s choice, agent definition, or participant’s own model'}.`;
   if (args.length === 0) return { kind: 'info', text: describe(session.getSubagentModel()) };
   if (args.length > 1) throw new Error('Usage: /model subagent [<model>|default]');
   const model = args[0] === 'default' ? null : resolveModelReference(args[0]);
@@ -217,14 +225,14 @@ function taskPreview(prompt: string): string {
 }
 
 function findWorker(id: string, session: CommandSession): SubagentRun {
-  const run = session.getWorkers().find(candidate => candidate.id === id);
+  const run = session.getWorkers().find(candidate => candidate.id === id || candidate.name === id);
   if (!run) throw new Error(`No worker "${id}" in this session. /agents lists them.`);
   return run;
 }
 
 function workerActions(run: SubagentRun): CommandMenuEntry[] {
   const entries: CommandMenuEntry[] = [
-    { type: 'heading', key: run.id, label: `${run.id} · ${run.status}` },
+    { type: 'heading', key: run.id, label: `${workerTitle(run)} · ${run.status}` },
     {
       type: 'item',
       key: 'show',
@@ -233,17 +241,12 @@ function workerActions(run: SubagentRun): CommandMenuEntry[] {
       command: `/agents show ${run.id}`,
     },
   ];
-  // Only a working worker can be steered or stopped; only a finished one can
-  // have its line cleared.
+  entries.push({
+    type: 'item', key: 'message', label: 'Send a message',
+    description: run.status === 'working' ? 'steer it while it works' : 'resume its conversation',
+    command: `/agents message ${run.id}`, input: { prompt: `Message for ${workerName(run)}` },
+  });
   if (run.status === 'working') {
-    entries.push({
-      type: 'item',
-      key: 'message',
-      label: 'Send a message',
-      description: 'steer it while it works',
-      command: `/agents message ${run.id}`,
-      input: { prompt: `Message for ${run.id}` },
-    });
     entries.push({
       type: 'item',
       key: 'cancel',
@@ -263,7 +266,7 @@ function workerActions(run: SubagentRun): CommandMenuEntry[] {
   return entries;
 }
 
-// `/agents` lists the session's workers; `/agents <id>` offers what can be
+// `/agents` lists the session's workers; `/agents <name>` offers what can be
 // done to one. Anything with an action word already chosen simply runs.
 export function agentsMenuItems(args: readonly string[], session: CommandSession): CommandMenuEntry[] | null {
   if (args.length === 0) {
@@ -274,8 +277,8 @@ export function agentsMenuItems(args: readonly string[], session: CommandSession
       ...workers.map(run => ({
         type: 'item' as const,
         key: run.id,
-        label: `${run.id} · ${run.model} · ${run.status} ${workerAge(run)}`,
-        description: taskPreview(run.prompt),
+        label: `${workerName(run)} · ${run.model} · ${run.status} ${workerAge(run)}`,
+        description: [taskPreview(run.description || run.prompt), ...(run.name ? [run.id] : [])].join(' · '),
         command: `/agents ${run.id}`,
       })),
     ];
@@ -289,7 +292,7 @@ export function agentsMenuItems(args: readonly string[], session: CommandSession
 function showWorker(run: SubagentRun): Feedback {
   const transcript = run.transcript.length > 0
     ? run.transcript.flatMap(entry => [
-      entry.role === 'user' ? '› you' : `› ${run.id}`,
+      entry.role === 'user' ? '› you' : `› ${workerName(run)}`,
       renderTranscript(entry.content),
       '',
     ])
@@ -299,7 +302,7 @@ function showWorker(run: SubagentRun): Feedback {
     showIcon: false,
     panel: true,
     text: [
-      `${run.id} · ${run.status} · ${workerAge(run)}`,
+      `${workerTitle(run)} · ${run.status} · ${workerAge(run)}`,
       `task: ${run.prompt.trim()}`,
       `model: ${run.model} · ${run.thinkingLevel}`,
       `branch: ${run.branch ?? `none · works in ${run.directory}`}`,
@@ -317,7 +320,7 @@ function describeWorkers(session: CommandSession): Feedback {
     showIcon: false,
     panel: true,
     text: workers
-      .map(run => `${run.id} · ${run.model} · ${run.status} ${workerAge(run)} · ${taskPreview(run.prompt)}`)
+      .map(run => `${workerTitle(run)} · ${run.model} · ${run.status} ${workerAge(run)} · ${taskPreview(run.description || run.prompt)}`)
       .join('\n'),
   };
 }
@@ -330,11 +333,11 @@ export function agentsCommand(
   if (action === undefined) return describeWorkers(session);
   // A bare id is what the list menu sends; typed on its own it shows the run.
   if (!isWorkerAction(action)) {
-    if (args.length > 1) throw new Error('Usage: /agents [show|message|cancel|dismiss] <id>');
+    if (args.length > 1) throw new Error('Usage: /agents [show|message|cancel|dismiss] <name>');
     return showWorker(findWorker(action, session));
   }
   const id = args[1];
-  if (!id) throw new Error(`Usage: /agents ${action} <id>`);
+  if (!id) throw new Error(`Usage: /agents ${action} <name>`);
   const run = findWorker(id, session);
   switch (action) {
     case 'show':
@@ -343,28 +346,25 @@ export function agentsCommand(
       // Typed, the message is the rest of the line; chosen from the menu it
       // arrives as one final argument the input bar collected.
       const text = args.slice(2).join(' ').trim();
-      if (!text) throw new Error(`Usage: /agents message ${run.id} <message>`);
-      if (run.status !== 'working') {
-        throw new Error(`${run.id} is ${run.status}; only a working worker can be messaged.`);
-      }
+      if (!text) throw new Error(`Usage: /agents message ${workerName(run)} <message>`);
       return session.messageWorker(run.id, text).then(() => ({
         kind: 'success' as const,
-        text: `Sent to ${run.id}.`,
+        text: `Sent to ${workerName(run)}.`,
       }));
     }
     case 'cancel': {
-      if (run.status !== 'working') return { kind: 'info', text: `${run.id} is already ${run.status}.` };
+      if (run.status !== 'working') return { kind: 'info', text: `${workerName(run)} is already ${run.status}.` };
       return session.cancelWorker(run.id).then(() => ({
         kind: 'success' as const,
-        text: `Cancelled ${run.id}.`,
+        text: `Cancelled ${workerName(run)}.`,
       }));
     }
     case 'dismiss': {
       if (run.status === 'working') {
-        throw new Error(`${run.id} is still working. Cancel it first, or leave it to finish.`);
+        throw new Error(`${workerName(run)} is still working. Cancel it first, or leave it to finish.`);
       }
       session.dismissWorker(run.id);
-      return { kind: 'success', text: `Dismissed ${run.id}.` };
+      return { kind: 'success', text: `Dismissed ${workerName(run)}.` };
     }
   }
 }

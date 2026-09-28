@@ -1,13 +1,11 @@
-import { useState } from 'react';
-import { Box, Text, useInput } from 'ink';
+import { Box, Text } from 'ink';
 import type { PermissionOptionKind } from '@agentclientprotocol/sdk';
 import { theme } from '../styles/theme';
 import type { ToolCallBlock } from '../../agent_runtime/types';
 import { describeRequester, type ApprovalDecision, type ApprovalRequest } from '../../agent_runtime/permissions/approvals';
 import { editPreview, toolLine, type DiffLine } from './ChatMessage';
-import { isForeignInput } from './editor';
+import type { InputState } from './editor';
 import { FramedCard, type TitlePart } from './FramedCard';
-import { moveSelection } from './SelectMenu';
 import { terminalText, truncate } from '../terminal/text';
 
 interface ApprovalChoice {
@@ -15,6 +13,7 @@ interface ApprovalChoice {
   decision: ApprovalDecision;
   key: string;
   label: string;
+  feedback?: boolean;
 }
 
 // The key each kind of option answers to, when the vendor offers one of each.
@@ -32,12 +31,17 @@ const KIND_KEYS: Record<PermissionOptionKind, string> = {
 export function approvalChoices(request: ApprovalRequest): ApprovalChoice[] {
   const kinds = request.options.map(option => option.kind);
   const byKind = new Set(kinds).size === kinds.length;
-  return request.options.map((option, index) => ({
+  const choices: ApprovalChoice[] = request.options.map((option, index) => ({
     kind: option.kind,
     decision: { optionId: option.optionId },
     key: byKind ? KIND_KEYS[option.kind] : String(index + 1),
     label: option.name,
   }));
+  choices.push({
+    kind: 'reject_once', decision: 'deny', key: 'tab',
+    label: 'No, and tell it what to do instead', feedback: true,
+  });
+  return choices;
 }
 
 const INPUT_LENGTH = 200;
@@ -81,9 +85,9 @@ function sentenceCase(line: string): string {
 
 // Who is asking and for what, as the card's top edge sets it after its mark
 // and the desktop notification says it: "@sirus wants to edit src/app.ts".
-export function approvalTitle(request: ApprovalRequest): TitlePart[] {
+export function approvalTitle(request: ApprovalRequest, requesterName?: string): TitlePart[] {
   return [
-    { text: describeRequester(request.requester), color: theme.accent, bold: true },
+    { text: requesterName ?? describeRequester(request.requester), color: theme.accent, bold: true },
     { text: ' wants to ' },
     { text: sentenceCase(toolLine(request.toolCall)), color: theme.highlight, bold: true },
   ];
@@ -101,34 +105,24 @@ function detailColor(line: string): string {
 
 // A pending permission prompt as a framed card: who is asking and what for
 // in its top edge, what the call would do, and the choices with their keys.
-// The arrows and enter pick a choice, or its key answers at once. Escape is
-// the turn's cancel, which the chat handles, and it withdraws the prompt.
-export function ApprovalPrompt({ request, waiting, onDecide }: {
+// The prompt bar holds the selection and reads the keys.
+export function ApprovalPrompt({ request, waiting, selected, requesterName, feedback }: {
   request: ApprovalRequest;
   waiting: number;
-  onDecide: (decision: ApprovalDecision) => void;
+  selected: number;
+  requesterName?: string;
+  feedback?: InputState;
 }) {
-  const [selected, setSelected] = useState(0);
   const choices = approvalChoices(request);
-  useInput((input, key) => {
-    if (isForeignInput(input, key)) return;
-    if (key.upArrow) setSelected(current => moveSelection(current, -1, choices.length));
-    else if (key.downArrow) setSelected(current => moveSelection(current, 1, choices.length));
-    else if (key.return && choices[selected]) onDecide(choices[selected].decision);
-    else {
-      const choice = choices.find(candidate => candidate.key === input);
-      if (choice) onDecide(choice.decision);
-    }
-  });
   const detail = approvalDetail(request.toolCall);
   // A plan is prose: it wraps, and its bullets are not a diff's marks.
   const plan = request.toolCall.kind === 'switch_mode';
   return (
     <FramedCard
       tone={theme.pending}
-      title={[{ text: '⚠ ', color: theme.pending }, ...approvalTitle(request)]}
+      title={[{ text: '⚠ ', color: theme.pending }, ...approvalTitle(request, requesterName)]}
       {...(waiting > 0 ? { right: `${waiting} more` } : {})}
-      footer="↑↓ move · enter select · esc cancels the turn"
+      footer={feedback ? 'enter decline and send · esc decline' : '↑↓ move · enter select · tab add feedback · esc decline'}
     >
       {detail.length > 0 && (
         <Box flexDirection="column" marginBottom={1}>
@@ -139,7 +133,16 @@ export function ApprovalPrompt({ request, waiting, onDecide }: {
           ))}
         </Box>
       )}
-      {choices.map((choice, index) => {
+      {feedback ? (
+        <Box paddingLeft={2} flexDirection="column">
+          <Text color={theme.textMuted}>What should it do instead?</Text>
+          <Text wrap="wrap">
+            <Text color={theme.text}>{feedback.text.slice(0, feedback.cursor)}</Text>
+            <Text color={theme.accent}>▌</Text>
+            <Text color={theme.text}>{feedback.text.slice(feedback.cursor)}</Text>
+          </Text>
+        </Box>
+      ) : choices.map((choice, index) => {
         const active = index === selected;
         return (
           <Box key={index} justifyContent="space-between">

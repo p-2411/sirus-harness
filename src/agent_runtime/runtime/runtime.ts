@@ -8,10 +8,12 @@ import type {
   ToolCall,
   ToolCallUpdate,
 } from '@agentclientprotocol/sdk';
+import { abortable, abortReason, throwIfAborted } from '../../abort';
 import { vendorOf, type ListedModel, type Vendor } from '../providers/catalog';
 import {
   TOOL_KINDS,
   type ImageBlock,
+  type NoticeBlock,
   type PermissionMode,
   type PlanEntry,
   type ThinkingLevel,
@@ -42,11 +44,16 @@ export const COMPACTION_STATUSES = ['in_progress', 'completed', 'failed', 'cance
 export type CompactionStatus = typeof COMPACTION_STATUSES[number];
 
 export interface RuntimeOptions {
+  // Cancels startup only; the prompt has its own signal once the runtime is ready.
+  signal?: AbortSignal;
   vendor: Vendor;
   model: string;
   thinkingLevel: ThinkingLevel;
   // Where the session runs; relative paths in tool calls resolve here.
   directory: string;
+  // Reopen the vendor's conversation in the directory it was created in.
+  // Failure rejects creation; the owner decides whether to seed a fresh one.
+  resume?: { sessionId: string; directory: string };
   // Sirus's addendum for this participant (`sirusPrompt`), which goes beside
   // the vendor's own prompt and the project's instruction files the vendor
   // reads itself. The launch spec decides how the vendor receives it.
@@ -61,6 +68,8 @@ export interface RuntimeOptions {
   // A bare runtime answers one question and keeps nothing: no Sirus tools and
   // as few native tools as the vendor allows. Session naming uses one.
   bare?: boolean;
+  tools?: readonly string[];
+  readOnly?: boolean;
   permissionMode: PermissionMode;
   // Whatever the vendor escalates arrives here. A cancelled prompt must
   // answer `{ outcome: 'cancelled' }`; the signal is the prompt's.
@@ -80,9 +89,44 @@ export const PERMISSION_CANCELLED: RequestPermissionResponse = { outcome: { outc
 export const QUESTION_CANCELLED: CreateElicitationResponse = { action: 'cancel' };
 export const QUESTION_DECLINED: CreateElicitationResponse = { action: 'decline' };
 
+export interface BackgroundTask {
+  id: string;
+  name: string;
+  description?: string;
+  state: 'running' | 'paused' | 'completed' | 'failed' | 'stopped';
+  canStop: boolean;
+  toolCallId?: string;
+  summary?: string;
+  outputFilePath?: string;
+}
+
+// AIR task updates are extensions to ACP, shared by both adapters. Keep a
+// complete task when a progress update carries only one changed field.
+export function backgroundTaskFrom(update: unknown, previous?: BackgroundTask): BackgroundTask | null {
+  if (!update || typeof update !== 'object') return null;
+  const value = update as Record<string, unknown>;
+  if (!['async_task_spawned', 'async_task_progress', 'async_task_state_update'].includes(String(value.sessionUpdate))
+    || typeof value.asyncTaskId !== 'string') return null;
+  const task: BackgroundTask = previous ? { ...previous } : {
+    id: value.asyncTaskId, name: 'Background task', state: 'running', canStop: false,
+  };
+  for (const field of ['name', 'description', 'toolCallId', 'summary', 'outputFilePath'] as const) {
+    if (typeof value[field] === 'string') task[field] = value[field];
+  }
+  if (typeof value.canStop === 'boolean') task.canStop = value.canStop;
+  if (['running', 'paused', 'completed', 'failed', 'stopped'].includes(String(value.state))) {
+    task.state = value.state as BackgroundTask['state'];
+  }
+  if (task.state !== 'running' && task.state !== 'paused') task.canStop = false;
+  return task;
+}
+
 export type RuntimeUpdate =
+  | { type: 'async_task'; task: BackgroundTask }
+  | { type: 'rate_limit'; resetsAt?: number }
   | { type: 'text'; text: string }
   | { type: 'thought'; text: string }
+  | NoticeBlock
   // A new call, or an update to one already reported: merge by id.
   | { type: 'tool_call'; call: ToolCallBlock }
   | { type: 'context'; usage: ContextUsage }
@@ -121,10 +165,12 @@ export interface PromptResult {
 // first prompt.
 export type ForkOptions = Pick<RuntimeOptions,
   'directory' | 'model' | 'thinkingLevel' | 'systemPrompt' | 'permissionMode' | 'mcpServer' | 'onPermission'
-  | 'onElicitation' | 'onUpdate'>;
+  | 'onElicitation' | 'onUpdate' | 'tools' | 'readOnly'>;
 
 export interface Runtime {
   readonly vendor: Vendor;
+  // The vendor's persisted session/thread id, including for owner forks.
+  readonly sessionId: string;
   readonly model: string;
   // The vendor's modes as `session/new` returned them, in the vendor's order.
   readonly modes: readonly SessionMode[];
@@ -161,6 +207,8 @@ export interface Runtime {
   // instead. Resolving means the text reached the turn, not that the turn
   // acted on it.
   steer(text: string): Promise<void>;
+  // Stops one background shell without cancelling the participant’s turn.
+  stopTask(id: string): Promise<boolean>;
   // Ends the process, or for a fork just its session, leaving the process up
   // for the runtime it was forked from. Idempotent.
   dispose(): void;
@@ -215,14 +263,22 @@ export function invalidateAllRuntimes(): void {
 // as one a vendor has since stopped listing that a restored session or the
 // subagent setting still names, has no credential to run on; started anyway,
 // its adapter would get this process's whole environment, keys included.
-// Aborting the signal ends a startup the adapter has not finished.
-export async function createRuntime(options: RuntimeOptions, signal?: AbortSignal): Promise<Runtime> {
+// Aborting the options' signal ends a startup the adapter has not finished.
+export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
+  throwIfAborted(options.signal);
   const bound = boundRuntimes[options.model];
   if (!bound && !vendorOf(options.model)) {
     throw new Error(`The model ${options.model} is no longer available. Pick another with /model.`);
   }
-  const runtime = bound ? await bound(options) : await startAcpRuntime(options, signal);
-  return trackRuntime(runtime);
+  const started = Promise.resolve().then(async () => {
+    const runtime = bound ? await bound(options) : await startAcpRuntime(options);
+    if (options.signal?.aborted) {
+      runtime.dispose();
+      throw abortReason(options.signal);
+    }
+    return trackRuntime(runtime);
+  });
+  return abortable(started, options.signal);
 }
 
 // The kind of vendor mode each of Sirus's modes maps onto.

@@ -1,4 +1,4 @@
-import { requireKnownModel, servableModelIds, servesModel } from '../providers';
+import { requireKnownModel, servesModel } from '../providers';
 import { SessionAgent, type Participant, type RuntimeHost } from '../agent';
 import { textOf, type Message, type PermissionMode, type ThinkingLevel } from '../types';
 import { rootTextRanges, type RootTextRange } from '../../mentions';
@@ -175,28 +175,24 @@ export class ParticipantRoster {
     }
   }
 
-  // Reads the @names out of a user prompt without creating anything, so a
-  // turn that names a participant badly leaves the session untouched.
+  // Reads known @names and explicit @name model introductions. Other @words
+  // are ordinary prose and leave the participant list alone.
   readMentions(text: string): Mention[] {
     const mentions: Mention[] = [];
     const seen = new Set<string>();
     for (const { name, range, localEnd } of scanMentions(text)) {
       const key = keyOf(name);
       if (seen.has(key)) continue;
-      seen.add(key);
-
       const existing = this.find(name);
       if (existing) {
+        seen.add(key);
         mentions.push({ name: existing.name });
         continue;
       }
 
       const modelMatch = /^([ \t]+)([^\s,;]+)/.exec(range.text.slice(localEnd));
-      if (!modelMatch || !servesModel(modelMatch[2])) {
-        throw new Error(
-          `New participant @${name} requires a model. Try: @${name} ${servableModelIds().join('|')} your prompt`,
-        );
-      }
+      if (!modelMatch || !servesModel(modelMatch[2])) continue;
+      seen.add(key);
       const modelStart = range.start + localEnd;
       mentions.push({
         name,

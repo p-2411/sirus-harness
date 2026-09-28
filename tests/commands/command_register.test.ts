@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, rmSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, beforeEach } from 'bun:test';
@@ -11,6 +11,7 @@ import {
   parseCommandLine,
 } from '../../src/commands/registry';
 import type { CommandMenuItem, CommandSession } from '../../src/commands/types';
+import { nextPermissionMode } from '../../src/agent_runtime/permissions/policy';
 import { loginMenuItems } from '../../src/commands/authentication/behavior';
 import { Session } from '../../src/agent_runtime/session';
 import { providerFor } from '../../src/agent_runtime/providers';
@@ -18,8 +19,8 @@ import { resolveModelReference } from '../../src/commands/agents/behavior';
 import type { SubagentRun } from '../../src/agent_runtime/tools/subagents';
 import type { Feedback } from '../../src/commands/feedback';
 import { openSettings } from '../../src/persistence/settings';
-import { shouldRequestJevKey } from '../../src/agent_runtime/router';
-import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
+import { bindScriptedRuntime, textTurn, unbindRuntime } from '../support/runtime';
+import { backgroundTaskFrom, type BackgroundTask } from '../../src/agent_runtime/runtime/runtime';
 
 function runCommand(
   command: string,
@@ -49,6 +50,7 @@ describe('matchCommands', () => {
     expect(all.map(c => c.name)).toContain('memory');
     expect(all.map(c => c.name)).toContain('thinking');
     expect(all.map(c => c.name)).toContain('update');
+    expect(all.map(c => c.name)).toContain('doctor');
   });
 
   test('filters by typed prefix', () => {
@@ -87,29 +89,64 @@ describe('executeCommand', () => {
     rmSync(settingsDirectory, { recursive: true, force: true });
   });
 
+  test('permissions ask explains what each vendor approves', () => {
+    const description = 'Claude asks before writes. Codex asks before leaving the workspace; edits inside it are not asked.';
+    expect(menuItems('permissions', []).find(item => item.key === 'ask')?.description).toBe(description);
+    const session = new Session();
+    expect(runCommand('permissions', ['ask'], session)).toEqual({
+      kind: 'success',
+      text: `Permission mode set to ask for approval. ${description}`,
+    });
+    expect(runCommand('permissions', [], session)).toEqual({
+      kind: 'info',
+      text: `Permission mode is ask for approval. ${description}`,
+    });
+  });
+
   test('model command changes only the active populated session', () => {
     const session = new Session();
     const other = new Session();
     session.append({ role: 'user', content: [{ type: 'text', text: 'Hello' }] });
     openSettings().set({ sirusModel: 'gpt-5.6-terra' });
     expect(runCommand('model', ['claude-fable-5-1'], session)).toEqual({
-      kind: 'success',
-      text: '@sirus model set to claude-fable-5-1.',
+      kind: 'warning',
+      text: 'Switching @sirus to claude-fable-5-1 restarts its session; it keeps the conversation as text.',
     });
     expect(session.getModel()).toBe('claude-fable-5-1');
     expect(other.getModel()).toBe('gpt-5.6-luna');
     expect(openSettings().get('sirusModel')).toBe('gpt-5.6-terra');
     runCommand('model', ['@sirus', 'sol'], session);
-    expect(session.getModel()).toBe('gpt-5.6-sol');
+    expect(session.getModel()).toBe('gpt-6-sol');
     expect(openSettings().get('sirusModel')).toBe('gpt-5.6-terra');
+  });
+
+  test('warns before a cross-vendor model change and in the model picker', () => {
+    const session = new Session();
+    session.append({ role: 'user', content: [{ type: 'text', text: 'Keep this context' }] });
+    const menu = commandMenu('model', [], session)!;
+    expect(menu.find((item): item is CommandMenuItem => item.type === 'item' && item.key === 'claude-sonnet-5')?.description)
+      .toContain('restarts its session; it keeps the conversation as text');
+    expect(menu.find((item): item is CommandMenuItem => item.type === 'item' && item.key === 'gpt-6-sol')?.description ?? '')
+      .not.toContain('restarts its session');
+    const notices: string[] = [];
+    executeCommand('model', ['claude-sonnet-5'], {
+      session,
+      notify: text => {
+        expect(session.getModel()).toBe('gpt-5.6-luna');
+        notices.push(text);
+      },
+      signal: new AbortController().signal,
+    });
+    expect(notices).toEqual(['Switching @sirus to claude-sonnet-5 restarts its session; it keeps the conversation as text.']);
+    expect(session.getModel()).toBe('claude-sonnet-5');
   });
 
   test('choosing Sirus in an empty session saves the default without changing peers', () => {
     const session = new Session();
     const other = new Session();
     runCommand('model', ['@Sirus', 'sol'], session);
-    expect(session.getModel()).toBe('gpt-5.6-sol');
-    expect(openSettings().get('sirusModel')).toBe('gpt-5.6-sol');
+    expect(session.getModel()).toBe('gpt-6-sol');
+    expect(openSettings().get('sirusModel')).toBe('gpt-6-sol');
     expect(other.getModel()).toBe('gpt-5.6-luna');
   });
 
@@ -161,40 +198,71 @@ describe('executeCommand', () => {
       '/model claude-sonnet-5',
       '/model claude-haiku-4-5',
       '/model claude-fable-5-1',
+      '/model claude-opus-5-5',
+      '/model gpt-5.5',
       '/model gpt-5.6-luna',
       '/model gpt-5.6-terra',
       '/model gpt-5.6-sol',
+      '/model gpt-6-luna',
+      '/model gpt-6-sol',
       '/model gpt-6-astra',
     ]);
     expect(menuItems('model', ['@reviewer'])[0].command).toBe('/model @reviewer claude-opus-5');
     expect(commandMenu('model', ['gpt-5.6-sol'], new Session())).toBeNull();
   });
 
-  test('clear command empties only the current session history', () => {
-    const current = new Session({ name: 'Current' });
-    const other = new Session({ name: 'Other' });
-    current.append({ role: 'user', content: [{ type: 'text', text: 'clear me' }] });
-    other.append({ role: 'user', content: [{ type: 'text', text: 'keep me' }] });
-
-    expect(runCommand('clear', [], current)).toEqual({
-      kind: 'success',
-      text: 'History cleared.',
+  test('/clear and /new request a fresh session and preserve the conversation', () => {
+    const session = new Session({ name: 'Current' });
+    session.append({ role: 'user', content: [{ type: 'text', text: 'keep me' }] });
+    let fresh = 0;
+    for (const command of ['clear', 'new']) executeCommand(command, [], {
+      session, signal: new AbortController().signal, notify() {}, newSession() { fresh++; },
     });
-    expect(current.getMessages()).toEqual([]);
-    expect(other.getMessages()).toHaveLength(1);
+    expect(fresh).toBe(2);
+    expect(session.getMessages()).toHaveLength(1);
     // A command that takes no arguments turns them away instead of running.
-    expect(() => runCommand('clear', ['junk'], other)).toThrow('Usage: /clear');
-    expect(other.getMessages()).toHaveLength(1);
+    expect(() => executeCommand('clear', ['junk'], {
+      session, signal: new AbortController().signal, notify() {}, newSession() { fresh++; },
+    })).toThrow('Usage: /clear');
+    expect(fresh).toBe(2);
   });
 
-  test('rename command updates the current session and rejects an empty name', () => {
+  test('rename accepts a title or derives one from content', async () => {
     const session = new Session({ name: 'Session 1' });
-    expect(runCommand('rename', ['UX', 'work'], session)).toEqual({
-      kind: 'success',
-      text: 'Renamed to UX work.',
-    });
-    expect(session.getName()).toBe('UX work');
-    expect(() => runCommand('rename', [], session)).toThrow('Usage: /rename <name>');
+    expect(runCommand('rename', ['UX', 'work'], session)).toEqual({ kind: 'success', text: 'Renamed to UX work.' });
+    await expect(runCommand('rename', [], session)).rejects.toThrow('Send a message first');
+    session.append({ role: 'user', content: [{ type: 'text', text: 'Fix session storage' }] });
+    await runCommand('rename', [], session);
+    expect(session.getName()).toBe('Fix session storage');
+  });
+
+  test('export, copy, and fork preserve the source conversation', async () => {
+    const session = new Session({ name: 'Source', directory: settingsDirectory });
+    session.append({ role: 'user', content: [{ type: 'text', text: 'Hello' }] });
+    session.append({ role: 'assistant', content: [{ type: 'text', text: 'The reply.' }] });
+    runCommand('export', ['chat.md'], session);
+    expect(readFileSync(join(settingsDirectory, 'chat.md'), 'utf8')).toContain('## You\n\nHello\n\n## Assistant\n\nThe reply.');
+    let copied = '';
+    let fork: ReturnType<Session['fork']> | undefined;
+    const context = { session, signal: new AbortController().signal, notify() {}, copy(text: string) { copied = text; }, openSession(snapshot: ReturnType<Session['fork']>) { fork = snapshot; } };
+    executeCommand('copy', [], context);
+    executeCommand('fork', [], context);
+    expect(copied).toBe('The reply.');
+    expect(fork!.id).not.toBe(session.getId());
+    expect(fork!.messages).toEqual(session.getMessages());
+    fork!.messages[0].content = [];
+    expect(session.getMessages()[0].content).toHaveLength(1);
+  });
+
+  test('/delete requires confirmation', async () => {
+    let removed = 0;
+    for (const accepted of [false, true]) {
+      await executeCommand('delete', [], {
+        session: new Session(), signal: new AbortController().signal, notify() {},
+        confirm: async () => accepted, deleteSession() { removed++; },
+      });
+      expect(removed).toBe(accepted ? 1 : 0);
+    }
   });
 
   test('help command lists commands and keyboard shortcuts', () => {
@@ -202,7 +270,7 @@ describe('executeCommand', () => {
     expect(result.kind).toBe('info');
     expect(result.showIcon).toBe(false);
     expect(result.text).toContain('/help');
-    expect(result.text).toContain('/rename <name>');
+    expect(result.text).toContain('/rename [name]');
     expect(result.text).toContain('/undo');
     expect(result.text).toContain('/rewind');
     expect(result.text).toContain('/image [path]');
@@ -298,6 +366,7 @@ describe('executeCommand', () => {
 
   test('update command rejects arguments before running the updater', () => {
     expect(() => runCommand('update', ['now'])).toThrow('Usage: /update');
+    expect(() => runCommand('doctor', ['now'])).toThrow('Usage: /doctor');
   });
 });
 
@@ -534,39 +603,20 @@ describe('subagent model command', () => {
   });
 
   test('sets, shows and clears the model spawned subagents run on', () => {
-    // No Jev key, in the environment or stored.
-    const previousKey = process.env.JEV_API;
-    const previousDirectory = process.env.SIRUS_DATA_DIR;
-    const directory = mkdtempSync(join(tmpdir(), 'sirus-subagent-model-'));
-    delete process.env.JEV_API;
-    process.env.SIRUS_DATA_DIR = directory;
-    try {
-      const session = new Session();
-      expect(runCommand('model', ['subagent'], session))
-        .toEqual({ kind: 'info', text: 'Subagents run on each participant\'s own model.' });
-      // With a key, Jev picks a worker's model when none is set.
-      process.env.JEV_API = 'ts-subagent-model';
-      expect(runCommand('model', ['subagent'], session))
-        .toEqual({ kind: 'info', text: 'Subagents run on the model Jev picks for each task.' });
-      delete process.env.JEV_API;
-      expect(runCommand('model', ['subagent', 'haiku'], session))
-        .toEqual({ kind: 'success', text: 'Subagents run on claude-haiku-4-5.' });
-      expect(session.getSubagentModel()).toBe('claude-haiku-4-5');
-      expect(session.getModel()).toBe('gpt-5.6-luna');
-      expect(runCommand('model', ['subagent'], session))
-        .toEqual({ kind: 'info', text: 'Subagents run on claude-haiku-4-5.' });
-      expect(runCommand('model', ['subagent', 'default'], session))
-        .toEqual({ kind: 'success', text: 'Subagents run on each participant\'s own model.' });
-      expect(session.getSubagentModel()).toBeNull();
-      expect(() => runCommand('model', ['subagent', 'nope'], session)).toThrow(/unknown model/i);
-      expect(() => runCommand('model', ['subagent', 'haiku', 'extra'], session)).toThrow('Usage: /model subagent');
-    } finally {
-      if (previousKey === undefined) delete process.env.JEV_API;
-      else process.env.JEV_API = previousKey;
-      if (previousDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
-      else process.env.SIRUS_DATA_DIR = previousDirectory;
-      rmSync(directory, { recursive: true, force: true });
-    }
+    const session = new Session();
+    expect(runCommand('model', ['subagent'], session))
+      .toEqual({ kind: 'info', text: 'Subagents run on the caller’s choice, agent definition, or participant’s own model.' });
+    expect(runCommand('model', ['subagent', 'haiku'], session))
+      .toEqual({ kind: 'success', text: 'Subagents run on claude-haiku-4-5.' });
+    expect(session.getSubagentModel()).toBe('claude-haiku-4-5');
+    expect(session.getModel()).toBe('gpt-5.6-luna');
+    expect(runCommand('model', ['subagent'], session))
+      .toEqual({ kind: 'info', text: 'Subagents run on claude-haiku-4-5.' });
+    expect(runCommand('model', ['subagent', 'default'], session))
+      .toEqual({ kind: 'success', text: 'Subagents run on the caller’s choice, agent definition, or participant’s own model.' });
+    expect(session.getSubagentModel()).toBeNull();
+    expect(() => runCommand('model', ['subagent', 'nope'], session)).toThrow(/unknown model/i);
+    expect(() => runCommand('model', ['subagent', 'haiku', 'extra'], session)).toThrow('Usage: /model subagent');
   });
 });
 
@@ -636,7 +686,7 @@ describe('/agents', () => {
     expect(items(['sub-live'], session).map(item => item.command))
       .toEqual(['/agents show sub-live', '/agents message sub-live', '/agents cancel sub-live']);
     expect(items(['sub-done'], session).map(item => item.command))
-      .toEqual(['/agents show sub-done', '/agents dismiss sub-done']);
+      .toEqual(['/agents show sub-done', '/agents message sub-done', '/agents dismiss sub-done']);
     // The message action asks for the text in the input bar, in the open.
     const message = items(['sub-live'], session).find(item => item.key === 'message')!;
     expect(message.input?.prompt).toMatch(/sub-live/);
@@ -689,11 +739,11 @@ describe('/agents', () => {
       .toThrow('Usage: /agents message sub-live <message>');
   });
 
-  test('refuses to steer a worker that has stopped', () => {
+  test('resumes a worker that has stopped', async () => {
     const { session, asked } = workerSession([worker({ id: 'sub-done', status: 'failed' })]);
-    expect(() => runCommand('agents', ['message', 'sub-done', 'carry on'], session))
-      .toThrow('sub-done is failed; only a working worker can be messaged.');
-    expect(asked).toEqual([]);
+    expect(await runCommand('agents', ['message', 'sub-done', 'carry on'], session))
+      .toEqual({ kind: 'success', text: 'Sent to sub-done.' });
+    expect(asked).toEqual(['message sub-done: carry on']);
   });
 
   test('cancels a working worker and leaves a finished one alone', async () => {
@@ -721,71 +771,113 @@ describe('/agents', () => {
     expect(asked).toEqual(['dismiss sub-done']);
   });
 
+  test('names a worker by the name its owner gave it, with the id secondary', async () => {
+    const { session, asked } = workerSession([
+      worker({ id: 'sub-1a2b3c4d', name: 'greet-jsdoc', description: 'Add JSDoc to greet' }),
+      worker({ id: 'sub-done', name: 'loader', status: 'done' }),
+    ]);
+    expect(items([], session).map(item => [item.label, item.description, item.command])).toEqual([
+      ['greet-jsdoc · gpt-5.6-terra · working 2m10s', 'Add JSDoc to greet · sub-1a2b3c4d', '/agents sub-1a2b3c4d'],
+      ['loader · gpt-5.6-terra · done 2m10s', 'Rewrite the loader · sub-done', '/agents sub-done'],
+    ]);
+    expect(commandMenu('agents', ['greet-jsdoc'], session)?.[0]).toMatchObject({ label: 'greet-jsdoc (sub-1a2b3c4d) · working' });
+    const shown = (runCommand('agents', ['show', 'greet-jsdoc'], session) as Feedback).text;
+    expect(shown).toStartWith('greet-jsdoc (sub-1a2b3c4d) · working · 2m10s');
+    expect((runCommand('agents', [], session) as Feedback).text)
+      .toContain('greet-jsdoc (sub-1a2b3c4d) · gpt-5.6-terra · working 2m10s · Add JSDoc to greet');
+    expect(await runCommand('agents', ['message', 'greet-jsdoc', 'also the tests'], session))
+      .toEqual({ kind: 'success', text: 'Sent to greet-jsdoc.' });
+    expect(await runCommand('agents', ['cancel', 'sub-1a2b3c4d'], session))
+      .toEqual({ kind: 'success', text: 'Cancelled greet-jsdoc.' });
+    expect(runCommand('agents', ['dismiss', 'loader'], session))
+      .toEqual({ kind: 'success', text: 'Dismissed loader.' });
+    expect(asked).toEqual(['message sub-1a2b3c4d: also the tests', 'cancel sub-1a2b3c4d', 'dismiss sub-done']);
+  });
+
   test('is offered in the command menu and in /help', () => {
     expect(matchCommands('/ag').map(command => command.name)).toEqual(['agents']);
-    expect(matchCommands('/agents')[0].args).toBe('[show|message|cancel|dismiss] [id]');
+    expect(matchCommands('/agents')[0].args).toBe('[show|message|cancel|dismiss] [name]');
     expect((runCommand('help', []) as Feedback).text)
-      .toContain('/agents [show|message|cancel|dismiss] [id]');
+      .toContain('/agents [show|message|cancel|dismiss] [name]');
   });
 });
 
-describe('jev command', () => {
-  let directory: string;
-  let previousDirectory: string | undefined;
-  let previousKey: string | undefined;
+test('removed routing command is absent from help and suggestions', () => {
+  expect(matchCommands('/jev')).toEqual([]);
+  expect((runCommand('help', []) as Feedback).text).not.toContain('/jev');
+});
 
-  beforeEach(() => {
-    directory = mkdtempSync(join(tmpdir(), 'sirus-jev-'));
-    previousDirectory = process.env.SIRUS_DATA_DIR;
-    previousKey = process.env.JEV_API;
-    process.env.SIRUS_DATA_DIR = directory;
-    delete process.env.JEV_API;
+
+test('permission cycling never enables bypass, which remains an explicit menu choice', () => {
+  expect(nextPermissionMode('ask')).toBe('auto');
+  expect(nextPermissionMode('auto')).toBe('ask');
+  expect(nextPermissionMode('bypass')).toBe('ask');
+  expect(menuItems('permissions', []).some(item => item.command === '/permissions bypass')).toBe(true);
+});
+
+test('/quit calls the app exit capability and rejects arguments', () => {
+  let exited = false;
+  executeCommand('quit', [], { session: new Session(), notify: () => {},
+    signal: new AbortController().signal, exit: () => { exited = true; } });
+  expect(exited).toBe(true);
+  expect(() => runCommand('quit', ['extra'])).toThrow('Usage: /quit');
+});
+
+describe('background tasks', () => {
+  test('merges AIR task progress and terminal metadata without reopening a finished task', () => {
+    const spawned = backgroundTaskFrom({
+      sessionUpdate: 'async_task_spawned', asyncTaskId: 'shell-1', name: 'sleep 20',
+      canStop: true, toolCallId: 'tool-1',
+    })!;
+    const progress = backgroundTaskFrom({
+      sessionUpdate: 'async_task_progress', asyncTaskId: 'shell-1', outputFilePath: '/tmp/output',
+    }, spawned)!;
+    expect(progress).toMatchObject({ name: 'sleep 20', toolCallId: 'tool-1', state: 'running', canStop: true });
+    const finished = backgroundTaskFrom({
+      sessionUpdate: 'async_task_state_update', asyncTaskId: 'shell-1', state: 'completed', summary: 'Done',
+    }, progress)!;
+    expect(finished).toMatchObject({ state: 'completed', canStop: false, outputFilePath: '/tmp/output', summary: 'Done' });
+    expect(backgroundTaskFrom({
+      sessionUpdate: 'async_task_progress', asyncTaskId: 'shell-1', outputFilePath: '/tmp/final',
+    }, finished)).toMatchObject({ state: 'completed', canStop: false, outputFilePath: '/tmp/final' });
+    expect(backgroundTaskFrom({ sessionUpdate: 'agent_message_chunk' })).toBeNull();
   });
 
-  afterEach(() => {
-    if (previousDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
-    else process.env.SIRUS_DATA_DIR = previousDirectory;
-    if (previousKey === undefined) delete process.env.JEV_API;
-    else process.env.JEV_API = previousKey;
-    rmSync(directory, { recursive: true, force: true });
-  });
-
-  test('sets, shows and removes the key, settling the one-time request', () => {
-    expect(shouldRequestJevKey()).toBe(true);
-    expect(runCommand('jev', [])).toEqual({ kind: 'info', text: expect.stringMatching(/Jev is off/) });
-    const menu = commandMenu('jev', [], new Session())!;
-    expect(menu[0]).toMatchObject({ type: 'heading', label: expect.stringMatching(/Jev is off/) });
-    expect(menu.filter(item => item.type === 'item').map(item => item.command)).toEqual(['/jev key']);
-    expect(menu.find(item => item.type === 'item' && item.secret)).toMatchObject({ secret: { prompt: 'TypeSafe AI API key' } });
-
-    expect(runCommand('jev', ['key', 'ts-live-key-abcdef'])).toEqual({
-      kind: 'success',
-      text: expect.stringMatching(/Saved TypeSafe AI key .*cdef/),
-    });
-    expect(openSettings().get('jevApiKey')).toBe('ts-live-key-abcdef');
-    expect(shouldRequestJevKey()).toBe(false);
-    expect(runCommand('jev', [])).toEqual({ kind: 'info', text: expect.stringMatching(/Jev is on, with the key/) });
-    expect(commandMenu('jev', [], new Session())!.filter(item => item.type === 'item').map(item => item.command))
-      .toEqual(['/jev key', '/jev off']);
-
-    expect(runCommand('jev', ['off'])).toEqual({ kind: 'success', text: expect.stringMatching(/Jev is off/) });
-    expect(openSettings().get('jevApiKey')).toBeNull();
-    // Declined or removed, the request is not repeated on the next launch.
-    expect(shouldRequestJevKey()).toBe(false);
-    expect(() => runCommand('jev', ['nonsense'])).toThrow('Usage: /jev [key <key>|off]');
-  });
-
-  test('a key in the environment wins and cannot be removed here', () => {
-    process.env.JEV_API = 'ts-env-key-123456';
-    expect(shouldRequestJevKey()).toBe(false);
-    expect(runCommand('jev', [])).toEqual({ kind: 'info', text: expect.stringMatching(/JEV_API in the environment/) });
-    expect(commandMenu('jev', [], new Session())!.filter(item => item.type === 'item').map(item => item.command))
-      .toEqual(['/jev key']);
-    expect(() => runCommand('jev', ['off'])).toThrow(/environment/);
-  });
-
-  test('help lists /jev', () => {
-    const result = runCommand('help', []) as Feedback;
-    expect(result.text).toContain('/jev');
+  test('/tasks separates participant task ids and routes stop to the chosen runtime', async () => {
+    const models = ['tasks-owner-test', 'tasks-reviewer-test'];
+    const task: BackgroundTask = { id: 'shell-1', name: 'sleep 20', state: 'running', canStop: true };
+    const bindings = models.map(model => bindScriptedRuntime(model, (_input, emit) => {
+      emit({ type: 'async_task', task });
+      emit({ type: 'text', text: 'Started.' });
+    }));
+    const session = new Session({ id: 'tasks-routing', name: 'Tasks', model: models[0] });
+    try {
+      session.addParticipant('reviewer', models[1]);
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: '@sirus @reviewer start' }] });
+      expect(session.getBackgroundTasks().map(task => task.participant)).toEqual(['sirus', 'reviewer']);
+      const menu = commandMenu('tasks', [], session)!;
+      expect(menu).toHaveLength(2);
+      expect(menu.map(entry => entry.type === 'item' ? entry.command : '')).toEqual([
+        '/tasks @sirus shell-1', '/tasks @reviewer shell-1',
+      ]);
+      expect(commandMenu('tasks', ['@reviewer', 'shell-1'], session)).toMatchObject([
+        { command: '/tasks stop @reviewer shell-1' },
+      ]);
+      expect(await runCommand('tasks', ['stop', '@reviewer', 'shell-1'], session)).toMatchObject({ kind: 'success' });
+      expect(bindings[0].runtimes[0].stoppedTasks).toEqual([]);
+      expect(bindings[1].runtimes[0].stoppedTasks).toEqual(['shell-1']);
+      bindings[0].starts[0].onUpdate({ type: 'async_task', task: { ...task, state: 'completed', canStop: false } });
+      expect(session.getBackgroundTasks().find(task => task.participant === 'sirus')?.state).toBe('completed');
+      expect(session.getNotice()?.notice.title).toContain('completed');
+      bindings[0].starts[0].onUpdate({ type: 'async_task', task: { ...task, state: 'completed', canStop: false, outputFilePath: '/tmp/final' } });
+      expect(session.getMessages().flatMap(entry => entry.content).filter(block =>
+        block.type === 'notice' && block.title.includes('shell-1 completed'))).toHaveLength(1);
+      expect(JSON.stringify(session.toSnapshot())).toContain('shell-1 completed');
+      expect(await runCommand('tasks', ['stop', '@sirus', 'shell-1'], session)).toMatchObject({ kind: 'info' });
+      expect(bindings[0].runtimes[0].stoppedTasks).toEqual([]);
+    } finally {
+      await session.dispose();
+      for (const model of models) unbindRuntime(model);
+    }
   });
 });

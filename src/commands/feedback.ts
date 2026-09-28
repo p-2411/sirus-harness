@@ -1,4 +1,4 @@
-export type FeedbackKind = 'info' | 'success' | 'error';
+export type FeedbackKind = 'info' | 'success' | 'warning' | 'error';
 
 export interface Feedback {
   kind: FeedbackKind;

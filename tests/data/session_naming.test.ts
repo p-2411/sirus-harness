@@ -70,7 +70,7 @@ describe('background session naming', () => {
 
   test('uses only the first accepted prompt, even when another arrives before the name', async () => {
     const session = createSession();
-    await expect(session.sendMessage(prompt('@missing help'))).rejects.toThrow();
+    await expect(session.sendMessage(prompt(`@subagent ${model} help`))).rejects.toThrow();
     expect(generate).not.toHaveBeenCalled();
     expect(session.toSnapshot().autoNamePending).toBe(true);
     await session.sendMessage(prompt('First accepted prompt'));
@@ -133,18 +133,20 @@ describe('background session naming', () => {
     expect(generate).toHaveBeenCalledTimes(1);
   });
 
-  test('rewinding away the first prompt discards an in-flight name', async () => {
+  test('rewinding preserves the original session and its in-flight name', async () => {
     const session = new Session({
       name: 'Session 9', directory, model, autoNamePending: true,
       checkpoints: [{ id: 'a'.repeat(40), seq: 0, summary: 'Old task', createdAt: Date.now() }],
     });
     await session.sendMessage(prompt('Old task'));
-    await session.rewind('a'.repeat(40), { files: false, chat: true });
-    expect(generate.mock.calls[0]?.[3]?.aborted).toBe(true);
+    const result = await session.rewind('a'.repeat(40), { files: false, chat: true });
+    expect(result.fork?.messages).toEqual([]);
+    expect(result.fork?.inputContent).toBe('Old task');
+    expect(generate.mock.calls[0]?.[3]?.aborted).toBe(false);
     finishNaming('Old title');
     await flush();
-    expect(session.isEmpty()).toBe(true);
-    expect(session.getName()).toBe('Session 9');
+    expect(session.isEmpty()).toBe(false);
+    expect(session.getName()).toBe('Old title');
   });
 
   test('restoring history does not name it from a later prompt', async () => {

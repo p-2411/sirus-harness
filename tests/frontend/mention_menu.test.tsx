@@ -13,22 +13,22 @@ const participants: Participant[] = [
 ];
 
 describe('unified mention menu', () => {
-  test('places every name below files with the closest matches nearest the bottom', () => {
+  test('places matching files nearest the input before participant creation', () => {
     const items = mentionMenuItems('Ask @Re', participants, ['README.md', 'src/Reviewer.ts']);
-    expect(items.map(item => item.kind)).toEqual(['file', 'file', 'create', 'participant', 'participant']);
+    expect(items.map(item => item.kind)).toEqual(['create', 'participant', 'participant', 'file', 'file']);
     expect(items.map(item => item.label)).toEqual([
-      '@src/Reviewer.ts', '@README.md', '@Re <model> <prompt>', '@Researcher', '@Reviewer',
+      '@Re <model> <prompt>', '@Researcher', '@Reviewer', '@src/Reviewer.ts', '@README.md',
     ]);
     expect(items.map(item => item.replacement)).toEqual([
-      '@src/Reviewer.ts ', '@README.md ', '@Re ', '@Researcher ', '@Reviewer ',
+      '@Re ', '@Researcher ', '@Reviewer ', '@src/Reviewer.ts ', '@README.md ',
     ]);
   });
 
-  test('keeps colliding files above an exact matching agent', () => {
+  test('prioritizes colliding files while keeping an exact matching agent available', () => {
     const items = mentionMenuItems('@Reviewer', participants, ['Reviewer', 'Reviewer.ts']);
-    expect(items.map(item => item.kind)).toEqual(['file', 'file', 'participant']);
-    expect(items.map(item => item.label)).toEqual(['@Reviewer.ts', '@"Reviewer"', '@Reviewer']);
-    expect(items.map(item => item.replacement)).toEqual(['@Reviewer.ts ', '@"Reviewer" ', '@Reviewer ']);
+    expect(items.map(item => item.kind)).toEqual(['participant', 'file', 'file']);
+    expect(items.map(item => item.label)).toEqual(['@Reviewer', '@Reviewer.ts', '@"Reviewer"']);
+    expect(items.map(item => item.replacement)).toEqual(['@Reviewer ', '@Reviewer.ts ', '@"Reviewer" ']);
   });
 
   test('quotes spaced paths and preserves explicit parent and absolute references', () => {
@@ -68,20 +68,20 @@ describe('unified mention menu', () => {
   test('aligns agent and file descriptions with identical fixed selection slots', () => {
     const items = mentionMenuItems('@Re', participants, ['README.md']);
     const output = stripAnsi(renderToString(
-      <MentionMenu items={items} participants={participants} selected={0} offset={0} />,
+      <MentionMenu items={items} participants={participants} selected={3} offset={0} />,
       { columns: 80 },
     ));
     const lines = output.split('\n');
     expect(lines).toHaveLength(4);
-    expect(lines[3]).toContain('@Reviewer');
-    expect(lines[0]).toContain('› @README.md');
-    const labelColumn = lines[3]!.indexOf('@Reviewer');
-    expect(lines[2]!.indexOf('@Researcher')).toBe(labelColumn);
-    expect(lines[0]!.indexOf('@README.md')).toBe(labelColumn);
-    const descriptionColumn = lines[3]!.indexOf('message participant');
-    expect(lines[2]!.indexOf('message participant')).toBe(descriptionColumn);
-    expect(lines[0]!.indexOf('attach file')).toBe(descriptionColumn);
-    expect(lines[1]!.indexOf('create participant')).toBe(descriptionColumn);
+    expect(lines[2]).toContain('@Reviewer');
+    expect(lines[3]).toContain('› @README.md');
+    const labelColumn = lines[2]!.indexOf('@Reviewer');
+    expect(lines[1]!.indexOf('@Researcher')).toBe(labelColumn);
+    expect(lines[3]!.indexOf('@README.md')).toBe(labelColumn);
+    const descriptionColumn = lines[2]!.indexOf('message participant');
+    expect(lines[1]!.indexOf('message participant')).toBe(descriptionColumn);
+    expect(lines[3]!.indexOf('attach file')).toBe(descriptionColumn);
+    expect(lines[0]!.indexOf('create participant')).toBe(descriptionColumn);
     expect(output).not.toContain('↑↓ choose · tab / enter select · esc close');
   });
 
@@ -89,7 +89,7 @@ describe('unified mention menu', () => {
     const files = Array.from({ length: 8 }, (_, index) => `${index}/${'long-directory/'.repeat(8)}file.ts`);
     const items = mentionMenuItems('@', participants, files);
     const output = stripAnsi(renderToString(
-      <MentionMenu items={items} participants={participants} selected={4} offset={3} />,
+      <MentionMenu items={items} participants={participants} selected={8} offset={7} />,
       { columns: 44 },
     ));
     const lines = output.split('\n');

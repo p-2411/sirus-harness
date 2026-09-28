@@ -1,61 +1,52 @@
-import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
-import { Box, Text, useInput, usePaste } from 'ink';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { Box, Text, useApp, useBoxMetrics, useInput, usePaste, useStdout, type DOMElement } from 'ink';
 import { theme } from '../styles/theme';
 import { CommandMenu, useCommandMenu } from './CommandMenu';
 import { isSirusCommand } from '../../commands/registry';
 import { MentionMenu, useFileSuggestions, useMentionMenu } from './MentionMenu';
-import { DraftText, TrailingImages } from './DraftText';
+import { DraftRow, TrailingImages } from './DraftText';
+import { describeImage, attachImageFile } from '../../images';
+import { readPromptHistory, appendPromptHistory } from '../../persistence/promptHistory';
+import { editInExternalEditor } from './externalEditor';
+import { KEY_BINDINGS } from '../../commands/help/commands';
 import { InputFeedback, QueuedRow } from './InputRows';
 import { StatusRow, type StatusRowProps } from './StatusRow';
 import { stripWorkers, WorkerStrip, type WorkerSelection } from './WorkerStrip';
-import { PromptBar, type CommandPrompt } from './PromptBar';
-import { ApprovalPrompt } from './ApprovalPrompt';
-import { QuestionCard } from './QuestionCard';
+import { PromptBar, type PromptMode } from './PromptBar';
 import {
   applyInputEdit,
+  createInputHistory,
+  draftCursorRow,
+  draftRows,
+  inputEditForKey,
   isForeignInput,
+  isKeyboardProtocolReport,
   isTypedText,
+  moveDraftRow,
   normalizeNewlines,
-  onFirstLine,
-  onLastLine,
   type InputEdit,
   type InputState,
 } from './editor';
-import { composeContent, removedPlaceholders, useDraftImages } from './draft';
+import { composeContent, removedPlaceholders, stripPlaceholders, useDraftImages } from './draft';
 import { MentionText, participantColorMap } from '../MentionText';
-import { getSelectionSnapshot, subscribeSelection } from '../interaction/selection';
+import { isMouseInput } from '../interaction/mouse';
+import { isFocusInput } from '../terminal/window-focus';
+import { clearSelection, getSelectionSnapshot, hasSelection, subscribeSelection } from '../interaction/selection';
 import type { Feedback } from '../../commands/feedback';
 import type { Participant } from '../../agent_runtime/agent';
 import type { QueuedMessage } from '../../agent_runtime/session/messageQueue';
 import type { ImageBlock, MessageBlock, PermissionMode } from '../../agent_runtime/types';
 import type { SubagentRun } from '../../agent_runtime/tools/subagents';
-import type { ApprovalDecision, ApprovalRequest } from '../../agent_runtime/permissions/approvals';
-import type { QuestionAnswer, QuestionRequest } from '../../agent_runtime/permissions/questions';
+import type { ContextUsage } from '../../agent_runtime/usage';
+import { errorMessage } from '../../abort';
 import type { NativeCommand } from '../../agent_runtime/runtime/commands';
 
-// What the input bar is collecting: a message, the answer to an agent's
-// approval request or question, or what a command's prompt asks for. Each of
-// the others takes the bar over for a moment.
-export type InputMode =
-  | { type: 'text' }
-  | {
-    type: 'approval';
-    request: ApprovalRequest;
-    // further prompts queued behind this one for the same session
-    waiting: number;
-    onDecide: (decision: ApprovalDecision) => void;
-  }
-  | {
-    type: 'question';
-    request: QuestionRequest;
-    // further questions queued behind this one for the same session
-    waiting: number;
-    onAnswer: (answer: QuestionAnswer) => void;
-  }
-  | CommandPrompt;
+// What the input bar is collecting: a message, or one of the prompts that
+// take the bar over for a moment.
+export type InputMode = { type: 'text' } | PromptMode;
 
 interface InputBarProps {
-  send: (input: string, attachments?: readonly ImageBlock[], content?: MessageBlock[]) => void;
+  send: (input: string, attachments?: readonly ImageBlock[], content?: MessageBlock[]) => unknown;
   inputContent: string;
   setInputContent: (inputContent: string) => void;
   disabled: boolean;
@@ -65,38 +56,48 @@ interface InputBarProps {
   workers?: readonly SubagentRun[];
   directory?: string;
   mode?: InputMode;
-  // what the row under the input box says about the session: its permission
-  // mode, its model and how full that model's context is
-  status?: StatusRowProps;
+  permissionMode?: PermissionMode;
+  // what the vendor made of that mode, when it could not honour it
+  modeNotice?: string | null;
   // shift+tab in text mode
   onCyclePermissionMode?: () => void;
-  // Told whether the bar has something open that escape closes: the worker
-  // strip's focus, a command or mention menu, a queued message being edited.
-  // The bar closes it itself, and the chat cancels the turn on escape only
-  // when there is nothing to close.
-  onDismissibleChange?: (dismissible: boolean) => void;
+  // Told when the worker strip takes the keyboard and when it gives it back,
+  // so the chat's own Escape leaves a focused strip alone.
+  onWorkerFocusChange?: (focused: boolean) => void;
+  onOverlayChange?: (open: boolean) => void;
   // images waiting to go with the next message, oldest first
   attachments?: readonly ImageBlock[];
   // ctrl+v in text mode
   onPasteImage?: () => void;
+  onAttachImage?: (image: ImageBlock) => void;
   // backspace over an image in the draft drops it
   onRemoveAttachment?: (image: ImageBlock) => void;
+  // the session's current model, shown under the input bar
+  model?: string;
+  thinkingLevel?: string;
   // the session's earlier prompts, oldest first, for ↑/↓ recall
   history?: readonly string[];
   // messages waiting to go out once the agents are free, oldest first
   queuedMessages?: readonly QueuedMessage[];
-  // where a message sent while the agents are working goes; without it the
-  // draft simply stays put
-  onQueue?: (text: string) => void;
-  // Edits a waiting message in place; empty text removes it.
+  // Tab queues the complete draft for after the running turn.
+  onQueue?: (text: string, images?: readonly ImageBlock[], content?: MessageBlock[]) => void;
+  onBeginQueuedEdit?: (id: string) => void;
+  onCancelQueuedEdit?: (id: string) => void;
+  onEscape?: () => void;
+  onRewind?: () => void;
+  onInterrupt?: () => boolean;
+  onExit?: () => void;
+  onExitHint?: () => void;
+  // Enter commits the private queue draft; empty text removes a text-only item.
   onUpdateQueued?: (id: string, text: string) => void;
+  contextUsage?: ContextUsage | null;
   // The vendor's own commands `/name` reaches, read while a slash command is
   // being typed.
   nativeCommands?: () => readonly NativeCommand[];
+  tasksVisible?: boolean;
 }
 
 const TEXT_MODE: InputMode = { type: 'text' };
-const NO_STATUS: StatusRowProps = {};
 const NO_WORKERS: readonly SubagentRun[] = [];
 const NO_ATTACHMENTS: readonly ImageBlock[] = [];
 const NO_HISTORY: readonly string[] = [];
@@ -105,31 +106,82 @@ const NO_NATIVE_COMMANDS: readonly NativeCommand[] = [];
 
 export function InputBar({
   send,
-  inputContent,
-  setInputContent,
+  inputContent: externalInputContent,
+  setInputContent: setExternalInputContent,
   disabled,
   feedback,
   participants,
   workers = NO_WORKERS,
   directory,
   mode = TEXT_MODE,
-  status = NO_STATUS,
+  permissionMode,
+  modeNotice,
   onCyclePermissionMode,
-  onDismissibleChange,
+  onWorkerFocusChange,
+  onOverlayChange,
   attachments = NO_ATTACHMENTS,
   onPasteImage,
+  onAttachImage,
   onRemoveAttachment,
+  model,
+  thinkingLevel,
   history = NO_HISTORY,
   queuedMessages = NO_QUEUE,
   onQueue,
+  onBeginQueuedEdit,
+  onCancelQueuedEdit,
+  onEscape,
+  onRewind,
+  onInterrupt,
+  onExit,
+  onExitHint,
   onUpdateQueued,
+  contextUsage,
   nativeCommands,
+  tasksVisible,
 }: InputBarProps) {
+  const pastes = useRef(new Map<string, { text: string; label: string }>());
+  const pasteNumber = useRef(0);
+  const expandPastes = (text: string) => [...text].map(character => pastes.current.get(character)?.text ?? character).join('');
+  const [inputContent, setLocalInputContent] = useState(externalInputContent);
+  const setInputContent = (text: string) => {
+    setLocalInputContent(text);
+    // Session snapshots always keep the full text, including while a paste is folded.
+    setExternalInputContent(expandPastes(text));
+  };
+  useEffect(() => {
+    if (externalInputContent !== expandPastes(inputContent)) setLocalInputContent(externalInputContent);
+  }, [externalInputContent]);
+  const [savedHistory, setSavedHistory] = useState(() => directory ? readPromptHistory(directory) : []);
+  useEffect(() => { setSavedHistory(directory ? readPromptHistory(directory) : []); }, [directory]);
+  const [search, setSearch] = useState<{ query: string; index: number; draft: InputState } | null>(null);
+  const [shortcuts, setShortcuts] = useState<number | null>(null);
+  const [localFeedback, setLocalFeedback] = useState<Feedback | null>(null);
+  const [editingExternally, setEditingExternally] = useState(false);
+  useEffect(() => { onOverlayChange?.(search !== null || shortcuts !== null || editingExternally); }, [search !== null, shortcuts !== null, editingExternally]);
+  useEffect(() => () => onOverlayChange?.(false), []);
+  const editorPrefix = useRef(false);
+  const { suspendTerminal } = useApp();
+  const { stdout } = useStdout();
+  const inputBox = useRef<DOMElement>(null);
+  const { width: boxWidth } = useBoxMetrics(inputBox);
   const participantColors = participantColorMap(participants);
+  const status: StatusRowProps = { permissionMode, modeNotice, model, thinkingLevel, contextUsage, tasksVisible };
 
   // ── The draft, and the waiting message standing in front of it ──────────
   // Identity survives edits and earlier messages draining from the queue.
   const [queueSelection, setQueueSelection] = useState<string | null>(null);
+  const [queueText, setQueueText] = useState('');
+  const editHistory = useRef(createInputHistory());
+  const clearedPrompts = useRef<{ text: string; after: number }[]>([]);
+  const lastEscape = useRef(0);
+  const lastInterrupt = useRef(0);
+  const editingRef = useRef<string | null>(null);
+  const cancelEditRef = useRef(onCancelQueuedEdit);
+  cancelEditRef.current = onCancelQueuedEdit;
+  useEffect(() => () => {
+    if (editingRef.current) cancelEditRef.current?.(editingRef.current);
+  }, []);
   const selectedQueued = queuedMessages.find(message => message.id === queueSelection);
   const selectedQueueIndex = selectedQueued ? queuedMessages.indexOf(selectedQueued) : null;
   const draftCursor = useRef(inputContent.length);
@@ -143,28 +195,32 @@ export function InputBar({
     }
     previousInputContent.current = inputContent;
   }, [inputContent, cursor, queueSelection]);
-  const input = selectedQueued?.text ?? inputContent;
+  const input = selectedQueued ? queueText : inputContent;
   const editor: InputState = { text: input, cursor: Math.min(cursor, input.length) };
-  function leaveQueue(): void {
+  function leaveQueue(commit = false): void {
+    if (queueSelection) {
+      if (commit) onUpdateQueued?.(queueSelection, expandPastes(queueText));
+      else onCancelQueuedEdit?.(queueSelection);
+    }
+    editingRef.current = null;
     setQueueSelection(null);
+    editHistory.current.undo = [];
     setCursor(Math.min(draftCursor.current, inputContent.length));
   }
   function selectQueued(message: QueuedMessage): void {
     if (!selectedQueued) draftCursor.current = editor.cursor;
+    else if (queueSelection) onCancelQueuedEdit?.(queueSelection);
+    onBeginQueuedEdit?.(message.id);
+    editingRef.current = message.id;
     setQueueSelection(message.id);
+    setQueueText(message.text);
+    editHistory.current.undo = [];
     setRecall(null);
     setCursor(message.text.length);
   }
   function setEditor(next: InputState): void {
-    if (selectedQueued) {
-      onUpdateQueued?.(selectedQueued.id, next.text);
-      if (next.text.length === 0) {
-        leaveQueue();
-        return;
-      }
-    } else {
-      setInputContent(next.text);
-    }
+    if (selectedQueued) setQueueText(next.text);
+    else setInputContent(next.text);
     setCursor(next.cursor);
   }
   useEffect(() => {
@@ -175,7 +231,7 @@ export function InputBar({
   }, [mode]);
 
   // ── Attached images ────────────────────────────────────────────────────
-  const { imageFor, placedImages, trailingImages } = useDraftImages({
+  const { imageFor, isKnownPlaceholder, placedImages, trailingImages } = useDraftImages({
     attachments,
     text: input,
     // The images belong to the draft even while a queued message is showing.
@@ -187,7 +243,7 @@ export function InputBar({
     },
   });
   const draftMessage = () => {
-    const content = composeContent(input.trim(), imageFor, trailingImages);
+    const content = composeContent(expandPastes(input).trim(), imageFor, trailingImages);
     const text = content.flatMap(block => block.type === 'text' ? [block.text] : []).join('');
     return { text, images: [...placedImages, ...trailingImages], content };
   };
@@ -221,24 +277,30 @@ export function InputBar({
   // ── Earlier prompts ────────────────────────────────────────────────────
   // Which one ↑ has brought back, and the draft it replaced so ↓ past the
   // newest one restores it. Editing leaves the recall.
+  const recallHistory = [...savedHistory];
+  for (const prompt of history) if (!recallHistory.includes(prompt)) recallHistory.push(prompt);
+  for (const [offset, prompt] of clearedPrompts.current.entries()) {
+    recallHistory.splice(Math.min(prompt.after + offset, recallHistory.length), 0, prompt.text);
+  }
   const [recall, setRecall] = useState<{ index: number; draft: InputState } | null>(null);
   const recallPrevious = () => {
-    if (history.length === 0) return;
-    const index = recall ? recall.index - 1 : history.length - 1;
+    editHistory.current.undo = [];
+    if (recallHistory.length === 0) return;
+    const index = recall ? recall.index - 1 : recallHistory.length - 1;
     if (index < 0) return;
     setRecall({ index, draft: recall?.draft ?? editor });
-    setEditor({ text: history[index], cursor: history[index].length });
+    setEditor({ text: recallHistory[index], cursor: recallHistory[index].length });
   };
   const recallNext = () => {
     if (!recall) return;
     const index = recall.index + 1;
-    if (index >= history.length) {
+    if (index >= recallHistory.length) {
       setEditor(recall.draft);
       setRecall(null);
       return;
     }
     setRecall({ ...recall, index });
-    setEditor({ text: history[index], cursor: history[index].length });
+    setEditor({ text: recallHistory[index], cursor: recallHistory[index].length });
   };
 
   // ── The worker strip ───────────────────────────────────────────────────
@@ -250,6 +312,9 @@ export function InputBar({
   useEffect(() => {
     if (mode.type !== 'text') setWorkerSelection(null);
   }, [mode]);
+  useEffect(() => {
+    onWorkerFocusChange?.(workerSelection !== null);
+  }, [workerSelection !== null]);
   const focusWorkers = (): boolean => {
     const runs = stripWorkers(workers);
     if (runs.length === 0) return false;
@@ -265,18 +330,11 @@ export function InputBar({
     });
   };
 
-  // What escape closes here, which the chat has to know before it treats the
-  // key as the turn's cancel. Reported after each render, so the chat reads
-  // what was on screen when the key was pressed.
-  const dismissible = workerSelection !== null || commands.matches.length > 0
-    || mentionActive || selectedQueued !== undefined;
-  useEffect(() => {
-    onDismissibleChange?.(dismissible);
-  }, [dismissible]);
-
   const edit = (change: InputEdit) => {
     setRecall(null);
-    const next = applyInputEdit(editor, change);
+    setLocalFeedback(null);
+    const next = stripPlaceholders(applyInputEdit(editor, change, editHistory.current),
+      placeholder => !isKnownPlaceholder(placeholder) || imageFor(placeholder) !== undefined);
     for (const placeholder of removedPlaceholders(editor.text, next.text)) {
       const image = imageFor(placeholder);
       if (image) onRemoveAttachment?.(image);
@@ -284,6 +342,33 @@ export function InputBar({
     setEditor(next);
   };
   const insertText = (text: string) => edit({ type: 'insert', text: normalizeNewlines(text) });
+  const rows = draftRows(input, Math.max(1, (boxWidth || stdout.columns || 80) - 6), character => {
+    const image = imageFor(character);
+    return image ? `[${describeImage(image)}]` : pastes.current.get(character)?.label;
+  });
+  const cursorRow = draftCursorRow(rows, editor.cursor);
+  const maxRows = Math.max(2, Math.min(8, Math.floor((stdout.rows || 24) / 3)));
+  const rowOffset = Math.max(0, cursorRow - maxRows + 1);
+  const searchMatches = search ? recallHistory.filter(text => text.toLowerCase().includes(search.query.toLowerCase())).reverse() : [];
+  const searchResult = searchMatches[search?.index ?? 0];
+  const openEditor = async () => {
+    if (editingExternally) return;
+    setEditingExternally(true);
+    try {
+      const text = await editInExternalEditor(expandPastes(input), suspendTerminal);
+      setLocalFeedback(null);
+      for (const placeholder of removedPlaceholders(input, text)) {
+        const image = imageFor(placeholder);
+        if (image) onRemoveAttachment?.(image);
+      }
+      editHistory.current.undo.push(editor);
+      setRecall(null);
+      setEditor({ text, cursor: text.length });
+    } catch (error) {
+      setLocalFeedback({ kind: 'error', text: error instanceof Error ? error.message : 'Could not open the editor.' });
+    } finally { setEditingExternally(false); }
+  };
+
 
   // Drag-selecting text copies it automatically; acknowledge that briefly
   // where the "enter" hint normally sits.
@@ -297,18 +382,93 @@ export function InputBar({
   }, [copiedAt]);
 
   // A paste lands whole, line breaks included, rather than as keystrokes.
-  usePaste(text => {
-    if (mode.type === 'text') insertText(text);
-  });
+  const pasteText = (text: string) => {
+    if (mode.type !== 'text' || editingExternally || shortcuts !== null) return;
+    if (search) { setSearch({ ...search, query: search.query + normalizeNewlines(text), index: 0 }); return; }
+    const normalized = normalizeNewlines(text);
+    // Terminals drop files as quoted or shell-escaped paths.
+    const file = normalized.trim().replace(/^(['"])(.*)\1$/s, '$2').replace(/\\(.)/g, '$1');
+    if (onAttachImage && /\.(png|jpe?g|gif|webp)$/i.test(file)) {
+      try {
+        onAttachImage(attachImageFile(file.startsWith('file://') ? decodeURIComponent(new URL(file).pathname) : file, directory));
+        return;
+      } catch (error) {
+        setLocalFeedback({ kind: 'warning', text: error instanceof Error ? error.message : 'Could not attach image.' });
+      }
+    }
+    if (normalized.length > 1000 || normalized.split('\n').length > 10) {
+      const number = ++pasteNumber.current;
+      const placeholder = String.fromCodePoint(0xF0000 + number);
+      pastes.current.set(placeholder, { text: normalized, label: `[Pasted text #${number} · ${normalized.split('\n').length} lines]` });
+      insertText(placeholder);
+    } else insertText(normalized);
+  };
+  usePaste(pasteText);
 
   useInput((enteredInput, key) => {
-    // The prompt modes read the keyboard themselves.
+    if (isKeyboardProtocolReport(enteredInput)) return;
+    if (key.eventType === 'release') return;
+    if (isMouseInput(enteredInput) || isFocusInput(enteredInput)) return;
+    if (editingExternally) return;
+    if (shortcuts !== null) {
+      const pageSize = Math.max(1, Math.min(12, Math.floor(((stdout.rows || 24) - 12) / 3)));
+      if (key.escape || enteredInput === '?' || (key.ctrl && enteredInput === 'c')) setShortcuts(null);
+      else if (key.downArrow || key.pageDown) setShortcuts(Math.min(KEY_BINDINGS.length - pageSize, shortcuts + (key.pageDown ? pageSize : 1)));
+      else if (key.upArrow || key.pageUp) setShortcuts(Math.max(0, shortcuts - (key.pageUp ? pageSize : 1)));
+      return;
+    }
+    if (search) {
+      if (key.meta && (key.upArrow || key.downArrow)) return;
+      if (key.escape || (key.ctrl && enteredInput === 'c')) { setEditor(search.draft); setSearch(null); }
+      else if (key.return) { if (searchResult !== undefined) setEditor({ text: searchResult, cursor: searchResult.length }); setSearch(null); }
+      else if (key.ctrl && enteredInput === 'r') setSearch({ ...search, index: Math.min(search.index + 1, Math.max(0, searchMatches.length - 1)) });
+      else if (key.ctrl && enteredInput === 's') setSearch({ ...search, index: Math.max(0, search.index - 1) });
+      else if (key.backspace) setSearch({ ...search, query: [...search.query].slice(0, -1).join(''), index: 0 });
+      else if (!key.ctrl && !key.meta && !key.pageUp && !key.pageDown && !key.tab && !key.upArrow && !key.downArrow && !key.leftArrow && !key.rightArrow && enteredInput) setSearch({ ...search, query: search.query + enteredInput, index: 0 });
+      return;
+    }
+    if (key.ctrl && enteredInput === 'c') {
+      if (onInterrupt?.()) {
+        lastInterrupt.current = 0;
+        return;
+      }
+      const now = Date.now();
+      if (!input && now - lastInterrupt.current < 1000) {
+        onExit?.();
+        return;
+      }
+      if (input) {
+        clearedPrompts.current.push({ text: draftMessage().text, after: history.length });
+        if (selectedQueued) leaveQueue();
+        setInputContent('');
+        setCursor(0);
+        setRecall(null);
+        editHistory.current.undo = [];
+      }
+      lastInterrupt.current = now;
+      onExitHint?.();
+      return;
+    }
+    lastInterrupt.current = 0;
+    // The prompt modes read their own Escape and editing keys.
     if (mode.type !== 'text') return;
     if (isForeignInput(enteredInput, key)) return;
 
-    // Most terminals (macOS included) send DEL for the backspace key, which
-    // Ink reports as key.delete rather than key.backspace.
-    const isBackspace = key.backspace || key.delete;
+    if (key.ctrl && enteredInput === 'r') {
+      setSearch({ query: '', index: 0, draft: editor });
+      return;
+    }
+    if (key.ctrl && (enteredInput === 'g' || (editorPrefix.current && enteredInput === 'e'))) {
+      editorPrefix.current = false;
+      void openEditor();
+      return;
+    }
+    editorPrefix.current = key.ctrl && enteredInput === 'x';
+    if (editorPrefix.current) return;
+    if (enteredInput === '?' && !input && !key.ctrl && !key.meta) { setShortcuts(0); return; }
+
+    // Ink distinguishes the raw DEL backspace byte from forward Delete.
+    const isBackspace = key.backspace;
 
     // While the strip has the keyboard it answers first, and keys it has no
     // use for do nothing. Enter opens the run's actions the way typing
@@ -329,15 +489,41 @@ export function InputBar({
         setWorkerSelection(null);
         return;
       }
-      if (!enteredInput || !isTypedText(key)) return;
+      if (!enteredInput || isBackspace || key.ctrl || key.meta || key.tab
+        || key.leftArrow || key.rightArrow
+        || key.pageUp || key.pageDown || key.home || key.end) return;
       setWorkerSelection(null);
     }
 
+    // Escape closes the nearest thing open, a selection first, and cancels
+    // the turn only when nothing is.
     if (key.escape) {
-      setMenusDismissed(true);
-      if (queueSelection !== null) leaveQueue();
+      if (hasSelection()) {
+        clearSelection();
+        lastEscape.current = 0;
+      } else if (commands.matches.length > 0 || mentionActive) {
+        setMenusDismissed(true);
+        lastEscape.current = 0;
+      } else if (queueSelection !== null) {
+        leaveQueue();
+        lastEscape.current = 0;
+      } else {
+        const now = Date.now();
+        if (now - lastEscape.current < 500) {
+          lastEscape.current = 0;
+          if (input) {
+            clearedPrompts.current.push({ text: draftMessage().text, after: history.length });
+            setRecall(null);
+            edit({ type: 'clear' });
+          } else onRewind?.();
+        } else {
+          lastEscape.current = now;
+          onEscape?.();
+        }
+      }
       return;
     }
+    lastEscape.current = 0;
     if (key.tab && key.shift) {
       onCyclePermissionMode?.();
       return;
@@ -380,17 +566,25 @@ export function InputBar({
       }
       // inside a long prompt the arrows move between its lines; past its
       // first or last line they walk the session's earlier prompts
-      if (key.upArrow && !onFirstLine(editor)) {
-        setEditor(applyInputEdit(editor, { type: 'up' }));
+      if (key.upArrow && cursorRow > 0) {
+        setEditor(moveDraftRow(editor, rows, -1));
         return;
       }
-      if (key.downArrow && !onLastLine(editor)) {
-        setEditor(applyInputEdit(editor, { type: 'down' }));
+      if (key.downArrow && cursorRow < rows.length - 1) {
+        setEditor(moveDraftRow(editor, rows, 1));
         return;
       }
-      if (onUpdateQueued && queuedMessages.length > 0 && (selectedQueued || key.upArrow)) {
+      if (onUpdateQueued && queuedMessages.length > 0 && !recall && (selectedQueued || key.upArrow)) {
         if (key.upArrow) {
-          selectQueued(queuedMessages[selectedQueueIndex === null ? queuedMessages.length - 1 : Math.max(0, selectedQueueIndex - 1)]);
+          if (selectedQueueIndex === 0) {
+            leaveQueue();
+            if (recallHistory.length > 0) {
+              const index = recallHistory.length - 1;
+              setRecall({ index, draft: { text: inputContent, cursor: draftCursor.current } });
+              setInputContent(recallHistory[index]);
+              setCursor(recallHistory[index].length);
+            }
+          } else selectQueued(queuedMessages[selectedQueueIndex === null ? queuedMessages.length - 1 : selectedQueueIndex - 1]);
         } else if (selectedQueueIndex === queuedMessages.length - 1) {
           leaveQueue();
         } else if (selectedQueueIndex !== null) {
@@ -405,33 +599,15 @@ export function InputBar({
       else recallNext();
       return;
     }
-    // cmd+backspace: reported with the super modifier under the kitty keyboard
-    // protocol; other terminals map it to ctrl+u, readline's kill-line
-    if ((isBackspace && key.super) || (key.ctrl && enteredInput === 'u')) {
-      edit({ type: 'clear' });
-      return;
-    }
-    // option+backspace: ESC DEL when option acts as meta, ctrl+w otherwise
-    if ((isBackspace && key.meta) || (key.ctrl && enteredInput === 'w')) {
-      edit({ type: 'delete-word-backward' });
-      return;
-    }
-    if (isBackspace) {
-      if (!selectedQueued && input.length === 0 && trailingImages.length > 0) onRemoveAttachment?.(trailingImages[trailingImages.length - 1]);
-      else edit({ type: 'backspace' });
+    const mappedEdit = inputEditForKey(enteredInput, key);
+    if (mappedEdit) {
+      if (mappedEdit.type === 'backspace' && !selectedQueued && input.length === 0 && trailingImages.length > 0) {
+        onRemoveAttachment?.(trailingImages[trailingImages.length - 1]);
+      } else edit(mappedEdit);
       return;
     }
 
-    if (key.leftArrow) {
-      setEditor(applyInputEdit(editor, { type: 'left' }));
-      return;
-    }
-    if (key.rightArrow) {
-      setEditor(applyInputEdit(editor, { type: 'right' }));
-      return;
-    }
-
-    if (key.return) {
+    if (key.return || (key.tab && !key.shift && onQueue)) {
       // shift+enter under the kitty protocol, option+enter elsewhere
       if (key.shift || key.meta) {
         insertText('\n');
@@ -445,57 +621,48 @@ export function InputBar({
         return;
       }
       if (selectedQueued) {
-        leaveQueue();
+        leaveQueue(true);
         return;
       }
       const selectedCommand = commands.matches[commands.selected];
       const draft = draftMessage();
       const trimmed = selectedCommand ? `/${selectedCommand.name}` : draft.text.trim();
       if (!trimmed && draft.images.length === 0) return; // nothing to send
-      if (disabled) {
-        // The session queue contains text. Keep image drafts intact until
-        // they can be sent together with their prompt.
-        if (!onQueue || draft.images.length > 0) return;
-        onQueue(trimmed);
-      } else {
-        // A command picked from the menu is sent by its full name; the
-        // draft's content is only the prefix typed to find it.
-        send(trimmed, draft.images, selectedCommand ? undefined : draft.content);
+      if (key.tab) onQueue?.(trimmed, draft.images, draft.content);
+      // A command picked from the menu is sent by its full name; the draft's
+      // content is only the prefix typed to find it.
+      else if (send(trimmed, draft.images, selectedCommand ? undefined : draft.content) === false) return;
+      if (directory && trimmed && !isSirusCommand(trimmed, nativeList)) {
+        try { appendPromptHistory(directory, trimmed); }
+        catch (error) { setLocalFeedback({ kind: 'warning', text: `Could not save prompt history: ${errorMessage(error)}` }); }
+        setSavedHistory(current => [...current, trimmed].slice(-1000));
       }
+      editHistory.current.undo = [];
       setRecall(null);
       setEditor({ text: '', cursor: 0 });
       return;
     }
 
-    if (isTypedText(key)) insertText(enteredInput);
+    if (isTypedText(key)) {
+      if (enteredInput.length > 1) pasteText(enteredInput);
+      else insertText(enteredInput);
+    }
   });
 
-  // The lines around the input box stay put whatever the box holds: the last
-  // command's feedback and the waiting messages above it, the worker strip
-  // and the status row below. A menu opens above them all.
-  const frame = (menu: ReactNode, box: ReactNode) => (
-    <>
-      {menu}
-      <InputFeedback feedback={feedback} participantColors={participantColors} />
-      <QueuedRow messages={queuedMessages.map(message => message.text)} selected={selectedQueueIndex} participantColors={participantColors} />
-      {box}
-      <WorkerStrip workers={workers} selection={workerSelection} />
-      <StatusRow {...status} />
-    </>
-  );
-
-  // An approval or a question card stands where the input box stands. Each
-  // is known by its request, which the chat wraps in a new mode every time
-  // it draws: a redraw keeps the card's place, a new request starts afresh.
-  if (mode.type === 'approval') {
-    return frame(null, <ApprovalPrompt key={mode.request.id} request={mode.request} waiting={mode.waiting} onDecide={mode.onDecide} />);
+  if (mode.type !== 'text') {
+    return (
+      <PromptBar
+        mode={mode}
+        feedback={feedback}
+        participantColors={participantColors}
+        queuedMessages={queuedMessages.map(message => message.text)}
+        workers={workers}
+        status={status}
+      />
+    );
   }
-  if (mode.type === 'question') {
-    return frame(null, <QuestionCard key={mode.request.id} request={mode.request} waiting={mode.waiting} onAnswer={mode.onAnswer} />);
-  }
-  if (mode.type !== 'text') return <PromptBar mode={mode} frame={frame} />;
 
-  return frame(
+  return (
     <>
       <CommandMenu matches={commands.matches} selected={commands.selected} offset={commands.offset} />
       {mentionActive && <MentionMenu
@@ -506,49 +673,34 @@ export function InputBar({
         loading={fileSuggestions.loading}
         error={fileSuggestions.error}
       />}
-    </>,
-    <Box
-      borderStyle="round"
-      borderColor={disabled ? theme.border : theme.accent}
-      paddingX={1}
-      marginX={1}
-      flexShrink={0}
-      flexDirection="column"
-    >
-      <Box justifyContent="space-between">
-        <Box flexShrink={1}>
-          <Box flexShrink={0}>
-            <Text color={disabled ? theme.textSubtle : theme.accentSoft}>
-              ›{' '}
-            </Text>
+      <InputFeedback feedback={localFeedback ?? feedback} participantColors={participantColors} />
+      <QueuedRow messages={queuedMessages.map(message => message.text)} selected={selectedQueueIndex} participantColors={participantColors} />
+      {shortcuts !== null && <Box marginX={1} paddingX={1} borderStyle="round" borderColor={theme.border} flexDirection="column">
+        <Text color={theme.accent}>Keyboard shortcuts · ↑/↓ scroll · esc closes</Text>
+        {KEY_BINDINGS.slice(shortcuts, shortcuts + Math.max(1, Math.min(12, Math.floor(((stdout.rows || 24) - 12) / 3)))).map(([keys, action]) =>
+          <Text key={keys} wrap="wrap"><Text color={theme.accentSoft}>{keys}</Text>{'  '}{action}</Text>)}
+        <Text color={theme.textSubtle}>{shortcuts + 1}–{Math.min(KEY_BINDINGS.length, shortcuts + Math.max(1, Math.min(12, Math.floor(((stdout.rows || 24) - 12) / 3))))} of {KEY_BINDINGS.length}</Text>
+      </Box>}
+      {search && <Box marginX={1} paddingX={1} flexDirection="column">
+        <Text color={theme.accent}>History search: {search.query}<Text inverse> </Text></Text>
+        <Text wrap="truncate-end" color={searchResult ? theme.text : theme.textSubtle}>{searchResult?.replace(/\n/g, ' ↵ ') ?? 'No matching prompts'}</Text>
+        <Text color={theme.textSubtle}>ctrl+r older · ctrl+s newer · enter selects · esc restores</Text>
+      </Box>}
+      <Box ref={inputBox} borderStyle="round" borderColor={theme.accent} paddingX={1} marginX={1} flexShrink={0} flexDirection="column">
+        {rows.slice(rowOffset, rowOffset + maxRows).map((cells, index) => <Box key={rowOffset + index}>
+          <Box width={2} flexShrink={0}><Text color={theme.accentSoft}>{rowOffset + index === 0 ? '› ' : '  '}</Text></Box>
+          <Box flexGrow={1} minWidth={0}>
+            {input ? <DraftRow cells={cells} cursor={editor.cursor} participantColors={participantColors} /> : <Text wrap="truncate-end"><Text inverse> </Text><Text color={theme.textSubtle}>{disabled ? 'enter to steer · tab to queue' : 'message sirus or @mention an agent…'}</Text></Text>}
           </Box>
-          <Text color={theme.text} wrap="wrap">
-            {!selectedQueued && !input && <TrailingImages images={trailingImages} after={false} />}
-            {input ? (
-              <>
-                <DraftText text={input.slice(0, cursor)} imageFor={imageFor} participantColors={participantColors} />
-                <Text color={theme.accentSoft}>▌</Text>
-                <DraftText text={input.slice(cursor)} imageFor={imageFor} participantColors={participantColors} />
-                {!selectedQueued && <TrailingImages images={trailingImages} after />}
-              </>
-            ) : (
-              <>
-                <Text color={disabled ? theme.textSubtle : theme.accentSoft}>▌</Text>
-                <Text color={theme.textSubtle}>
-                  {disabled
-                    ? ' agents are thinking…'
-                    : <> message sirus or <MentionText colors={participantColors}>@mention</MentionText> an agent…</>}
-                </Text>
-              </>
-            )}
-          </Text>
-        </Box>
-        <Box marginLeft={1} flexShrink={0}>
-          {showCopied
-            ? <Text color={theme.success}>copied ✓</Text>
-            : <Text color={theme.textSubtle}>enter ↵</Text>}
-        </Box>
+        </Box>)}
+        {!selectedQueued && trailingImages.length > 0 && <TrailingImages images={trailingImages} after={false} />}
+        <Text color={showCopied ? theme.success : theme.textSubtle} wrap="truncate-end">
+          {showCopied ? 'copied ✓' : selectedQueued ? 'enter saves · esc restores' : disabled ? 'enter to steer · tab to queue' : 'enter ↵ · ? shortcuts'}
+          {rows.length > maxRows ? ` · rows ${rowOffset + 1}–${Math.min(rows.length, rowOffset + maxRows)}/${rows.length}` : ''}
+        </Text>
       </Box>
-    </Box>,
+      <WorkerStrip workers={workers} selection={workerSelection} />
+      <StatusRow {...status} />
+    </>
   );
 }

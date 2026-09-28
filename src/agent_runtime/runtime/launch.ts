@@ -8,6 +8,7 @@ import { VENDOR_INFO, type Vendor } from '../providers/catalog';
 import { codexBinaryPath } from '../providers/openai/codex-account';
 import type { PermissionMode } from '../types';
 import type { RuntimeOptions } from './runtime';
+import { claudeSkillPlugins, codexPersonalSkills, codexSkillDirectories } from './skills';
 
 // A vendor is a launch spec: the adapter to run, the environment its process
 // gets, and what its `session/new` carries. Everything the runtime does after
@@ -28,6 +29,7 @@ export interface SessionSpec {
   // Sirus's addendum to the vendor's prompt, or a bare runtime's whole prompt.
   systemPrompt: string;
   mcpServer: RuntimeOptions['mcpServer'];
+  tools?: readonly string[];
 }
 
 // What that session's `session/new`, `session/fork` or `session/resume`
@@ -35,6 +37,7 @@ export interface SessionSpec {
 export interface SessionParams {
   meta?: Record<string, unknown>;
   mcpServers: McpServer[];
+  additionalDirectories?: string[];
 }
 
 export interface Launch {
@@ -51,12 +54,8 @@ export interface Launch {
   // whole process's; on a fork only the MCP entry actually lands, since
   // Claude keeps the prompt the forked transcript was written under.
   session(spec: SessionSpec): SessionParams;
-  // claude-agent-acp's `session/fork` only writes the forked transcript: it
-  // looks the session being forked up under the directory the call names, so
-  // that must be the parent's, and the fork is not a session in the adapter
-  // until a `session/resume` opens it in the worker's directory. codex-acp
-  // creates the forked session outright, in the directory the call names, and
-  // answers with it already live.
+  // Both adapters need a resume after forking. Claude also needs the
+  // parent's directory to locate its transcript when making the fork.
   forkNeedsResume: boolean;
   // An `authenticate` to send after `initialize`, when the credential in the
   // environment is one the harness must be logged in with rather than read.
@@ -98,7 +97,10 @@ function projectDirectories(directory: string): string[] {
 // Claude Code's tools that delegate to Claude's own agents (Agent, which
 // Task names too, Workflow, RemoteTrigger) or that start turns on their own
 // (the cron tools, ScheduleWakeup, Monitor).
-const CLAUDE_TOOLS_OFF = ['Agent', 'Workflow', 'RemoteTrigger', 'CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'Monitor'];
+const CLAUDE_TOOLS_OFF = [
+  'Agent', 'Task', 'SendMessage', 'ListAgents', 'TeamCreate', 'TeamDelete', 'Workflow', 'RemoteTrigger',
+  'CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'Monitor',
+];
 
 // Claude Code's bundled skills built on those tools, so the `/` menu does
 // not offer what cannot run.
@@ -140,8 +142,11 @@ function claudeLaunch(options: RuntimeOptions, mode: PermissionMode): Launch {
           systemPrompt: { append: spec.systemPrompt + agentsPointer(spec.directory) },
           claudeCode: {
             options: {
-              disallowedTools: CLAUDE_TOOLS_OFF,
+              ...(spec.tools !== undefined ? { tools: spec.tools } : {}),
+              disallowedTools: [...CLAUDE_TOOLS_OFF, ...(spec.tools !== undefined
+                && !spec.tools.some(tool => tool.startsWith('mcp__')) ? ['mcp__*'] : [])],
               settings: { skillOverrides: Object.fromEntries(CLAUDE_SKILLS_OFF.map(name => [name, 'off'])) },
+              plugins: claudeSkillPlugins(spec.directory),
             },
           },
         },
@@ -155,6 +160,9 @@ function claudeLaunch(options: RuntimeOptions, mode: PermissionMode): Launch {
 
 // codex-acp's mode ids by the kind Sirus's modes map onto (`_AgentMode` in
 // its source). The adapter reads the initial one from the environment.
+// In 1.13.1, "read-only" still permits workspace writes. Its fixed turn
+// policies override CODEX_CONFIG; neither metadata nor set_config_option
+// exposes a stricter policy. The UI explains this vendor difference.
 const CODEX_MODES: Record<PermissionMode, string> = {
   ask: 'read-only',
   auto: 'agent',
@@ -163,40 +171,40 @@ const CODEX_MODES: Record<PermissionMode, string> = {
 
 const LINK_TYPE = process.platform === 'win32' ? 'junction' : 'dir';
 
-// The skills in one folder by name: its subfolders that hold a SKILL.md.
-function skillsIn(folder: string): Map<string, string> {
-  const found = new Map<string, string>();
-  let names: string[];
-  try {
-    names = readdirSync(folder);
-  } catch {
-    return found;
-  }
-  for (const name of names) {
-    if (name.startsWith('.')) continue;
-    const skill = path.join(folder, name);
-    if (existsSync(path.join(skill, 'SKILL.md'))) found.set(name, skill);
-  }
-  return found;
-}
-
 // Codex finds the user's skills in `~/.codex/skills`. A credential with a
 // profile of its own points Codex's home elsewhere, so the user's skills are
 // linked in there one by one, since Codex writes its built-in skills into the
-// same folder; a link to a skill the user has since removed goes.
-function linkCodexSkills(profileHome: string | undefined): void {
+// same folder; a link to a removed or disabled skill goes. Only profiles
+// inside Sirus's data directory are managed here.
+function linkCodexSkills(profileHome: string | undefined, directory: string): void {
   const userHome = process.env[VENDOR_INFO.gpt.profileDirEnv] || path.join(os.homedir(), '.codex');
   if (!profileHome || path.resolve(profileHome) === path.resolve(userHome)) return;
-  const source = path.join(userHome, 'skills');
-  const target = path.join(profileHome, 'skills');
+  if (!isSirusProfile(profileHome)) return;
+  const data = path.resolve(dataDirectory());
+  const source = path.resolve(userHome, 'skills');
+  const target = path.resolve(profileHome, 'skills');
   try {
+    // A profile or skills directory redirected outside Sirus must never be
+    // changed through a symlink, even when its lexical path is inside it.
+    let current = target;
+    for (;;) {
+      try {
+        if (lstatSync(current).isSymbolicLink()) return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+      if (current === data) break;
+      current = path.dirname(current);
+    }
+    const skills = codexPersonalSkills(directory);
     mkdirSync(target, { recursive: true });
     for (const name of readdirSync(target)) {
       const link = path.join(target, name);
       if (!lstatSync(link).isSymbolicLink()) continue;
-      if (readlinkSync(link).startsWith(source + path.sep) && !existsSync(link)) unlinkSync(link);
+      const destination = path.resolve(target, readlinkSync(link));
+      if (destination === path.join(source, name) && (!skills.has(name) || !existsSync(link))) unlinkSync(link);
     }
-    for (const [name, skill] of skillsIn(source)) {
+    for (const [name, skill] of skills) {
       const link = path.join(target, name);
       try {
         lstatSync(link);
@@ -216,7 +224,10 @@ function codexLaunch(options: RuntimeOptions, mode: PermissionMode): Launch {
   // Codex reads itself. A bare runtime's prompt replaces Codex's instead, and
   // it reads no project instructions.
   const codex = codexBinaryPath();
-  if (!options.bare) linkCodexSkills(options.env[VENDOR_INFO.gpt.profileDirEnv]);
+  if (!options.bare) linkCodexSkills(options.env[VENDOR_INFO.gpt.profileDirEnv], options.directory);
+  // Codex caches its discovered skills for the adapter process, so every
+  // session on it uses the same directories collected at launch.
+  const additionalDirectories = options.bare ? undefined : codexSkillDirectories(options.directory);
   const config = options.bare
     ? { instructions: options.systemPrompt, project_doc_max_bytes: 0 }
     : {
@@ -244,10 +255,15 @@ function codexLaunch(options: RuntimeOptions, mode: PermissionMode): Launch {
       ...(codex ? { CODEX_PATH: codex } : {}),
     },
     mode,
-    // The developer instructions are the whole process's, so a forked
-    // session inherits the owner's and takes only its own MCP entry.
-    session: spec => ({ mcpServers: mcpServersFor(spec) }),
-    forkNeedsResume: false,
+    // Developer instructions and shared skills belong to the whole process;
+    // each fork takes its own MCP entry.
+    session: spec => ({
+      mcpServers: mcpServersFor(spec),
+      ...(additionalDirectories ? { additionalDirectories } : {}),
+    }),
+    // codex-acp 1.13.1 unsubscribes the new thread in SessionFork.ts. Resume
+    // subscribes it again; without it the first prompt receives no updates.
+    forkNeedsResume: true,
     // An API key in the environment is an API-key source (a subscription's
     // environment scrubs it). Codex only honours a key it was logged in
     // with, in the home the source's environment points it at. Logging in
@@ -271,5 +287,5 @@ const LAUNCHES: Record<Vendor, (options: RuntimeOptions, mode: PermissionMode) =
 };
 
 export function launchFor(options: RuntimeOptions): Launch {
-  return LAUNCHES[options.vendor](options, options.bare ? 'ask' : options.permissionMode);
+  return LAUNCHES[options.vendor](options, options.bare || options.readOnly ? 'ask' : options.permissionMode);
 }

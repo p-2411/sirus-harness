@@ -35,7 +35,7 @@ describe('command menu', () => {
 
     expect(lines).toHaveLength(6);
     expect(output).not.toContain('/model');
-    expect(output).toContain('› /logout');
+    expect(output).toContain('› /login');
   });
 
   test('wraps navigation while resetting the visible window', () => {

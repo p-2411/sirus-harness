@@ -12,7 +12,6 @@ implementation.
 | Participant | `src/agent_runtime/agent.ts` | One agent in a session: its record, its credentials, and the runtime that answers for it. |
 | Runtime | `src/agent_runtime/runtime/runtime.ts` | One ACP session, and the process that holds it and every session forked from it; the contract everything above is written against. |
 | Providers | `src/agent_runtime/providers/index.ts` | Credentials only: which vendor, which key or subscription, in which order. |
-| Routing | `src/agent_runtime/router.ts` | Which model a new session starts on, and which model and depth a worker runs on, when nobody has said. |
 | Tools | `src/agent_runtime/tools/index.ts` | The tools only Sirus can offer, served to every runtime by one MCP server. |
 | Permissions | `src/agent_runtime/permissions/policy.ts` | The three modes, and the queue for whatever a vendor escalates. |
 | Persistence | `src/persistence/settings.ts`, `sessions.ts` | Settings and session snapshots on disk, each file imported directly. Knows nothing about the runtime. |
@@ -28,8 +27,7 @@ One user prompt, in the order a reader opens the files:
    `session.sendMessage(draft)`.
 2. `agent_runtime/session/index.ts`: `Session.sendMessage` reads the mentions through
    `ParticipantRoster`, stamps the entry with the session-wide sequence number and puts it
-   in the transcript of every participant it addresses, and nothing else's. The first
-   prompt of a draft whose model nobody chose waits here for the router's pick. The pre-turn
+   in the transcript of every participant it addresses, and nothing else's. The pre-turn
    checkpoint is awaited before anything is prompted, because the runtimes run their tools
    themselves and cannot wait on a barrier. Then the round goes to `TurnRunner`.
 3. `agent_runtime/session/turnRunner.ts`: the round loop. Every addressed participant runs
@@ -37,12 +35,12 @@ One user prompt, in the order a reader opens the files:
    attributed, and those run in the next round, until nobody is mentioned.
 4. `agent_runtime/agent.ts`: `SessionAgent.respond` walks the vendor's credentials in order
    and starts a runtime on one. A new runtime is seeded with this participant's own record
-   in its first prompt; a warm one is prompted with the turn's text alone. Everything the
+   in its first prompt; a warm or natively resumed one gets the turn's text alone. Everything the
    runtime reports is recorded into the assistant entry as it arrives.
 5. `agent_runtime/runtime/runtime.ts`: `createRuntime` starts the vendor's adapter, or the
    scripted runtime the test suite bound to that model id.
 6. `agent_runtime/runtime/acp.ts`: the ACP client. Spawn, `initialize` advertising
-   compaction and form elicitation and nothing else, `session/new`, `session/set_mode`, one `session/prompt` per
+   compaction and form elicitation and nothing else, `session/new` (or `session/resume` for a saved vendor session), `session/set_mode`, one `session/prompt` per
    turn, `session/cancel` to stop one, `session/fork` for a worker that starts from its
    owner's conversation, and `_session/steering` to put text into a prompt in flight. One
    process can hold several sessions, so every update is routed by the session id it names.
@@ -58,9 +56,9 @@ One user prompt, in the order a reader opens the files:
    delegation runs in `tools/subagents/`.
 9. `agent_runtime/permissions/approvals.ts`: whatever the vendor escalates arrives as
    `session/request_permission` and is queued here. `Chat.tsx` hands the session's first
-   waiting request to `InputBar`, which draws `frontend/chat/ApprovalPrompt.tsx` in place of
-   the input box; the prompt keeps its own keys and selection and answers with one of the
-   options the vendor offered. A question the agent asks arrives as `elicitation/create`, is
+   waiting request to `InputBar`, whose `PromptBar.tsx` draws
+   `frontend/chat/ApprovalPrompt.tsx` in place of the input box, keeps its keys and
+   selection, and answers with one of the options the vendor offered. A question the agent asks arrives as `elicitation/create`, is
    queued in `permissions/questions.ts` the same way, and is drawn by `QuestionCard.tsx` once
    no approval is waiting.
 
@@ -81,21 +79,23 @@ facade over collaborators in the same folder, each constructible on its own:
   grammar exists once, here; the chat's colouring (`MentionText.tsx`) and the `@` menu
   import it.
 - `TurnRunner`: the round loop, and the one place that decides what a participant is
-  prompted with.
+  prompted with, including who a user prompt added to the session
+  (`withIntroductions`), since the model that created them is stripped from its text.
 - `CheckpointLog`: directory snapshots taken before each turn, and the cross-session
   interlock that makes restoring one safe. Injectable `DirectoryActivity`; the default is
   process-wide.
-- `MessageQueue`: prompts typed while a turn runs. `isAutoSendable` is the one rule for
+- `MessageQueue`: prompts queued while a turn runs. `isAutoSendable` is the one rule for
   which of them drain on their own.
 - `ChangeFeed`: listeners, version counters, and the 50 ms streaming throttle.
 
 A checkpoint records the sequence number of the prompt that started its turn. Rewinding the
-chat drops every participant's entries from that number on and rebuilds their runtimes, so
-each one is reseeded from the record that is left. A rewind is refused, not queued, while
-other work could be caught by it: the chat while any of the session's workers is working or
-still being set up, since it rebuilds the records they belong to, and `clear` the same way;
-the files while a worker of any session is working in the project directory itself, or
-another session has a turn or a restore running there. A worker in its own worktree changes
+chat forks the session (`Session.fork`): the new one keeps every participant's entries from
+before that number, with no vendor session to reopen and none of the workers, so each
+runtime is seeded from the record that is left, and the original stays as it was. A rewind
+is refused, not queued, while other work could be caught by it: the chat while any of the
+session's workers is working or still being set up, and `clear` the same way; the files
+while a worker of any session is working in the project directory itself, or another
+session has a turn or a restore running there. A worker in its own worktree changes
 nothing in the project directory, so it does not hold up a file restore.
 
 The snapshots themselves (`src/checkpoints.ts`) are commits in a shadow git repository per
@@ -105,11 +105,14 @@ captures so an unchanged file is not rehashed; the shadow repository's `info/att
 makes captures and restores byte-exact whatever the project's `.gitattributes` say.
 
 `cancel`, which Esc calls, aborts the session's turn from the moment it was accepted, so a
-turn still waiting on the router's pick or on its pre-turn checkpoint stops there, before
-any participant is prompted. Workers keep running.
+turn still waiting on its pre-turn checkpoint stops there, before any participant is
+prompted. Workers keep running.
 
 The session's workers are the subagents its participants spawned, and they are background
-tasks: nothing waits on one. When a worker ends, `workerFinished` queues its report and
+tasks: nothing waits on one. A foreground spawn is the exception, whose SpawnAgent call waits
+for the report (`awaitForeground`); when that wait ends first, because the owner's turn was
+cancelled or it reached `TOOL_WAIT_LIMIT_MS`, a little inside the five minutes after which
+both vendors give up on a tool call, the run becomes a background one. When a worker ends, `workerFinished` queues its report and
 `flushReports` delivers it as soon as nothing else holds the session: no turn, rewind,
 compaction or directory restore. `deliverReports` gives it to the agent that spawned it as a
 message from the run, which starts that agent's turn the way a peer's message does, one turn
@@ -120,11 +123,13 @@ call the run came from (`toolCallOf`), which is where the user reads it. The sna
 carries a `WorkerRecord` per run, so a run still working when Sirus quits comes back
 `interrupted`, a record with no agent behind it, and `appendRestoredReports` reads its
 report into the owner's record at the start of the next prompt rather than starting a turn
-on launch. Nothing restarts on its own. `getWorkers`, `cancelWorker`, `messageWorker` and
+on launch. Nothing restarts on its own. A later SendMessage reopens the worker’s saved vendor
+session, including an owner-context fork, before giving it the new message. `getWorkers`, `cancelWorker`, `messageWorker` and
 `dismissWorker` are what `/agents` and the worker strip call; `dispose` is asynchronous for
-the workers' sake, since each one must be stopped and waited for before its worktree can be
-removed, and it first waits for any spawn still setting up its worker. `app.tsx` calls it
-from `deleteSession`, whose control in the sidebar is commented out.
+the workers' sake, since each one is stopped and waited for, and it first waits for any
+spawn still setting up its worker. A worktree a worker changed outlives the session.
+`app.tsx` calls it from `deleteSession`, which the sidebar's delete control and `ctrl+d`
+reach.
 
 Compaction belongs to the runtime. Each one folds its own conversation when its window
 fills and reports it; `Session.compact` asks the default participant's runtime to do it now
@@ -164,8 +169,8 @@ it was forked from, so the worker's own contract arrives in its first prompt ins
 catalog row; Providers below lists the rest.
 
 Each vendor runs as it would in its own terminal, with its own instruction files, settings,
-skills, plugins, hooks and commands; Sirus reads none of them and switches off only what it
-has to. On Claude that is `CLAUDE_TOOLS_OFF`, the tools that hand work to Claude's own
+skills, plugins, hooks and commands; Sirus switches off only what it has to, and adds only
+the other vendor's skills. On Claude that is `CLAUDE_TOOLS_OFF`, the tools that hand work to Claude's own
 agents or start turns Sirus never asked for, and `CLAUDE_SKILLS_OFF`, the bundled skills
 built on them, switched off through `settings.skillOverrides`; on Codex, `multi_agent`.
 `agentsPointer` adds one thing to Claude's prompt: when the session's directory and its
@@ -174,6 +179,10 @@ parents up to the git root hold an `AGENTS.md` and no `CLAUDE.md`, `.claude/CLAU
 `SessionSpec.directory`, so a worker with a runtime of its own gets one for its worktree,
 while a fork keeps its owner's prompt, as above. When a credential points `CODEX_HOME` at a
 profile of Sirus's own, `linkCodexSkills` links the user's `~/.codex/skills` into it.
+`runtime/skills.ts` hands each vendor the skills the other has and it lacks, the user's, the
+project's and those of third-party plugins the user enabled, linked from `shared-skills/`
+under the data directory: Claude gets them as local plugins (`claudeSkillPlugins`), Codex as
+additional directories (`codexSkillDirectories`), and neither vendor's own folders change.
 
 The `/` menu lists the vendor's own commands after Sirus's. A runtime reports what its
 harness offers in `available_commands_update`, and `runtime/commands.ts` keeps it:
@@ -192,10 +201,11 @@ prompt's last text block, so a cold runtime seeded with its record gets that rec
 block of its own ahead of the command (`PromptInput.context`), and every prompt sends its
 images before its text.
 
-Delegation is the participant's own: `spawnSubagent` settles the worker's model and thinking
-level (`workerModel`: the session's fixed subagent model at the owner's level, else the
-router's answer for that task, else the owner's own model and level), has `worktree.ts` cut
-it a checkout, and returns as soon as the run is under way. Until then the spawn is in
+Delegation is the participant's own: `spawnSubagent` settles the worker's model (the
+session's fixed subagent model, else the one the spawn named, else its agent definition's,
+else the owner's) and thinking level (the spawn's, else the definition's, else the owner's),
+has `worktree.ts` cut it a checkout when the spawn asked for one, and returns as soon as the
+run is under way. Until then the spawn is in
 `settingUp`, and the session counts it as a working worker, so a chat rewind and `clear`
 are refused and `dispose` waits for it. `createSubagent` builds the worker as a
 `SessionAgent` of its own under `host.forWorker(id, directory)`, with the subagent contract
@@ -203,26 +213,36 @@ and none of the delegation tools. A worker started from its owner's conversation
 `forkFrom` start its first runtime as a fork of the owner's, falling back to a fresh runtime
 seeded with the owner's record as text when there is nothing to fork or the vendor refuses.
 
-Runtimes stay warm between turns. One is rebuilt when a credential fails, a model change
-cannot be applied to the live session, the system prompt changes under it
-(`invalidateAllRuntimes`), the record it mirrors is rewound or cleared, or it is `lost`: its
-process ended between turns, or a cancelled prompt went unanswered for 30 seconds and the
-session was marked stuck. A turn that is cancelled or fails marks the tool calls it left
-open as failed, since nothing more will be heard of them, and a snapshot restores an open
-call the same way.
+Runtimes stay warm between turns. Each participant and worker snapshot carries a
+`nativeSession`: vendor, vendor session id, original session directory, credential source
+id, profile home and a hash of Sirus's system prompt. After restart or process loss,
+including a stuck cancel or the automatic crash retry, the next turn reopens that session.
+The saved credential is tried first. A fallback credential can reuse the session when it
+uses the same profile home; a different home starts fresh. Claude looks up its transcript
+in the original directory; Codex resumes its thread log. `acp.ts` prefers `session/resume`
+and uses `session/load` only when resume is not advertised, suppressing replayed transcript
+updates while preserving live session configuration and recovered background tasks.
+
+A rewind, clear, incompatible model switch or system-prompt change discards the native
+handle and starts fresh with the bounded text recap. Prompt hashes catch changes across
+app restarts too. Missing sessions, directories, credentials or profile homes, and vendor
+resume refusals, produce a brief notice and use the same recap fallback. A cancelled
+startup keeps an existing handle for the next attempt. A turn that is cancelled or fails
+marks the tool calls it left open as failed, since nothing more will be heard of them, and
+a snapshot restores an open call the same way.
 
 A participant keeps the time its runtime last reported anything (`quietFor`), not counting
-time spent waiting on the user's approval. After a minute of silence the turn status line
-says so. A worker, which nobody is watching, is stopped after 15 minutes of it, and its
+time spent waiting on the user's approval or inside a tool call that is still running. After
+a minute of silence the turn status line says so. A worker, which nobody is watching, is stopped after 15 minutes of it, and its
 report says why.
 
 ## Providers
 
 Reduced to credentials: nothing here knows a wire protocol or runs a turn.
 
-- `catalog.ts`: every fact about the models and vendors. `MODELS` (id, vendor, the profile
-  the router reads, and whether the model is the vendor's latest or kept off the worker
-  list), `VENDOR_INFO` (display names, the API-key environment variable Sirus reads, the one
+- `catalog.ts`: every fact about the models and vendors. `MODELS` (id, vendor, and the
+  profile SpawnAgent's description shows an agent choosing a model for delegated work),
+  `VENDOR_INFO` (display names, the API-key environment variable Sirus reads, the one
   the vendor's harness reads, the credentials a subscription child must not inherit, the
   profile directory variable, the allowance window), and the models each vendor's runtime
   last reported offering (`rememberListedModels`, kept in `listed-models.json`), which is
@@ -246,37 +266,13 @@ Reduced to credentials: nothing here knows a wire protocol or runs a turn.
   `openai/codex-account.ts` runs `codex app-server` for one account request at a time over
   a small JSON-RPC client.
 
-A model a vendor lists needs nothing here to be chosen and run. A row in `MODELS` is what
-the router needs to consider it: the profile Jev judges it by, and the flags that make it
-the vendor's latest or keep it off the worker list. To add a vendor: a `VENDOR_TABLE` row, a
+A model a vendor lists needs nothing here to be chosen and run; a row in `MODELS` only
+profiles it. To add a vendor: a `VENDOR_TABLE` row, a
 launch spec in `LAUNCHES` in `runtime/launch.ts`, its effort option in `EFFORT_OPTION_IDS`
 in `runtime/acp.ts`, a row in `providers/index.ts`, the exhaustive `switch` statements in
 `login.ts` and `usage.ts`, and the vendor enums in `persistence/settings.ts` and
 `persistence/subscriptionLimits.ts`. Every one of those is a compile error until it is done,
 so nothing fails silently.
-
-## Routing
-
-`router.ts` is the only code that talks to Jev, TypeSafe AI's System One model, through
-`@typesafe-ai/sdk` on a key from `JEV_API` in the environment or, failing that, the one
-`/jev` stored in the settings; `shouldRequestJevKey` is the one-time first-launch question
-`app.tsx` asks through the chat's entry prompt. Two routers of one shape: a set of candidate
-models, each judged on its catalog profile (what it is good at, published benchmark results
-under the metric's own name, what users report of it, its list price) together with what its
-vendor has left of its allowance, which is the one part the catalog cannot know; then a
-typed `choice` question, answered in one call with a two-second timeout and no retries.
-`routeSessionModel` picks a new session's model from the latest model of each vendor that
-can still run, and `Session` awaits it on the first prompt of a draft started with
-`routePending`. `routeWorker` picks a worker's model and thinking level, from every model
-the catalog does not keep off the worker list, in one call with two questions.
-`usableVendor` and `vendorAllowance` read the figures the sidebar has cached; a vendor
-nobody has read yet counts as available rather than making a turn wait on a live read.
-With one candidate there is nothing to ask, and both routers return it, key or no key: a
-session takes the one usable vendor's latest model, and a worker the one candidate model at
-its owner's level. Otherwise anything short of a confident answer returns null and the
-caller keeps the model it had, so nothing here can fail or hold up a turn. The `client`
-option is the seam: the suite passes a `RoutingClient` of its own, and null stands for no
-key.
 
 ## Tools and permissions
 
@@ -294,14 +290,15 @@ and no delegation port. A session joins the server in `Session.mcpServerEntry`, 
 runtime first asks for its entry, rather than when it is made, so a draft nobody sent to is
 never held in the server's map. The tool list is computed per request, so `/memory on` and
 `off` take effect on the next one. `agents.ts` holds the delegation tools, SpawnAgent,
-CheckAgent, MessageAgent, CancelAgent and ListAgents, whose `audience` hides them from a
+CheckAgent, SendMessage, WaitAgent, CancelAgent and ListAgents, whose `audience` hides them from a
 worker, so a subagent cannot spawn one. The runs themselves live in `tools/subagents/`:
 `index.ts` (the `WorkerRecord` the snapshot keeps, and the process-wide index of runs the
 chat, the strip, the notifications and the rewind interlock read), `run.ts` (lifecycle:
 start, check, steer, cancel, and the report handed to the owner at the end), `report.ts`
 (everything a run says about itself, to the model that asked and in that report),
-`worktree.ts` (the worker's own checkout under the data directory, cut from the project's
-HEAD onto `sirus/<id>`, removed by `Session.dispose` while its branch stays). A project that
+`worktree.ts` (the checkout a spawn with `isolation: "worktree"` gets under the data
+directory, cut from the project's HEAD onto `sirus/<id>`, removed with its branch when the
+run ends having changed nothing, and kept with its branch otherwise). A project that
 is no repository, or has no commit yet, gets no worktree and the worker runs in place; a
 repository git fails to cut a worktree from fails the spawn instead.
 
@@ -332,20 +329,25 @@ silence to the watchdog.
 
 ## Persistence
 
-`src/dataDirectory.ts` is a leaf, and `persistence/atomicJson.ts` reads and writes every file
-Sirus owns: a write lands whole or not at all, and a failure is `false` rather than a throw.
-There is no index module; callers import `settings.ts`, `sessions.ts` and
-`subscriptionLimits.ts` directly. `settings.ts` exposes `openSettings()` with typed
-`get`/`set` over one `SettingsShape`, and `saveJevApiKey`. Each section of the file is
+`src/dataDirectory.ts` is a leaf, and `persistence/atomicJson.ts` reads and writes Sirus's
+JSON files: a write lands whole or not at all, and a failure is `false` rather than a throw.
+There is no index module; callers import `settings.ts`, `sessions.ts`,
+`subscriptionLimits.ts` and `promptHistory.ts` directly. `settings.ts` exposes
+`openSettings()` with typed `get`/`set` over one `SettingsShape`. Each section of the file is
 validated on its own: one this build cannot read falls back to its default alone and is
 left as found by writes to the others, and unknown keys survive a write. A new setting is
 four entries in that one file (schema field, shape field, default, codec) and a missing one
-is a compile error. `sessions.ts` reads and writes plain `SessionSnapshot` values and
-normalises files written by older builds, tool calls and compaction records included; a
-session this build cannot read is written back unchanged, and `Session.fromSnapshot` is the
-only way a `Session` is rebuilt. A settings or sessions file that is not valid JSON, or not
-version 1, is renamed aside to `<file>.unreadable-<ms>` before anything is written over it.
-`app.tsx` saves the sessions on a 500 ms trailing timer, and synchronously on exit.
+is a compile error. A settings file that is not valid JSON, or not version 1, is renamed
+aside to `<file>.unreadable-<ms>` before anything is written over it. `sessions.ts` keeps
+each session in a file of its own under `sessions/`, with `index.json` for their order and
+the selected one, and reads and writes plain `SessionSnapshot` values, normalising files
+written by older builds, tool calls and compaction records included; `Session.fromSnapshot`
+is the only way a `Session` is rebuilt. The single `sessions.json` older builds kept is
+migrated once, each session validated on its own and its file created with a hard link
+only where none exists yet. A session file this build cannot read is moved into `invalid/`
+with a notice, or left where it is when it cannot be moved, and is never written over.
+`app.tsx` saves each changed session on a 500 ms trailing timer, and synchronously on exit;
+a session whose file another window deleted is not written back.
 Nothing under `persistence/` imports runtime code: its value imports from outside the folder
 are the zero-dependency `agent_runtime/types.ts`, `src/dataDirectory.ts` and, in
 `sessions.ts`, `isCheckpointId` from `src/checkpoints.ts`; its imports of `Session` and
@@ -369,10 +371,13 @@ mutated in place. It is one line: the run with the freshest `updatedAt` of those
 finished within the last second, with a counter for the rest. `↓` from the input bar hands
 it the keyboard against a list frozen as focus arrives, so nothing moves under the user, and
 `enter` sends `/agents <id>` down the path typing it takes; the ordering is the strip's own,
-while `/agents` keeps listing every run nobody has dismissed. In the history, `ChatMessage.tsx`
-lets the SpawnAgent row follow the run it started, keeps it out of the `Ran N commands`
-groups, and shows the report the session set as the call's output, open already once the run
-has ended.
+while `/agents` keeps listing every run nobody has dismissed. A worker goes by the name its owner gave it (`workerName`), or its id when it has none, in
+all of these and on its approval prompts. In the history, `ChatMessage.tsx` lets the
+SpawnAgent row follow the run it started and keeps it out of the `Ran N commands` groups. The
+row is laid out like Claude Code's Agent row: the worker and its task, then how the run stands
+(`runSummary`, "Done (3 tool uses · 24k tokens · 16s)"), then the report the session set as
+the call's output, whole and as Markdown, open already once the run has ended. A spawn that
+started no worker shows the tool's error instead.
 
 ## Verification
 

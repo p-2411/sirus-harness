@@ -1,8 +1,10 @@
 import type { Participant } from '../agent_runtime/agent';
-import type { RewindOptions, RewindResult } from '../agent_runtime/session/checkpointLog';
-import type { Checkpoint } from '../checkpoints';
+import type { BackgroundTask } from '../agent_runtime/runtime/runtime';
+import type { SessionSnapshot } from '../agent_runtime/session';
+import type { RewindOptions, RewindPreview, RewindResult } from '../agent_runtime/session/checkpointLog';
 import type { SubagentRun } from '../agent_runtime/tools/subagents';
-import type { ImageBlock, PermissionMode, ThinkingLevel } from '../agent_runtime/types';
+import type { ImageBlock, Message, PermissionMode, ThinkingLevel } from '../agent_runtime/types';
+import type { Checkpoint } from '../checkpoints';
 import type { ContextUsage } from '../agent_runtime/usage';
 import type { Feedback } from './feedback';
 
@@ -35,6 +37,10 @@ export type CommandMenuEntry = CommandMenuHeading | CommandMenuItem;
 export interface CommandSession {
   changeParticipantModel(participantName: string, newModel: string): void;
   clear(): void;
+  getMessages(): Message[];
+  getModel(): string;
+  fork(): SessionSnapshot;
+  previewRewind(checkpointId: string, options: RewindOptions): Promise<RewindPreview>;
   // Sends /compact to the default participant's runtime as a turn. Rejects
   // while the session is busy.
   compact(signal?: AbortSignal): Promise<void>;
@@ -45,19 +51,20 @@ export interface CommandSession {
   getName(): string;
   getPermissionMode(): PermissionMode;
   getThinkingLevel(participantName?: string): ThinkingLevel;
-  // A new session still waiting for Jev to pick its model.
-  isModelPending(): boolean;
   isEmpty(): boolean;
   rewind(checkpointId: string, options: RewindOptions): Promise<RewindResult>;
   setName(name: string): void;
   setPermissionMode(mode: PermissionMode): void;
   setThinkingLevel(level: ThinkingLevel, participantName?: string): void;
-  // The model spawned subagents run on; null leaves it to Jev's pick for
-  // the task, or to the spawning participant's own model without a key.
+  // The model every spawned subagent is pinned to; null leaves it to the
+  // spawn: its model argument, then the agent definition's, then the
+  // spawning participant's own.
   getSubagentModel(): string | null;
   setSubagentModel(model: string | null): void;
   // The session's workers, oldest first, and what the user can do to one.
   getWorkers(): SubagentRun[];
+  getBackgroundTasks(): (BackgroundTask & { participant: string })[];
+  stopBackgroundTask(participant: string, id: string): Promise<boolean>;
   cancelWorker(id: string): Promise<void>;
   messageWorker(id: string, text: string): Promise<void>;
   dismissWorker(id: string): void;
@@ -88,7 +95,15 @@ export interface QuitsApp {
 // Capabilities beyond the conversation are opt-in: a caller that cannot
 // attach images or quit simply leaves them out, and the one command that
 // needs each says so.
-export type CommandCapabilities = Partial<AttachesImages & QuitsApp>;
+export type CommandCapabilities = Partial<AttachesImages & QuitsApp & {
+  newSession(): void;
+  openSession(snapshot: SessionSnapshot): void;
+  resumeSession(query?: string): void;
+  archiveSession(): void;
+  deleteSession(): void;
+  confirm(text: string): Promise<boolean>;
+  copy(text: string): void;
+}>;
 
 export interface CommandSpec {
   name: string;

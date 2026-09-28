@@ -29,7 +29,7 @@ export function removedPlaceholders(before: string, after: string): string[] {
 }
 
 // Drops the placeholders `keep` rejects, moving the cursor with the text.
-function stripPlaceholders(state: InputState, keep: (placeholder: string) => boolean): InputState {
+export function stripPlaceholders(state: InputState, keep: (placeholder: string) => boolean): InputState {
   let text = '';
   let cursor = state.cursor;
   for (let index = 0; index < state.text.length; index++) {
@@ -112,5 +112,10 @@ export function useDraftImages({ attachments, text, getDraft, setDraft }: {
     if (next.text !== draft.text || next.cursor !== draft.cursor) setDraft(next);
   }, [attachments]);
 
-  return { imageFor, placedImages, trailingImages };
+  return {
+    imageFor,
+    isKnownPlaceholder: (placeholder: string) => placeholderPaths.current.has(placeholder),
+    placedImages,
+    trailingImages,
+  };
 }

@@ -1,4 +1,16 @@
 import crypto from 'crypto';
+import type { Vendor } from './providers/catalog';
+
+// The vendor's durable conversation, in the credential profile and directory
+// where it was opened. A snapshot keeps this even when its process is gone.
+export interface NativeSession {
+  vendor: Vendor;
+  sessionId: string;
+  directory: string;
+  sourceId: string | null;
+  profileHome: string;
+  systemPromptHash?: string;
+}
 
 export interface TextBlock {
   type: 'text';
@@ -33,6 +45,15 @@ export interface ThoughtBlock {
 export interface CompactionBlock {
   type: 'compaction';
   summary?: string;
+}
+
+// Advisory information from the vendor, shown to the user but never sent
+// back to a runtime as conversation or used to address another participant.
+export interface NoticeBlock {
+  type: 'notice';
+  severity: string;
+  title: string;
+  description?: string;
 }
 
 // ACP's vocabulary for what a tool call does. The kind picks the verb and the
@@ -81,7 +102,7 @@ export interface ToolCallBlock {
   output?: unknown;
 }
 
-export type MessageBlock = TextBlock | ImageBlock | ThoughtBlock | CompactionBlock | ToolCallBlock;
+export type MessageBlock = TextBlock | ImageBlock | ThoughtBlock | CompactionBlock | NoticeBlock | ToolCallBlock;
 
 export const PLAN_ENTRY_STATUSES = ['pending', 'in_progress', 'completed'] as const;
 

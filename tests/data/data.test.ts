@@ -1,17 +1,19 @@
-import { afterEach, describe, expect, spyOn, test } from 'bun:test';
+import { afterEach, describe, expect, jest, setSystemTime, spyOn, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import * as checkpoints from '../../src/checkpoints';
 import * as naming from '../../src/agent_runtime/session/naming';
-import * as router from '../../src/agent_runtime/router';
+import * as launch from '../../src/agent_runtime/runtime/launch';
 import * as acp from '../../src/agent_runtime/runtime/acp';
-import { invalidateAllRuntimes, type RuntimeOptions } from '../../src/agent_runtime/runtime/runtime';
+import { startAcpRuntime } from '../../src/agent_runtime/runtime/acp';
+import { pendingQuestions, questionFields, requestAnswers, resolveQuestion } from '../../src/agent_runtime/permissions/questions';
+import { invalidateAllRuntimes, type Runtime, type RuntimeOptions, type RuntimeUpdate } from '../../src/agent_runtime/runtime/runtime';
 import type { Draft } from '../../src/agent_runtime/session/timeline';
 import { Session } from '../../src/agent_runtime/session';
 import { sirusMcpServerEntry } from '../../src/agent_runtime/tools/server';
 import { findSubagent } from '../../src/agent_runtime/tools/subagents';
-import { subagentDone } from '../../src/agent_runtime/tools/subagents/run';
+import { subagentDone, TOOL_WAIT_LIMIT_MS } from '../../src/agent_runtime/tools/subagents/run';
 import * as worktree from '../../src/agent_runtime/tools/subagents/worktree';
 import { textOf } from '../../src/agent_runtime/types';
 import { bindScriptedRuntime, textTurn, unbindRuntime, type ScriptedTurn } from '../support/runtime';
@@ -38,6 +40,279 @@ afterEach(() => {
   unbindRuntime(testModel);
   unbindRuntime(secondTestModel);
   unbindRuntime(thirdTestModel);
+});
+
+test('ACP opts into notices and routes early notices to the session being opened', async () => {
+  const adapter = `
+    import { createInterface } from 'node:readline';
+    const send = value => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\\n');
+    const update = (sessionId, update) => send({ method: 'session/update', params: { sessionId, update } });
+    for await (const line of createInterface({ input: process.stdin })) {
+      const request = JSON.parse(line);
+      const reply = result => send({ id: request.id, result });
+      if (request.method === 'initialize') {
+        if (!request.params.clientCapabilities.session.notices) throw new Error('Notices were not advertised');
+        reply({ protocolVersion: 1, agentCapabilities: { sessionCapabilities: { fork: {} } } });
+      } else if (request.method === 'session/new' || request.method === 'session/fork') {
+        const sessionId = request.method === 'session/new' ? 'owner' : 'worker';
+        update(sessionId, { sessionUpdate: 'notice', severity: 'info', title: sessionId + ' opening' });
+        reply({ sessionId });
+      } else if (request.method === 'session/prompt') {
+        const sessionId = request.params.sessionId;
+        update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Before' } });
+        update(sessionId, { sessionUpdate: 'notice', severity: 'warning', title: 'Warning', description: null });
+        update(sessionId, { sessionUpdate: 'notice', severity: 'vendor-hint', title: 'Hint', description: 'Details' });
+        update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'After' } });
+        reply({ stopReason: 'end_turn' });
+      } else if (request.id !== undefined) reply({});
+    }
+  `;
+  const spec = spyOn(launch, 'launchFor').mockImplementation(options => ({
+    command: process.execPath,
+    args: ['-e', adapter],
+    env: options.env,
+    mode: options.permissionMode,
+    session: () => ({ mcpServers: [] }),
+    forkNeedsResume: false,
+  }));
+  const updates: RuntimeUpdate[] = [];
+  const workerUpdates: RuntimeUpdate[] = [];
+  const options: RuntimeOptions = {
+    vendor: 'gpt', model: 'gpt-5.6-luna', thinkingLevel: 'high', directory: process.cwd(),
+    systemPrompt: '', env: { ...process.env }, mcpServer: null, permissionMode: 'auto',
+    onPermission: async () => ({ outcome: { outcome: 'cancelled' } }),
+    onUpdate: update => { updates.push(update); },
+  };
+  let runtime: Runtime | undefined;
+  try {
+    runtime = await startAcpRuntime(options);
+    expect(runtime.sessionId).toBe('owner');
+    expect(updates).toEqual([{ type: 'notice', severity: 'info', title: 'owner opening' }]);
+    const worker = await runtime.fork({ ...options, onUpdate: update => { workerUpdates.push(update); } });
+    expect(worker.sessionId).toBe('worker');
+    expect(workerUpdates).toEqual([{ type: 'notice', severity: 'info', title: 'worker opening' }]);
+    expect(updates).toHaveLength(1);
+    await worker.prompt({ text: 'Inspect', images: [] }, new AbortController().signal);
+    expect(workerUpdates.slice(1)).toEqual([
+      { type: 'text', text: 'Before' },
+      { type: 'notice', severity: 'warning', title: 'Warning' },
+      { type: 'notice', severity: 'vendor-hint', title: 'Hint', description: 'Details' },
+      { type: 'text', text: 'After' },
+    ]);
+    expect(updates).toHaveLength(1);
+  } finally {
+    runtime?.dispose();
+    spec.mockRestore();
+  }
+});
+
+test.each([
+  ['claude', 'resume'], ['claude', 'load'], ['gpt', 'resume'], ['gpt', 'load'],
+] as const)('ACP %s %s reopens the recorded session without replaying its transcript', async (vendor, method) => {
+  const adapter = `
+    import { createInterface } from 'node:readline';
+    const send = value => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\\n');
+    const update = update => send({ method: 'session/update', params: { sessionId: 'saved-session', update } });
+    const requests = [];
+    const configOptions = [
+      { id: 'model', name: 'Model', type: 'select', currentValue: 'old', options: [{ value: 'chosen', name: 'Chosen' }] },
+      { id: '${vendor === 'claude' ? 'effort' : 'reasoning_effort'}', name: 'Thinking', type: 'select', currentValue: 'low', options: [{ value: 'high', name: 'High' }] },
+    ];
+    for await (const line of createInterface({ input: process.stdin })) {
+      const request = JSON.parse(line);
+      const reply = result => send({ id: request.id, result });
+      if (request.method === 'initialize') {
+        reply({ protocolVersion: 1, agentCapabilities: {
+          loadSession: true, sessionCapabilities: ${method === 'resume' ? '{ resume: {} }' : '{}'},
+        } });
+      } else if (request.method === 'session/${method}') {
+        requests.push(request);
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Old answer' } });
+        update({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'Old reasoning' } });
+        update({ sessionUpdate: 'tool_call', toolCallId: 'old-tool', title: 'Old tool', status: 'completed' });
+        update({ sessionUpdate: 'plan', entries: [{ content: 'Old plan', priority: 'medium', status: 'completed' }] });
+        update({ sessionUpdate: 'compaction_update', compactionId: 'old-compact', status: 'completed' });
+        update({ sessionUpdate: 'usage_update', used: 99, size: 1000 });
+        update({ sessionUpdate: 'async_task_spawned', asyncTaskId: 'restored-task', name: 'Restored task', state: 'running', canStop: true });
+        update({ sessionUpdate: 'available_commands_update', availableCommands: [{ name: 'compact', description: 'Compact history' }] });
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Last replayed answer' } });
+        reply({ configOptions, modes: {
+          currentModeId: 'manual', availableModes: [{ id: 'auto', name: 'Auto', _meta: { kind: 'auto_review' } }],
+        } });
+      } else if (request.method === 'session/set_mode') {
+        requests.push(request);
+        reply({});
+      } else if (request.method === 'session/set_config_option') {
+        requests.push(request);
+        configOptions.find(option => option.id === request.params.configId).currentValue = request.params.value;
+        reply({ configOptions });
+      } else if (request.method === 'session/prompt') {
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: JSON.stringify(requests) } });
+        reply({ stopReason: 'end_turn' });
+      } else if (request.id !== undefined) {
+        send({ id: request.id, error: { code: -32601, message: 'Unexpected ' + request.method } });
+      }
+    }
+  `;
+  const spec = spyOn(launch, 'launchFor').mockImplementation(options => {
+    expect(options.directory).toBe('/recorded/project');
+    return {
+      command: process.execPath, args: ['-e', adapter], env: options.env,
+      mode: options.permissionMode, forkNeedsResume: true,
+      session: session => {
+        expect(session.directory).toBe('/recorded/project');
+        return { mcpServers: [], meta: { refreshed: true }, additionalDirectories: ['/skills'] };
+      },
+    };
+  });
+  const updates: RuntimeUpdate[] = [];
+  let runtime: Runtime | undefined;
+  try {
+    runtime = await startAcpRuntime({
+      vendor, model: 'chosen', thinkingLevel: 'high', directory: '/different/project',
+      resume: { sessionId: 'saved-session', directory: '/recorded/project' },
+      systemPrompt: '', env: { ...process.env }, mcpServer: null, permissionMode: 'auto',
+      onPermission: async () => ({ outcome: { outcome: 'cancelled' } }),
+      onUpdate: update => { updates.push(update); },
+    });
+    expect(runtime.sessionId).toBe('saved-session');
+    expect(runtime.context).toEqual({ tokens: 99, window: 1000 });
+    expect(updates.map(update => update.type).sort()).toEqual(['async_task', 'commands', 'context', 'models']);
+    await runtime.prompt({ text: 'Continue', images: [] }, new AbortController().signal);
+    const answer = updates.at(-1);
+    expect(answer?.type).toBe('text');
+    const requests = JSON.parse(answer?.type === 'text' ? answer.text : '[]');
+    expect(requests.map((request: { method: string }) => request.method)).toEqual([
+      `session/${method}`, 'session/set_mode', 'session/set_config_option', 'session/set_config_option',
+    ]);
+    expect(requests[0].params).toEqual({
+      sessionId: 'saved-session', cwd: '/recorded/project', mcpServers: [],
+      _meta: { refreshed: true }, additionalDirectories: ['/skills'],
+    });
+    expect(requests.slice(1).map((request: { params: unknown }) => request.params)).toEqual([
+      { sessionId: 'saved-session', modeId: 'auto' },
+      { sessionId: 'saved-session', configId: 'model', value: 'chosen' },
+      { sessionId: 'saved-session', configId: vendor === 'claude' ? 'effort' : 'reasoning_effort', value: 'high' },
+    ]);
+  } finally {
+    runtime?.dispose();
+    spec.mockRestore();
+  }
+});
+
+test('ACP resume failure rejects creation so the caller can seed a fresh runtime', async () => {
+  const adapter = `
+    import { createInterface } from 'node:readline';
+    const send = value => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\\n');
+    for await (const line of createInterface({ input: process.stdin })) {
+      const request = JSON.parse(line);
+      if (request.method === 'initialize') send({ id: request.id, result: {
+        protocolVersion: 1, agentCapabilities: { sessionCapabilities: { resume: {} } },
+      } });
+      else send({ id: request.id, error: { code: -32603, message: 'Internal error', data: { message: 'Session missing' } } });
+    }
+  `;
+  const spec = spyOn(launch, 'launchFor').mockImplementation(options => ({
+    command: process.execPath, args: ['-e', adapter], env: options.env,
+    mode: options.permissionMode, session: () => ({ mcpServers: [] }), forkNeedsResume: true,
+  }));
+  try {
+    await expect(startAcpRuntime({
+      vendor: 'gpt', model: 'chosen', thinkingLevel: 'high', directory: process.cwd(),
+      resume: { sessionId: 'missing', directory: process.cwd() },
+      systemPrompt: '', env: { ...process.env }, mcpServer: null, permissionMode: 'auto',
+      onPermission: async () => ({ outcome: { outcome: 'cancelled' } }), onUpdate: () => {},
+    })).rejects.toThrow('Session missing');
+  } finally {
+    spec.mockRestore();
+  }
+});
+
+test.each(['answer', 'withdraw', 'turn-cancel', 'disconnect'] as const)('ACP questions settle and leave the queue after %s', async ending => {
+  const adapter = `
+    import { createInterface } from 'node:readline';
+    const send = value => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\\n');
+    let promptId;
+    for await (const line of createInterface({ input: process.stdin })) {
+      const request = JSON.parse(line);
+      const reply = result => send({ id: request.id, result });
+      if (request.id === 'question') {
+        send({ method: 'session/update', params: { sessionId: 'owner', update: {
+          sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: JSON.stringify(request.result ?? request.error) }
+        } } });
+        send({ id: promptId, result: { stopReason: 'end_turn' } });
+      } else if (request.method === 'initialize') {
+        if (!request.params.clientCapabilities.elicitation.form) throw new Error('Forms were not advertised');
+        reply({ protocolVersion: 1 });
+      } else if (request.method === 'session/new') reply({ sessionId: 'owner' });
+      else if (request.method === 'session/prompt') {
+        promptId = request.id;
+        send({ id: 'question', method: 'elicitation/create', params: {
+          sessionId: 'owner', mode: 'form', message: 'Codex needs your input to continue.',
+          requestedSchema: { type: 'object', required: ['color'], properties: {
+            color: { type: 'string', title: 'Which color?', oneOf: [{ const: 'Blue', title: 'Blue' }, { const: 'None of the above', title: 'None of the above' }] },
+            color_note: { type: 'string', _meta: { codex: { role: 'user_note', questionId: 'color' } } }
+          } }
+        } });
+        if ('${ending}' === 'withdraw') setTimeout(() => send({ method: '$/cancel_request', params: { requestId: 'question' } }), 100);
+        if ('${ending}' === 'disconnect') setTimeout(() => process.exit(0), 100);
+      } else if (request.method === 'session/cancel') send({ id: promptId, result: { stopReason: 'cancelled' } });
+      else if (request.id !== undefined) reply({});
+    }
+  `;
+  const spec = spyOn(launch, 'launchFor').mockImplementation(options => ({
+    command: process.execPath, args: ['-e', adapter], env: options.env,
+    mode: options.permissionMode, session: () => ({ mcpServers: [] }), forkNeedsResume: false,
+  }));
+  const context = { sessionId: `question-${ending}`, requester: { participant: 'sirus' } };
+  const updates: RuntimeUpdate[] = [];
+  const controller = new AbortController();
+  let runtime: Runtime | undefined;
+  let turn: Promise<unknown> | undefined;
+  try {
+    runtime = await startAcpRuntime({
+      vendor: 'gpt', model: 'gpt-5.6-luna', thinkingLevel: 'high', directory: process.cwd(),
+      systemPrompt: '', env: { ...process.env }, mcpServer: null, permissionMode: 'auto',
+      onPermission: async () => ({ outcome: { outcome: 'cancelled' } }),
+      onElicitation: (request, signal) => requestAnswers(context, request, signal),
+      onUpdate: update => { updates.push(update); },
+    });
+    turn = runtime.prompt({ text: 'Ask', images: [] }, controller.signal).catch(error => error);
+    await until(() => pendingQuestions(context.sessionId).length === 1, 'question card');
+    const [question] = pendingQuestions(context.sessionId);
+    expect(question.fields[0]).toMatchObject({ kind: 'choice', required: true, other: { key: 'color_note', value: 'None of the above' } });
+    if (ending === 'answer') {
+      expect(resolveQuestion(question.id, { action: 'accept', content: { color: 'None of the above', color_note: 'Purple' } })).toBe(true);
+    } else if (ending === 'turn-cancel') controller.abort(new Error('Turn stopped'));
+    const result = await turn;
+    if (ending === 'disconnect' || ending === 'turn-cancel') expect(result).toBeInstanceOf(Error);
+    else expect(result).toEqual({ stopReason: 'end_turn' });
+    await until(() => pendingQuestions(context.sessionId).length === 0, 'question withdrawal');
+    expect(resolveQuestion(question.id, { action: 'decline' })).toBe(false);
+    if (ending === 'answer') expect(updates).toContainEqual({ type: 'text', text: JSON.stringify({ action: 'accept', content: { color: 'None of the above', color_note: 'Purple' } }) });
+  } finally {
+    controller.abort();
+    runtime?.dispose();
+    await turn;
+    spec.mockRestore();
+  }
+});
+
+test('question schemas retain choice requirements and fold custom answers', () => {
+  const fields = questionFields({
+    sessionId: 'owner', mode: 'form', message: 'Choose preferences',
+    requestedSchema: { type: 'object', required: ['features'], properties: {
+      features: { type: 'array', title: 'Features', minItems: 1, maxItems: 2, items: { type: 'string', enum: ['Search', 'Export'] } },
+      custom: { type: 'string', _meta: { _askUserQuestionCustomAnswer: { isCustomAnswer: true, questionId: 'features' } } },
+      theme: { type: 'string', title: 'Theme', enum: ['Dark', 'Light'] },
+    } },
+  });
+  expect(fields).toEqual([
+    { kind: 'choice', key: 'features', title: 'Features', multiple: true, required: true, minimum: 1, maximum: 2,
+      options: [{ value: 'Search', label: 'Search' }, { value: 'Export', label: 'Export' }], other: { key: 'custom' } },
+    { kind: 'choice', key: 'theme', title: 'Theme', multiple: false, required: false,
+      options: [{ value: 'Dark', label: 'Dark' }, { value: 'Light', label: 'Light' }] },
+  ]);
 });
 
 describe('Session model', () => {
@@ -123,81 +398,6 @@ describe('Session model', () => {
     expect(session.getContextUsage()).toEqual({ tokens: 300, window: 200_000 });
     // Nothing of it survives a restore: the gauge waits for the runtime.
     expect(Session.fromSnapshot(session.toSnapshot()).getContextUsage()).toBeNull();
-  });
-
-  test('asks Jev for a draft\'s model on its first prompt unless the user picked one', async () => {
-    const binding = bindScriptedRuntime(testModel, textTurn('Done'));
-    const alternative = bindScriptedRuntime(secondTestModel, textTurn('Done'));
-    const route = spyOn(router, 'routeSessionModel').mockResolvedValue({ model: secondTestModel, confidence: 0.9 });
-    try {
-      const routed = new Session({ name: 'Routed', directory: process.cwd(), model: testModel, routePending: true });
-      const first = routed.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Review the auth module carefully' }] });
-      // The chat reads whether the prompt was accepted straight after the
-      // call, so it is in the history before Jev has answered.
-      expect(routed.isEmpty()).toBe(false);
-      await first;
-      expect(route).toHaveBeenCalledTimes(1);
-      expect(route.mock.calls[0]?.[0]).toEqual({ prompt: 'Review the auth module carefully', directory: process.cwd() });
-      expect(routed.getModel()).toBe(secondTestModel);
-      expect(alternative.starts).toHaveLength(1);
-      expect(binding.starts).toHaveLength(0);
-      // The pick was made: a later prompt does not ask again.
-      await routed.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Again' }] });
-      expect(route).toHaveBeenCalledTimes(1);
-
-      // The user's own /model pick settles the draft's model instead.
-      const pinned = new Session({ name: 'Pinned', model: secondTestModel, routePending: true });
-      pinned.changeParticipantModel('sirus', testModel);
-      await pinned.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Go' }] });
-      expect(route).toHaveBeenCalledTimes(1);
-      expect(pinned.getModel()).toBe(testModel);
-
-      // No confident answer leaves the draft on the model it started with.
-      route.mockResolvedValue(null);
-      const unsure = new Session({ name: 'Unsure', model: testModel, routePending: true });
-      await unsure.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Go' }] });
-      expect(route).toHaveBeenCalledTimes(2);
-      expect(unsure.getModel()).toBe(testModel);
-
-      // A prompt the session rejects never reaches Jev.
-      const rejected = new Session({ name: 'Rejected', model: testModel, routePending: true });
-      await expect(rejected.sendMessage({ role: 'user', content: [{ type: 'text', text: '@nobody help' }] })).rejects.toThrow();
-      expect(route).toHaveBeenCalledTimes(2);
-    } finally {
-      route.mockRestore();
-    }
-  });
-
-  test('a draft\'s model is pending only while Jev is configured to pick one', async () => {
-    // Jev's key can also live in the settings, so the test gets a data
-    // directory of its own rather than reading the machine's.
-    const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-pending-'));
-    const previousDirectory = process.env.SIRUS_DATA_DIR;
-    const previousKey = process.env.JEV_API;
-    bindScriptedRuntime(testModel, textTurn('Done'));
-    const route = spyOn(router, 'routeSessionModel').mockResolvedValue(null);
-    try {
-      process.env.SIRUS_DATA_DIR = directory;
-      delete process.env.JEV_API;
-      expect(new Session({ model: testModel, routePending: true }).isModelPending()).toBe(false);
-      process.env.JEV_API = 'ts-live-key-pending';
-      const draft = new Session({ model: testModel, routePending: true });
-      expect(draft.isModelPending()).toBe(true);
-      expect(new Session({ model: testModel }).isModelPending()).toBe(false);
-      await draft.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Go' }] });
-      // Asked and answered, even with nothing chosen, the fallback is now the model.
-      expect(draft.isModelPending()).toBe(false);
-      const pinned = new Session({ model: testModel, routePending: true });
-      pinned.changeParticipantModel('sirus', testModel);
-      expect(pinned.isModelPending()).toBe(false);
-    } finally {
-      route.mockRestore();
-      if (previousDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
-      else process.env.SIRUS_DATA_DIR = previousDirectory;
-      if (previousKey === undefined) delete process.env.JEV_API;
-      else process.env.JEV_API = previousKey;
-      rmSync(directory, { recursive: true, force: true });
-    }
   });
 
   test('changing a participant model changes it for that session only', () => {
@@ -389,13 +589,15 @@ describe('Session model', () => {
     expect(session.getContextUsage()).toEqual({ tokens: 128, window: 400_000 });
   });
 
-  test('records tool calls, thoughts and compaction as the runtime reports them', async () => {
+  test('records tool calls, thoughts, notices and compaction in their original order', async () => {
     bindScriptedRuntime(testModel, (_input, emit) => {
       emit({ type: 'thought', text: 'Let me look.' });
       emit({ type: 'tool_call', call: { type: 'tool_call', id: 'call-1', title: 'cat file.txt', kind: 'execute', status: 'pending', locations: [], content: [] } });
       emit({ type: 'tool_call', call: { type: 'tool_call', id: 'call-1', title: 'cat file.txt', kind: 'execute', status: 'completed', locations: [], content: [{ type: 'text', text: 'hi' }], output: 'hi' } });
       emit({ type: 'compaction', status: 'in_progress' });
       emit({ type: 'compaction', status: 'completed', summary: 'Read the file.' });
+      emit({ type: 'text', text: 'Read it.' });
+      emit({ type: 'notice', severity: 'warning', title: 'Model fallback', description: 'Using the available model.' });
       emit({ type: 'text', text: 'It says hi.' });
     });
     const session = new Session({ id: 'tools', name: 'Tools', model: testModel });
@@ -404,8 +606,62 @@ describe('Session model', () => {
       { type: 'thought', text: 'Let me look.' },
       { type: 'tool_call', id: 'call-1', title: 'cat file.txt', kind: 'execute', status: 'completed', locations: [], content: [{ type: 'text', text: 'hi' }], output: 'hi' },
       { type: 'compaction', summary: 'Read the file.' },
+      { type: 'text', text: 'Read it.' },
+      { type: 'notice', severity: 'warning', title: 'Model fallback', description: 'Using the available model.' },
       { type: 'text', text: 'It says hi.' },
     ]);
+  });
+
+  test('keeps notices out of mention routing, peer prompts and rebuilt runtime history', async () => {
+    const writer = bindScriptedRuntime(testModel, (_input, emit) => {
+      emit({ type: 'text', text: 'Before' });
+      emit({ type: 'notice', severity: 'vendor-hint', title: 'Notice for @observer', description: 'Vendor detail for @uninvited' });
+      emit({ type: 'text', text: 'After @reviewer' });
+    });
+    const reviewer = bindScriptedRuntime(secondTestModel, textTurn('Reviewed'));
+    const observer = bindScriptedRuntime(thirdTestModel, textTurn('Observed'));
+    const session = new Session({ name: 'Notices', model: testModel });
+    session.addParticipant('reviewer', secondTestModel);
+    session.addParticipant('observer', thirdTestModel);
+    let restored: Session | undefined;
+    try {
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Inspect' }] });
+      expect(observer.starts).toHaveLength(0);
+      expect(reviewer.runtimes[0].prompts[0].text).toBe('@sirus wrote:\nBefore\nAfter @reviewer');
+      expect(session.getParticipants().map(participant => participant.name)).toEqual(['sirus', 'reviewer', 'observer']);
+      restored = Session.fromSnapshot(session.toSnapshot());
+      await restored.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Again' }] });
+      const seed = writer.runtimes[1].prompts[0].text;
+      expect(seed).toContain('@sirus: Before');
+      expect(seed).toContain('@sirus: After @reviewer');
+      expect(seed).not.toContain('Notice for');
+      expect(seed).not.toContain('Vendor detail');
+      expect(observer.starts).toHaveLength(0);
+    } finally {
+      await session.dispose();
+      await restored?.dispose();
+    }
+  });
+
+  test('surfaces notices between turns through the session without changing the transcript', async () => {
+    const binding = bindScriptedRuntime(testModel, textTurn('Done'));
+    const session = new Session({ name: 'Idle notice', model: testModel });
+    try {
+      expect(session.getNotice()).toBeNull();
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Inspect' }] });
+      const before = session.toSnapshot().messages;
+      let changes = 0;
+      const unsubscribe = session.subscribe(() => { changes++; });
+      const notice = { type: 'notice' as const, severity: 'error', title: 'Configuration changed' };
+      binding.starts[0].onUpdate(notice);
+      unsubscribe();
+      expect(session.getNotice()).toEqual({ participant: 'sirus', notice });
+      expect(changes).toBe(1);
+      expect(session.getMessages()).toEqual(before);
+      expect(session.toSnapshot()).not.toHaveProperty('notice');
+    } finally {
+      await session.dispose();
+    }
   });
 
   test('/compact sends the slash command to the default participant and records the boundary', async () => {
@@ -554,7 +810,7 @@ describe('Session model', () => {
       // One worker per session, on that session's first turn; the report
       // turns that follow spawn nothing.
       else if (spawns < sessions.length) {
-        await sessions[spawns].subagentHostFor('sirus')!.spawn('background task', 'fresh', { callId: `spawn-${spawns++}` });
+        await sessions[spawns].subagentHostFor('sirus')!.spawn('background task', { context: 'fresh' }, { callId: `spawn-${spawns++}` });
       }
       emit({ type: 'text', text: 'Done' });
     });
@@ -609,7 +865,7 @@ describe('Session model', () => {
         // entry; the run is tied to it, and the report lands on it.
         const call = { type: 'tool_call' as const, id: 'spawn', title: 'sirus - SpawnAgent', kind: 'other' as const, locations: [], content: [] };
         emit({ type: 'tool_call', call: { ...call, status: 'in_progress' } });
-        await session.subagentHostFor('sirus')!.spawn('Rewrite the parser', 'fresh', { callId: 'spawn' });
+        await session.subagentHostFor('sirus')!.spawn('Rewrite the parser', { context: 'fresh' }, { callId: 'spawn' });
         emit({ type: 'tool_call', call: { ...call, status: 'completed' } });
       }
       emit({ type: 'text', text: 'Noted' });
@@ -627,12 +883,15 @@ describe('Session model', () => {
       expect(worker.status).toBe('done');
       expect(worker.reported).toBe(true);
       // The owner hears it the way it hears any other participant.
-      expect(prompts[1]).toStartWith(`@${worker.id} wrote:`);
+      expect(prompts[1]).toStartWith(`Subagent ${worker.id} done`);
       expect(prompts[1]).toContain(`Subagent ${worker.id} done`);
       expect(prompts[1]).toContain('I rewrote the parser.');
+      // How to continue a worker is the tools' to say; a report that says it
+      // gets finished workers sent follow-ups.
+      expect(prompts[1]).not.toContain('SendMessage');
 
-      const report = session.getMessages().find(entry => entry.participant === worker.id);
-      expect(report).toMatchObject({ role: 'assistant', participant: worker.id, model: testModel, to: ['sirus'], hidden: true });
+      const report = session.getMessages().find(entry => entry.hidden && textOf(entry).includes(worker.id));
+      expect(report).toMatchObject({ role: 'user', to: ['sirus'], hidden: true });
       expect(textOf(report!)).toContain('Final message:');
       // The user reads the report under the call that started the worker.
       const call = session.getMessages().flatMap(entry => entry.content)
@@ -668,8 +927,8 @@ describe('Session model', () => {
         }
         const host = session.subagentHostFor('sirus')!;
         await Promise.all([
-          host.spawn('First task', 'fresh', { callId: 'mcp-one' }),
-          host.spawn('Second task', 'fresh', { callId: 'mcp-two' }),
+          host.spawn('First task', { context: 'fresh' }, { callId: 'mcp-one' }),
+          host.spawn('Second task', { context: 'fresh' }, { callId: 'mcp-two' }),
         ]);
         for (const call of calls) {
           emit({ type: 'tool_call', call: {
@@ -689,7 +948,7 @@ describe('Session model', () => {
     }
   });
 
-  test('a report waits behind a busy turn and goes out before the user’s queued prompts', async () => {
+  test('a report steers a busy owner without adding a turn before queued prompts', async () => {
     const prompts: string[] = [];
     let releaseOwner!: () => void;
     let releaseWorker!: () => void;
@@ -706,7 +965,7 @@ describe('Session model', () => {
       prompts.push(input.text);
       if (!spawned) {
         spawned = true;
-        await session.subagentHostFor('sirus')!.spawn('Background task', 'fresh', { callId: 'spawn' });
+        await session.subagentHostFor('sirus')!.spawn('Background task', { context: 'fresh' }, { callId: 'spawn' });
       } else if (prompts.length === 2) {
         await ownerGate;
       }
@@ -721,16 +980,14 @@ describe('Session model', () => {
       await until(() => prompts.length === 2, 'the second turn to start');
       session.queueMessage('Queued prompt');
       releaseWorker();
-      await until(() => worker.status === 'done', 'the worker to finish');
-      // The report cannot interrupt the turn in flight.
-      expect(worker.reported).toBe(false);
+      await until(() => worker.status === 'done' && worker.reported, 'the worker report to arrive');
+      expect(worker.reported).toBe(true);
       expect(session.getQueuedMessageCount()).toBe(1);
 
       releaseOwner();
       await busy;
-      await until(() => prompts.length === 4 && session.getStatus() === 'idle', 'the report and the queued prompt');
-      expect(prompts[2]).toContain(`@${worker.id} wrote:`);
-      expect(prompts[3]).toBe('Queued prompt');
+      await until(() => prompts.length === 3 && session.getStatus() === 'idle', 'the queued prompt');
+      expect(prompts[2]).toBe('Queued prompt');
       expect(session.getQueuedMessageCount()).toBe(0);
     } finally {
       releaseOwner();
@@ -751,7 +1008,7 @@ describe('Session model', () => {
       }
       if (!spawned) {
         spawned = true;
-        await session.subagentHostFor('sirus')!.spawn('Background task', 'fresh', { callId: 'spawn' });
+        await session.subagentHostFor('sirus')!.spawn('Background task', { context: 'fresh' }, { callId: 'spawn' });
       }
       emit({ type: 'text', text: 'Noted' });
     });
@@ -763,7 +1020,7 @@ describe('Session model', () => {
       expect(session.isEmpty()).toBe(false);
 
       release();
-      await until(() => worker.reported && session.getStatus() === 'idle', 'the report turn');
+      await until(() => worker.status === 'done' && session.getStatus() === 'idle', 'the report turn');
       session.clear();
       expect(session.isEmpty()).toBe(true);
     } finally {
@@ -774,16 +1031,17 @@ describe('Session model', () => {
 
   test('a worker still being set up counts as working, and deleting the session stops it', async () => {
     bindScriptedRuntime(testModel, textTurn('Done'));
-    // Never created: removing the worktree is stubbed out below.
+    // Never created: the worktree is stubbed out below.
     const directory = path.join(os.tmpdir(), `sirus-spawn-setup-${process.pid}`);
     let cut!: () => void;
     const create = spyOn(worktree, 'createWorktree')
-      .mockImplementation(() => new Promise(resolve => { cut = () => resolve({ directory, branch: 'sirus/setup' }); }));
-    const remove = spyOn(worktree, 'removeWorktree').mockResolvedValue();
+      .mockImplementation(() => new Promise(resolve => {
+        cut = () => resolve({ directory, branch: 'sirus/setup', startHead: 'a'.repeat(40) });
+      }));
     const session = new Session({ id: 'spawn-setup', name: 'Setup', model: testModel });
     session.append({ role: 'user', to: ['sirus'], content: [{ type: 'text', text: 'Earlier' }] });
     try {
-      const spawn = session.subagentHostFor('sirus')!.spawn('Background task', 'fresh', { callId: 'spawn' });
+      const spawn = session.subagentHostFor('sirus')!.spawn('Background task', { isolation: 'worktree' }, { callId: 'spawn' });
       await until(() => create.mock.calls.length === 1, 'the spawn to ask for a worktree');
       // The run does not exist yet, but its worker starts from this record.
       expect(session.getActiveSubagentCount()).toBe(1);
@@ -793,11 +1051,9 @@ describe('Session model', () => {
       cut();
       await disposed;
       const run = await spawn;
-      expect(remove).toHaveBeenCalledWith(session.getDirectory(), directory);
-      expect(findSubagent(run.id)).toBeUndefined();
+      expect(findSubagent(run.id as string)).toBeUndefined();
     } finally {
       create.mockRestore();
-      remove.mockRestore();
     }
   });
 
@@ -813,7 +1069,7 @@ describe('Session model', () => {
       }
       if (!spawned) {
         spawned = true;
-        await session.subagentHostFor('sirus')!.spawn('Background task', 'fresh', { callId: 'spawn' });
+        await session.subagentHostFor('sirus')!.spawn('Background task', { context: 'fresh' }, { callId: 'spawn' });
       }
       emit({ type: 'text', text: 'Noted' });
     });
@@ -834,7 +1090,7 @@ describe('Session model', () => {
     }
   });
 
-  test('messageWorker steers a running worker and refuses one that has ended', async () => {
+  test('messageWorker steers a running worker and resumes one that ended', async () => {
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const steered: string[] = [];
@@ -849,7 +1105,7 @@ describe('Session model', () => {
       }
       if (!spawned) {
         spawned = true;
-        await session.subagentHostFor('sirus')!.spawn('Background task', 'fresh', { callId: 'spawn' });
+        await session.subagentHostFor('sirus')!.spawn('Background task', { context: 'fresh' }, { callId: 'spawn' });
       }
       emit({ type: 'text', text: 'Noted' });
     });
@@ -869,7 +1125,9 @@ describe('Session model', () => {
 
       release();
       await until(() => worker.status === 'done', 'the worker to finish');
-      await expect(session.messageWorker(worker.id, 'Too late')).rejects.toThrow(`Subagent ${worker.id} is done`);
+      await session.messageWorker(worker.id, 'Follow up');
+      await until(() => worker.status === 'done', 'the resumed worker');
+      expect(worker.transcript.some(entry => textOf(entry) === 'Follow up')).toBe(true);
       await expect(session.messageWorker('sub-nothing', 'Nobody')).rejects.toThrow('has no worker');
     } finally {
       release();
@@ -891,7 +1149,7 @@ describe('Session model', () => {
       prompts.push(input.text);
       if (!spawned) {
         spawned = true;
-        await session.subagentHostFor('sirus')!.spawn('Background task', 'fresh', { callId: 'spawn' });
+        await session.subagentHostFor('sirus')!.spawn('Background task', { context: 'fresh' }, { callId: 'spawn' });
       }
       emit({ type: 'text', text: 'Noted' });
     });
@@ -926,7 +1184,7 @@ describe('Session model', () => {
       await restored.sendMessage({ role: 'user', content: [{ type: 'text', text: 'What happened?' }] });
       expect(restoredWorker.reported).toBe(true);
       const entries = restored.getMessages();
-      const report = entries.findIndex(entry => entry.participant === worker.id);
+      const report = entries.findIndex(entry => entry.hidden && textOf(entry).includes(worker.id));
       const question = entries.findIndex(entry => entry.role === 'user' && textOf(entry) === 'What happened?');
       // The report is in the record the fresh runtime is seeded with, ahead
       // of the prompt, rather than a turn of its own.
@@ -942,91 +1200,30 @@ describe('Session model', () => {
     }
   });
 
-  test('Jev picks the worker’s model and level, and a routing failure keeps the owner’s', async () => {
-    let release!: () => void;
-    const gate = new Promise<void>(resolve => { release = resolve; });
+  test('worker model and thinking follow explicit choices, then owner, with the user pin first', async () => {
     const started: { model: string; thinkingLevel: string }[] = [];
-    let session!: Session;
-    let spawns = 0;
-    // Jev is asked only for an owner on a catalog model, so the owner runs a
-    // scripted runtime bound under a real id, with a key of its own in a data
-    // directory of its own so the vendor has a credential to start it on.
-    const ownerModel = 'gpt-5.6-luna';
-    const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-worker-routing-'));
-    const previous = { SIRUS_DATA_DIR: process.env.SIRUS_DATA_DIR, OPENAI_SECRET: process.env.OPENAI_SECRET };
-    process.env.SIRUS_DATA_DIR = directory;
-    process.env.OPENAI_SECRET = 'sk-test-worker-routing';
-    bindScriptedRuntime(ownerModel, async (_input, emit, options) => {
-      if (isWorker(options)) {
+    for (const model of [testModel, secondTestModel, thirdTestModel]) {
+      bindScriptedRuntime(model, (_input, emit, options) => {
         started.push({ model: options.model, thinkingLevel: options.thinkingLevel });
-        await gate;
-        return;
-      }
-      if (spawns < 2) {
-        spawns++;
-        await session.subagentHostFor('sirus')!.spawn('Background task', 'fresh', { callId: `spawn-${spawns}` });
-      }
-      emit({ type: 'text', text: 'Noted' });
-    });
-    bindScriptedRuntime(secondTestModel, async (_input, _emit, options) => {
-      started.push({ model: options.model, thinkingLevel: options.thinkingLevel });
-      await gate;
-    });
-    const route = spyOn(router, 'routeWorker')
-      .mockResolvedValueOnce({ model: secondTestModel, thinkingLevel: 'low' })
-      .mockRejectedValueOnce(new Error('Jev is unreachable'));
-    session = new Session({ id: 'worker-routing', name: 'Routing', model: ownerModel });
+        emit({ type: 'text', text: 'Done' });
+      });
+    }
+    const session = new Session({ id: 'worker-choice', name: 'Choice', model: testModel });
     session.setThinkingLevel('xhigh');
+    const host = session.subagentHostFor('sirus')!;
     try {
-      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Delegate it' }] });
-      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Delegate another' }] });
-      const [first, second] = session.getWorkers();
-      expect(route).toHaveBeenCalledTimes(2);
-      expect(route.mock.calls[0][0]).toEqual({ task: 'Background task', directory: session.getDirectory() });
-      expect(route.mock.calls[0][3]).toMatchObject({ fallbackLevel: 'xhigh' });
-      expect(first).toMatchObject({ model: secondTestModel, thinkingLevel: 'low' });
-      // A throw is not an answer: the worker stays on its owner's model.
-      expect(second).toMatchObject({ model: ownerModel, thinkingLevel: 'xhigh' });
-      await until(() => started.length === 2, 'both workers to start');
+      await host.spawn('Explicit', { model: secondTestModel, thinkingLevel: 'low', runInBackground: false }, { callId: 'one' });
+      await host.spawn('Inherited', { runInBackground: false }, { callId: 'two' });
+      session.setSubagentModel(thirdTestModel);
+      await host.spawn('Pinned', { model: secondTestModel, thinkingLevel: 'medium', runInBackground: false }, { callId: 'three' });
       expect(started).toEqual([
         { model: secondTestModel, thinkingLevel: 'low' },
-        { model: ownerModel, thinkingLevel: 'xhigh' },
+        { model: testModel, thinkingLevel: 'xhigh' },
+        { model: thirdTestModel, thinkingLevel: 'medium' },
       ]);
+      expect(session.getStatus()).toBe('idle');
+      expect(session.getMessages()).toHaveLength(0);
     } finally {
-      release();
-      route.mockRestore();
-      await session.dispose();
-      unbindRuntime(ownerModel);
-      for (const [name, value] of Object.entries(previous)) {
-        if (value === undefined) delete process.env[name];
-        else process.env[name] = value;
-      }
-      rmSync(directory, { recursive: true, force: true });
-    }
-  });
-
-  test('a worker of an owner outside the catalog never asks Jev', async () => {
-    let release!: () => void;
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    let session!: Session;
-    let spawned = false;
-    bindScriptedRuntime(testModel, async (_input, emit, options) => {
-      if (isWorker(options)) { await gate; return; }
-      if (!spawned) {
-        spawned = true;
-        await session.subagentHostFor('sirus')!.spawn('Background task', 'fresh', { callId: 'spawn' });
-      }
-      emit({ type: 'text', text: 'Noted' });
-    });
-    const route = spyOn(router, 'routeWorker').mockResolvedValue({ model: 'gpt-5.6-terra', thinkingLevel: 'low' });
-    session = new Session({ id: 'worker-unrouted', name: 'Unrouted', model: testModel });
-    try {
-      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Delegate it' }] });
-      expect(route).not.toHaveBeenCalled();
-      expect(session.getWorkers()[0]).toMatchObject({ model: testModel, status: 'working' });
-    } finally {
-      release();
-      route.mockRestore();
       await session.dispose();
     }
   });
@@ -1045,15 +1242,19 @@ describe('Session model', () => {
       }
       if (!spawned) {
         spawned = true;
-        await session.subagentHostFor('sirus')!.spawn('Carry on from here', 'owner', { callId: 'spawn' });
+        await session.subagentHostFor('sirus')!.spawn('Carry on from here', { context: 'owner' }, { callId: 'spawn' });
       }
       emit({ type: 'text', text: 'Delegated it' });
-    });
+    }, true);
     session = new Session({ id: 'worker-fork', name: 'Fork', model: testModel });
     try {
       await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Delegate it' }] });
       const [worker] = session.getWorkers();
       expect(worker.context).toBe('owner');
+      expect(session.toSnapshot().workers![0]!.nativeSession).toMatchObject({
+        vendor: 'gpt', sessionId: binding.runtimes[1]!.sessionId, directory: worker.directory, sourceId: null,
+      });
+      expect(binding.runtimes[1]!.sessionId).not.toBe(binding.runtimes[0]!.sessionId);
       expect(binding.forks).toHaveLength(1);
       expect(binding.forks[0]).toMatchObject({ model: testModel, directory: session.getDirectory() });
       expect(binding.forks[0].systemPrompt).toContain('You are a Sirus subagent');
@@ -1065,6 +1266,9 @@ describe('Session model', () => {
       expect(workerPrompts[0]).toEndWith('Your task:\nCarry on from here');
       // The conversation itself is already in the forked session.
       expect(workerPrompts[0]).not.toContain('Earlier conversation');
+      // Keep the inherited record too, in case the fork's process is lost.
+      expect(textOf(worker.transcript[0])).toContain('Earlier conversation');
+      expect(textOf(worker.transcript[0])).toContain('Delegate it');
     } finally {
       release();
       await session.dispose();
@@ -1084,7 +1288,7 @@ describe('Session model', () => {
     const session = new Session({ id: 'worker-fork-fallback', name: 'Fallback', model: testModel });
     session.append({ role: 'user', to: ['sirus'], content: [{ type: 'text', text: 'The parser is in src/parser.ts' }] });
     try {
-      await session.subagentHostFor('sirus')!.spawn('Carry on from here', 'owner', { callId: 'spawn' });
+      await session.subagentHostFor('sirus')!.spawn('Carry on from here', { context: 'owner' }, { callId: 'spawn' });
       await until(() => workerPrompts.length === 1, 'the worker’s first prompt');
       expect(binding.forks).toEqual([]);
       expect(workerPrompts[0]).toStartWith('Earlier conversation of the agent that spawned you, for context:');
@@ -1151,27 +1355,6 @@ describe('Session model', () => {
     release();
   });
 
-  test('Esc while Jev picks the model stops the turn before any runtime starts', async () => {
-    const binding = bindScriptedRuntime(testModel, textTurn('Done'));
-    let answer!: (pick: router.RoutingPick | null) => void;
-    const route = spyOn(router, 'routeSessionModel').mockImplementation(() => new Promise(resolve => { answer = resolve; }));
-    try {
-      const draft = new Session({ id: 'cancel-while-routing', name: 'Routing', model: testModel, routePending: true });
-      const turn = draft.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Go' }] });
-      // Nobody is answering yet, but the turn is under way and is stopped.
-      expect(draft.cancel()).toBe(true);
-      expect(route.mock.calls[0]?.[2]?.signal?.aborted).toBe(true);
-      answer(null);
-      await expect(turn).rejects.toMatchObject({ name: 'AbortError' });
-      expect(binding.starts).toHaveLength(0);
-      expect(draft.wasLastTurnCancelled()).toBe(true);
-      expect(draft.getStatus()).toBe('idle');
-      expect(draft.cancel()).toBe(false);
-    } finally {
-      route.mockRestore();
-    }
-  });
-
   test('Esc while a report turn takes its checkpoint stops it before the owner is prompted', async () => {
     const prompts: string[] = [];
     let releaseWorker!: () => void;
@@ -1186,7 +1369,7 @@ describe('Session model', () => {
       prompts.push(input.text);
       if (!spawned) {
         spawned = true;
-        await session.subagentHostFor('sirus')!.spawn('Background task', 'fresh', { callId: 'spawn' });
+        await session.subagentHostFor('sirus')!.spawn('Background task', { context: 'fresh' }, { callId: 'spawn' });
       }
       emit({ type: 'text', text: 'Noted' });
     });
@@ -1198,7 +1381,7 @@ describe('Session model', () => {
       .mockImplementation(() => new Promise(resolve => { releaseCapture = () => resolve(null); }));
     try {
       releaseWorker();
-      await until(() => worker.reported && capture.mock.calls.length === 1, 'the report turn to take its checkpoint');
+      await until(() => worker.status === 'done' && capture.mock.calls.length === 1, 'the report turn to take its checkpoint');
       expect(session.getStatus()).toBe('working');
       expect(session.cancel()).toBe(true);
       releaseCapture();
@@ -1220,7 +1403,8 @@ describe('Session model', () => {
     // An adapter that does not finish starting: it stops when told to, and
     // gives up by itself after a while, so a start nobody can stop still
     // ends the test.
-    const start = spyOn(acp, 'startAcpRuntime').mockImplementation((_options, signal) => {
+    const start = spyOn(acp, 'startAcpRuntime').mockImplementation(options => {
+      const signal = options.signal;
       startSignals.push(signal);
       return new Promise((_resolve, reject) => {
         const hung = setTimeout(() => reject(new Error('The adapter never started')), 2_000);
@@ -1278,6 +1462,30 @@ describe('Session model', () => {
         { seq: 1, role: 'assistant', participant: 'Reviewer', model: testModel, content: [{ type: 'text', text: 'reviewed' }] },
         { seq: 3, role: 'assistant', participant: 'Reviewer', model: testModel, content: [{ type: 'text', text: 'reviewed' }] },
       ]);
+  });
+
+  test('tells the others a prompt addresses who it added to the session', async () => {
+    const sirus = bindScriptedRuntime(secondTestModel, textTurn('asked'));
+    const reviewer = bindScriptedRuntime(testModel, textTurn('reviewed'));
+    const session = new Session({ id: 'introductions', name: 'Introductions', model: secondTestModel });
+
+    await session.sendMessage({
+      role: 'user',
+      content: [{ type: 'text', text: '@reviewer test-session-model review the diff, then ask @sirus to fix it' }],
+    });
+    expect(sirus.runtimes[0].prompts[0].text).toBe([
+      'This message adds @reviewer (test-session-model) to the session as a new participant, and it receives this message too.',
+      '',
+      '@reviewer review the diff, then ask @sirus to fix it',
+    ].join('\n'));
+    // The new participant knows its own name, and the record keeps the
+    // prompt as the chat shows it.
+    expect(reviewer.runtimes[0].prompts[0].text).toBe('@reviewer review the diff, then ask @sirus to fix it');
+    expect(textOf(session.getMessages()[0])).toBe('@reviewer review the diff, then ask @sirus to fix it');
+
+    // Once it exists, a prompt naming it introduces nobody.
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: '@sirus @reviewer compare notes' }] });
+    expect(sirus.runtimes[0].prompts[1].text).toBe('@sirus @reviewer compare notes');
   });
 
   test('runs unique mentions in parallel and commits responses in mention order', async () => {
@@ -1339,14 +1547,26 @@ describe('Session model', () => {
     expect(binding.runtimes[0].prompts[0].text).toBe('@Claude claude-opus-5 is still relevant here');
   });
 
-  test('rejects an unknown mention without a model before changing the session', async () => {
-    const session = new Session();
-    await expect(session.sendMessage({
+  test('keeps unknown mentions without a model as ordinary prompt text', async () => {
+    const binding = bindScriptedRuntime(testModel, textTurn('done'));
+    const session = new Session({ model: testModel });
+    await session.sendMessage({
       role: 'user',
-      content: [{ type: 'text', text: 'Could @reviewer inspect this?' }],
-    })).rejects.toThrow(/requires a model/i);
-    expect(session.getParticipants()).toEqual([{ name: 'sirus', model: 'gpt-5.6-luna' }]);
-    expect(session.getMessages()).toEqual([]);
+      content: [{ type: 'text', text: 'Could @reviewer inspect this @mention?' }],
+    });
+    expect(session.getParticipants()).toEqual([{ name: 'sirus', model: testModel }]);
+    expect(binding.runtimes[0].prompts[0].text).toBe('Could @reviewer inspect this @mention?');
+  });
+
+  test('allows an explicit introduction after an ordinary occurrence of the same word', async () => {
+    const binding = bindScriptedRuntime(testModel, textTurn('done'));
+    const session = new Session({ model: testModel });
+    await session.sendMessage({
+      role: 'user',
+      content: [{ type: 'text', text: 'About @reviewer: @reviewer test-session-model inspect this' }],
+    });
+    expect(session.getParticipants().map(participant => participant.name)).toEqual(['sirus', 'reviewer']);
+    expect(binding.runtimes[0].prompts[0].text).toBe('About @reviewer: @reviewer inspect this');
   });
 
   test('does not treat a scoped package name as a participant mention', async () => {
@@ -1599,14 +1819,14 @@ describe('Session subscriptions', () => {
     expect(session.getStatus()).toBe('working');
     while (!finish) await new Promise(resolve => setTimeout(resolve, 0));
     finish();
-    await expect(failedTurn).rejects.toThrow('runtime failed');
+    await expect(failedTurn).rejects.toThrow('refused or could not complete');
     expect(session.getStatus()).toBe('error');
     expect(session.getMessages().at(-1)).toEqual({
       seq: 3,
       role: 'assistant',
       participant: 'sirus',
       model: testModel,
-      content: [{ type: 'text', text: 'Partial before failure' }],
+      content: [{ type: 'text', text: 'Partial before failure' }, { type: 'notice', severity: 'error', title: 'OpenAI refused or could not complete this request. Try again or revise the prompt.' }],
     });
   });
 
@@ -1686,7 +1906,7 @@ describe('Session subscriptions', () => {
       }
       if (!spawned) {
         spawned = true;
-        await session.subagentHostFor('sirus')!.spawn('Background task', 'fresh', { callId: 'spawn' });
+        await session.subagentHostFor('sirus')!.spawn('Background task', { context: 'fresh' }, { callId: 'spawn' });
       }
       emit({ type: 'text', text: 'Noted' });
     });
@@ -1719,7 +1939,7 @@ describe('session-owned workers', () => {
     bindScriptedRuntime(testModel, async (_input, emit, options) => {
       expect(options.mcpServer?.headers[1].value).toBe('sirus');
       if (spawns < sessions.length) {
-        await sessions[spawns++].subagentHostFor('sirus')!.spawn('Work', 'fresh', { callId: 'spawn' });
+        await sessions[spawns++].subagentHostFor('sirus')!.spawn('Work', { context: 'fresh' }, { callId: 'spawn' });
       }
       emit({ type: 'text', text: 'Worker started' });
     });
@@ -1733,7 +1953,7 @@ describe('session-owned workers', () => {
       const [firstWorker] = first.getWorkers();
       const [secondWorker] = second.getWorkers();
       expect(first.getStatus()).toBe('idle');
-      // The session's fixed subagent model wins over anything Jev would say.
+      // The session's fixed subagent model wins over the owner's model.
       expect(firstWorker).toMatchObject({ model: secondTestModel, sessionId: 'owned-first' });
       expect(first.getWorkers().map(run => run.id)).toEqual([firstWorker.id]);
 
@@ -1750,6 +1970,837 @@ describe('session-owned workers', () => {
     } finally {
       finishWorkers();
       await second.dispose();
+    }
+  });
+});
+
+test('named workers wait, interrupt, resume warm conversations, and recover from failure', async () => {
+  let workerRuntime: import('../support/runtime').ScriptedRuntime | undefined;
+  const ownerPrompts: string[] = [];
+  bindScriptedRuntime(testModel, async (input, emit, options, _signal, runtime) => {
+    if (!isWorker(options)) { ownerPrompts.push(input.text); return; }
+    workerRuntime = runtime;
+    if (input.text === 'Block') await new Promise(() => {});
+    if (input.text === 'Fail now') throw new Error('Deliberate failure');
+    emit({ type: 'text', text: `Result: ${input.text}` });
+  });
+  const session = new Session({ id: 'worker-resume-turns', name: 'Resume', model: testModel });
+  const host = session.subagentHostFor('sirus')!;
+  try {
+    const handle = await host.spawn('Block', { name: 'helper', description: 'Check the lifecycle' }, { callId: 'spawn' });
+    await until(() => workerRuntime !== undefined, 'worker runtime');
+    expect(await host.wait(['helper'], 0)).toEqual([expect.objectContaining({ id: handle.id, status: 'working' })]);
+    await expect(host.spawn('Duplicate', { name: 'helper' }, { callId: 'duplicate' })).rejects.toThrow('already in use');
+    const originalRuntime = workerRuntime!;
+    await host.message('helper', 'Second turn', true);
+    expect(await host.wait(['helper'], 1000)).toEqual([expect.objectContaining({ status: 'done', finalMessage: 'Result: Second turn' })]);
+    expect(ownerPrompts.join('\n')).not.toContain('Interrupted by SendMessage');
+    await host.message('helper', 'Continuation');
+    await host.wait(['helper'], 1000);
+    expect(workerRuntime).toBe(originalRuntime);
+    expect(originalRuntime.prompts.map(prompt => prompt.text)).toEqual(['Block', 'Second turn', 'Continuation']);
+    await host.message('helper', 'Fail now');
+    expect(await host.wait(['helper'], 1000)).toEqual([expect.objectContaining({ status: 'failed' })]);
+    await host.message('helper', 'Recovered');
+    await host.wait(['helper'], 1000);
+    expect(host.check('helper')).toMatchObject({ status: 'done' });
+    expect(workerRuntime!.prompts[0].text).toContain('Second turn');
+    expect(workerRuntime!.prompts[0].text).toContain('Continuation');
+    expect(workerRuntime!.prompts[0].text).toContain('Recovered');
+  } finally {
+    await session.dispose();
+  }
+});
+
+test('a restored worker reopens its native session and snapshots its replacement after reset', async () => {
+  const profileHome = mkdtempSync(path.join(os.tmpdir(), 'sirus-worker-profile-'));
+  const previousHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = profileHome;
+  const binding = bindScriptedRuntime(testModel, textTurn('Finished'), true);
+  const session = new Session({ id: 'native-worker', name: 'Worker restart', model: testModel });
+  let reopened: Session | undefined;
+  try {
+    await session.subagentHostFor('sirus')!.spawn('Remember the tool results', { runInBackground: false }, { callId: 'spawn' });
+    const snapshot = session.toSnapshot();
+    const saved = snapshot.workers![0]!;
+    expect(saved.nativeSession).toMatchObject({
+      vendor: 'gpt', sessionId: binding.runtimes[0]!.sessionId,
+      directory: session.getDirectory(), sourceId: null, profileHome,
+    });
+    await session.dispose();
+    reopened = Session.fromSnapshot(snapshot);
+    expect(reopened.getWorkers()[0]!.worker).toBeNull();
+    await reopened.messageWorker(saved.id, 'Continue from the tool results');
+    await reopened.subagentHostFor('sirus')!.wait([saved.id], 1000);
+    const resumed = binding.runtimes[1]!;
+    expect(binding.starts[1]!.resume).toEqual(saved.nativeSession);
+    expect(resumed.prompts[0]!.text).toBe('Continue from the tool results');
+    expect(reopened.toSnapshot().workers![0]!.nativeSession).toEqual(saved.nativeSession);
+
+    // A reset invalidates the saved ref even though the run still holds the
+    // original restored record. The next continuation must use the recap.
+    const worker = reopened.getWorkers()[0]!;
+    worker.worker!.resetRuntime();
+    expect(reopened.toSnapshot().workers![0]!.nativeSession).toBeUndefined();
+    await reopened.messageWorker(saved.id, 'Start again');
+    await reopened.subagentHostFor('sirus')!.wait([saved.id], 1000);
+    const fresh = binding.runtimes.find(runtime => runtime.prompts[0]?.text.endsWith('Start again'))!;
+    expect(fresh.prompts[0]!.text).toContain('Earlier conversation');
+    expect(reopened.toSnapshot().workers![0]!.nativeSession!.sessionId).toBe(fresh.sessionId);
+    expect(fresh.sessionId).not.toBe(saved.nativeSession!.sessionId);
+  } finally {
+    await reopened?.dispose();
+    await session.dispose();
+    if (previousHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousHome;
+    rmSync(profileHome, { recursive: true, force: true });
+  }
+});
+
+test('foreground workers return their report without a notification and apply agent definitions', async () => {
+  const { mkdirSync, writeFileSync } = await import('fs');
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-agent-definition-'));
+  mkdirSync(path.join(directory, '.claude', 'agents'), { recursive: true });
+  writeFileSync(path.join(directory, '.claude', 'agents', 'reader.md'), `---\nname: reader\ndescription: Reads only\ntools: Read, Grep\nmodel: ${secondTestModel}\nthinkingLevel: low\n---\nFollow the READER_CONTRACT.`);
+  const binding = bindScriptedRuntime(secondTestModel, (_input, emit) => { emit({ type: 'text', text: 'Definition result' }); });
+  bindScriptedRuntime(testModel, textTurn('Owner'));
+  const session = new Session({ id: 'foreground-definition', name: 'Definition', directory, model: testModel });
+  try {
+    const result = await session.subagentHostFor('sirus')!.spawn('Read', { agentType: 'reader', runInBackground: false }, { callId: 'spawn' });
+    expect(result).toMatchObject({ status: 'done', model: secondTestModel, thinkingLevel: 'low', finalMessage: 'Definition result' });
+    expect(binding.starts[0]).toMatchObject({ tools: ['Read', 'Grep'], readOnly: true });
+    expect(binding.starts[0].systemPrompt).toContain('READER_CONTRACT');
+    expect(session.getMessages()).toEqual([]);
+    expect(session.getWorkers()[0]).toMatchObject({ directory, branch: null, reported: true });
+    const restored = Session.fromSnapshot(session.toSnapshot());
+    try {
+      await restored.messageWorker(session.getWorkers()[0].id, 'Read again');
+      await restored.subagentHostFor('sirus')!.wait([session.getWorkers()[0].id], 1000);
+      expect(binding.starts.at(-1)?.systemPrompt).toContain('READER_CONTRACT');
+      expect(binding.runtimes.at(-1)?.prompts[0].text).toContain('Definition result');
+    } finally {
+      await restored.dispose();
+    }
+  } finally {
+    await session.dispose();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a foreground worker its owner stops waiting for carries on in the background and reports', async () => {
+  const gates = new Map<string, () => void>();
+  const ownerPrompts: string[] = [];
+  let spawned: Promise<Record<string, unknown>> | null = null;
+  let session!: Session;
+  bindScriptedRuntime(testModel, async (input, emit, options) => {
+    if (isWorker(options)) {
+      await new Promise<void>(resolve => { gates.set(input.text, resolve); });
+      emit({ type: 'text', text: `Finished: ${input.text}` });
+      return;
+    }
+    ownerPrompts.push(input.text);
+    if (ownerPrompts.length === 1) {
+      spawned = session.subagentHostFor('sirus')!.spawn('Slow task', { runInBackground: false }, { callId: 'spawn' });
+      await spawned.catch(() => {});
+    }
+    emit({ type: 'text', text: 'Noted' });
+  });
+  session = new Session({ id: 'foreground-left', name: 'Foreground left', model: testModel });
+  const host = session.subagentHostFor('sirus')!;
+  try {
+    // Esc stops the owner's turn while it waits in its SpawnAgent call.
+    const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Delegate it' }] });
+    await until(() => gates.has('Slow task'), 'the worker to start');
+    session.cancel();
+    await turn.catch(() => {});
+    await expect(spawned!).rejects.toThrow();
+    const [cancelled] = session.getWorkers();
+    expect(cancelled).toMatchObject({ status: 'working', runInBackground: true });
+    gates.get('Slow task')!();
+    await until(() => ownerPrompts.length === 2 && session.getStatus() === 'idle', 'the report turn');
+    expect(cancelled.reported).toBe(true);
+    expect(ownerPrompts[1]).toStartWith(`Subagent ${cancelled.id} done`);
+    expect(ownerPrompts[1]).toContain('Finished: Slow task');
+
+    // A wait that would outlast the vendor's patience with a tool call
+    // returns before it gives up, and the run reports the same way.
+    jest.useFakeTimers();
+    let result: Record<string, unknown>;
+    try {
+      const pending = host.spawn('Long task', { runInBackground: false }, { callId: 'spawn-long' });
+      // Microtasks only: the wait's own timer is the one being tested.
+      for (let tick = 0; tick < 1000 && session.getWorkers().length < 2; tick++) await Promise.resolve();
+      for (let tick = 0; tick < 20; tick++) await Promise.resolve();
+      jest.advanceTimersByTime(TOOL_WAIT_LIMIT_MS);
+      result = await pending;
+    } finally {
+      jest.useRealTimers();
+    }
+    expect(result).toMatchObject({ status: 'working', note: expect.stringContaining('carries on in the background') });
+    const long = session.getWorkers()[1];
+    expect(long.runInBackground).toBe(true);
+    await until(() => gates.has('Long task'), 'the long worker to start');
+    gates.get('Long task')!();
+    await until(() => ownerPrompts.length === 3 && session.getStatus() === 'idle', 'the second report turn');
+    expect(ownerPrompts[2]).toContain('Finished: Long task');
+  } finally {
+    for (const release of gates.values()) release();
+    await session.dispose();
+  }
+});
+
+test('a worker whose call was refused says so in the report its owner reads', async () => {
+  bindScriptedRuntime(testModel, (_input, emit) => {
+    emit({ type: 'tool_call', call: {
+      type: 'tool_call', id: 'refused-edit', title: 'Edit README.md', kind: 'edit', status: 'failed', locations: [],
+      content: [{ type: 'text', text: '```\n<tool_use_error>User refused permission to run tool</tool_use_error>\n```' }],
+    } });
+    emit({ type: 'text', text: 'The edit was declined.' });
+  });
+  const session = new Session({ id: 'refused-worker', name: 'Refused', model: testModel });
+  try {
+    const result = await session.subagentHostFor('sirus')!.spawn('Append a line', { runInBackground: false }, { callId: 'spawn' });
+    expect(result).toMatchObject({ status: 'done', failedCalls: ['Edit README.md: User refused permission to run tool'] });
+    const { workerReport } = await import('../../src/agent_runtime/tools/subagents/report');
+    expect(workerReport(session.getWorkers()[0])).toContain(
+      'Calls that did not go through:\n- Edit README.md: User refused permission to run tool\n\nFinal message:\n\nThe edit was declined.');
+  } finally {
+    await session.dispose();
+  }
+});
+
+test('time inside a running tool call is not silence to the worker watchdog', async () => {
+  let finishCall!: () => void;
+  const callGate = new Promise<void>(resolve => { finishCall = resolve; });
+  let finishTurn!: () => void;
+  const turnGate = new Promise<void>(resolve => { finishTurn = resolve; });
+  const call = { type: 'tool_call' as const, id: 'suite', title: 'bun test', kind: 'execute' as const, locations: [], content: [] };
+  bindScriptedRuntime(testModel, async (_input, emit, options) => {
+    if (!isWorker(options)) return;
+    emit({ type: 'tool_call', call: { ...call, status: 'in_progress' } });
+    await callGate;
+    emit({ type: 'tool_call', call: { ...call, status: 'completed' } });
+    await turnGate;
+  });
+  const session = new Session({ id: 'quiet-tool', name: 'Quiet tool', model: testModel });
+  try {
+    await session.subagentHostFor('sirus')!.spawn('Run the suite', {}, { callId: 'spawn' });
+    const [run] = session.getWorkers();
+    await until(() => run.content.some(block => block.type === 'tool_call'), 'the command to start');
+    // Twenty minutes into the command, the worker is busy, not hung.
+    setSystemTime(new Date(Date.now() + 20 * 60_000));
+    expect(run.worker!.quietFor).toBe(0);
+    setSystemTime();
+    finishCall();
+    await until(() => run.content.some(block => block.type === 'tool_call' && block.status === 'completed'), 'the command to end');
+    // Once nothing is running, silence counts again.
+    setSystemTime(new Date(Date.now() + 16 * 60_000));
+    expect(run.worker!.quietFor).toBeGreaterThanOrEqual(15 * 60_000);
+  } finally {
+    setSystemTime();
+    finishCall();
+    finishTurn();
+    await session.dispose();
+  }
+});
+
+test('owner context on another vendor seeds a fresh runtime and never attempts a fork', async () => {
+  const previous = { ANTHROPIC_API: process.env.ANTHROPIC_API, OPENAI_SECRET: process.env.OPENAI_SECRET };
+  process.env.ANTHROPIC_API = 'test-anthropic-key';
+  process.env.OPENAI_SECRET = 'test-openai-key';
+  const owner = bindScriptedRuntime('gpt-5.6-luna', textTurn('Remember CROSS_VENDOR_CONTEXT'));
+  const worker = bindScriptedRuntime('claude-sonnet-5', textTurn('I remember'));
+  const session = new Session({ id: 'cross-vendor-worker', name: 'Cross vendor', model: 'gpt-5.6-luna' });
+  try {
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Remember the context' }] });
+    await session.subagentHostFor('sirus')!.spawn('Continue', { context: 'owner', model: 'claude-sonnet-5', runInBackground: false }, { callId: 'spawn' });
+    expect(owner.forks).toHaveLength(0);
+    expect(worker.runtimes[0].prompts[0].text).toContain('CROSS_VENDOR_CONTEXT');
+    expect(worker.starts[0].vendor).toBe('claude');
+  } finally {
+    await session.dispose();
+    unbindRuntime('gpt-5.6-luna');
+    unbindRuntime('claude-sonnet-5');
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test('notifications stay attached to their completed turn when steering acknowledges after a resume', async () => {
+  let releaseOwner!: () => void;
+  const ownerGate = new Promise<void>(resolve => { releaseOwner = resolve; });
+  const acknowledgements: (() => void)[] = [];
+  const steered: string[] = [];
+  bindScriptedRuntime(testModel, async (input, emit, options, _signal, runtime) => {
+    if (isWorker(options)) { emit({ type: 'text', text: input.text }); return; }
+    runtime.steer = text => new Promise<void>(resolve => { steered.push(text); acknowledgements.push(resolve); });
+    emit({ type: 'tool_call', call: {
+      type: 'tool_call', id: 'spawn-delayed', title: 'mcp.sirus.SpawnAgent', kind: 'execute',
+      status: 'completed', locations: [], content: [],
+    } });
+    await ownerGate;
+  });
+  const session = new Session({ id: 'delayed-reports', name: 'Delayed reports', model: testModel });
+  const ownerTurn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Start' }] });
+  try {
+    await until(() => session.getMessages().some(entry => entry.content.some(block => block.type === 'tool_call')), 'owner runtime');
+    const host = session.subagentHostFor('sirus')!;
+    await host.spawn('FIRST_RESULT', { name: 'delayed' }, { callId: 'spawn-delayed' });
+    await host.wait(['delayed'], 1000);
+    expect(acknowledgements).toHaveLength(1);
+    await host.message('delayed', 'SECOND_RESULT');
+    await host.wait(['delayed'], 1000);
+    expect(acknowledgements).toHaveLength(2);
+    acknowledgements[1]();
+    await new Promise(resolve => setImmediate(resolve));
+    acknowledgements[0]();
+    await new Promise(resolve => setImmediate(resolve));
+    const notifications = session.getMessages().filter(entry => entry.hidden).map(textOf);
+    expect(notifications).toHaveLength(2);
+    expect(notifications.some(text => text.includes('Final message:\n\nFIRST_RESULT'))).toBe(true);
+    expect(notifications.some(text => text.includes('Final message:\n\nSECOND_RESULT'))).toBe(true);
+    expect(steered[0]).toContain('FIRST_RESULT');
+    expect(steered[1]).toContain('SECOND_RESULT');
+    const call = session.getMessages().flatMap(entry => entry.content).find(block => block.type === 'tool_call');
+    expect(call).toMatchObject({ output: expect.stringContaining('Final message:\n\nSECOND_RESULT') });
+    expect(session.getWorkers()[0].reported).toBe(true);
+  } finally {
+    for (const acknowledge of acknowledgements) acknowledge();
+    releaseOwner();
+    await ownerTurn;
+    await session.dispose();
+  }
+});
+
+test('retries an adapter crash once, carries completed work, and records the final error', async () => {
+  const { AdapterLostError } = await import('../../src/agent_runtime/runtime/errors');
+  let attempts = 0;
+  const binding = bindScriptedRuntime(testModel, (_input, emit) => {
+    attempts++;
+    emit({ type: 'text', text: 'Inspected the project.' });
+    throw new AdapterLostError('claude adapter closed the connection: sessionId=secret phase=validate-cwd');
+  });
+  const session = new Session({ model: testModel });
+  try {
+    await expect(session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Continue' }] })).rejects.toThrow('adapter stopped unexpectedly');
+    expect(attempts).toBe(2);
+    expect(binding.runtimes[1].prompts[0].text).toContain('Inspected the project.');
+    expect(binding.runtimes[1].prompts[0].text).toContain('without repeating it');
+    const errors = session.getMessages().flatMap(entry => entry.content).filter(block => block.type === 'notice' && block.severity === 'error');
+    expect(errors).toHaveLength(1);
+    expect(JSON.stringify(errors)).not.toContain('sessionId');
+    bindScriptedRuntime(testModel, textTurn('Recovered'));
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Next' }] });
+    expect(Session.fromSnapshot(session.toSnapshot()).getMessages().flatMap(entry => entry.content)).toContainEqual(errors[0]);
+  } finally { await session.dispose(); }
+});
+
+test('a single credential recovers automatically after its adapter crashes', async () => {
+  const { providerFor } = await import('../../src/agent_runtime/providers');
+  const { AdapterLostError } = await import('../../src/agent_runtime/runtime/errors');
+  const model = 'gpt-5.6-luna';
+  const credentials = spyOn(providerFor('gpt').sources, 'list').mockReturnValue([{ id: 'only', kind: 'subscription', profile: 'default' }]);
+  let attempts = 0;
+  const binding = bindScriptedRuntime(model, (_input, emit) => {
+    if (++attempts === 1) throw new AdapterLostError('closed');
+    emit({ type: 'text', text: 'Recovered' });
+  });
+  const session = new Session({ model });
+  try {
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'hello' }] });
+    expect(binding.starts).toHaveLength(2);
+    expect(textOf(session.getMessages().at(-1)!)).toBe('Recovered');
+  } finally { await session.dispose(); credentials.mockRestore(); unbindRuntime(model); }
+});
+
+test.each([
+  ['429 rate limit. Resets at 18:30 UTC', 'limit', 'Resets at 18:30 UTC'],
+  ['usage_limit_reached: allowance spent, try again in 12 hours', 'limit', 'try again in 12 hours'],
+  ['401 authentication token expired', 'login', '/login'],
+  ['policy denied', 'refused', 'refused'],
+] as const)('classifies %s without retrying a live vendor refusal', async (raw, kind, expected) => {
+  const { turnFailure } = await import('../../src/agent_runtime/runtime/errors');
+  const failure = turnFailure(new Error(raw), 'claude', 'reviewer');
+  expect(failure.kind).toBe(kind);
+  expect(failure.message).toContain(expected);
+  if (kind === 'limit') expect(failure.message).toContain('/model @reviewer gpt-5.6-luna');
+  let attempts = 0;
+  bindScriptedRuntime(testModel, () => { attempts++; throw new Error(raw); });
+  const session = new Session({ model: testModel });
+  try {
+    await expect(session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'hello' }] })).rejects.toThrow(expected);
+    expect(attempts).toBe(1);
+    expect(session.getMessages().at(-1)?.content).toMatchObject([{ type: 'notice', severity: 'error' }]);
+  } finally { await session.dispose(); }
+});
+
+test('draft warmup is shared with the first turn and is disposed if unused', async () => {
+  const binding = bindScriptedRuntime(testModel, textTurn('Ready'));
+  const session = new Session({ model: testModel });
+  await Promise.all([session.warmup(), session.warmup()]);
+  expect(binding.starts).toHaveLength(1);
+  expect(binding.runtimes[0].prompts).toHaveLength(0);
+  expect(session.isEmpty()).toBe(true);
+  await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'hello' }] });
+  expect(binding.starts).toHaveLength(1);
+  expect(binding.runtimes[0].prompts[0].text).toBe('hello');
+  session.releaseWarmup();
+  expect(binding.runtimes[0].disposed).toBe(false);
+  await session.dispose();
+  const draft = new Session({ model: testModel });
+  await draft.warmup();
+  draft.releaseWarmup();
+  expect(binding.runtimes.at(-1)?.disposed).toBe(true);
+  await draft.dispose();
+});
+
+test('a pending warmup cannot survive a model change or draft disposal', async () => {
+  const { boundRuntimes } = await import('../../src/agent_runtime/runtime/runtime');
+  const binding = bindScriptedRuntime(testModel, textTurn('Old'));
+  const oldFactory = boundRuntimes[testModel];
+  let finish!: () => void;
+  let started!: () => void;
+  const opening = new Promise<void>(resolve => { started = resolve; });
+  const gate = new Promise<void>(resolve => { finish = resolve; });
+  boundRuntimes[testModel] = async options => { started(); await gate; return oldFactory(options); };
+  const next = bindScriptedRuntime(secondTestModel, textTurn('New'));
+  const session = new Session({ model: testModel });
+  const warm = session.warmup().catch(() => undefined);
+  await opening;
+  session.changeParticipantModel('sirus', secondTestModel);
+  await session.warmup();
+  finish();
+  await warm;
+  await until(() => binding.runtimes[0]?.disposed === true, 'superseded warmup disposal');
+  expect(binding.runtimes[0].disposed).toBe(true);
+  await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'hello' }] });
+  expect(next.starts).toHaveLength(1);
+  expect(textOf(session.getMessages().at(-1)!)).toBe('New');
+  await session.dispose();
+});
+
+test.each(['gpt', 'claude'] as const)('ACP %s advertises async tasks and stops cancelled shells including late announcements', async vendor => {
+  const adapter = `
+    import { createInterface } from 'node:readline';
+    const send = value => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\\n');
+    const update = (sessionId, update) => send({ method: 'session/update', params: { sessionId, update } });
+    const task = (sessionId, id) => update(sessionId, {
+      sessionUpdate: 'async_task_spawned', asyncTaskId: id, name: 'sleep 20', canStop: true, toolCallId: 'tool-' + id
+    });
+    const turns = new Map();
+    for await (const line of createInterface({ input: process.stdin })) {
+      const request = JSON.parse(line);
+      const reply = result => send({ id: request.id, result });
+      const sessionId = request.params?.sessionId;
+      if (request.method === 'initialize') {
+        const air = request.params.clientCapabilities._meta?.jetbrains?.air;
+        if (air?.version !== 1 || !air.capabilities.includes('asyncTasks')) throw new Error('Async tasks were not advertised');
+        reply({ protocolVersion: 1, agentCapabilities: { sessionCapabilities: { fork: {} } } });
+      } else if (request.method === 'session/new' || request.method === 'session/fork') {
+        const id = request.method === 'session/new' ? 'owner' : 'worker';
+        task(id, 'early');
+        reply({ sessionId: id });
+      } else if (request.method === 'session/prompt') {
+        if (request.params.prompt.at(-1).text === 'Next') {
+          update(sessionId, { sessionUpdate: 'usage_update', used: 100, size: 200000,
+            _meta: { '_claude/rateLimit': { resetsAt: 2000000000 } } });
+          task(sessionId, 'next');
+          reply({ stopReason: 'end_turn' });
+        } else {
+          turns.set(sessionId, request.id);
+          task(sessionId, 'running');
+        }
+      } else if (request.method === 'session/cancel') {
+        send({ id: turns.get(sessionId), result: { stopReason: 'cancelled' } });
+        setTimeout(() => task(sessionId, 'late'), 20);
+      } else if (request.method === '_session/async_task/stop') {
+        const id = request.params.asyncTaskId;
+        update(sessionId, { sessionUpdate: 'notice', severity: 'info', title: 'stop received', description: id });
+        update(sessionId, { sessionUpdate: 'async_task_progress', asyncTaskId: id, outputFilePath: '/tmp/' + id });
+        setTimeout(() => {
+          update(sessionId, { sessionUpdate: 'async_task_state_update', asyncTaskId: id, state: 'stopped' });
+          reply({ stopped: true });
+        }, 10);
+      } else if (request.id !== undefined) reply({});
+    }
+  `;
+  const spec = spyOn(launch, 'launchFor').mockImplementation(options => ({
+    command: process.execPath, args: ['-e', adapter], env: options.env,
+    mode: options.permissionMode, session: () => ({ mcpServers: [] }), forkNeedsResume: false,
+  }));
+  const updates: RuntimeUpdate[] = [];
+  const workerUpdates: RuntimeUpdate[] = [];
+  const startup = new AbortController();
+  const options: RuntimeOptions = {
+    signal: startup.signal,
+    vendor, model: vendor === 'gpt' ? 'gpt-5.6-luna' : 'claude-sonnet-5', thinkingLevel: 'high',
+    directory: process.cwd(), systemPrompt: '', env: { ...process.env }, mcpServer: null, permissionMode: 'auto',
+    onPermission: async () => ({ outcome: { outcome: 'cancelled' } }),
+    onUpdate: update => { updates.push(update); },
+  };
+  const stopped = () => updates.flatMap(update => update.type === 'notice' && update.title === 'stop received'
+    ? [update.description] : []);
+  const terminal = (id: string) => updates.some(update =>
+    update.type === 'async_task' && update.task.id === id && update.task.state === 'stopped');
+  const controller = new AbortController();
+  let runtime: Runtime | undefined;
+  let turn: Promise<unknown> | undefined;
+  try {
+    runtime = await startAcpRuntime(options);
+    expect(updates).toMatchObject([{ type: 'async_task', task: { id: 'early', state: 'running', canStop: true } }]);
+    startup.abort(new Error('Startup already finished'));
+    expect(runtime.lost).toBe(false);
+    const worker = await runtime.fork({ ...options, onUpdate: update => { workerUpdates.push(update); } });
+    expect(workerUpdates).toHaveLength(1);
+    turn = runtime.prompt({ text: 'Start', images: [] }, controller.signal).catch(error => error);
+    await until(() => updates.some(update => update.type === 'async_task' && update.task.id === 'running'), 'running shell');
+    controller.abort(new Error('Stopped by Esc'));
+    expect(await turn).toMatchObject({ message: 'Stopped by Esc' });
+    await until(() => ['early', 'running', 'late'].every(terminal), 'known and late shell cancellation');
+    expect(stopped().sort()).toEqual(['early', 'late', 'running']);
+    expect(workerUpdates).toHaveLength(1);
+    expect(workerUpdates[0]).toMatchObject({ type: 'async_task', task: { id: 'early', state: 'running' } });
+    expect(updates.find(update => update.type === 'async_task' && update.task.id === 'late' && update.task.state === 'stopped'))
+      .toMatchObject({ task: { name: 'sleep 20', toolCallId: 'tool-late', outputFilePath: '/tmp/late', canStop: false } });
+    await runtime.prompt({ text: 'Next', images: [] }, new AbortController().signal);
+    expect(stopped()).not.toContain('next');
+    expect(updates).toContainEqual({ type: 'rate_limit', resetsAt: 2000000000 });
+    expect(updates).toContainEqual({ type: 'context', usage: { tokens: 100, window: 200000 } });
+    expect(await runtime.stopTask('next')).toBe(true);
+    expect(stopped()).toContain('next');
+    expect(await runtime.stopTask('next')).toBe(false);
+    expect(await runtime.stopTask('missing')).toBe(false);
+    worker.dispose();
+  } finally {
+    controller.abort();
+    runtime?.dispose();
+    await turn;
+    spec.mockRestore();
+  }
+});
+
+test('warming a draft again follows a changed preferred credential', async () => {
+  const { providerFor } = await import('../../src/agent_runtime/providers');
+  const model = 'gpt-5.6-luna';
+  const credentials = spyOn(providerFor('gpt').sources, 'list').mockReturnValue([{ id: 'old', kind: 'subscription', profile: 'default' }]);
+  const binding = bindScriptedRuntime(model, textTurn('Ready'));
+  const session = new Session({ model });
+  try {
+    await session.warmup();
+    credentials.mockReturnValue([{ id: 'new', kind: 'subscription', profile: 'default' }]);
+    await session.warmup();
+    expect(binding.starts).toHaveLength(2);
+    expect(binding.runtimes[0].disposed).toBe(true);
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'hello' }] });
+    expect(binding.starts).toHaveLength(2);
+  } finally { await session.dispose(); credentials.mockRestore(); unbindRuntime(model); }
+});
+
+test('pending warmup adopts the latest permission mode and thinking level', async () => {
+  const { boundRuntimes } = await import('../../src/agent_runtime/runtime/runtime');
+  const binding = bindScriptedRuntime(testModel, textTurn('Ready'));
+  const factory = boundRuntimes[testModel];
+  let finish!: () => void;
+  let started!: () => void;
+  const opening = new Promise<void>(resolve => { started = resolve; });
+  const gate = new Promise<void>(resolve => { finish = resolve; });
+  boundRuntimes[testModel] = async options => { started(); await gate; return factory(options); };
+  const session = new Session({ model: testModel, permissionMode: 'bypass' });
+  const warm = session.warmup();
+  await opening;
+  session.setPermissionMode('ask');
+  session.setThinkingLevel('low');
+  finish();
+  await warm;
+  expect(binding.runtimes[0].permissionMode).toBe('ask');
+  expect(binding.runtimes[0].thinkingLevel).toBe('low');
+  await session.dispose();
+});
+
+test('limit errors preserve structured reset times without copying debug credentials', async () => {
+  const { turnFailure } = await import('../../src/agent_runtime/runtime/errors');
+  const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+  const cause = Object.assign(new Error('Internal error'), { data: { details: 'rate_limit_exceeded', resetsAt } });
+  const failure = turnFailure(new Error('Internal error', { cause }), 'gpt', 'sirus');
+  expect(failure.message).toContain(new Date(resetsAt * 1000).toLocaleString());
+  expect(failure.message).toContain('/model claude-sonnet-5');
+  const debug = turnFailure(new Error('Rate limit exceeded. Resets at 18:30 UTC. Request Authorization: Bearer test-secret-key'), 'gpt', 'sirus');
+  expect(debug.message).toContain('Resets at 18:30 UTC');
+  expect(debug.message).not.toContain('test-secret-key');
+});
+
+test.each(['initialize', 'session/new'])('cancelling ACP startup terminates an adapter hung in %s', async phase => {
+  const { existsSync, readFileSync } = await import('fs');
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-startup-cancel-'));
+  const pidFile = path.join(directory, 'adapter.pid');
+  const adapter = `
+    import { createInterface } from 'node:readline';
+    import { writeFileSync } from 'node:fs';
+    for await (const line of createInterface({ input: process.stdin })) {
+      const request = JSON.parse(line);
+      if (request.method === process.env.HANG_PHASE) {
+        writeFileSync(process.env.PID_FILE, String(process.pid));
+      } else if (request.method === 'initialize') {
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { protocolVersion: 1 } }) + '\\n');
+      }
+    }
+  `;
+  const spec = spyOn(launch, 'launchFor').mockImplementation(options => ({
+    command: process.execPath, args: ['-e', adapter], env: { ...options.env, HANG_PHASE: phase, PID_FILE: pidFile },
+    mode: options.permissionMode, session: () => ({ mcpServers: [] }), forkNeedsResume: false,
+  }));
+  const controller = new AbortController();
+  const opening = startAcpRuntime({
+    vendor: 'gpt', model: 'gpt-5.6-luna', thinkingLevel: 'high', directory,
+    systemPrompt: '', env: { ...process.env }, mcpServer: null, permissionMode: 'auto', signal: controller.signal,
+    onPermission: async () => ({ outcome: { outcome: 'cancelled' } }), onUpdate: () => {},
+  }).catch(error => error);
+  let pid: number | undefined;
+  try {
+    await until(() => existsSync(pidFile), 'adapter startup request');
+    pid = Number(readFileSync(pidFile, 'utf8'));
+    controller.abort(new Error('Draft closed'));
+    expect(await opening).toMatchObject({ message: 'Draft closed' });
+    await until(() => {
+      try { process.kill(pid!, 0); return false; }
+      catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
+    }, 'adapter exit after startup cancellation');
+  } finally {
+    controller.abort();
+    await opening;
+    if (pid) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+    spec.mockRestore();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a bound runtime resolving after startup cancellation is disposed before it can be adopted', async () => {
+  const { boundRuntimes, createRuntime } = await import('../../src/agent_runtime/runtime/runtime');
+  const model = 'late-startup-runtime';
+  const binding = bindScriptedRuntime(model, textTurn('Unused'));
+  const start = boundRuntimes[model]!;
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  boundRuntimes[model] = async options => { await gate; return start(options); };
+  const controller = new AbortController();
+  const opening = createRuntime({
+    vendor: 'gpt', model, thinkingLevel: 'high', directory: process.cwd(), systemPrompt: '',
+    env: { ...process.env }, mcpServer: null, permissionMode: 'auto', signal: controller.signal,
+    onPermission: async () => ({ outcome: { outcome: 'cancelled' } }), onUpdate: () => {},
+  }).catch(error => error);
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    controller.abort(new Error('Draft replaced'));
+    expect(await opening).toMatchObject({ message: 'Draft replaced' });
+    release();
+    await until(() => binding.runtimes.length === 1, 'late runtime');
+    expect(binding.runtimes[0].disposed).toBe(true);
+  } finally {
+    release();
+    await opening;
+    unbindRuntime(model);
+  }
+});
+
+describe('native participant sessions', () => {
+  test('reopens a snapshot and a lost process without a text recap', async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-native-participant-'));
+    const previousHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = directory;
+    const binding = bindScriptedRuntime(testModel, textTurn('Learned'), true);
+    const original = new Session({ model: testModel, directory });
+    let restored: Session | undefined;
+    try {
+      await original.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Learn a hidden detail' }] });
+      const snapshot = original.toSnapshot();
+      const native = snapshot.participants[0].nativeSession!;
+      expect(native).toMatchObject({ vendor: 'gpt', directory, sourceId: null, profileHome: directory });
+      expect(native.sessionId).toBe(binding.runtimes[0].sessionId);
+      await original.dispose();
+      restored = Session.fromSnapshot(snapshot);
+      // Switching away from a restored chat releases draft warmup resources,
+      // but must retain the session that has not been reopened yet.
+      restored.releaseWarmup();
+      expect(restored.toSnapshot().participants[0].nativeSession).toEqual(native);
+      await restored.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Recall it' }] });
+      expect(binding.starts[1].resume).toEqual(native);
+      expect(binding.runtimes[1].prompts).toEqual([{ text: 'Recall it', images: [] }]);
+      binding.runtimes[1].dispose();
+      await restored.sendMessage({ role: 'user', content: [{ type: 'text', text: 'After process loss' }] });
+      expect(binding.starts[2].resume?.sessionId).toBe(native.sessionId);
+      expect(binding.runtimes[2].prompts[0].text).toBe('After process loss');
+    } finally {
+      await restored?.dispose();
+      await original.dispose();
+      if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome;
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('cancelling a pending resume retains the native session for the next turn', async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-native-cancel-'));
+    const previousHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = directory;
+    const binding = bindScriptedRuntime(testModel, textTurn('Learned'), true);
+    const original = new Session({ model: testModel, directory });
+    const { boundRuntimes } = await import('../../src/agent_runtime/runtime/runtime');
+    const factory = boundRuntimes[testModel];
+    let restored: Session | undefined;
+    let turn: Promise<unknown> | undefined;
+    let started!: () => void;
+    let release!: () => void;
+    const opening = new Promise<void>(resolve => { started = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    try {
+      await original.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Learn a hidden detail' }] });
+      const snapshot = original.toSnapshot();
+      const native = snapshot.participants[0].nativeSession!;
+      await original.dispose();
+      boundRuntimes[testModel] = async options => {
+        expect(options.resume).toEqual(native);
+        started();
+        await gate;
+        return factory(options);
+      };
+      restored = Session.fromSnapshot(snapshot);
+      turn = restored.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Cancelled before prompting' }] }).catch(error => error);
+      await opening;
+      restored.cancel();
+      await turn;
+      expect(restored.toSnapshot().participants[0].nativeSession).toEqual(native);
+      release();
+      await until(() => binding.runtimes[1]?.disposed === true, 'cancelled resume cleanup');
+      expect(binding.runtimes[1].prompts).toEqual([]);
+      boundRuntimes[testModel] = factory;
+      await restored.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Recall it after cancellation' }] });
+      expect(binding.starts[2].resume).toEqual(native);
+      expect(binding.runtimes[2].prompts[0].text).toBe('Recall it after cancellation');
+    } finally {
+      release();
+      restored?.cancel();
+      await turn;
+      await restored?.dispose();
+      await original.dispose();
+      boundRuntimes[testModel] = factory;
+      if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome;
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test.each(['same', 'different'] as const)('credential fallback with a %s profile home preserves the appropriate native session', async profile => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-native-credentials-'));
+    const previous = { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR, SIRUS_DATA_DIR: process.env.SIRUS_DATA_DIR };
+    process.env.CLAUDE_CONFIG_DIR = directory;
+    process.env.SIRUS_DATA_DIR = path.join(directory, 'data');
+    const { providerFor } = await import('../../src/agent_runtime/providers');
+    const model = 'claude-sonnet-5';
+    const first = { id: 'first', kind: 'api' as const, key: 'test-first-key' };
+    const backup = profile === 'same'
+      ? { id: 'backup', kind: 'api' as const, key: 'test-backup-key' }
+      : { id: 'backup', kind: 'subscription' as const, profile: 'backup-profile' };
+    const credentials = spyOn(providerFor('claude').sources, 'list').mockReturnValue([first, backup]);
+    let failFirst = false;
+    const attempts: string[] = [];
+    const binding = bindScriptedRuntime(model, (_input, emit, options) => {
+      const source = options.env.ANTHROPIC_API_KEY === first.key ? 'first' : 'backup';
+      attempts.push(source);
+      if (failFirst && source === 'first') throw new Error('401 authentication rejected');
+      emit({ type: 'text', text: 'Earlier answer' });
+    }, true);
+    const original = new Session({ model, directory });
+    let restored: Session | undefined;
+    try {
+      await original.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Learn a hidden detail' }] });
+      const native = original.toSnapshot().participants[0].nativeSession!;
+      expect(native).toMatchObject({ sourceId: first.id, profileHome: directory });
+      failFirst = true;
+      await original.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Continue after credential failure' }] });
+      expect(attempts).toEqual(['first', 'first', 'backup']);
+      expect(binding.starts).toHaveLength(2);
+      const replacement = original.toSnapshot().participants[0].nativeSession!;
+      expect(replacement.sourceId).toBe(backup.id);
+      if (profile === 'same') {
+        expect(binding.starts[1].resume).toEqual(native);
+        expect(replacement.sessionId).toBe(native.sessionId);
+        expect(replacement.profileHome).toBe(native.profileHome);
+        expect(binding.runtimes[1].prompts[0].text).not.toContain('Earlier conversation, for context:');
+      } else {
+        expect(binding.starts[1].resume).toBeUndefined();
+        expect(replacement.sessionId).not.toBe(native.sessionId);
+        expect(replacement.profileHome).toBe(path.join(directory, 'data', 'subscriptions', 'claude', 'backup-profile'));
+        expect(binding.runtimes[1].prompts[0].text).toContain('Earlier answer');
+        expect(original.getMessages().at(-1)?.content).toContainEqual(expect.objectContaining({
+          type: 'notice', title: 'Starting fresh with a conversation recap',
+          description: expect.stringContaining('different profile home'),
+        }));
+      }
+
+      // The configured preference still puts the rejected credential first.
+      // Restoring must use the saved backup directly, without failing again.
+      const snapshot = original.toSnapshot();
+      await original.dispose();
+      restored = Session.fromSnapshot(snapshot);
+      await restored.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Resume on the saved credential' }] });
+      expect(attempts).toEqual(['first', 'first', 'backup', 'backup']);
+      expect(binding.starts).toHaveLength(3);
+      expect(binding.starts[2].resume).toEqual(replacement);
+      expect(binding.runtimes[2].prompts[0].text).toBe('Resume on the saved credential');
+      expect(restored.toSnapshot().participants[0].nativeSession!.sessionId).toBe(replacement.sessionId);
+    } finally {
+      await restored?.dispose();
+      await original.dispose();
+      credentials.mockRestore();
+      unbindRuntime(model);
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test.each(['directory', 'profile', 'missing profile', 'credential', 'prompt', 'refused'] as const)('uses a recap if native recovery is invalid: %s', async invalid => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-native-fallback-'));
+    const previousHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = directory;
+    const binding = bindScriptedRuntime(testModel, textTurn('Earlier answer'), true);
+    const original = new Session({ model: testModel, directory });
+    let restored: Session | undefined;
+    const { boundRuntimes } = await import('../../src/agent_runtime/runtime/runtime');
+    try {
+      await original.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Earlier question' }] });
+      const snapshot = original.toSnapshot();
+      const native = snapshot.participants[0].nativeSession!;
+      if (invalid === 'directory') native.directory = path.join(directory, 'missing');
+      if (invalid === 'profile' || invalid === 'missing profile') native.profileHome = path.join(directory, 'missing-profile');
+      if (invalid === 'missing profile') process.env.CODEX_HOME = native.profileHome;
+      if (invalid === 'credential') native.sourceId = 'removed-credential';
+      if (invalid === 'prompt') native.systemPromptHash = 'previous-prompt';
+      let attempted = false;
+      const factory = boundRuntimes[testModel];
+      if (invalid === 'refused') boundRuntimes[testModel] = options => {
+        if (options.resume) { attempted = true; throw new Error('Session not found'); }
+        return factory(options);
+      };
+      restored = Session.fromSnapshot(snapshot);
+      await restored.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Continue' }] });
+      expect(binding.starts.at(-1)?.resume).toBeUndefined();
+      expect(binding.runtimes.at(-1)?.prompts[0].text).toContain('Earlier conversation, for context:');
+      expect(binding.runtimes.at(-1)?.prompts[0].text).toContain('Earlier answer');
+      if (invalid === 'refused') expect(attempted).toBe(true);
+      if (invalid === 'missing profile') expect(restored.getMessages().at(-1)?.content).toContainEqual(expect.objectContaining({
+        type: 'notice', description: expect.stringContaining('saved profile home is missing'),
+      }));
+      if (invalid !== 'prompt') expect(restored.getMessages().at(-1)?.content).toContainEqual(expect.objectContaining({
+        type: 'notice', title: 'Starting fresh with a conversation recap',
+      }));
+      expect(restored.toSnapshot().participants[0].nativeSession?.sessionId).not.toBe(native.sessionId);
+    } finally {
+      await restored?.dispose();
+      await original.dispose();
+      if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome;
+      rmSync(directory, { recursive: true, force: true });
     }
   });
 });

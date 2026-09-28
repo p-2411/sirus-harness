@@ -12,18 +12,33 @@ const COMMAND_PREVIEW_CHARS = 100;
 // What a run that was working when Sirus quit says instead of a final message.
 export const INTERRUPTED_REASON = 'Sirus quit while it was working';
 
+// Whole seconds, cut the way the strip and the SpawnAgent row cut them, so
+// the report beside the row never says a second more.
 function elapsedSeconds(run: SubagentRun): number {
-  return Math.round(((run.finishedAt ?? Date.now()) - run.startedAt) / 1000);
+  return Math.floor(((run.finishedAt ?? Date.now()) - run.startedAt) / 1000);
+}
+
+// What a worker is called wherever it appears: the name its owner gave it,
+// or its id when it was given none. The id is the secondary handle, shown
+// beside a name where there is room for both.
+export function workerName(run: Pick<SubagentRun, 'id' | 'name'>): string {
+  return run.name ?? run.id;
+}
+
+export function workerTitle(run: Pick<SubagentRun, 'id' | 'name'>): string {
+  return run.name ? `${run.name} (${run.id})` : run.id;
 }
 
 export function describeSubagents(subagents: readonly SubagentRun[]): Record<string, unknown>[] {
   return subagents.map(run => ({
     id: run.id,
+    name: run.name,
+    description: run.description,
     model: run.model,
     thinkingLevel: run.thinkingLevel,
     status: run.status,
     elapsedSeconds: elapsedSeconds(run),
-    task: truncate(run.prompt, COMMAND_PREVIEW_CHARS),
+    task: run.description || truncate(run.prompt, COMMAND_PREVIEW_CHARS),
     branch: run.branch,
     context: run.context,
   }));
@@ -31,10 +46,12 @@ export function describeSubagents(subagents: readonly SubagentRun[]): Record<str
 
 // The run as it stands right now. A working run shows the tail of what it has
 // produced; a finished one shows what it ended with, which its owner has also
-// received as a message.
+// received as a result or notification.
 export function describeRun(run: SubagentRun): Record<string, unknown> {
   const base = {
     id: run.id,
+    name: run.name,
+    description: run.description,
     model: run.model,
     thinkingLevel: run.thinkingLevel,
     status: run.status,
@@ -49,40 +66,54 @@ export function describeRun(run: SubagentRun): Record<string, unknown> {
       progress: transcript.length > PROGRESS_TAIL_CHARS
         ? `…${transcript.slice(-PROGRESS_TAIL_CHARS)}`
         : transcript,
-      note: 'Still working. It reports back to you as a message when it ends; MessageAgent sends it instructions meanwhile.',
+      note: 'Still working. WaitAgent waits for completion; SendMessage sends instructions.',
     };
   }
-  if (run.status === 'failed') {
-    return { ...base, error: run.error, changes: run.changes };
-  }
-  if (run.status === 'cancelled' || run.status === 'interrupted') {
-    return { ...base, reason: run.error, changes: run.changes };
-  }
-  return { ...base, finalMessage: run.finalMessage, changes: run.changes };
+  const failed = failedCalls(run.content);
+  const ended = { finalMessage: run.finalMessage, changes: run.changes, ...(failed.length > 0 ? { failedCalls: failed } : {}) };
+  if (run.status === 'failed') return { ...base, error: run.error, ...ended };
+  if (run.status === 'cancelled' || run.status === 'interrupted') return { ...base, reason: run.error, ...ended };
+  return { ...base, ...ended };
 }
 
 // The message the owner receives when a worker ends: who it was, where its
 // work is, what it touched and what it said. This is the whole of what the
 // owner is told, so it names the branch rather than assuming the owner still
-// remembers there was one.
+// remembers there was one. How to continue a worker is the tools' to say, not
+// the report's: an owner told at the end of every report to send a follow-up
+// sent one to workers that had finished their task. The user reads the same
+// text under the SpawnAgent row, as Markdown, so its sections are paragraphs
+// and lists of their own and the final message keeps its own formatting.
 export function workerReport(run: SubagentRun): string {
-  const lines = [
-    `Subagent ${run.id} ${run.status} after ${elapsedSeconds(run)}s on ${run.model} (${run.thinkingLevel}).`,
-    `Task: ${truncate(run.prompt, COMMAND_PREVIEW_CHARS)}`,
+  const sections = [
+    `Subagent ${workerTitle(run)} ${run.status} after ${elapsedSeconds(run)}s on ${run.model} (${run.thinkingLevel}).\nTask: ${truncate(run.prompt, COMMAND_PREVIEW_CHARS)}`,
   ];
   if (run.branch) {
-    lines.push(
-      `Its work is on branch ${run.branch}, in its own worktree at ${run.directory}, not in your working directory.`,
-      'Merge that branch or inspect the worktree yourself, or tell the user to; nothing else will.',
-    );
+    sections.push(`Its work is on branch ${run.branch}, in its own worktree at ${run.directory}, not in your working directory.\n`
+      + 'Merge that branch or inspect the worktree yourself, or tell the user to; nothing else will.');
   }
-  lines.push(run.changes.length > 0
+  sections.push(run.changes.length > 0
     ? `Changes:\n${run.changes.map(change => `- ${change}`).join('\n')}`
     : 'Changes: none recorded.');
-  if (run.status === 'done') lines.push(`Final message:\n${run.finalMessage ?? '(none)'}`);
-  else if (run.status === 'failed') lines.push(`It failed: ${run.error ?? 'unknown error'}`);
-  else lines.push(`It stopped: ${run.error ?? INTERRUPTED_REASON}`);
-  return lines.join('\n');
+  const failed = failedCalls(run.content);
+  if (failed.length > 0) sections.push(`Calls that did not go through:\n${failed.map(call => `- ${call}`).join('\n')}`);
+  if (run.status === 'done') sections.push(`Final message:\n\n${run.finalMessage ?? '(none)'}`);
+  else if (run.status === 'failed') sections.push(`It failed: ${run.error ?? 'unknown error'}`);
+  else sections.push(`It stopped: ${run.error ?? INTERRUPTED_REASON}`);
+  return sections.join('\n\n');
+}
+
+// The calls of a turn that did not go through, each with the reason its
+// vendor gave. A call the user declined fails like any other, so a run that
+// ends "done" still says what it could not do. Claude wraps the reason in a
+// code fence and a tool_use_error tag; the reason is the words inside.
+export function failedCalls(content: readonly MessageBlock[]): string[] {
+  return content.flatMap(block => {
+    if (block.type !== 'tool_call' || block.status !== 'failed') return [];
+    const reason = block.content.flatMap(item => item.type === 'text' ? [item.text] : []).join(' ')
+      .replace(/```[\w-]*|<\/?tool_use_error>/g, ' ');
+    return [`${truncate(block.title, COMMAND_PREVIEW_CHARS)}${reason.trim() ? `: ${truncate(reason, RESULT_PREVIEW_CHARS)}` : ''}`];
+  });
 }
 
 // The subagent's closing words: whatever text follows its last tool call.

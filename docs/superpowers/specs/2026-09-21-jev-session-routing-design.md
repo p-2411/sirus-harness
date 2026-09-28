@@ -1,5 +1,7 @@
 # Jev picks a new session's model
 
+Historical design: Jev routing has been removed. Sessions use the saved model preference or the default model; subagents use the current model-selection rules.
+
 Status: approved 2026-09-21. Scope: sub-project 1 of the Jev work. Sub-project 2
 (subagent parity and Jev routing the default subagent) follows in its own spec.
 

@@ -1,26 +1,20 @@
 import { rmSync } from 'fs';
 import path from 'path';
 import { errorMessage } from '../../../abort';
-import { checkpointsEnabled, projectGit } from '../../../checkpoints';
+import { projectGit } from '../../../checkpoints';
 import { dataDirectory } from '../../../dataDirectory';
 
-// Where a worker works. In a git project it gets a worktree of its own, cut
-// from the project's HEAD onto a branch named after the run: uncommitted
-// changes and ignored directories are not carried over, so two workers and
-// the user never edit the same files. Anything else — a directory that is not
-// a repository, a repository with no commit yet — runs the worker in the
-// project itself. A repository git fails to cut a worktree from fails the
-// spawn.
-//
-// The worktree outlives the run: the report names the branch so the owner or
-// the user can merge or inspect it. It goes when the session does; the branch
-// stays.
+// Explicit worktree isolation: a branch from HEAD, retained only when changed.
+// A directory that is not a repository, or a repository with no commit yet,
+// runs the worker in place. A repository git fails to cut a worktree from
+// fails the spawn.
 
 const GIT_TIMEOUT_MS = 60_000;
 
 export interface Worktree {
   directory: string;
   branch: string;
+  startHead: string;
 }
 
 function git(directory: string, args: readonly string[]): Promise<string> {
@@ -31,55 +25,70 @@ export function worktreePath(sessionId: string, runId: string): string {
   return path.join(dataDirectory(), 'worktrees', sessionId, runId);
 }
 
-// The worker's own checkout, or null when it must run in place. Off entirely
-// until the app switches checkpoints on, so a session driven from a test or a
-// script never creates a branch in the user's repository.
 export async function createWorktree(
   project: string,
   sessionId: string,
   runId: string,
 ): Promise<Worktree | null> {
-  if (!checkpointsEnabled()) return null;
   const directory = worktreePath(sessionId, runId);
   const branch = `sirus/${runId}`;
+  let startHead: string;
   try {
     // An unborn HEAD has no commit to branch from, and a directory outside a
     // repository fails the same way.
-    await git(project, ['rev-parse', '--verify', 'HEAD']);
+    startHead = (await git(project, ['rev-parse', '--verify', 'HEAD'])).trim();
   } catch {
     return null;
   }
   try {
     await git(project, ['worktree', 'add', '--quiet', '-b', branch, directory, 'HEAD']);
-    return { directory, branch };
   } catch (error) {
     // A repository that cannot make one fails the spawn: running the worker
     // in the user's own checkout instead is not a fallback. Git may have
     // made the branch, or part of the checkout, before it failed; `-d`
     // deletes the branch only while it holds nothing HEAD lacks.
-    await removeWorktree(project, directory);
+    await discardWorktree(project, directory);
     await git(project, ['branch', '-d', branch]).catch(() => {});
     throw new Error(`Could not create a worktree for the worker: ${errorMessage(error)}`);
   }
+  return { directory, branch, startHead };
 }
 
-// Removes the worktree and forgets it, leaving the branch behind. Git refuses
-// to remove one with changes in it, hence the force; whatever it leaves is
-// removed directly and pruned from the project's administrative files.
-export async function removeWorktree(project: string, directory: string): Promise<void> {
-  try {
-    await git(project, ['worktree', 'remove', '--force', directory]);
-  } catch {
-    // The user may have removed it themselves, or git may refuse it.
-  }
+// Removes what a failed `worktree add` left of the checkout and forgets it.
+// Whatever git will not remove is removed directly and pruned from the
+// project's administrative files.
+async function discardWorktree(project: string, directory: string): Promise<void> {
+  await git(project, ['worktree', 'remove', '--force', directory]).catch(() => {});
   try {
     rmSync(directory, { recursive: true, force: true });
   } catch {
-    // Leaving a directory behind must never fail a session teardown.
+    // Leaving a directory behind must never hide git's own error.
   }
+  await git(project, ['worktree', 'prune']).catch(() => {});
+}
+
+// Both checks matter: a committed edit has a clean tree but still belongs
+// to the worker. Failure to inspect it must leave its work in place.
+export async function removeUnchangedWorktree(project: string, worktree: Worktree): Promise<boolean> {
   try {
-    await git(project, ['worktree', 'prune']);
+    const head = (await git(worktree.directory, ['rev-parse', 'HEAD'])).trim();
+    const status = await git(worktree.directory, ['status', '--porcelain', '--untracked-files=all']);
+    if (head !== worktree.startHead || status.trim()) return false;
+    await git(project, ['worktree', 'remove', worktree.directory]);
   } catch {
-    // Same: a stale administrative entry is harmless.
+    return false;
+  }
+  // Once removed, a failed branch cleanup must not report a retained path.
+  await git(project, ['branch', '-D', worktree.branch]).catch(() => undefined);
+  return true;
+}
+
+export async function worktreeChanges(worktree: Worktree): Promise<string[]> {
+  try {
+    const changed = await git(worktree.directory, ['diff', '--name-only', '-z', worktree.startHead]);
+    const untracked = await git(worktree.directory, ['ls-files', '--others', '--exclude-standard', '-z']);
+    return [...new Set([...changed.split('\0'), ...untracked.split('\0')].filter(Boolean))];
+  } catch {
+    return [];
   }
 }

@@ -22,8 +22,10 @@ import type { ListedModel, Vendor } from '../providers/catalog';
 import { PLAN_ENTRY_STATUSES, THINKING_LEVELS, type PermissionMode, type ThinkingLevel, type ToolCallBlock } from '../types';
 import type { ContextUsage } from '../usage';
 import { nativeCommandFrom } from './commands';
+import { AdapterLostError } from './errors';
 import { launchFor, type Launch, type SessionParams } from './launch';
 import {
+  backgroundTaskFrom,
   COMPACTION_STATUSES,
   modeKindOf,
   PERMISSION_CANCELLED,
@@ -31,6 +33,7 @@ import {
   QUESTION_DECLINED,
   toolCallBlockFrom,
   vendorModeFor,
+  type BackgroundTask,
   type CompactionStatus,
   type ForkOptions,
   type ModeKind,
@@ -59,12 +62,16 @@ const KILL_GRACE_MS = 2_000;
 // as stuck. The adapter normally answers within a second or two.
 const CANCEL_GRACE_MS = 30_000;
 
-// Sirus advertises compaction and form elicitation and nothing else: no fs,
+// Sirus advertises compaction, notices, async tasks and form elicitation: no fs,
 // terminal, plan or subagents, so the agents run their tools on disk
 // themselves and nothing pulls execution back into this process. Forms are
 // how both adapters put a question to the user; codex-acp still sends its
 // tool approvals as permission requests either way.
-const CLIENT_CAPABILITIES: ClientCapabilities = { session: { compaction: {} }, elicitation: { form: {} } };
+const CLIENT_CAPABILITIES: ClientCapabilities = {
+  session: { compaction: {}, notices: {} },
+  elicitation: { form: {} },
+  _meta: { jetbrains: { air: { version: 1, capabilities: ['asyncTasks'] } } },
+};
 
 // The select option each adapter exposes for its reasoning depth.
 const EFFORT_OPTION_IDS: Record<Vendor, string> = { claude: 'effort', gpt: 'reasoning_effort' };
@@ -193,6 +200,9 @@ interface SessionState {
   // Cleared when the turn ends: the transcript keeps them, and nothing more
   // arrives for them.
   toolCalls: Map<string, ToolCallBlock>;
+  tasks: Map<string, BackgroundTask>;
+  stoppingTasks: Set<string>;
+  stopBackgroundOnCancel: boolean;
   // Summary chunks by compaction id, until the terminal update carries them.
   summaries: Map<string, string>;
   // Compactions already reported as over. claude-agent-acp sends a second
@@ -213,16 +223,17 @@ interface SessionState {
   // is holding a turn nobody can end, so the session takes no more prompts
   // and its owner rebuilds it.
   stuck: boolean;
+  // A load can replay transcript updates before it answers. Sirus already
+  // owns that transcript; only live metadata should reach its callbacks.
+  reopening: boolean;
 }
 
 // The launch is the vendor's own; the test suite passes one that runs a
 // stand-in adapter.
-export async function startAcpRuntime(
-  options: RuntimeOptions,
-  signal?: AbortSignal,
-  launch: Launch = launchFor(options),
-): Promise<Runtime> {
-  throwIfAborted(signal);
+export async function startAcpRuntime(options: RuntimeOptions, testLaunch?: Launch): Promise<Runtime> {
+  throwIfAborted(options.signal);
+  if (options.resume) options = { ...options, directory: options.resume.directory };
+  const launch = testLaunch ?? launchFor(options);
   const child = spawn(launch.command, launch.args, { stdio: ['pipe', 'pipe', 'pipe'], env: launch.env });
 
   // Both adapters write their errors to stderr; the last lines are what the
@@ -237,7 +248,7 @@ export async function startAcpRuntime(
   // Once set, every call on every session of this process rejects with it:
   // the runtime is lost and the participant rebuilds it.
   let dead: Error | null = null;
-  const lost = (what: string): Error => new Error(
+  const lost = (what: string): Error => new AdapterLostError(
     `${options.vendor} adapter ${what}${stderrTail.length ? `: ${stderrTail.join(' | ')}` : ''}`,
   );
   child.on('error', error => { dead ??= lost(`failed to start (${error.message})`); });
@@ -250,12 +261,16 @@ export async function startAcpRuntime(
     if (connection.signal.aborted) return (dead = lost('closed the connection'));
     if (!(error instanceof Error)) return new Error(String(error));
     const detail = detailOf(error);
-    return detail ? new Error(`${error.message}: ${detail}`) : error;
+    return detail ? new Error(`${error.message}: ${detail}`, { cause: error }) : error;
   }
 
   // The live sessions by id, which is also the routing table: a session is
   // in here exactly while updates for it should reach a caller.
   const sessions = new Map<string, SessionState>();
+  // A new session can send notices or recover background tasks before its
+  // response gives us its id.
+  const openingUpdates = new Map<string, SessionUpdate[]>();
+  let openingSessions = 0;
   // What the adapter said it can do, read from the initialize response.
   let canFork = false;
   let canSteer = false;
@@ -272,15 +287,42 @@ export async function startAcpRuntime(
       configOptions: [],
       context: null,
       toolCalls: new Map(),
+      tasks: new Map(),
+      stoppingTasks: new Set(),
+      stopBackgroundOnCancel: false,
       summaries: new Map(),
       compacted: new Set(),
       turn: null,
       inFlight: Promise.resolve(),
       closed: false,
       stuck: false,
+      reopening: false,
     };
     sessions.set(id, state);
+    for (const update of openingUpdates.get(id) ?? []) receive(id, update);
+    openingUpdates.delete(id);
     return state;
+  }
+
+  async function openSession<T extends { sessionId: string }>(
+    request: () => Promise<T>, directory: string, hooks: SessionHooks, model: string,
+  ): Promise<{ opened: T; state: SessionState }> {
+    openingSessions++;
+    try {
+      const opened = await request();
+      return { opened, state: register(opened.sessionId, directory, hooks, model) };
+    } finally {
+      openingSessions--;
+      if (openingSessions === 0) openingUpdates.clear();
+    }
+  }
+
+  async function finishReopening(state: SessionState): Promise<void> {
+    // The SDK resolves responses ahead of its asynchronous notification
+    // handlers. Drain updates already read before enabling transcript output,
+    // including the last replay chunk immediately preceding the response.
+    await new Promise<void>(resolve => setImmediate(resolve));
+    state.reopening = false;
   }
 
   // The error a call on a session that can no longer answer rejects with.
@@ -289,7 +331,7 @@ export async function startAcpRuntime(
   function live(state: SessionState): void {
     if (dead) throw dead;
     if (state.closed) throw new Error(`${options.vendor} runtime was disposed`);
-    if (state.stuck) throw new Error(`${options.vendor} runtime did not answer a cancel`);
+    if (state.stuck) throw new AdapterLostError(`${options.vendor} runtime did not answer a cancel`);
   }
 
   function compaction(state: SessionState, id: string, status: CompactionStatus): RuntimeUpdate | null {
@@ -303,11 +345,24 @@ export async function startAcpRuntime(
   }
 
   function reduce(state: SessionState, update: SessionUpdate): RuntimeUpdate | null {
+    const taskId = (update as { asyncTaskId?: string }).asyncTaskId;
+    const task = backgroundTaskFrom(update, taskId ? state.tasks.get(taskId) : undefined);
+    if (task) {
+      state.tasks.set(task.id, task);
+      return { type: 'async_task', task };
+    }
     switch (update.sessionUpdate) {
       case 'agent_message_chunk':
         return update.content.type === 'text' ? { type: 'text', text: update.content.text } : null;
       case 'agent_thought_chunk':
         return update.content.type === 'text' ? { type: 'thought', text: update.content.text } : null;
+      case 'notice':
+        return {
+          type: 'notice',
+          severity: update.severity,
+          title: update.title,
+          ...(update.description != null ? { description: update.description } : {}),
+        };
       case 'tool_call':
       case 'tool_call_update': {
         // codex-acp reports its own compaction as a tool call tagged in
@@ -396,12 +451,32 @@ export async function startAcpRuntime(
       return;
     }
     const state = sessions.get(sessionId);
-    if (!state) return;
+    if (!state) {
+      if (openingSessions > 0 && (update.sessionUpdate === 'notice' || String(update.sessionUpdate).startsWith('async_task_'))) {
+        const updates = openingUpdates.get(sessionId) ?? [];
+        updates.push(update);
+        openingUpdates.set(sessionId, updates);
+      }
+      return;
+    }
+    if (state.reopening && !String(update.sessionUpdate).startsWith('async_task_') && ![
+      'notice', 'usage_update', 'current_mode_update', 'config_option_update', 'available_commands_update',
+    ].includes(update.sessionUpdate)) return;
     if (!state.turn && TURN_CONTENT.has(update.sessionUpdate)) return;
     const reduced = reduce(state, update);
     if (!reduced) return;
     try {
+      const rateLimit = update.sessionUpdate === 'usage_update' ? update._meta?.['_claude/rateLimit'] : undefined;
+      if (rateLimit && typeof rateLimit === 'object') {
+        const resetsAt = (rateLimit as { resetsAt?: unknown }).resetsAt;
+        state.hooks.onUpdate({ type: 'rate_limit',
+          ...(typeof resetsAt === 'number' && Number.isFinite(resetsAt) ? { resetsAt } : {}),
+        });
+      }
       state.hooks.onUpdate(reduced);
+      if (reduced.type === 'async_task' && reduced.task.canStop && state.stopBackgroundOnCancel) {
+        stopCancelledTask(state, reduced.task.id);
+      }
     } catch (error) {
       if (state.turn) state.turn.error = error instanceof Error ? error : new Error(String(error));
     }
@@ -422,11 +497,15 @@ export async function startAcpRuntime(
 
   // A question outside a turn, or one tied to no session (asked while the
   // adapter is still starting up), has nobody to answer it.
-  async function elicitation(request: CreateElicitationRequest): Promise<CreateElicitationResponse> {
+  async function elicitation(request: CreateElicitationRequest, requestSignal: AbortSignal): Promise<CreateElicitationResponse> {
     const sessionId = 'sessionId' in request && typeof request.sessionId === 'string' ? request.sessionId : null;
     const state = sessionId ? answeringSession(sessionId, request) : undefined;
-    const signal = state?.turn?.signal;
-    if (!state || !signal || signal.aborted) return QUESTION_CANCELLED;
+    const turnSignal = state?.turn?.signal;
+    if (!state || !turnSignal) return QUESTION_CANCELLED;
+    // Codex can withdraw a question without ending the turn, including when
+    // it auto-resolves one. The card must stop waiting along with the request.
+    const signal = AbortSignal.any([turnSignal, requestSignal]);
+    if (signal.aborted) return QUESTION_CANCELLED;
     if (!state.hooks.onElicitation) return QUESTION_DECLINED;
     try {
       return await state.hooks.onElicitation(request, signal);
@@ -438,14 +517,30 @@ export async function startAcpRuntime(
 
   // The casts bridge node's web-stream types and the runtime's globals, which
   // name the same objects.
+  const stream = ndJsonStream(
+    Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
+    Readable.toWeb(child.stdout) as unknown as ReadableStream<Uint8Array>,
+  );
+  // Stable ACP's schema does not include AIR task notifications. Route only
+  // those extensions before validation; standard updates keep the SDK's
+  // schema checks.
+  const readable = stream.readable.pipeThrough(new TransformStream({
+    transform(message, controller) {
+      if ('method' in message && message.method === methods.client.session.update && !('id' in message)) {
+        const params = message.params as { sessionId?: unknown; update?: unknown } | undefined;
+        if (typeof params?.sessionId === 'string' && backgroundTaskFrom(params.update)) {
+          receive(params.sessionId, params.update as SessionUpdate);
+          return;
+        }
+      }
+      controller.enqueue(message);
+    },
+  }));
   const connection = client({ name: 'sirus' })
     .onRequest(methods.client.session.requestPermission, ({ params }) => permission(params))
-    .onRequest(methods.client.elicitation.create, ({ params }) => elicitation(params))
+    .onRequest(methods.client.elicitation.create, ({ params, signal }) => elicitation(params, signal))
     .onNotification(methods.client.session.update, ({ params }) => { receive(params.sessionId, params.update); })
-    .connect(ndJsonStream(
-      Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
-      Readable.toWeb(child.stdout) as unknown as ReadableStream<Uint8Array>,
-    ));
+    .connect({ ...stream, readable });
   void connection.closed.then(() => { dead ??= lost('closed the connection'); });
 
   let disposed = false;
@@ -497,10 +592,13 @@ export async function startAcpRuntime(
     throwIfAborted(signal);
     const current = { signal, error: null as Error | null };
     state.turn = current;
+    state.stopBackgroundOnCancel = false;
     let answered = false;
     let giveUp: () => void = () => undefined;
     const unanswered = new Promise<void>(resolve => { giveUp = resolve; });
     const cancel = () => {
+      state.stopBackgroundOnCancel = true;
+      for (const task of state.tasks.values()) if (task.canStop) stopCancelledTask(state, task.id);
       void connection.agent.notify(methods.agent.session.cancel, { sessionId: state.id }).catch(() => undefined);
       // The next prompt waits for this one's answer; one that never comes
       // must not hold it for good.
@@ -533,6 +631,29 @@ export async function startAcpRuntime(
       state.turn = null;
       state.toolCalls.clear();
     }
+  }
+
+  async function stopTask(state: SessionState, id: string): Promise<boolean> {
+    live(state);
+    if (!state.tasks.get(id)?.canStop || state.stoppingTasks.has(id)) return false;
+    state.stoppingTasks.add(id);
+    try {
+      const response = await connection.agent.request<{ stopped: boolean }>('_session/async_task/stop', {
+        sessionId: state.id, asyncTaskId: id,
+      });
+      return response.stopped === true;
+    } catch (error) {
+      throw settled(error);
+    } finally {
+      state.stoppingTasks.delete(id);
+    }
+  }
+
+  function stopCancelledTask(state: SessionState, id: string): void {
+    void stopTask(state, id).catch(() => {
+      state.hooks.onUpdate({ type: 'notice', severity: 'warning', title: 'Background task could not be stopped',
+        description: `Use /tasks to stop ${id}.` });
+    });
   }
 
   async function setPermissionMode(
@@ -644,25 +765,31 @@ export async function startAcpRuntime(
       directory: forked.directory,
       systemPrompt: forked.systemPrompt,
       mcpServer: forked.mcpServer,
+      tools: forked.tools,
     });
-    const extras = { mcpServers: params.mcpServers, ...(params.meta ? { _meta: params.meta } : {}) };
+    const extras = {
+      mcpServers: params.mcpServers,
+      ...(params.meta ? { _meta: params.meta } : {}),
+      ...(params.additionalDirectories ? { additionalDirectories: params.additionalDirectories } : {}),
+    };
     let created;
+    let state: SessionState;
     try {
-      created = await connection.agent.request(methods.agent.session.fork, {
+      ({ opened: created, state } = await openSession(() => connection.agent.request(methods.agent.session.fork, {
         sessionId: parent.id,
         // Where the adapter finds the session being forked when the fork only
         // copies its transcript, and where the new session runs when it does
         // not; the launch spec says which this vendor does.
-        cwd: launch.forkNeedsResume ? parent.directory : forked.directory,
+        cwd: options.vendor === 'claude' ? parent.directory : forked.directory,
         ...extras,
-      });
+      }), forked.directory, forked, parent.model));
     } catch (error) {
       throw settled(error);
     }
     // Registered before the resume, since the adapter starts pushing updates
     // for the new session the moment it opens it.
-    const state = register(created.sessionId, forked.directory, forked, parent.model);
     try {
+      state.reopening = launch.forkNeedsResume;
       const opened = launch.forkNeedsResume
         ? await connection.agent.request(methods.agent.session.resume, {
           sessionId: created.sessionId,
@@ -670,10 +797,11 @@ export async function startAcpRuntime(
           ...extras,
         })
         : created;
+      if (state.reopening) await finishReopening(state);
       state.modes = opened.modes?.availableModes ?? [];
       state.currentModeId = opened.modes?.currentModeId ?? '';
       state.configOptions = opened.configOptions ?? [];
-      await configure(state, forked.permissionMode, forked.model, forked.thinkingLevel);
+      await configure(state, forked.readOnly ? 'ask' : forked.permissionMode, forked.model, forked.thinkingLevel);
     } catch (error) {
       const failure = settled(error);
       closeSession(state);
@@ -685,6 +813,7 @@ export async function startAcpRuntime(
   function runtimeFor(state: SessionState, dispose: () => void): Runtime {
     return {
       vendor: options.vendor,
+      sessionId: state.id,
       get model() { return state.model; },
       get modes() { return state.modes; },
       get context() { return state.context; },
@@ -695,6 +824,7 @@ export async function startAcpRuntime(
       setThinkingLevel: level => setThinkingLevel(state, level),
       fork: forked => fork(state, forked),
       steer: text => steer(state, text),
+      stopTask: id => stopTask(state, id),
       dispose,
     };
   }
@@ -703,9 +833,11 @@ export async function startAcpRuntime(
   // answers would hold the turn for good. Cancelling the turn, which the
   // user or a worker's watchdog does, ends the process instead, and that
   // fails whichever request is still waiting.
-  const stop = () => disposeProcess();
-  signal?.addEventListener('abort', stop, { once: true });
+  const cancelStartup = () => disposeProcess();
+  options.signal?.addEventListener('abort', cancelStartup, { once: true });
   try {
+    if (options.signal?.aborted) cancelStartup();
+    throwIfAborted(options.signal);
     const initialized = await connection.agent.request(methods.agent.initialize, {
       protocolVersion: 1,
       clientInfo: { name: 'sirus', version: SIRUS_VERSION },
@@ -725,13 +857,34 @@ export async function startAcpRuntime(
       directory: options.directory,
       systemPrompt: options.systemPrompt,
       mcpServer: options.mcpServer,
+      tools: options.tools,
     });
-    const session = await connection.agent.request(methods.agent.session.new, {
+    const openingParams = {
       cwd: options.directory,
       mcpServers: params.mcpServers,
       ...(params.meta ? { _meta: params.meta } : {}),
-    });
-    const state = register(session.sessionId, options.directory, options, options.model);
+      ...(params.additionalDirectories ? { additionalDirectories: params.additionalDirectories } : {}),
+    };
+    let session;
+    let state: SessionState;
+    if (options.resume) {
+      // Resume preserves the conversation without replay; older adapters may
+      // offer only load, whose historical notifications are discarded below.
+      const capabilities = initialized.agentCapabilities;
+      const method = capabilities?.sessionCapabilities?.resume != null
+        ? methods.agent.session.resume
+        : capabilities?.loadSession ? methods.agent.session.load : null;
+      if (!method) throw new Error(`The ${options.vendor} adapter cannot reopen a session`);
+      state = register(options.resume.sessionId, options.directory, options, options.model);
+      state.reopening = true;
+      session = await connection.agent.request(method, { sessionId: state.id, ...openingParams });
+      await finishReopening(state);
+    } else {
+      ({ opened: session, state } = await openSession(
+        () => connection.agent.request(methods.agent.session.new, openingParams),
+        options.directory, options, options.model,
+      ));
+    }
     state.modes = session.modes?.availableModes ?? [];
     state.currentModeId = session.modes?.currentModeId ?? '';
     state.configOptions = session.configOptions ?? [];
@@ -740,10 +893,10 @@ export async function startAcpRuntime(
     await configure(state, launch.mode, options.model, options.thinkingLevel);
     return runtimeFor(state, disposeProcess);
   } catch (error) {
-    const failure = signal?.aborted ? abortReason(signal) : settled(error);
+    const failure = options.signal?.aborted ? abortReason(options.signal) : settled(error);
     disposeProcess();
     throw failure;
   } finally {
-    signal?.removeEventListener('abort', stop);
+    options.signal?.removeEventListener('abort', cancelStartup);
   }
 }

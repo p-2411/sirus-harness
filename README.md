@@ -20,7 +20,7 @@ Run `sirus` on its own to open the current directory. The npm package includes t
 Inside Sirus:
 
 1. Type `/login` and choose Claude or ChatGPT, then sign in with an existing subscription or enter an API key through the masked input. Repeat `/login` to connect more accounts—as many as you want.
-2. Optionally type `/model` and pick a model. Left alone, and with a TypeSafe AI key, a new session asks Jev, TypeSafe AI's routing model, which of your connected vendors' latest models fits the task in your first prompt; see "A model picked for the task" below.
+2. Optionally type `/model` and pick a model. New sessions use your saved model preference, or `gpt-5.6-luna` by default.
 3. Give Sirus a task:
 
 ```text
@@ -69,27 +69,21 @@ Then address that participant by name:
 @reviewer Check whether the latest fix resolves the issues you found.
 ```
 
-Each participant keeps its own conversation. It reads the prompts you address to it, and whatever another participant says in a message that mentions it, attributed to the sender. A prompt that mentions nobody goes to `@sirus`. Set a participant's model with `/model @reviewer <model>` and reasoning depth with `/thinking @reviewer high`. Use `/model` to see the model names supported by your installation.
-
-### A model picked for the task
-
-Jev needs a TypeSafe AI key. Sirus asks for one once, on the first launch without one; `/jev` shows whether Jev is on and sets or removes the key later, and a `JEV_API` variable in the environment is used as it is. With a key, a new session does not start on a fixed model. Its first prompt goes to Jev, a fast decision model from TypeSafe AI, which chooses between the latest model of each vendor you have connected and that still has allowance: today `claude-fable-5-1` and `gpt-6-astra`. Jev sees the prompt, the names of files it mentions and the project's name, and the profile Sirus's catalog keeps of each model: what it is good at, its published benchmark results, what people report from using it, and what it costs, alongside how much of that vendor's allowance is left. Until the pick lands the model label under the input stays empty; it shows the pick like any model, or your own choice as soon as you make one.
-
-Jev also picks for subagents, unless `/model subagent` has pinned one. Each spawn asks it for the model and the reasoning depth that fit that task, choosing among every model the catalog offers for delegated work rather than only the latest ones, so routine work goes somewhere cheap and quick and the hard cases somewhere capable.
-
-Your own choice comes first: `/model <model>` before the first prompt pins the session to it and Jev is not asked. With one usable vendor there is nothing to choose: the session takes that vendor's latest model, with or without a key. Otherwise anything short of a confident pick keeps the model in hand: no key, no answer in time, an error, or an answer Jev is unsure of leaves a new session on the saved `/model` default or `gpt-5.6-luna` as before, and a subagent on its owner's model and depth. A vendor whose subscription allowance the sidebar shows at 0% is left out of the choice.
+Each participant keeps its own conversation. It reads the prompts you address to it, and whatever another participant says in a message that mentions it, attributed to the sender. A prompt that mentions no known participant goes to `@sirus`. An unknown `@word` stays ordinary text unless a supported model follows it. Matching files take priority in the `@` menu. Set a participant's model with `/model @reviewer <model>` and reasoning depth with `/thinking @reviewer high`. Use `/model` to see the model names supported by your installation.
 
 ### Delegate work, follow the results
 
-For work that can be split into independent tasks, Sirus can spawn subagents that work in the background. Each receives a focused assignment, and the agent that spawned it carries on at once. When a subagent ends, its report appears under the SpawnAgent row that started it, saying what it did, what it changed, and where its work is; the row opens itself so you do not have to go looking. The agent that spawned it is told the same thing, and that report starts its next turn. If the session is busy the report waits for the turn to finish, and goes ahead of whatever you queued behind it.
+For work that can be split into independent tasks, Sirus can spawn subagents that work in the background. Each receives a focused assignment, and the agent that spawned it carries on at once. The row that started a subagent is titled with its name and its task, as `greet-jsdoc(Add JSDoc to greet)`, and says under it how the run stands: `Working`, then `Done (3 tool uses · 24k tokens · 16s)`, counting any call that failed or that you declined. When a subagent ends, its report appears in full under that row, saying what it did, what it changed, what did not go through, and where its work is; the row opens itself so you do not have to go looking. The agent that spawned it is told the same thing, and that report starts its next turn. If the session is busy the report waits for the turn to finish, and goes ahead of whatever you queued behind it.
 
-In a Git project each subagent works in a Git worktree of its own, on a branch named after the run and cut from your project's HEAD, so its edits meet neither yours nor another subagent's. Uncommitted changes and ignored files are not carried over. The report names the branch, and merging or inspecting it is yours or the spawning agent's to do. The worktree stays in Sirus's data directory after the subagent ends, and the branch stays in your repository. If Git cannot create the worktree, the subagent is not started. In a project that is not a Git repository, or one with no commit yet, subagents work in the project directory itself, so assignments should avoid overlapping edits.
+An agent can also wait for a subagent's report in the call that spawned it. If you press `Esc` while it waits, or the wait passes four and a half minutes (both vendors give up on a tool call after five), the subagent carries on in the background and its report reaches the agent the same way.
 
-Named participants are collaborators you can address and follow in the chat; subagents receive only their delegated task and report back to the agent that spawned them, though an agent can also start one from its own conversation so far when the task depends on what you have already established. While a subagent runs, its owner can ask it for its status, send it further instructions, or stop it. `Esc` cancels the session's turn and leaves the subagents working. A subagent whose agent has reported nothing for 15 minutes, not counting time spent waiting on your approval, is taken as hung and stopped, and its report says so.
+Subagents work in the project directory itself by default, so assignments should avoid overlapping edits. An agent can ask for a Git worktree instead: the subagent then works on a branch named after the run and cut from your project's HEAD, so its edits meet neither yours nor another subagent's. Uncommitted changes and ignored files are not carried over. The report names the branch, and merging or inspecting it is yours or the spawning agent's to do. A worktree the subagent left unchanged is removed when it ends, with its branch; one it changed stays in Sirus's data directory, deleting the session included, and its branch stays in your repository. A project that is not a Git repository, or has no commit yet, gets no worktree, and its subagents work in the project directory. If Git cannot create the worktree, the subagent is not started.
 
-You can follow them yourself. The strip above the status row shows one line, for the subagent that changed last: its id, its model, how long it has been running, its latest tool call, and its branch, with a counter such as `1/3` when others are behind it. Press `↓` from the input bar to step onto the strip; the order is fixed as you arrive, `↑`/`↓` walk it, `enter` opens that subagent's actions, and `↑` past the first line or `Esc` hands the keyboard back to your draft. A subagent that ends keeps its line for a second, dimmed, saying how it ended, and is then off the strip. `/agents` lists the session's subagents and offers to show one's record, send it a message, cancel it, or dismiss its line. Runs are saved with the session: one still working when you quit comes back marked interrupted, with its record, and its report reaches its owner on your next prompt. Nothing restarts on its own.
+Named participants are collaborators you can address and follow in the chat; subagents receive only their delegated task and report back to the agent that spawned them, though an agent can also start one from its own conversation so far when the task depends on what you have already established. While a subagent runs, its owner can ask it for its status, send it further instructions, or stop it. `Esc` cancels the session's turn and leaves the subagents working. A subagent whose agent has reported nothing for 15 minutes, not counting time spent waiting on your approval or inside a tool call that is still running, such as a long build, is taken as hung and stopped, and its report says so.
 
-With a TypeSafe AI key, a subagent runs on the model and reasoning depth Jev picks for its task; without one, it runs on its owner's model and depth. Use `/model subagent <model>` to put every subagent in the session on one model instead, at its owner's depth, `/model subagent` to see which, and `/model subagent default` to hand the choice back.
+You can follow them yourself. A subagent goes by the name its agent gave it, or by its id when it was given none, on the strip, in `/agents`, on its row and on its approval prompts. The strip above the status row shows one line, for the subagent that changed last: its name, its model, how long it has been running, its latest tool call, its task, and its branch, with a counter such as `1/3` when others are behind it. Press `↓` from the input bar to step onto the strip; the order is fixed as you arrive, `↑`/`↓` walk it, `enter` opens that subagent's actions, and `↑` past the first line or `Esc` hands the keyboard back to your draft. A subagent that ends keeps its line for a second, dimmed, saying how it ended, and is then off the strip. `/agents` lists the session's subagents and offers to show one's record, send it a message, cancel it, or dismiss its line. Runs are saved with the session: one still working when you quit comes back marked interrupted, with its record, and its report reaches its owner on your next prompt. Nothing restarts on its own.
+
+A subagent inherits its owner's model and reasoning depth unless the spawning agent selects another. Use `/model subagent <model>` to fix the subagent model for the session, `/model subagent` to see it, and `/model subagent default` to restore the default behavior.
 
 ### Explore with an undo button
 
@@ -101,9 +95,9 @@ Sirus captures a checkpoint before each turn. Use `/undo` for the last turn or `
 
 This restores the files while keeping the conversation, letting you discuss what happened and try another approach. Checkpoints live in a separate Git repository in Sirus's local data directory, leaving your project's Git history and staging area untouched.
 
-File restoration covers the checkpointed directory, including your own edits since the snapshot. It respects Git's tracked and ignored file rules; it does not undo external effects such as deployments or database changes.
+File restoration puts back only the files the agents changed since the checkpoint, and leaves any file you changed as it is; `/undo` and `/rewind` list what they would restore before you confirm. Restoring the chat continues in a new conversation from that point, and the original stays as it was. Neither undoes external effects such as deployments or database changes.
 
-Restoring the chat is refused while any of the session's subagents is still starting or working, since it rebuilds the conversations they belong to; `/clear` is refused the same way. Restoring files is refused only while a subagent is working in the project directory itself, or another session is busy there; a subagent in its own worktree is out of the way. Wait for the subagents to end, or cancel them with `/agents`, then try again.
+Restoring the chat is refused while any of the session's subagents is still starting or working, and the conversation it continues in starts with none of them. Restoring files is refused only while a subagent is working in the project directory itself, or another session is busy there; a subagent in its own worktree is out of the way. Wait for the subagents to end, or cancel them with `/agents`, then try again.
 
 ### Memory that survives a new chat
 
@@ -121,11 +115,11 @@ Use `/compact` to ask for it now. There is nothing to turn on or off: compaction
 
 Create sessions, name them, and switch between them from the sidebar. Each session retains its working directory, conversation, participants, model choices, and permission mode. Existing sessions keep their model settings when you change models elsewhere.
 
-Send a follow-up while an agent is busy to queue it. Session history is saved automatically, including partial responses when you quit. Reopen Sirus to return to your conversations. Desktop notifications tell you when attention is needed while the terminal is not focused; that is the default, and `/notify always` or `/notify off` changes it.
+A follow-up sent while an agent is busy goes into its running turn; `Tab` queues it for after the turn instead. Session history is saved automatically, including partial responses when you quit. Reopen Sirus to return to your conversations. Desktop notifications tell you when attention is needed while the terminal is not focused; that is the default, and `/notify always` or `/notify off` changes it.
 
 ### Put the right context in the prompt
 
-Type `@` to find agents and files in one menu. The menu opens at the bottom, with the closest matches nearest the input. Agent names and the new-name option sit below file results; use ↑/↓ and Tab or Enter to select either. File search also accepts relative paths such as `@../proj/file.tsx`. Sirus includes the selected text files in your message, making it easy to point at the code you want to discuss: up to 10 files, 256 KiB each and 512 KiB together.
+Type `@` to find agents and files in one menu. The menu opens at the bottom, with the closest matches nearest the input. File results sit below the agent names and the new-name option, and take the selection once they arrive; use ↑/↓ and Tab or Enter to select either. File search also accepts relative paths such as `@../proj/file.tsx`. Sirus includes the selected text files in your message, making it easy to point at the code you want to discuss: up to 10 files, 256 KiB each and 512 KiB together.
 
 A mention counts, and the menu opens, only in ordinary prose, not in a list item, heading, block quote, table, code or quoted text. A path ends at the first whitespace, quote, backtick, or any of `< > ( ) [ ] { } , ;`; the menu writes a path that needs it in double quotes, such as `@"my notes.txt"`.
 
@@ -141,7 +135,7 @@ The runtime Sirus uses to name a session reads no project instructions.
 
 ### Skills
 
-Each agent uses its own vendor's skills and slash commands, found where Claude Code or Codex would find them: Claude its skills, commands and enabled plugins, GPT its Codex skills and built-in commands. Sirus keeps no skill folders of its own.
+Each agent uses its own vendor's skills and slash commands, found where Claude Code or Codex would find them: Claude its skills, commands and enabled plugins, GPT its Codex skills and built-in commands. Each also gets the other vendor's skills it lacks: a Claude participant those in `.agents/skills` and `.codex/skills` (the project's, up to the Git root, and yours) and in third-party Codex plugins you enabled, and a GPT participant those in `.claude/skills` and in third-party Claude plugins you enabled that have a description and that the model may invoke; none that shares a name with one it has already. Sirus links them from a folder under its data directory, and neither vendor's own folders change.
 
 Type `/` to find one: after Sirus's own commands, the menu lists what `@sirus`'s runtime reports it offers, with what each takes. The list is the one last reported for that vendor in the session's directory, kept on disk, so once a runtime has run there the menu has it before the first prompt; a skill you add appears once the runtime reports its list again. `Tab` completes the name so you can add arguments, including `@file` mentions, and `Enter` sends it. Sirus hands it to the agent as the vendor's own terminal would, `/deploy prod` for Claude or `$deploy prod` for a Codex skill, so it runs as it would in Claude Code or Codex. A Sirus command of the same name takes precedence, and a few of the vendors' commands stay out of the menu: `/effort`, which would change the reasoning depth behind `/thinking`'s back, and Claude's internal session commands.
 
@@ -149,7 +143,7 @@ Codex on an OpenAI key, or on any ChatGPT account after the first you signed in 
 
 Claude loads your settings, plugins and hooks as Claude Code does. Each participant, subagent and rebuilt runtime is a Claude session of its own, so a session-start hook runs for each. Plugin agents need Claude Code's own Agent tool, which Sirus switches off in favour of its subagents, so they go unused.
 
-Claude Code's bundled skills are on, except `batch`, `code-review`, `loop`, `deep-research` and `workflow-authoring`, which are built on tools Sirus switches off: Claude Code's own agents, workflows and remote triggers, since delegation here goes through Sirus's subagents, and its scheduling and monitoring tools, which start turns Sirus never asked for. Codex keeps its built-in skills, with its own subagents switched off.
+Claude Code's bundled skills are on, except `batch`, `code-review`, `loop`, `deep-research` and `workflow-authoring`, which are built on tools Sirus switches off: Claude Code's own agents, workflows and remote triggers, since delegation here goes through Sirus's subagents, and its scheduling and monitoring tools, which start turns Sirus never asked for. Codex keeps its built-in skills, with its own subagents switched off. Claude reads its skills when its runtime starts, so a skill you add reaches a Claude participant after `/clear`, a chat rewind, or the next time Sirus opens. Codex rereads the project's folders and `~/.agents/skills` on every prompt.
 
 ### Choose how much approval you want
 
@@ -161,13 +155,13 @@ The mode applies to the session's participants and its subagents, including thos
 | `ask` | The agent asks before every action that is not a read, except what Codex runs in its sandbox (below). |
 | `bypass` | Nothing is asked. |
 
-Use `/permissions` to choose a mode, or `Shift+Tab` to cycle through them. At a prompt, choose one of the options the agent offers, in its own words, such as allowing once, allowing without asking again, or denying.
+Use `/permissions` to choose a mode, or `Shift+Tab` to switch between `ask` and `auto`. At a prompt, choose one of the options the agent offers, in its own words, such as allowing once, allowing without asking again, or denying.
 
 Two things differ by vendor. In `ask` and `auto`, Codex runs edits and commands inside the working directory in a sandbox that can write there and reach no network, so those run without asking and only what leaves the sandbox reaches you. Claude's `auto` mode depends on the model: where the model does not support it the session falls back to asking, and the status row says so. Codex's sandbox aside, these are tool approval controls, not an operating-system sandbox.
 
 ### Questions from the agent
 
-When an agent needs a decision from you, it can ask instead of guessing: Claude through Claude Code's AskUserQuestion, GPT through Codex's question tool, and MCP servers through the forms they raise. The question takes the input bar's place as a card, one question at a time: pick with `↑`/`↓` and `Enter` (or a number key), toggle a multiple choice with `Space`, choose `Other…` to type your own answer, and `←` to go back. `Esc` cancels the turn, as it does for an approval. Subagents cannot ask; nobody is watching them.
+When an agent needs a decision from you, it can ask instead of guessing: Claude through Claude Code's AskUserQuestion, GPT through Codex's question tool, and MCP servers through the forms they raise. The question takes the input bar's place as a card, one question at a time: pick with `↑`/`↓` and `Enter` (or a number key), toggle a multiple choice with `Space`, choose `Other…` to type your own answer, and `←` (`Shift+Tab` while typing) to go back. `Esc` declines the question, as it declines an approval, and the turn goes on. Subagents cannot ask; nobody is watching them.
 
 ### Your subscriptions, as many as you want—or an API key
 
@@ -183,17 +177,17 @@ Use `/usage` to see reported subscription allowance and how full each participan
 | --- | --- |
 | `Ctrl+N` | Start a new session. |
 | `Option+↑` / `Option+↓` | Switch sessions. |
-| `Ctrl+K` | Collapse or expand the sidebar. |
-| `Enter` | Send a message, or queue it while agents are busy. |
-| `Tab` | Complete the highlighted `/` command or skill. |
+| `Ctrl+B` | Collapse or expand the sidebar. |
+| `Enter` | Send a message; while agents are busy, it goes into their running turn. |
+| `Tab` | Complete the highlighted `/` command or skill, or queue the message for after the turn. |
 | `Shift+Enter` or `\` then `Enter` | Insert a new line. |
 | `Esc` | Close a menu or cancel the current session's turn. |
 | `/rename <name>` | Give the current session a useful name. |
 | `/thinking` | Show or change reasoning depth. |
 | `/agents` | Watch, message, cancel, or clear the session's subagents. |
-| `/jev` | Set or remove the TypeSafe AI key Jev picks models with. |
 | `/undo` / `/rewind` | Choose what to restore from a checkpoint. |
 | `/notify` | Configure desktop notifications. |
+| `/doctor` | Check Bun, adapter and vendor versions, logins, data directory and git. Also available as `sirus doctor`. API key validity is not checked. |
 | `/update` | Install the latest release with `npm install --global`. |
 | `/help` | Show all commands and shortcuts. |
 | `/exit` | Quit Sirus. |

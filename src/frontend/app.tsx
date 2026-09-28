@@ -1,16 +1,29 @@
-import { useEffect, useMemo, useState } from "react";
-import { Box, useInput, useStdout } from "ink";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Box, Text, useInput, useStdout } from "ink";
 import Chat from "./chat/Chat";
 import Sidebar, { COLLAPSED_SIDEBAR_WIDTH, SIDEBAR_WIDTH } from "./Sidebar";
 import { Session } from "../agent_runtime/session";
-import { loadSessionSnapshots, saveSessionSnapshots, type PersistedSessions } from "../persistence/sessions";
+import {
+  loadSessionSnapshots,
+  loadSessionSnapshot,
+  loadSessionRevision,
+  saveSessionSnapshot,
+  saveSessionMetadata,
+  deleteSessionSnapshot,
+  type PersistedSessions,
+} from "../persistence/sessions";
 import { openSettings } from "../persistence/settings";
+import { errorMessage } from "../abort";
 import { useTextSelection } from "./interaction/useTextSelection";
 import { useTerminalFocus } from "./interaction/useTerminalFocus";
 import { useNotifications } from "./useNotifications";
 import { DEFAULT_MODEL, isKnownModel } from '../agent_runtime/providers/catalog';
-import { shouldRequestJevKey } from '../agent_runtime/router';
+import ResumePicker from './ResumePicker';
+import type { CliOptions } from '../cli';
+import type { SessionSnapshot } from '../agent_runtime/session';
+import { theme } from './styles/theme';
 import { checkSirusUpdate } from '../updater';
+import { onProviderChange } from '../agent_runtime/providers/sources';
 
 export function nextSessionName(sessions: readonly Session[]): string {
   let sessionCount = sessions.length + 1;
@@ -38,9 +51,7 @@ function createDraft(
   preference: string | null = openSettings().get('sirusModel'),
 ): Session {
   const model = preference && isKnownModel(preference) ? preference : DEFAULT_MODEL;
-  // The draft starts on the fallback; its first prompt asks Jev for better,
-  // unless the user picks a model first.
-  return new Session({ name: nextSessionName(sessions), directory, model, autoNamePending: true, routePending: true });
+  return new Session({ name: nextSessionName(sessions), directory, model, autoNamePending: true });
 }
 
 export function startSession(
@@ -60,27 +71,58 @@ export function startSession(
 }
 
 // A streaming session notifies up to twenty times a second, and a save writes
-// every session whole and synchronously on the thread that reads input, so
-// changes are gathered into one save at most this long after the first.
+// the session whole and synchronously on the thread that reads input, so a
+// session's changes are gathered into one save at most this long after the
+// first.
 const PERSIST_DELAY_MS = 500;
 
-export default function App({ launchDirectory = process.cwd() }: { launchDirectory?: string }) {
+export default function App({ launchDirectory = process.cwd(), startup }: { launchDirectory?: string; startup?: CliOptions }) {
+  const diskSnapshots = useRef(new Map<string, string>());
+  const savedVersions = useRef(new WeakMap<Session, number>());
+  const savedSnapshots = useRef(new WeakMap<Session, string>());
+  const removedIds = useRef(new Set<string>());
+  const retiredSessions = useRef(new WeakSet<Session>());
+  const replacements = useRef(new WeakMap<Session, Promise<Session>>());
+  const initialNotices = useRef<string[]>([]);
   const [workspace, setWorkspace] = useState(() => {
     const saved = loadSessionSnapshots(undefined, launchDirectory);
-    return createWorkspace({
+    initialNotices.current = saved.notices ?? [];
+    for (const snapshot of saved.snapshots) diskSnapshots.current.set(snapshot.id, JSON.stringify(snapshot));
+    const initial = createWorkspace({
       sessions: saved.snapshots.map(snapshot => Session.fromSnapshot(snapshot)),
       selectedSessionId: saved.selectedSessionId,
     }, launchDirectory);
+    for (const session of initial.sessions) {
+      savedVersions.current.set(session, session.getVersion());
+      savedSnapshots.current.set(session, JSON.stringify(session.toSnapshot()));
+    }
+    const eligible = initial.sessions.filter(session => session.getDirectory() === launchDirectory && !session.isArchived());
+    if (startup?.continueSession) initial.selectedSession = eligible.sort((a, b) => b.getLastActivity() - a.getLastActivity())[0] ?? null;
+    if (startup?.resume) {
+      const query = startup.resume.toLocaleLowerCase();
+      const exact = initial.sessions.find(session => session.getId().toLocaleLowerCase() === query);
+      const names = initial.sessions.filter(session => session.getName().toLocaleLowerCase() === query);
+      const matches = initial.sessions.filter(session => session.getId().toLocaleLowerCase().includes(query) || session.getName().toLocaleLowerCase().includes(query));
+      initial.selectedSession = exact ?? (names.length === 1 ? names[0] : matches.length === 1 ? matches[0] : null);
+    }
+    const active = initial.selectedSession ?? initial.draftSession;
+    if (active.isArchived()) active.setArchived(false);
+    if (startup?.model) active.changeParticipantModel(active.toSnapshot().defaultModel.name, startup.model);
+    if (startup?.permissionMode) active.setPermissionMode(startup.permissionMode);
+    return initial;
   });
+  const currentWorkspace = useRef(workspace);
+  currentWorkspace.current = workspace;
+  const [resumeQuery, setResumeQuery] = useState<string | null>(() => startup?.resume != null && !workspace.selectedSession ? startup.resume : null);
+  const [sidebarFocused, setSidebarFocused] = useState(false);
+  const [storageNotice, setStorageNotice] = useState(initialNotices.current.join('\n'));
+  const promptStarted = useRef(false);
   const { sessions, selectedSession, draftSession } = workspace;
   const activeSession = selectedSession ?? draftSession;
   const { stdout } = useStdout();
   const [terminalHeight, setTerminalHeight] = useState(() => stdout.rows ?? 24);
-  const [updateAvailable, setUpdateAvailable] = useState(false);
+  const [updateVersion, setUpdateVersion] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  // Asked once per install: on the first launch without a Jev key, and never
-  // again once the user has pasted one or declined.
-  const [jevKeyPending, setJevKeyPending] = useState(() => shouldRequestJevKey());
   const sidebarWidth = sidebarCollapsed ? COLLAPSED_SIDEBAR_WIDTH : SIDEBAR_WIDTH;
   // tracked so width-only resizes also re-render (the header rule spans the width)
   const [terminalWidth, setTerminalWidth] = useState(() => stdout.columns ?? 80);
@@ -90,8 +132,24 @@ export default function App({ launchDirectory = process.cwd() }: { launchDirecto
   useTerminalFocus();
   useNotifications(useMemo(() => [...sessions, draftSession], [sessions, draftSession]));
 
+  useEffect(() => {
+    let mounted = true;
+    const warm = () => queueMicrotask(() => {
+      if (mounted) void activeSession.warmup().catch(() => { /* The first turn reports a failed startup. */ });
+    });
+    warm();
+    const stopSession = activeSession.subscribe(warm);
+    const stopSources = onProviderChange(warm);
+    return () => {
+      mounted = false;
+      stopSession();
+      stopSources();
+      activeSession.releaseWarmup();
+    };
+  }, [activeSession]);
+
   useInput((input, key) => {
-    if (key.ctrl && input === 'k') setSidebarCollapsed(collapsed => !collapsed);
+    if (key.ctrl && input === 'b' && key.eventType !== 'release' && !sidebarFocused) setSidebarCollapsed(collapsed => !collapsed);
   });
 
   useEffect(() => {
@@ -102,7 +160,7 @@ export default function App({ launchDirectory = process.cwd() }: { launchDirecto
       activeController = new AbortController();
       void checkSirusUpdate(activeController.signal)
         .then(result => {
-          if (!disposed) setUpdateAvailable(result.updateAvailable);
+          if (!disposed) setUpdateVersion(result.updateAvailable ? result.latestVersion : null);
         })
         .catch(() => void 0);
     };
@@ -127,88 +185,246 @@ export default function App({ launchDirectory = process.cwd() }: { launchDirecto
   }, [stdout]);
 
   useEffect(() => {
-    // Include the startup draft so its first streamed turn is durable even if
-    // the process exits before React promotes it into the sidebar state.
     const persistableSessions = [...new Set([...sessions, draftSession])];
-    // A session with no history is a draft, not something to restore next
-    // launch; a selection pointing at one is dropped with it.
-    const persist = () => saveSessionSnapshots(
-      persistableSessions.filter(session => !session.isEmpty()).map(session => session.toSnapshot()),
-      selectedSession?.getId() ?? null,
-    );
-    let pending: ReturnType<typeof setTimeout> | null = null;
-    const persistSoon = () => {
-      if (pending) return;
-      pending = setTimeout(() => {
-        pending = null;
-        persist();
+    const persist = (session: Session, checkFinal = false) => {
+      if (retiredSessions.current.has(session) || removedIds.current.has(session.getId()) || session.isEmpty()
+        || (!checkFinal && savedVersions.current.get(session) === session.getVersion())) return;
+      const snapshot = session.toSnapshot();
+      const serialized = JSON.stringify(snapshot);
+      // A stream mutates its entry before the throttled change notification.
+      // Check the actual final contents without rewriting unchanged sessions.
+      if (checkFinal && savedSnapshots.current.get(session) === serialized) return;
+      if (diskSnapshots.current.has(session.getId()) && loadSessionRevision(session.getId()) === null) {
+        removedIds.current.add(session.getId());
+        setStorageNotice(`${session.getName()} was removed by another window. The copy in memory will not recreate it.`);
+        return;
+      }
+      if (saveSessionSnapshot(snapshot)) {
+        savedVersions.current.set(session, session.getVersion());
+        savedSnapshots.current.set(session, serialized);
+        diskSnapshots.current.set(session.getId(), serialized);
+      } else setStorageNotice(`Could not save ${session.getName()}. Your conversation is still in memory.`);
+    };
+    const pending = new Set<Session>();
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const persistSoon = (session: Session) => {
+      pending.add(session);
+      if (timer) return;
+      timer = setTimeout(() => {
+        timer = null;
+        const due = [...pending];
+        pending.clear();
+        for (const waiting of due) persist(waiting);
       }, PERSIST_DELAY_MS);
-      pending.unref?.();
+      timer.unref?.();
     };
-    // Session messages are mutated with the latest streamed snapshot before
-    // throttled UI notifications. A synchronous save on exit, or when this
-    // effect is replaced, captures that final in-memory snapshot, with
-    // whatever was still waiting on the timer.
-    const persistNow = () => {
-      if (pending) clearTimeout(pending);
-      pending = null;
-      persist();
+    // A synchronous save on exit, or when this effect is replaced, captures
+    // each session's final in-memory snapshot, with whatever was still
+    // waiting on the timer.
+    const persistOnExit = () => {
+      if (timer) clearTimeout(timer);
+      timer = null;
+      pending.clear();
+      for (const session of persistableSessions) persist(session, true);
     };
-    const unsubscribe = persistableSessions.map(session => session.subscribe(persistSoon));
-    process.on('exit', persistNow);
-    persist();
+    const unsubscribe = persistableSessions.map(session => session.subscribe(() => persistSoon(session)));
+    process.on('exit', persistOnExit);
+    for (const session of persistableSessions) persist(session);
+    saveSessionMetadata(sessions.filter(session => !session.isEmpty()).map(session => session.getId()), selectedSession?.getId() ?? null);
     return () => {
       for (const stop of unsubscribe) stop();
-      process.off('exit', persistNow);
-      persistNow();
+      process.off('exit', persistOnExit);
+      persistOnExit();
     };
   }, [sessions, selectedSession, draftSession]);
 
-  function selectSession(session: Session) {
-    setWorkspace(current => ({ ...current, selectedSession: session }));
+  // Retire the old object before restoring the same id: disposal unregisters
+  // its tool server and workers, which must not remove the new object's bindings.
+  function replaceSession(old: Session, snapshot: SessionSnapshot): Promise<Session> {
+    const existing = replacements.current.get(old);
+    if (existing) return existing;
+    retiredSessions.current.add(old);
+    const replacement = old.dispose().then(() => {
+      const session = Session.fromSnapshot(snapshot);
+      savedVersions.current.set(session, session.getVersion());
+      savedSnapshots.current.set(session, JSON.stringify(session.toSnapshot()));
+      diskSnapshots.current.set(snapshot.id, JSON.stringify(snapshot));
+      return session;
+    });
+    replacements.current.set(old, replacement);
+    return replacement;
   }
 
-  // A new session from the sidebar joins it at once, empty.
+  // Another window may add, archive, or change an inactive conversation.
+  // The visible session and sessions still running here retain their own state.
+  useEffect(() => {
+    let refreshing = false;
+    let disposed = false;
+    const timer = setInterval(async () => {
+      if (refreshing) return;
+      refreshing = true;
+      try {
+        const saved = loadSessionSnapshots(undefined, launchDirectory);
+        if (saved.notices?.length) setStorageNotice(saved.notices.join('\n'));
+        const previous = currentWorkspace.current;
+        const byId = new Map(previous.sessions.map(session => [session.getId(), session]));
+        const restored = new Map<Session, Session>();
+        const added: Session[] = [];
+        const existingIds = new Set(saved.snapshots.map(snapshot => snapshot.id));
+        for (const snapshot of saved.snapshots) {
+          if (removedIds.current.has(snapshot.id)) continue;
+          const old = byId.get(snapshot.id);
+          if (old && (old === currentWorkspace.current.selectedSession || old.getStatus() === 'working'
+            || old.getWorkers().some(worker => worker.status === 'working')
+            || diskSnapshots.current.get(snapshot.id) === JSON.stringify(snapshot))) continue;
+          if (old) restored.set(old, await replaceSession(old, snapshot));
+          else {
+            const session = Session.fromSnapshot(snapshot);
+            savedVersions.current.set(session, session.getVersion());
+            savedSnapshots.current.set(session, JSON.stringify(session.toSnapshot()));
+            diskSnapshots.current.set(snapshot.id, JSON.stringify(snapshot));
+            added.push(session);
+          }
+        }
+        if (disposed) return;
+        setWorkspace(current => {
+          let changed = false;
+          const next = current.sessions.flatMap(old => {
+            const replacement = restored.get(old);
+            if (replacement) { changed = true; return [replacement]; }
+            if (!existingIds.has(old.getId()) && byId.get(old.getId()) === old
+              && old !== current.selectedSession && old.getStatus() !== 'working'
+              && !old.getWorkers().some(worker => worker.status === 'working') && !old.isEmpty()) {
+              retiredSessions.current.add(old);
+              removedIds.current.add(old.getId());
+              changed = true;
+              void old.dispose();
+              return [];
+            }
+            return [old];
+          });
+          for (const session of added) {
+            if (!next.some(existing => existing.getId() === session.getId())) {
+              next.push(session);
+              changed = true;
+            }
+          }
+          return changed ? {
+            ...current, sessions: next,
+            selectedSession: current.selectedSession ? restored.get(current.selectedSession) ?? current.selectedSession : null,
+          } : current;
+        });
+      } catch (error) {
+        if (!disposed) setStorageNotice(`Could not refresh sessions: ${errorMessage(error)}`);
+      } finally {
+        refreshing = false;
+      }
+    }, 1500);
+    return () => { disposed = true; clearInterval(timer); };
+  }, [launchDirectory]);
+
+  useEffect(() => {
+    if (!startup?.prompt || promptStarted.current || resumeQuery !== null) return;
+    promptStarted.current = true;
+    const turn = activeSession.sendMessage({ role: 'user', content: [{ type: 'text', text: startup.prompt }] });
+    if (!activeSession.isEmpty()) activateSession(activeSession);
+    void turn.catch(error => setStorageNotice(errorMessage(error)));
+  }, [startup?.prompt, resumeQuery, activeSession]);
+
+  async function selectSession(session: Session) {
+    // Refresh at selection too, including switches before the next poll.
+    let selected = session;
+    if (session !== activeSession && session.getStatus() !== 'working'
+      && !session.getWorkers().some(worker => worker.status === 'working')) {
+      const notices: string[] = [];
+      const snapshot = loadSessionSnapshot(session.getId(), undefined, launchDirectory, notices);
+      if (notices.length) setStorageNotice(notices.join('\n'));
+      if (!snapshot && !session.isEmpty()) {
+        removedIds.current.add(session.getId());
+        setStorageNotice(`${session.getName()} is no longer available on disk.`);
+        setWorkspace(current => ({ ...current, sessions: current.sessions.filter(item => item !== session) }));
+        return;
+      }
+      if (snapshot && JSON.stringify(snapshot) !== diskSnapshots.current.get(snapshot.id)) {
+        selected = await replaceSession(session, snapshot);
+      }
+    }
+    selected.setArchived(false);
+    setResumeQuery(null);
+    setWorkspace(current => ({ ...current, sessions: current.sessions.map(item => item === session ? selected : item), selectedSession: selected }));
+  }
+
   function addSession() {
-    setWorkspace(current => startSession(current, createDraft(current.sessions, launchDirectory), launchDirectory));
+    setWorkspace(current => ({ ...current, selectedSession: null }));
+  }
+
+  function newSession() {
+    const previous = activeSession.toSnapshot();
+    const fresh = new Session({
+      name: nextSessionName(sessions), directory: previous.directory,
+      participants: previous.participants, defaultParticipant: previous.defaultModel.name,
+      model: previous.defaultModel.model, permissionMode: previous.permissionMode,
+      subagentModel: previous.subagentModel, autoNamePending: true,
+    });
+    setWorkspace(current => ({ ...current, selectedSession: null, draftSession: fresh }));
   }
 
   function activateSession(session: Session) {
     setWorkspace(current => startSession(current, session, launchDirectory));
   }
 
-  function deleteSession(session: Session) {
-    session.dispose();
-    setWorkspace(current => {
-      const index = current.sessions.indexOf(session);
-      if (index === -1) return current;
-      const sessions = current.sessions.filter(candidate => candidate !== session);
-      const selectedSession = current.selectedSession === session
-        ? sessions[Math.min(index, sessions.length - 1)] ?? null
-        : current.selectedSession;
-      return {
-        sessions,
-        selectedSession,
-        draftSession: selectedSession === null && sessions.length === 0
-          ? createDraft(sessions, launchDirectory)
-          : current.draftSession,
-      };
-    });
+  function openSession(snapshot: SessionSnapshot) {
+    const session = Session.fromSnapshot(snapshot);
+    setWorkspace(current => ({ ...current, sessions: [...current.sessions, session], selectedSession: session }));
   }
+
+  function archiveSession(session: Session) {
+    session.setArchived(true);
+    if (!session.isEmpty()) saveSessionSnapshot(session.toSnapshot());
+    setWorkspace(current => ({ ...current, selectedSession: current.selectedSession === session ? null : current.selectedSession }));
+  }
+
+  function deleteSession(session: Session) {
+    if (session.getStatus() === 'working' || session.getWorkers().some(worker => worker.status === 'working')) {
+      setStorageNotice('Stop this session and its workers before deleting it.');
+      return;
+    }
+    if (!deleteSessionSnapshot(session.getId())) { setStorageNotice(`Could not delete ${session.getName()}.`); return; }
+    removedIds.current.add(session.getId());
+    void session.dispose();
+    setWorkspace(current => ({
+      ...current, sessions: current.sessions.filter(candidate => candidate !== session),
+      selectedSession: current.selectedSession === session ? null : current.selectedSession,
+      draftSession: current.draftSession === session ? createDraft(current.sessions, launchDirectory) : current.draftSession,
+    }));
+  }
+
 	return (
     // Always a full-screen frame: the sidebar spans the terminal and messages
     // render inside the chat column (bottom-anchored, clipped at the top), so
     // nothing ever lands in scrollback outside the viewport.
     <Box flexDirection="row" width={terminalWidth} height={Math.max(terminalHeight, 14)}>
-      <Sidebar sessions={sessions} currSession={selectedSession} selectSession={selectSession} addSession={addSession} deleteSession={deleteSession} updateAvailable={updateAvailable} collapsed={sidebarCollapsed} />
+      <Sidebar isActive={resumeQuery === null} sessions={sessions.filter(session => !session.isArchived())} directory={launchDirectory} onArchive={archiveSession} onFocusChange={setSidebarFocused} currSession={selectedSession} selectSession={selectSession} addSession={addSession} deleteSession={deleteSession} collapsed={sidebarCollapsed} />
+      <Box flexDirection="column" flexGrow={1} flexBasis={0} minWidth={0}>
+      {updateVersion && <Text color={theme.success} wrap="truncate-end">Sirus {updateVersion} available · /update</Text>}
+      {storageNotice && <Text color="yellow">{storageNotice}</Text>}
+      {resumeQuery !== null && <ResumePicker sessions={sessions} directory={launchDirectory} initialQuery={resumeQuery} onSelect={selectSession} onClose={() => setResumeQuery(null)} />}
+      {sidebarFocused && <Box padding={3}><Text>Manage sessions in the sidebar. Esc returns to the conversation.</Text></Box>}
+      <Box display={resumeQuery !== null || sidebarFocused ? 'none' : 'flex'} flexGrow={1} minHeight={0}>
       <Chat
+        active={resumeQuery === null && !sidebarFocused}
         key={activeSession.getId()}
         currSession={activeSession}
+        onNewSession={newSession}
+        onOpenSession={openSession}
+        onResumeSession={query => setResumeQuery(query ?? '')}
+        onArchiveSession={() => archiveSession(activeSession)}
+        onDeleteSession={() => deleteSession(activeSession)}
         sidebarWidth={sidebarWidth}
         onStartSession={selectedSession === null ? activateSession : undefined}
-        askJevKey={jevKeyPending}
-        onJevKeyAsked={() => setJevKeyPending(false)}
       />
+      </Box>
+      </Box>
     </Box>
 	);
 }

@@ -4,6 +4,59 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { FORKED_WORKER_HANDOVER, sirusPrompt } from '../../src/agent_runtime/prompt';
 import { openSettings } from '../../src/persistence/settings';
+import { RECAP_MAX_BYTES, transcriptText } from '../../src/agent_runtime/session/transcript';
+import type { Message } from '../../src/agent_runtime/types';
+
+describe('runtime recap', () => {
+  test('keeps recent conversation and the latest compaction summary within a byte budget', () => {
+    const entries: Message[] = [
+      { seq: 0, role: 'user', content: [{ type: 'text', text: 'Discarded before compaction' }] },
+      { seq: 1, role: 'assistant', content: [
+        { type: 'compaction', summary: 'Superseded summary' },
+        { type: 'text', text: 'Already represented in the summary' },
+        { type: 'compaction', summary: 'Latest summary: preserve the migration plan.' },
+      ] },
+      ...Array.from({ length: 200 }, (_, index): Message => ({
+        seq: index + 2, role: 'user', content: [{ type: 'text', text: `message-${index}: ${'界🌍'.repeat(80)}` }],
+      })),
+      { seq: 202, role: 'assistant', participant: 'reviewer', content: [{ type: 'text', text: 'Latest answer' }] },
+    ];
+    const recap = transcriptText(entries);
+    expect(Buffer.byteLength(recap)).toBeLessThanOrEqual(RECAP_MAX_BYTES);
+    expect(recap).toContain('Latest summary: preserve the migration plan.');
+    expect(recap).toContain('message-199:');
+    expect(recap).toEndWith('@reviewer: Latest answer');
+    expect(recap).toContain('older conversation text omitted');
+    for (const omitted of ['Discarded before compaction', 'Superseded summary', 'Already represented in the summary', 'message-0:', '\uFFFD']) {
+      expect(recap).not.toContain(omitted);
+    }
+  });
+
+  test('bounds an oversized summary and message without losing the newest text', () => {
+    const recap = transcriptText([
+      { seq: 0, role: 'assistant', content: [{ type: 'compaction', summary: `Summary starts here. ${'🌍'.repeat(RECAP_MAX_BYTES)}` }] },
+      { seq: 1, role: 'user', content: [{ type: 'text', text: `${'界'.repeat(RECAP_MAX_BYTES)} Latest request.` }] },
+    ]);
+    expect(Buffer.byteLength(recap)).toBeLessThanOrEqual(RECAP_MAX_BYTES);
+    expect(recap).toContain('Summary starts here.');
+    expect(recap).toContain('compaction summary was also shortened');
+    expect(recap).toEndWith('Latest request.');
+    expect(recap).not.toContain('\uFFFD');
+  });
+
+  test('leaves short recaps intact and excludes notices and private thoughts', () => {
+    expect(transcriptText([
+      { seq: 0, role: 'user', content: [{ type: 'text', text: 'Hello' }] },
+      { seq: 1, role: 'assistant', participant: 'reviewer', content: [
+        { type: 'thought', text: 'Private thought' },
+        { type: 'notice', severity: 'error', title: 'Adapter stopped' },
+        { type: 'compaction' },
+        { type: 'text', text: 'Hi' },
+      ] },
+    ])).toBe('User: Hello\n@reviewer: Hi');
+    expect(transcriptText([])).toBe('');
+  });
+});
 
 describe('system prompt', () => {
   test('adds only what the vendor cannot know to its own prompt', () => {
@@ -18,11 +71,11 @@ describe('system prompt', () => {
 
   test('tells the owner a subagent is a background task that reports back on its own', () => {
     const owner = sirusPrompt('sirus');
-    expect(owner).toContain('as soon as the subagent is on its way');
-    expect(owner).toContain('reaches you as a message from @<id> and starts your next turn');
+    expect(owner).toContain('runs in the background by default');
+    expect(owner).toContain('notification in your current turn');
     expect(owner).toContain('branch sirus/<id> in its own worktree');
-    expect(owner).toContain('Merge it yourself');
-    expect(owner).toContain('MessageAgent with an id and a message');
+    expect(owner).toContain('Inspect or merge the branch yourself');
+    expect(owner).toContain('SendMessage with to (id or name) and message');
     expect(owner).toContain('context "owner"');
     // Nothing tells it to wait, poll or read a stream file any more.
     expect(owner).not.toContain('streamFile');
@@ -31,7 +84,7 @@ describe('system prompt', () => {
 
   test('tells the worker it may be steered and that its changes land on a branch', () => {
     const worker = sirusPrompt('sirus', true);
-    expect(worker).toContain('may send further instructions while you work');
+    expect(worker).toContain('send further instructions while you work');
     expect(worker).toContain('worktree of the project on a branch of your own');
     expect(worker).toContain('final message addressed to the agent that spawned you');
   });
@@ -40,7 +93,7 @@ describe('system prompt', () => {
     expect(FORKED_WORKER_HANDOVER).toStartWith('You are now a Sirus subagent, forked from the conversation above');
     for (const obligation of [
       'never ask one',
-      'may send further instructions while you work',
+      'send further instructions while you work',
       'cannot spawn or contact other agents',
       'worktree of the project on a branch of your own',
       'final message addressed to the agent that spawned you',
@@ -61,7 +114,7 @@ describe('system prompt', () => {
   });
 
   test('describes the vendor tools generically and names only the Sirus tools', () => {
-    for (const tool of ['SpawnAgent', 'CheckAgent', 'MessageAgent', 'CancelAgent', 'ListAgents']) {
+    for (const tool of ['SpawnAgent', 'CheckAgent', 'SendMessage', 'CancelAgent', 'ListAgents']) {
       expect(sirusPrompt()).toContain(tool);
     }
     for (const retiredTool of ['ReadFile', 'WriteFile', 'EditFile', 'RunShell', 'SearchFiles', 'FetchURL', 'TodoWrite', 'apply_patch']) {

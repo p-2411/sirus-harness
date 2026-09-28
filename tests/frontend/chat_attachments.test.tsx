@@ -118,7 +118,7 @@ describe('chat attachment lifecycle', () => {
 
       // Keep a separator after the image chip so word deletion can correct the
       // rejected route without deleting the attachment placeholder.
-      await chat.submit(' @missing look at this');
+      await chat.submit(` @subagent ${testModel} look this`);
       await chat.waitFor(() => session.getStatus() === 'error');
       expect(session.getMessages()).toHaveLength(0);
       expect(storedImages()).toEqual([sentPath]);
@@ -142,7 +142,7 @@ describe('chat attachment lifecycle', () => {
     expect(sentPath && existsSync(sentPath)).toBe(true);
   });
 
-  test('keeps a busy image draft intact while queued text runs, then sends the draft with its image', async () => {
+  test('queues a busy image draft with its text and transfers ownership to the queue', async () => {
     let release = () => {};
     const gate = new Promise<void>(resolve => { release = resolve; });
     let calls = 0;
@@ -164,24 +164,22 @@ describe('chat attachment lifecycle', () => {
       await chat.waitFor(() => calls === 1);
 
       await chat.submit('Describe attached image');
-      expect(session.getQueuedMessageCount()).toBe(0);
+      expect(session.getQueuedMessageCount()).toBe(1);
+      expect(session.getInputContent()).toBe('');
+      expect(chat.output()).toContain('queued');
       expect(session.getMessages().filter(message => message.role === 'user')).toHaveLength(1);
       session.queueMessage('Queued text');
       release();
       await activeTurn;
-      await chat.waitFor(() => session.getStatus() === 'idle' && calls === 2);
+      await chat.waitFor(() => session.getStatus() === 'idle' && calls === 3);
       expect(storedImages()).toEqual([sentPath!]);
       expect(session.getMessages().filter(message => message.role === 'user')[1].content)
-        .toEqual([{ type: 'text', text: 'Queued text' }]);
-
-      // The busy submit retained both the text draft and its attachment.
-      await chat.press('\r');
-      await chat.waitFor(() => session.getStatus() === 'idle' && calls === 3);
-      expect(session.getMessages().filter(message => message.role === 'user')[2].content)
         .toEqual([
           expect.objectContaining({ type: 'image', path: sentPath }),
           { type: 'text', text: 'Describe attached image' },
         ]);
+      expect(session.getMessages().filter(message => message.role === 'user')[2].content)
+        .toEqual([{ type: 'text', text: 'Queued text' }]);
     } finally {
       release();
       await activeTurn;
