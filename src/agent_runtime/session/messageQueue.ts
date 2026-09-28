@@ -50,8 +50,8 @@ export class MessageQueue {
     return taken;
   }
 
-  shiftAutoSendable(): QueuedMessage | undefined {
+  firstAutoSendable(): QueuedMessage | undefined {
     const next = this.items[0];
-    return next && isAutoSendable(next.text) ? this.items.shift() : undefined;
+    return next && isAutoSendable(next.text) ? next : undefined;
   }
 }

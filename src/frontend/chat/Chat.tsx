@@ -10,6 +10,7 @@ import {
   type ToolCallBlock,
 } from '../../agent_runtime/types';
 import { Session, type SessionSnapshot } from '../../agent_runtime/session';
+import type { QueuedMessage } from '../../agent_runtime/session/messageQueue';
 import { readClipboard, removeStoredImage } from '../../images';
 import { Box, Text, measureElement, renderToString, useApp, useBoxMetrics, useInput, useStdout, type DOMElement } from 'ink';
 import { theme } from '../styles/theme';
@@ -610,7 +611,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
 
   // A command leaves any attachments waiting for the next real message.
   // Commands are exactly what the background queue leaves for a mounted Chat.
-  const send = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[], recipient = selected, to?: readonly string[]): boolean => {
+  const send = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[], recipient = selected, to?: readonly string[], queuedMessage?: QueuedMessage): boolean => {
     const commandName = /^\/(\S+)/.exec(text)?.[1];
     const immediate = commandName && ['model', 'thinking', 'effort', 'fast', 'status', 'usage', 'mcp', 'config', 'permissions', 'agents', 'tasks'].includes(commandName);
     // An agent's own command goes to the agent on that command's vendor: the
@@ -620,6 +621,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     const vendorTarget = vendorCommand?.vendor ? currSession.participantOn(vendorCommand.vendor, recipient) : null;
     if (vendorCommand?.reporting && vendorTarget) {
       // In the vendor's own words: `/codex:status` is Codex's `/status`.
+      if (queuedMessage) currSession.takeQueuedMessages([queuedMessage.id]);
       runAside(vendorTarget, vendorCommand.command.invocation);
       return true;
     }
@@ -629,7 +631,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     const targetsBusy = routed.to?.some(name => currSession.isParticipantWorking(name)) ?? false;
     const taskCommand = commandName && commandRegistry.some(spec => spec.name === commandName);
     if ((targetsBusy || commandAbort.current || (taskCommand && currSession.getStatus() === 'working')) && !immediate) {
-      queue(text, images, content, recipient);
+      if (!queuedMessage) queue(text, images, content, recipient);
       return true;
     }
     // A Sirus command runs here. Anything else that starts with a slash, an
@@ -637,11 +639,12 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     // the agent's harness makes of it what it will.
     const command = isSirusCommand(text, currSession.getNativeCommands(recipient)) ? parseCommandLine(text) : null;
     if (command && commandRegistry.some(spec => spec.name === command.name)) {
+      if (queuedMessage) currSession.takeQueuedMessages([queuedMessage.id]);
       runCommand(command.name, command.args, recipient, command.rest);
     } else {
       const previousLength = currSession.getMessages().length;
       const previousDraft = currSession.getInputContent(recipient);
-      deliver(routed, images)
+      deliver(routed, images, queuedMessage)
         .catch((caught: unknown) => {
           if (currSession.getMessages().length === previousLength && !currSession.getInputContent(recipient)) {
             currSession.setInputContent(previousDraft, recipient);
@@ -656,7 +659,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
 
   // The user's message to the agents, however it was started: typed, or sent
   // by a command such as /init. Settles when the turn it starts is over.
-  const deliver = (msg: Parameters<Session['sendMessage']>[0], images: readonly ImageBlock[] = []) => {
+  const deliver = (msg: Parameters<Session['sendMessage']>[0], images: readonly ImageBlock[] = [], queuedMessage?: QueuedMessage) => {
     // Images sit where the draft placed them. The session stamps the
     // entry's seq when it enters the transcript.
     followLatest();
@@ -665,7 +668,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     // navigates away mid-request the unmounted Chat no longer repaints its
     // history. The session-owned status still updates its sidebar row.
     const previousLength = currSession.getMessages().length;
-    const turn = currSession.sendMessage(msg);
+    const turn = currSession.sendMessage(msg, queuedMessage);
     // Validation can reject a turn before its user message is appended.
     // Keep those images available so the user can correct the prompt.
     if ((currSession.getMessages().length > previousLength || currSession.getQueuedMessages().some(item => item.images?.some(image => images.some(sent => sent.path === image.path)))) && images.length > 0) {
@@ -709,14 +712,14 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     void currSession.deliverQueuedMessages();
   };
 
-  // Queued messages live on the session so they survive switching away and
-  // back. Send one at a time as soon as that session is free again.
+  // Queued commands need the active Chat and a ready input. Text can drain
+  // at a tool boundary; messages with images wait until the turn ends.
   useEffect(() => {
     if (!active || inputIsBusy || imageIsLoading || currSession.getStatus() === 'working'
       || queued === 0 || effectiveInputMode.type !== 'text') return;
-    const next = currSession.shiftQueuedPrompt();
+    const next = currSession.nextQueuedPromptForChat();
     if (next !== undefined) {
-      send(next.text, next.images, next.content ? [...next.content] : undefined, next.to?.[0] ?? selected, next.to);
+      send(next.text, next.images, next.content ? [...next.content] : undefined, next.to?.[0] ?? selected, next.to, next);
     }
   }, [currSession, active, inputIsBusy, imageIsLoading, queued, effectiveInputMode.type]);
 

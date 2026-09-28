@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, jest, setSystemTime, spyOn, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import * as checkpoints from '../../src/checkpoints';
@@ -1028,6 +1028,39 @@ describe('Session model', () => {
     expect(session.getStatus()).toBe('idle');
     expect(session.shiftQueuedMessage()).toBe('/login');
     expect(session.shiftQueuedMessage()).toBe('after login');
+  });
+
+  test('retains a queued file mention that fails before acceptance and retries it once fixed', async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-queued-file-'));
+    let finish!: () => void;
+    const gate = new Promise<void>(resolve => { finish = resolve; });
+    const binding = bindScriptedRuntime(testModel, async input => {
+      if (input.text === 'Work') await gate;
+    });
+    const session = new Session({ model: testModel, directory });
+    const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Work' }] });
+    try {
+      await until(() => binding.runtimes[0]?.prompts.length === 1, 'initial prompt');
+      session.queueMessage('Read @"missing.txt"');
+      session.queueMessage('After attachment');
+      const queuedIds = session.getQueuedMessages().map(item => item.id);
+      finish();
+      await turn;
+      await until(() => session.getStatus() === 'error', 'missing attachment failure');
+      expect(session.getQueuedMessages().map(item => item.id)).toEqual(queuedIds);
+      expect(binding.runtimes[0].prompts.map(prompt => prompt.text)).toEqual(['Work']);
+      writeFileSync(path.join(directory, 'missing.txt'), 'Found');
+      await session.deliverQueuedMessages();
+      await until(() => binding.runtimes[0].prompts.length === 3, 'retried queue');
+      expect(binding.runtimes[0].prompts.map(prompt => prompt.text.split('\n')[0]))
+        .toEqual(['Work', 'Read @"missing.txt"', 'After attachment']);
+      expect(session.getQueuedMessageCount()).toBe(0);
+    } finally {
+      finish();
+      await turn;
+      await session.dispose();
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   test('cancelling sends that session queue next and leaves other sessions running', async () => {
@@ -2771,6 +2804,41 @@ test('queued follow-ups wait for all foreground tools, then steer in FIFO order 
     finish();
     await turn;
     await session.dispose();
+  }
+});
+
+test('safe-point delivery leaves an invalid file prompt at the front of the queue', async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-queued-safe-point-'));
+  let emit!: (update: RuntimeUpdate) => void;
+  let finish!: () => void;
+  const gate = new Promise<void>(resolve => { finish = resolve; });
+  const binding = bindScriptedRuntime(testModel, async (_input, update) => { emit = update; await gate; });
+  const session = new Session({ model: testModel, directory });
+  const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Work' }] });
+  try {
+    await until(() => !!emit, 'runtime to start');
+    session.queueMessage('Read @"missing.txt"');
+    session.queueMessage('Later');
+    const queuedIds = session.getQueuedMessages().map(item => item.id);
+    emit({ type: 'tool_call', call: {
+      type: 'tool_call', id: 'done', title: 'Done', kind: 'execute', status: 'completed', locations: [], content: [],
+    } });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    emit({ type: 'tool_call', call: {
+      type: 'tool_call', id: 'again', title: 'Again', kind: 'execute', status: 'completed', locations: [], content: [],
+    } });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    finish();
+    await turn;
+    expect(session.getStatus()).toBe('error');
+    expect(session.getQueuedMessages().map(item => item.id)).toEqual(queuedIds);
+    expect(binding.runtimes[0].steers).toEqual([]);
+    expect(session.getMessages().filter(message => message.role === 'user').map(textOf)).toEqual(['Work']);
+  } finally {
+    finish();
+    await turn;
+    await session.dispose();
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 

@@ -769,6 +769,34 @@ test('escape closes what is open before it cancels the turn', async () => {
   }
 });
 
+test('Chat leaves a queued prompt visible after its attachment fails before acceptance', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sirus-chat-queued-failure-'));
+  const model = 'test-chat-queued-failure';
+  let finish!: () => void;
+  const gate = new Promise<void>(resolve => { finish = resolve; });
+  bindScriptedRuntime(model, async input => { if (input.text === 'Work') await gate; });
+  const session = new Session({ model, directory });
+  const chat = mountChat(session);
+  const turn = session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Work' }] });
+  try {
+    await chat.flush();
+    session.queueMessage('Read @"missing.txt"');
+    const queuedId = session.getQueuedMessages()[0]!.id;
+    finish();
+    await turn;
+    await chat.flush();
+    expect(session.getQueuedMessages().map(item => item.id)).toEqual([queuedId]);
+    expect(chat.frame()).toContain('Read @"missing.txt"');
+  } finally {
+    finish();
+    await turn;
+    await chat.unmount();
+    await session.dispose();
+    unbindRuntime(model);
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('copying from the history copies the lines on screen after a row was opened', async () => {
   const model = 'test-chat-copy';
   bindScriptedRuntime(model, (_input, emit) => {

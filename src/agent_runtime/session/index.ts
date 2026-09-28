@@ -178,6 +178,7 @@ function resolveSessionOptions(options: SessionOptions = {}): ResolvedSessionOpt
 export class Session {
   private readonly changes = new ChangeFeed(() => this.timeline.touch());
   private readonly queue = new MessageQueue();
+  private blockedQueuedPromptId: string | null = null;
   private deliveringQueue = false;
   private readonly timeline: Timeline;
   private readonly roster: ParticipantRoster;
@@ -429,6 +430,10 @@ export class Session {
       }
       if (this.activeSends === 1) this.timeline.startConversationIfNeeded(Date.now());
       accepted = true;
+      if (queuedMessage) {
+        this.queue.take([queuedMessage.id]);
+        this.changes.notify();
+      }
       this.appendRestoredReports();
       const busy = targets.filter(target => target.busy || this.starting.has(target));
       const images = stored.content.filter((block): block is ImageBlock => block.type === 'image');
@@ -501,6 +506,7 @@ export class Session {
       if (failed) throw failed.reason;
       return this.timeline.entries();
     } catch (error) {
+      if (!accepted && queuedMessage) this.blockedQueuedPromptId = queuedMessage.id;
       this.recordTurnError(error);
       throw error;
     } finally {
@@ -893,6 +899,7 @@ export class Session {
   // ask the adapter to deliver now. Commands and images need a fresh turn.
   async deliverQueuedMessages(atSafePoint?: SessionAgent): Promise<void> {
     if (this.deliveringQueue || this.disposed) return;
+    if (!atSafePoint) this.blockedQueuedPromptId = null;
     if (this.activeSends === 0) { this.sendNextQueuedPrompt(); return; }
     this.deliveringQueue = true;
     try {
@@ -900,6 +907,7 @@ export class Session {
       for (let index = 0; index < count; index++) {
         const next = this.queue.all()[0];
         if (!next) break;
+        if (next.id === this.blockedQueuedPromptId) break;
         if (!isAutoSendable(next.text) || next.images?.length) {
           if (!atSafePoint) this.cancel();
           break;
@@ -917,8 +925,6 @@ export class Session {
           // A tool boundary for one participant must not interrupt another.
           if (!busy.includes(atSafePoint) || busy.some(agent => agent !== atSafePoint)) break;
         }
-        this.queue.shift();
-        this.changes.notify();
         await this.sendMessage({ role: 'user', ...(next.to ? { to: [...next.to] } : {}),
           content: next.content ? [...next.content] : [{ type: 'text', text: next.text }, ...(next.images ?? [])],
         }, next);
@@ -946,6 +952,13 @@ export class Session {
     return next;
   }
 
+  // Chat handles commands once visible; a failed prompt stays
+  // offered for editing, but is not sent again on every status repaint.
+  nextQueuedPromptForChat(): QueuedMessage | undefined {
+    const next = this.queue.all()[0];
+    return next?.id === this.blockedQueuedPromptId ? undefined : next;
+  }
+
   // ↑ in the input bar takes the messages it shows back into its draft.
   takeQueuedMessages(ids: readonly string[]): QueuedMessage[] {
     const taken = this.queue.take(ids);
@@ -965,11 +978,14 @@ export class Session {
       this.flushReports();
       return;
     }
-    const next = this.queue.shiftAutoSendable();
-    if (next === undefined) return;
+    const next = this.queue.firstAutoSendable();
+    if (next === undefined || next.id === this.blockedQueuedPromptId) return;
     void this.sendMessage({ role: 'user', ...(next.to ? { to: [...next.to] } : {}),
-      content: next.content ? [...next.content] : [{ type: 'text', text: next.text }, ...(next.images ?? [])] })
-      .catch(() => { /* sendMessage records the failure in the session status. */ });
+      content: next.content ? [...next.content] : [{ type: 'text', text: next.text }, ...(next.images ?? [])] }, next)
+      .catch(() => {
+        // A preflight guard can reject before sendMessage begins a turn.
+        if (this.queue.all().some(message => message.id === next.id)) this.blockedQueuedPromptId = next.id;
+      });
   }
 
   getQueuedMessageCount(): number {
