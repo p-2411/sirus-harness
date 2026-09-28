@@ -15,3 +15,6 @@ cloudflare/.wrangler/
 cloudflare/.dev.vars
 marketing/private/
 xcuserdata/
+
+# Python byte code from the screenshot tools
+__pycache__/
