@@ -14,6 +14,7 @@ const now = Date.now();
 const LONG_NAME = 'Refactor-remote-control-session-ownership-so-two-terminal-windows-never-drive-one-session-at-the-same-time';
 const LONG_DIRECTORY = '~/code/clients/very-long-organisation-name/monorepo/packages/remote-control-server-and-client/src/agent_runtime/permissions';
 const LONG_PATH = 'ios/SirusRemote/Views/ConversationViewWithAVeryLongFileNameThatNeverBreaksAnywhereOnAPhoneScreen.swift';
+const UNBROKEN = 'refactor-auth-oauth2/pkce.'.repeat(10);
 const LONG_URL = 'https://developer.apple.com/documentation/swiftui/view/safeareabar(edge:alignment:spacing:content:)?language=swift&changes=latest_minor&platform=ios';
 
 const sessions = [
@@ -23,6 +24,7 @@ const sessions = [
   { id: 's-question', name: 'Choose how pickers should look', directory: '~/code/sirus-harness', status: 'working', working: true, needsYou: true, lastActivity: now - 45_000, assistantVersion: 9 },
   { id: 's-crowded', name: 'Eight agents review the remote-control protocol before release', directory: '~/code/sirus-harness/docs/superpowers/specs', status: 'idle', working: false, needsYou: false, lastActivity: now - 3_600_000, assistantVersion: 30 },
   { id: 's-empty', name: 'New session', directory: '~/code/sirus-harness', status: 'idle', working: false, needsYou: false, lastActivity: now - 7_200_000, assistantVersion: 0 },
+  { id: 's-stress', name: UNBROKEN.slice(0, 120), directory: `/Users/sebastian/${UNBROKEN}`.slice(0, 200), status: 'working', working: true, needsYou: true, lastActivity: now - 1_000, assistantVersion: 99 },
   { id: 's-error', name: 'Fix the flaky escape test', directory: '~/code/sirus-harness/tests/frontend', status: 'error', working: false, needsYou: false, lastActivity: now - 86_400_000, assistantVersion: 3 },
   ...Array.from({ length: 6 }, (_, index) => ({
     id: `s-old-${index}`, name: `Older session ${index + 1}: tidy the ${['changelog', 'README', 'push keys', 'setup screen', 'sidebar', 'caption'][index]}`,
@@ -36,7 +38,10 @@ const sessions = [
 const focusSession: Record<string, string> = {
   conversation: 's-main', loading: 's-main', gone: 's-main', offline: 's-main',
   approval: 's-approval', question: 's-question', crowded: 's-crowded', empty: 's-empty', long: 's-long',
+  stress: 's-stress',
 };
+// The agent each scene opens on: the stress scene opens on its widest name.
+const focusParticipant = scene === 'stress' ? 'コードレビュー担当エージェント' : 'sirus';
 const focusId = focusSession[scene] ?? 's-main';
 
 const participants: Record<string, { name: string; model: string; vendor: string; working: boolean; needsYou: boolean }[]> = {
@@ -48,10 +53,14 @@ const participants: Record<string, { name: string; model: string; vendor: string
   crowded: [
     'sirus', 'codex', 'reviewer', 'security-auditor-for-the-remote-protocol', 'docs', 'ios-layout-checker', 'tester', 'release-manager',
   ].map((name, index) => ({ name, model: index % 2 ? 'gpt-5-codex' : 'claude-sonnet-4-5', vendor: index % 2 ? 'Codex' : 'Claude', working: index === 5, needsYou: index === 6 })),
+  stress: [
+    'sirus', 'security-auditor-for-the-remote-protocol', 'documentation-writer-for-every-endpoint', 'ios-layout-checker-at-three-sizes-and-up',
+    'コードレビュー担当エージェント', '🦄🦄🦄🦄🦄🦄🦄🦄', 'release-manager-for-the-next-version', 'tester',
+  ].map((name, index) => ({ name, model: 'claude-opus-4-1-20250805[1m]', vendor: 'Claude', working: index === 1, needsYou: index === 2 })),
 };
 
 function header(participant: string): Frame {
-  const agents = scene === 'crowded' ? participants.crowded : participants.default.map(agent => ({
+  const agents = scene === 'crowded' ? participants.crowded : scene === 'stress' ? participants.stress : participants.default.map(agent => ({
     ...agent,
     needsYou: (scene === 'approval' && agent.name === 'sirus') || (scene === 'question' && agent.name === 'sirus'),
   }));
@@ -59,6 +68,17 @@ function header(participant: string): Frame {
   const thought = scene === 'approval' ? 'waiting for your approval'
     : scene === 'question' ? 'waiting for your answer'
     : '**Checking** how the floating overlay measures the header and the input bar, so that opening a menu never pushes the transcript up on a small phone';
+  if (scene === 'stress') {
+    return {
+      participants: agents,
+      status: { participant, thought: `**Reading** ${UNBROKEN}`.repeat(2), startedAt: now - 4_000_000 },
+      queued: 12,
+      permissionMode: 'bypass permissions',
+      modeNotice: 'the reviewer is unavailable, so every tool call asks first',
+      context: { text: 'ctx 196k · 2% left · /compact', tone: 'danger' },
+      thinking: 'max',
+    };
+  }
   return {
     participants: agents,
     status: working && participant === 'sirus' ? { participant, thought, startedAt: now - 83_000 } : null,
@@ -131,6 +151,22 @@ function transcript(participant: string): Frame[] {
 }
 
 function requests(): Frame[] {
+  if (scene === 'stress') {
+    const label = (text: string) => `${text}, ${'and remember this choice for every later command in this directory '.repeat(2)}`.slice(0, 110);
+    return [{
+      id: 'r-stress', kind: 'approval', requester: 'security-auditor-for-the-remote-protocol',
+      title: `Run ${UNBROKEN}`.slice(0, 300),
+      detail: [code(Array.from({ length: 60 }, (_, index) => `+ ${index} ${UNBROKEN}`).join('\n'), 'diff')],
+      options: [
+        { id: 'a', label: label('Yes'), kind: 'allow_once' },
+        { id: 'b', label: label('Yes, always'), kind: 'allow_always' },
+        { id: 'c', label: label('Yes, for this session'), kind: 'allow_always' },
+        { id: 'd', label: label('No'), kind: 'reject_once' },
+        { id: 'e', label: label('No, never'), kind: 'reject_always' },
+        { id: 'f', label: label('No, and explain'), kind: 'reject_once' },
+      ],
+    }];
+  }
   if (scene === 'approval') {
     return [{
       id: 'r-approval', kind: 'approval', requester: 'sirus',
@@ -171,14 +207,14 @@ function view(participant: string): Frame {
   return {
     type: 'view', sessionId: focusId, participant, reset: true,
     header: header(participant), rows: transcript(participant), removed: [],
-    requests: participant === 'sirus' ? requests() : [],
+    requests: participant === focusParticipant ? requests() : [],
   };
 }
 
 function sessionsFrame(): Frame {
   return {
     type: 'sessions',
-    focus: scene === 'nosessions' ? null : { sessionId: focusId, participant: 'sirus', at: now },
+    focus: scene === 'nosessions' ? null : { sessionId: focusId, participant: focusParticipant, at: now },
     sessions: scene === 'nosessions' ? [] : sessions,
   };
 }
@@ -210,6 +246,9 @@ const pickers: Record<string, Frame> = {
 function send(text: string): Frame {
   const command = text.trim().split(/\s+/)[0] ?? '';
   if (text.trim() in pickers) return { ok: true, picker: pickers[text.trim()] };
+  if (command === '/long-note') {
+    return { ok: true, feedback: `Compacted the conversation. ${'Kept the plan, the open files and the last three decisions; dropped tool output older than an hour. '.repeat(6)}`.slice(0, 600) };
+  }
   if (command === '/model' && text.includes('opus-9')) {
     return { ok: false, error: 'claude-opus-9 isn’t a model Sirus knows. Open /model to pick one, or check the id for typos.' };
   }

@@ -42,9 +42,17 @@ print(types.get(sys.argv[1], ""))' "$name")
   return 1
 }
 
+# Runs a command, giving up after the seconds given, so one simulator
+# command that hangs can't hold the whole run.
+limit() {
+  local seconds=$1
+  shift
+  perl -e 'alarm shift; exec @ARGV' "$seconds" "$@"
+}
+
 boot() {
   xcrun simctl boot "$1"
-  xcrun simctl bootstatus "$1" -b >/dev/null
+  limit 600 xcrun simctl bootstatus "$1" -b >/dev/null
   xcrun simctl status_bar "$1" override --time 9:41 --batteryState charged --batteryLevel 100 --wifiBars 3 --cellularBars 4
 }
 
@@ -71,15 +79,15 @@ stop_mock() {
 launch() {
   local udid=$1
   shift
-  xcrun simctl terminate "$udid" "$bundle" >/dev/null 2>&1 || true
-  xcrun simctl uninstall "$udid" "$bundle" >/dev/null 2>&1 || true
-  xcrun simctl install "$udid" "$app"
-  xcrun simctl launch "$udid" "$bundle" -notificationsAsked YES "$@" >/dev/null
+  limit 30 xcrun simctl terminate "$udid" "$bundle" >/dev/null 2>&1 || true
+  limit 60 xcrun simctl uninstall "$udid" "$bundle" >/dev/null 2>&1 || true
+  limit 120 xcrun simctl install "$udid" "$app" || echo "install timed out" >&2
+  limit 60 xcrun simctl launch "$udid" "$bundle" -notificationsAsked YES "$@" >/dev/null || echo "launch timed out" >&2
 }
 
 shot() {
-  xcrun simctl io "$1" screenshot "$out/$2.png" >/dev/null
-  echo "shot $2"
+  limit 60 xcrun simctl io "$1" screenshot "$out/$2.png" >/dev/null || echo "screenshot $2 timed out" >&2
+  echo "$(date +%T) shot $2"
 }
 
 # One scene against the stand-in Sirus: udid, device label, name, SCENE,
@@ -105,7 +113,7 @@ run() {
   # Setup after a failed connect, from a link to a Mac that isn't there.
   launch "$udid"
   sleep 3
-  xcrun simctl openurl "$udid" "sirus://connect?host=nope.invalid" || echo "openurl failed" >&2
+  limit 30 xcrun simctl openurl "$udid" "sirus://connect?host=nope.invalid" || echo "openurl failed" >&2
   sleep 8
   shot "$udid" "$label-setup-failed"
 
@@ -130,6 +138,9 @@ run() {
   scene "$udid" "$label" long long 6
   scene "$udid" "$label" sidebar conversation 6 -sidebarExpanded YES
   scene "$udid" "$label" gone gone 8
+  scene "$udid" "$label" stress stress 7
+  scene "$udid" "$label" question-keyboard question 8 -composerFocused YES
+  scene "$udid" "$label" note-long conversation 7 -sendOnLaunch /long-note
 
   # Offline: the Mac goes away while the conversation is on screen.
   start_mock offline
