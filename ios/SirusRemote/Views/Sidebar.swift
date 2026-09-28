@@ -9,6 +9,10 @@ import SwiftUI
 struct Sidebar: View {
     static let inset: CGFloat = 12
     static let railWidth: CGFloat = 48
+    static let panelRadius: CGFloat = 34
+    // Controls in the panel's corners sit concentric with them: in from each
+    // edge by the corner's radius less their own.
+    static let cornerInset = panelRadius - railWidth / 2
     // How far in the conversation starts, so the rail never covers it.
     static let gutter = inset + railWidth + 12
 
@@ -57,7 +61,7 @@ struct Sidebar: View {
     }
 
     private var pane: some View {
-        let shape = RoundedRectangle(cornerRadius: expanded ? 34 : Self.railWidth / 2, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: expanded ? Self.panelRadius : Self.railWidth / 2, style: .continuous)
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 0) {
                 toggle
@@ -80,6 +84,7 @@ struct Sidebar: View {
                     .transition(.opacity)
                 }
             }
+            .padding([.top, .horizontal], expanded ? Self.cornerInset : 0)
             if expanded {
                 panel.transition(.opacity)
             } else if !store.sessions.isEmpty {
@@ -308,7 +313,7 @@ private struct LinkLine: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 8)
-            Text(caption).foregroundStyle(store.link == .offline ? Palette.red : Palette.subtle)
+            Text(caption).foregroundStyle(Palette.subtle)
         }
         .font(.mono(12))
     }
@@ -316,8 +321,8 @@ private struct LinkLine: View {
     private var color: Color {
         switch store.link {
         case .live: Palette.platinum
-        case .connecting: Palette.amber
-        case .offline: Palette.red
+        case .connecting: Palette.muted
+        case .offline: Palette.muted
         }
     }
 

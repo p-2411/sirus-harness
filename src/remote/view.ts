@@ -10,6 +10,7 @@ import { turnPhase } from '../frontend/chat/Chat';
 import { visibleContent } from '../frontend/chat/ChatMessage';
 import { historyParts } from '../frontend/chat/history';
 import { approvalDetail } from '../frontend/chat/ApprovalPrompt';
+import { contextGauge, shownThinkingLevel } from '../frontend/chat/StatusRow';
 import { editPreview, failureDetail, outputText, planText, stopLabel, toolLine, type DiffLine } from '../frontend/chat/toolCalls';
 
 // The frames the phone draws, protocol v1 as the remote control spec has it.
@@ -45,6 +46,11 @@ export interface ViewFrame {
     status: { participant: string; thought: string; startedAt: number } | null;
     queued: number;
     permissionMode: string;
+    // The rest of the TUI's status row for the participant on view: what
+    // the vendor made of the mode, the context gauge, the thinking level.
+    modeNotice: string | null;
+    context: ReturnType<typeof contextGauge> | null;
+    thinking: string | null;
   };
   rows: Row[];
   removed: string[];
@@ -189,6 +195,7 @@ function statusOf(session: Session, participant: string, messages: readonly Mess
 export function viewOf(session: Session, participant: string): ViewFrame {
   const messages = session.getMessages(participant).filter(message => !message.hidden);
   const directory = session.getDirectory();
+  const contextUsage = session.getContextUsage(participant);
   return {
     type: 'view', sessionId: session.getId(), participant, reset: false,
     header: {
@@ -202,6 +209,9 @@ export function viewOf(session: Session, participant: string): ViewFrame {
       status: statusOf(session, participant, messages),
       queued: session.getQueuedMessageCount(),
       permissionMode: PERMISSION_MODE_NAMES[session.getPermissionMode()],
+      modeNotice: session.getModeNotice(participant),
+      context: contextUsage ? contextGauge(contextUsage) : null,
+      thinking: shownThinkingLevel(session, participant) ?? null,
     },
     rows: historyParts(messages).flatMap(part => rowsOf(part.message, part.key, directory)).slice(-ROW_LIMIT),
     removed: [],

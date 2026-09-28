@@ -6,7 +6,10 @@ import SwiftUI
 struct RootView: View {
     @Bindable var store: RemoteStore
     @Environment(\.scenePhase) private var phase
-    @AppStorage("sidebarExpanded") private var sidebarExpanded = false
+    // Plain state, written through to the defaults: a change to @AppStorage
+    // reaches the view outside the animation it was made in, so the sidebar
+    // would snap instead of springing.
+    @State private var sidebarExpanded = UserDefaults.standard.bool(forKey: "sidebarExpanded")
 
     var body: some View {
         Group {
@@ -30,6 +33,9 @@ struct RootView: View {
         .background(Palette.ground.ignoresSafeArea())
         .tint(Palette.platinum)
         .preferredColorScheme(.dark)
+        .onChange(of: sidebarExpanded) { _, expanded in
+            UserDefaults.standard.set(expanded, forKey: "sidebarExpanded")
+        }
         .onChange(of: store.sessions.first?.id, initial: true) { _, first in
             // Nothing opened at launch: show the most recent session.
             if store.openSession == nil, let first { store.open(first) }

@@ -100,7 +100,10 @@ Server → client:
     "participants": [ { "name": "sirus", "model": "opus[1m]", "vendor": "Claude",
                         "working": true, "needsYou": false } ],
     "status": { "participant": "sirus", "thought": "Reading the router", "startedAt": 1759… } | null,
-    "queued": 0, "permissionMode": "Ask" },
+    "queued": 0, "permissionMode": "Ask",
+    "modeNotice": null,                       // what the vendor made of the mode, as the TUI's status row says it
+    "context": { "text": "ctx 84k (42%)", "tone": "subtle" | "warning" | "danger" } | null,  // the TUI's gauge
+    "thinking": "high" | null },              // the participant's level, none for a model without levels
   "rows": [ Row ], "removed": [ "rowId" ],
   "requests": [ Request ] }                  // the whole pending list for this session, every frame
 ```

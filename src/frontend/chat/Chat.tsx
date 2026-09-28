@@ -58,6 +58,7 @@ import { onProviderChange } from '../../agent_runtime/providers/sources';
 import { copyToClipboard } from '../terminal/clipboard';
 import { nextPermissionMode } from '../../agent_runtime/permissions/policy';
 import { getSubagentsVersion, subscribeSubagents } from '../../agent_runtime/tools/subagents';
+import { shownThinkingLevel } from './StatusRow';
 
 export function ChatHeader({ session, activity = new Map(), width = 100, onSelect }: {
   session: Session;
@@ -924,8 +925,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         onOverlayChange={setInputOverlay}
         onRemoveAttachment={removeAttachment}
         model={participants.find(participant => participant.name === selected)!.model}
-        thinkingLevel={currSession.getOfferedThinkingLevels(selected)?.length === 0 ? undefined
-          : currSession.getThinkingLevel(selected) ?? currSession.getModelThinkingDefault(selected)}
+        thinkingLevel={shownThinkingLevel(currSession, selected)}
         history={history}
         queuedMessages={currSession.getQueuedMessages().filter(message => !message.to?.length || message.to.includes(selected))}
         onSendNow={sendNow}

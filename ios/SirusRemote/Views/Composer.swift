@@ -61,7 +61,7 @@ struct Composer: View {
             .contentTransition(.symbolEffect(.replace))
             .foregroundStyle(stops || !empty ? Palette.ground : Palette.subtle)
             .frame(width: 34, height: 34)
-            .background(Circle().fill(stops ? Palette.amber : empty ? Color.white.opacity(0.08) : Palette.platinum))
+            .background(Circle().fill(stops ? Palette.platinum : empty ? Color.white.opacity(0.08) : Palette.platinum))
             .frame(width: 44, height: 44)
             .contentShape(Circle())
     }

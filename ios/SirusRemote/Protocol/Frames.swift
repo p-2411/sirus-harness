@@ -85,10 +85,26 @@ struct Status: Decodable, Equatable {
 }
 
 struct Header: Decodable, Equatable {
+    // The TUI's context gauge, in its words and its tone.
+    struct Gauge: Decodable, Equatable {
+        enum Tone: String { case subtle, warning, danger }
+        let text: String
+        let tone: Tone
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: Keys.self)
+            text = c.take("text") ?? ""
+            tone = Tone(rawValue: c.take("tone") ?? "") ?? .subtle
+        }
+    }
+
     let participants: [Participant]
     let status: Status?
     let queued: Int
     let permissionMode: String?
+    let modeNotice: String?
+    let context: Gauge?
+    let thinking: String?
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
@@ -96,6 +112,9 @@ struct Header: Decodable, Equatable {
         status = c.take("status")
         queued = c.take("queued") ?? 0
         permissionMode = c.take("permissionMode")
+        modeNotice = c.take("modeNotice")
+        context = c.take("context")
+        thinking = c.take("thinking")
     }
 }
 

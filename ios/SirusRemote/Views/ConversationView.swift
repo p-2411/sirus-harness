@@ -62,8 +62,9 @@ private struct Conversation: View {
                         }
                     }
                 }
-                .padding(.leading, Sidebar.gutter)
-                .padding(.trailing, 16)
+                // The same inset on both sides, so the title and tabs centre
+                // on the screen rather than on the space beside the rail.
+                .padding(.horizontal, Sidebar.gutter)
                 .padding(.bottom, 6)
                 .background { Fade(edge: .top) }
             }
@@ -82,7 +83,7 @@ private struct Conversation: View {
         GlassEffectContainer(spacing: 8) {
             VStack(alignment: .leading, spacing: 10) {
                 if client.link != .live {
-                    Pill(tone: client.link == .offline ? Palette.red : Palette.amber) {
+                    Pill(tone: Palette.muted) {
                         Image(systemName: client.link == .offline ? "wifi.slash" : "arrow.triangle.2.circlepath")
                             .symbolEffect(.rotate, isActive: client.link == .connecting)
                         Text(client.link == .offline ? "Offline" : "Reconnecting…")
@@ -102,7 +103,7 @@ private struct Conversation: View {
                 if let request = client.requests.first {
                     RequestCard(request: request, waiting: client.requests.count - 1, client: client, names: names)
                         .id(request.id)
-                        .glassEffect(.regular.tint(request.kind == .approval ? Palette.amber.opacity(0.05) : nil),
+                        .glassEffect(.regular,
                                      in: .rect(cornerRadius: 30, style: .continuous))
                         .glassEffectID("input", in: glass)
                 } else {
@@ -124,7 +125,7 @@ private struct Conversation: View {
 }
 
 // The participants as the TUI header lists them, in a glass capsule: the
-// selected one on a lighter thumb, a working one breathing amber, one
+// selected one on a lighter thumb, a working one breathing silver, one
 // waiting on the user marked.
 private struct AgentTabs: View {
     let participants: [Participant]
@@ -159,7 +160,7 @@ private struct AgentTabs: View {
                         } else if agent.working {
                             Image(systemName: "circle.fill")
                                 .font(.system(size: 6))
-                                .foregroundStyle(Palette.amber)
+                                .foregroundStyle(Palette.silver)
                                 .symbolEffect(.pulse, options: .repeating)
                         }
                     }
@@ -218,12 +219,12 @@ private struct StatusPill: View {
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
-            Pill(tone: Palette.amber) {
+            Pill(tone: Palette.silver) {
                 Image(systemName: "progress.indicator")
                     .font(.system(size: 13, weight: .semibold))
                     .symbolEffect(.variableColor.iterative, options: .repeating)
                 Text(firstLine(status?.thought) ?? "Working")
-                    .foregroundStyle(Palette.silver)
+                    .foregroundStyle(Palette.muted)
                     .lineLimit(1)
                 if queued > 0 {
                     Text("\(queued) queued").foregroundStyle(Palette.subtle)
@@ -242,24 +243,42 @@ private struct StatusPill: View {
 }
 
 // Under the input, as the TUI's status row: the permission mode on the left,
-// the selected agent's model on the right.
+// with what the vendor made of it; the context gauge, model and thinking
+// level on the right.
 private struct ModeCaption: View {
     let header: Header?
     let participant: String
 
     var body: some View {
-        HStack {
+        HStack(spacing: 12) {
             if let mode = permissionMode(header?.permissionMode) {
-                Text(mode.name).foregroundStyle(mode.color)
+                let notice = Text(header?.modeNotice.map { " · \($0)" } ?? "").foregroundStyle(Palette.subtle)
+                Text("\(Text(mode.name).foregroundStyle(mode.color))\(notice)")
+                    .truncationMode(.tail)
             }
-            Spacer()
-            if let model = header?.participants.first(where: { $0.name == participant })?.model {
-                Text(model).foregroundStyle(Palette.subtle)
-            }
+            Spacer(minLength: 0)
+            // The gauge, model and level keep their width; the mode gives way.
+            right.layoutPriority(1)
         }
         .font(.mono(11))
         .lineLimit(1)
         .padding(.horizontal, 18)
         .padding(.bottom, 2)
+    }
+
+    private var right: Text {
+        let model = header?.participants.first(where: { $0.name == participant })?.model
+        let tail = [model, header?.thinking].compactMap { $0 }.joined(separator: " · ")
+        guard let context = header?.context else { return Text(tail).foregroundStyle(Palette.subtle) }
+        let gauge = Text(context.text).foregroundStyle(tone(context.tone))
+        return tail.isEmpty ? gauge : Text("\(gauge)\(Text(" · \(tail)").foregroundStyle(Palette.subtle))")
+    }
+
+    private func tone(_ tone: Header.Gauge.Tone) -> Color {
+        switch tone {
+        case .subtle: Palette.subtle
+        case .warning: Palette.amber
+        case .danger: Palette.red
+        }
     }
 }

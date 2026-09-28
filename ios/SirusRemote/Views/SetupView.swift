@@ -68,7 +68,7 @@ struct SetupView: View {
             Group {
                 if store.scanning {
                     HStack(spacing: 8) {
-                        ProgressView().controlSize(.small).tint(Palette.amber)
+                        ProgressView().controlSize(.small).tint(Palette.silver)
                         Text("Looking for Sirus…").foregroundStyle(Palette.muted)
                     }
                     .font(.mono(12))

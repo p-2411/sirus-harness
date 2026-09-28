@@ -28,19 +28,33 @@ export interface StatusRowProps {
 
 // The context gauge: how much of the model's window the last response used.
 // Muted until it matters; from CONTEXT_LOW_PERCENT on it says how much is
-// left and that /compact frees it, amber, and red once nearly full.
-function ContextGauge({ usage }: { usage: ContextUsage }) {
+// left and that /compact frees it, amber, and red once nearly full. The phone
+// shows the same words (`src/remote/view.ts`).
+export function contextGauge(usage: ContextUsage): { text: string; tone: 'subtle' | 'warning' | 'danger' } {
   const percent = contextPercent(usage);
   const low = percent !== null && percent >= CONTEXT_LOW_PERCENT;
-  const color = percent === null ? theme.textSubtle
-    : percent >= 95 ? theme.danger
-      : low ? theme.pending : theme.textSubtle;
-  return (
-    <Text color={color} dimColor={!low}>
-      ctx {formatTokens(usage.tokens)}
-      {low ? ` · ${100 - (percent ?? 0)}% left · /compact` : percent !== null ? ` (${percent}%)` : ''}
-    </Text>
-  );
+  return {
+    text: `ctx ${formatTokens(usage.tokens)}${low ? ` · ${100 - (percent ?? 0)}% left · /compact` : percent !== null ? ` (${percent}%)` : ''}`,
+    tone: percent !== null && percent >= 95 ? 'danger' : low ? 'warning' : 'subtle',
+  };
+}
+
+const GAUGE_COLORS = { subtle: theme.textSubtle, warning: theme.pending, danger: theme.danger } as const;
+
+function ContextGauge({ usage }: { usage: ContextUsage }) {
+  const { text, tone } = contextGauge(usage);
+  return <Text color={GAUGE_COLORS[tone]} dimColor={tone === 'subtle'}>{text}</Text>;
+}
+
+// The level the row names for an agent: the one picked, else the model's own
+// default; none for a model with no levels to choose from.
+export function shownThinkingLevel(session: {
+  getOfferedThinkingLevels(name?: string): readonly string[] | null;
+  getThinkingLevel(name?: string): string | undefined;
+  getModelThinkingDefault(name?: string): string | undefined;
+}, name: string): string | undefined {
+  return session.getOfferedThinkingLevels(name)?.length === 0 ? undefined
+    : session.getThinkingLevel(name) ?? session.getModelThinkingDefault(name);
 }
 
 // The line under the input box: the session's permission mode, qualified when

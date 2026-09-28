@@ -121,7 +121,7 @@ private struct ApprovalBody: View {
                                 .font(.system(size: 16, weight: primary ? .semibold : .medium))
                                 .multilineTextAlignment(.leading)
                         }
-                        .foregroundStyle(primary ? Palette.ground : option.rejects ? Palette.red : Palette.white)
+                        .foregroundStyle(primary ? Palette.ground : Palette.white)
                         .padding(.horizontal, 18)
                         .padding(.vertical, 8)
                         .frame(maxWidth: .infinity, minHeight: 48)

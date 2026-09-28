@@ -47,15 +47,14 @@ struct Transcript: View {
                 pinned = new.belowView < 40
             }
         }
+        // Centred on the screen, like the header; only the rows keep clear
+        // of the rail.
         .overlay {
-            Group {
-                if loading {
-                    Pulse(color: Palette.subtle, size: 7)
-                } else if rows.isEmpty {
-                    Text("Nothing here yet.").font(.system(size: 15)).foregroundStyle(Palette.subtle)
-                }
+            if loading {
+                Pulse(color: Palette.subtle, size: 7)
+            } else if rows.isEmpty {
+                Text("Nothing here yet.").font(.system(size: 15)).foregroundStyle(Palette.subtle)
             }
-            .padding(.leading, leading - 20)
         }
         .overlay(alignment: .bottomTrailing) {
             if !pinned {

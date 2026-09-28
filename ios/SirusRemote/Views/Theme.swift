@@ -2,8 +2,10 @@ import SwiftUI
 
 // src/frontend/styles/theme.ts on the phone: platinum and arctic white on the
 // near-black ground, gunmetal hairlines, periwinkle kept for mentions of
-// known participants, amber for work in progress and the one green for tool
-// activity.
+// known participants and the one green for tool activity. Amber and red are
+// small marks only, where the TUI uses them: amber for what needs the user
+// (and the sidebar's working spinner), red for what failed. Work in progress
+// is silver, never a fill.
 enum Palette {
     static let ground = Color(hex: 0x0C0E11)
     static let platinum = Color(hex: 0xC8CDD5)
