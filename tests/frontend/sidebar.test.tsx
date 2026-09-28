@@ -21,6 +21,8 @@ import { moveAt, pressAt, releaseAt } from '../../src/frontend/interaction/click
 import { lineToRow } from '../../src/frontend/terminal/screen';
 
 const noOp = () => {};
+// A sidebar row holding nothing but the arrow that says more sessions are below.
+const arrowRow = (frame: string) => frame.split('\n').some(line => /^\s*↓\s*│/.test(line));
 
 function mountSidebar() {
   let sessions = Array.from({ length: 30 }, (_, index) => new Session({
@@ -172,7 +174,10 @@ describe('sidebar scrolling', () => {
       const initial = app.frame();
       expect(initial).toContain('Session 00');
       expect(initial).not.toContain('Session 29');
+      // The last row says more sessions are below, and a blank line keeps them off the controls.
+      expect(arrowRow(initial)).toBe(true);
       const footerLine = initial.split('\n').findIndex(line => line.includes('new session'));
+      expect(initial.split('\n')[footerLine - 2]).toMatch(/^\s*│/);
       await app.wheel('down', 30); // Over chat, not the sidebar.
       await app.wheel('down', 3, 0); // Over the fixed header.
       expect(app.frame()).toBe(initial);
@@ -181,7 +186,7 @@ describe('sidebar scrolling', () => {
       expect(app.frame()).not.toContain('Session 00');
       expect(app.frame().split('\n')[footerLine]).toContain('new session');
       expect(app.frame().split('\n')[0]).toContain('sirus');
-      expect(app.frame()).toContain('┃');
+      expect(arrowRow(app.frame())).toBe(false);
       const bottom = app.frame();
       await app.wheel('down');
       expect(app.frame()).toBe(bottom);
@@ -221,7 +226,7 @@ describe('sidebar scrolling', () => {
       expect(app.frame()).toContain('Session 00');
       await app.resize(14);
       expect(app.frame()).toContain('Session 02');
-      expect(app.frame()).not.toContain('┃');
+      expect(arrowRow(app.frame())).toBe(false);
     } finally {
       await app.close();
     }
