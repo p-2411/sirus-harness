@@ -10,6 +10,9 @@ struct AgentTabs: View {
     let choose: (String) -> Void
     @State private var width: CGFloat = 0
     @Namespace private var thumb
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var motion: Motion { Motion(reduced: reduceMotion) }
 
     // Names are measured in the tab's own font, so a wide script or emoji
     // takes the room it needs.
@@ -30,7 +33,11 @@ struct AgentTabs: View {
         .frame(minWidth: 0, maxWidth: .infinity)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
         .sensoryFeedback(.selection, trigger: selected)
-        .animation(.spring(duration: 0.35, bounce: 0.2), value: selected)
+        .animation(motion.snap, value: selected)
+        // A tab widens for its mark when its agent starts working or needs
+        // the user, and the thumb glides along rather than jumping. Keyed
+        // on whether each has a mark, not on every update of the agents.
+        .animation(motion.snap, value: participants.map { $0.needsYou || $0.working })
     }
 
     // As wide as the name, but no wider than the capsule can give one tab
@@ -103,6 +110,7 @@ struct AgentTabs: View {
         } label: {
             HStack(spacing: 6) {
                 Text("+\(hidden.count)").font(.mono(13)).foregroundStyle(Palette.muted)
+                    .contentTransition(.numericText())
                 mark(needsYou: hidden.contains(where: \.needsYou), working: hidden.contains(where: \.working))
             }
             .fixedSize()
@@ -128,6 +136,6 @@ struct AgentTabs: View {
     }
 
     private func select(_ name: String) {
-        withAnimation(.spring(duration: 0.35, bounce: 0.2)) { choose(name) }
+        withAnimation(motion.snap) { choose(name) }
     }
 }

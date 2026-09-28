@@ -36,6 +36,67 @@ extension Font {
     }
 }
 
+// How things move, kept in one place so the whole app moves one way. Glass
+// that travels (the sidebar, a menu, a picker, a card taking the input's
+// place) springs on one curve with little bounce, as a large surface should
+// land rather than wobble; small controls take a quicker spring with a
+// touch more give; what changes in place eases without overshooting; what
+// only appears or goes, fades. Each thing comes from where it belongs, the
+// sidebar from the leading edge and the menus up out of the input, and
+// goes back the way it came.
+//
+// With Reduce Motion on, nothing travels: springs lose their bounce and
+// what would slide cross-fades, briefly. What moves is read from a value
+// made with the setting; what is static moves nothing, so is the same
+// either way.
+struct Motion {
+    var reduced = false
+
+    // Glass that travels: the sidebar opening, a menu or picker rising, a
+    // card taking the input's place, the rail stepping aside.
+    var panel: Animation { reduced ? Self.fade : .spring(duration: 0.45, bounce: 0.16) }
+    // A small thing changing state or place: the tabs' thumb, send turning
+    // into stop, a note, the jump to the latest message.
+    var snap: Animation { reduced ? .smooth(duration: 0.25) : .spring(duration: 0.3, bounce: 0.2) }
+
+    // Content changing in place: a row opening, a line appearing or going,
+    // the rail taking the marks that fit.
+    static var settle: Animation { .smooth(duration: 0.28) }
+    // What fades rather than moves: a control's tint, one screen or picker
+    // giving way to the next, and whatever Reduce Motion keeps still.
+    static var fade: Animation { .easeInOut(duration: 0.22) }
+    // A row darkening under the finger, at once; it lets go on `fade`.
+    static var press: Animation { .easeOut(duration: 0.12) }
+    // A status dot breathing while something is in progress.
+    static var breathe: Animation { .easeInOut(duration: 0.9).repeatForever(autoreverses: true) }
+
+    // The `/` and `@` menu rising out of the input by the given distance.
+    // It starts over the input, so it comes in clear rather than covering it.
+    func menu(rising distance: CGFloat) -> AnyTransition {
+        if reduced { return .opacity }
+        return .offset(y: distance).combined(with: .opacity)
+    }
+
+    // A picker sliding up from the bottom edge, through the input's place,
+    // as a sheet does: solid all the way, over a scrim that only fades.
+    var sheet: AnyTransition {
+        if reduced { return .opacity }
+        return .move(edge: .bottom)
+    }
+
+    // A note slipping in a little way from the edge it keeps to.
+    func note(from edge: VerticalEdge) -> AnyTransition {
+        if reduced { return .opacity }
+        return .offset(y: edge == .top ? -16 : 16).combined(with: .opacity)
+    }
+
+    // A small control appearing where it stands.
+    var pop: AnyTransition {
+        if reduced { return .opacity }
+        return .scale(scale: 0.85).combined(with: .opacity)
+    }
+}
+
 // One device pixel of gunmetal.
 struct Hairline: View {
     var color = Palette.line
@@ -58,18 +119,19 @@ struct Pulse: View {
             .fill(color)
             .frame(width: size, height: size)
             .opacity(active && dim ? 0.3 : 1)
-            .animation(active ? .easeInOut(duration: 0.9).repeatForever(autoreverses: true) : .default, value: dim)
+            .animation(active ? Motion.breathe : Motion.fade, value: dim)
             .onAppear { dim = active }
             .onChange(of: active) { _, now in dim = now }
     }
 }
 
-// Rows darken a touch under the finger instead of flashing grey.
+// Rows darken a touch under the finger instead of flashing grey: at once
+// on the touch, easing back on the release, as a system button does.
 struct RowPress: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .opacity(configuration.isPressed ? 0.55 : 1)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .animation(configuration.isPressed ? Motion.press : Motion.fade, value: configuration.isPressed)
     }
 }
 
