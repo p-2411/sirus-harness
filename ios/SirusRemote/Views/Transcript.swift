@@ -345,6 +345,9 @@ struct BlockView: View {
             ?? AttributedString(source)
         for run in Array(text.runs).reversed() where run.inlinePresentationIntent?.contains(.code) == true {
             let code = String(text[run.range].characters)
+            // A span longer than a line would then break between any two
+            // letters; it is left free to break at its own separators.
+            guard code.count <= 30 else { continue }
             var protected = ""
             for index in code.indices {
                 let character = code[index]

@@ -20,6 +20,10 @@ struct Sidebar: View {
     let store: RemoteStore
     let selected: String?
     @Binding var expanded: Bool
+    // Where on screen the rail must end: above the conversation's bottom
+    // bar, so a request card there is never under it.
+    var railEnd: CGFloat = .infinity
+    @State private var railTop: CGFloat = 0
     @State private var seen: [String: Int] = [:]
     @State private var confirmingForget = false
     @GestureState private var drag: CGFloat = 0
@@ -149,7 +153,10 @@ struct Sidebar: View {
             }
             .scrollIndicators(.hidden)
             .scrollBounceBehavior(.basedOnSize)
-            .frame(height: min(CGFloat(store.sessions.count), 7) * 44)
+            // Seven marks at most, fewer when the bottom bar comes up to
+            // meet it; the rest scroll.
+            .frame(height: min(min(CGFloat(store.sessions.count), 7) * 44, max(44, railEnd - railTop - 12)))
+            .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { railTop = $0 }
         }
         .frame(width: Self.railWidth)
         .padding(.bottom, 4)

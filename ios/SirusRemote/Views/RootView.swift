@@ -11,6 +11,9 @@ struct RootView: View {
     // would snap instead of springing.
     @State private var sidebarExpanded = UserDefaults.standard.bool(forKey: "sidebarExpanded")
     @State private var menuOpen = false
+    // Where the conversation's bottom bar starts on screen, for the rail to
+    // end above: an approval or question there must not sit under it.
+    @State private var chromeTop: CGFloat = .infinity
     // A link to another Mac, waiting for the user to say yes.
     @State private var otherMac: String?
     @State private var confirmingOtherMac = false
@@ -26,13 +29,13 @@ struct RootView: View {
             } else {
                 ZStack {
                     if let id = store.openSession {
-                        ConversationView(store: store, sessionId: id, menuOpen: $menuOpen)
+                        ConversationView(store: store, sessionId: id, menuOpen: $menuOpen, chromeTop: $chromeTop)
                             .id(id)
                             .transition(.opacity)
                     } else {
                         Lobby(store: store)
                     }
-                    Sidebar(store: store, selected: store.openSession, expanded: $sidebarExpanded)
+                    Sidebar(store: store, selected: store.openSession, expanded: $sidebarExpanded, railEnd: chromeTop)
                         .ignoresSafeArea(.keyboard)
                         .opacity(railAside ? 0 : 1)
                         .allowsHitTesting(!railAside)

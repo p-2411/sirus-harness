@@ -8,15 +8,17 @@ struct ConversationView: View {
     let store: RemoteStore
     let sessionId: String
     // Whether a menu is up over the conversation, so the sidebar's rail can
-    // step aside for it.
+    // step aside for it, and where the bottom bar starts, for the rail to
+    // end above it.
     @Binding var menuOpen: Bool
+    @Binding var chromeTop: CGFloat
 
     var body: some View {
         if let client = store.client(for: sessionId), let session = store.session(sessionId) {
             // Only what the conversation shows of the session is passed on,
             // so the list's activity updates don't redraw it.
             Conversation(store: store, client: client, sessionId: session.id, sessionName: session.name,
-                         participant: store.participant(for: sessionId), menuOpen: $menuOpen)
+                         participant: store.participant(for: sessionId), menuOpen: $menuOpen, chromeTop: $chromeTop)
         } else if store.link == .live && !store.clients.contains(where: { $0.link == .connecting }) {
             // Every Sirus answered, and none has it.
             VStack(spacing: 10) {
@@ -59,6 +61,7 @@ private struct Conversation: View {
     let sessionName: String
     let participant: String
     @Binding var menuOpen: Bool
+    @Binding var chromeTop: CGFloat
     // Kept here rather than in the composer, so an approval that takes the
     // composer's place leaves the draft waiting, as the TUI does.
     @State private var draft = ""
@@ -155,7 +158,10 @@ private struct Conversation: View {
                 closePicker()
             }
             .onChange(of: showsMenu, initial: true) { _, shown in menuOpen = shown }
-            .onDisappear { menuOpen = false }
+            .onDisappear {
+                menuOpen = false
+                chromeTop = .infinity
+            }
             // Typed text outlives the screen: back in this session, it waits.
             .onAppear { if draft.isEmpty { draft = store.draft(for: sessionId) } }
             .onChange(of: draft) { _, text in store.keep(draft: text, for: sessionId) }
@@ -219,6 +225,7 @@ private struct Conversation: View {
         }
         .padding(.horizontal, 12)
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { barHeight = $0 }
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { chromeTop = $0 }
         .animation(.spring(duration: 0.4, bounce: 0.14), value: client.requests.first?.id)
         .animation(.smooth(duration: 0.3), value: working || status != nil)
         .animation(.smooth(duration: 0.3), value: client.link)
@@ -576,35 +583,27 @@ private struct ModeCaption: View {
 
     private var model: String? { header?.participants.first { $0.name == participant }?.model }
 
+    // One line where it all fits. On a narrow screen, two: the permission
+    // mode and the context over the model and thinking level, so none is
+    // cut to a letter. The mode keeps its room first, since it says
+    // whether anything is asked; a long model id gives way in the middle.
     var body: some View {
-        HStack(spacing: 6) {
-            if let mode = header?.permissionMode, !mode.isEmpty {
-                let notice = Text(header?.modeNotice.map { " · \($0)" } ?? "").foregroundStyle(Palette.subtle)
-                CaptionChip(name: "Permission mode", value: mode, busy: openingCommand == "/permissions") {
-                    open("/permissions")
-                } label: {
-                    Text("\(Text(mode).foregroundStyle(permissionColor(mode)))\(notice)")
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 6) {
+                mode(height: 44)
+                Spacer(minLength: 4)
+                gauge
+                agent(height: 44)
+            }
+            VStack(spacing: 0) {
+                HStack(spacing: 6) {
+                    mode(height: 36).layoutPriority(1)
+                    Spacer(minLength: 4)
+                    gauge
                 }
-            }
-            Spacer(minLength: 4)
-            if let context = header?.context {
-                Text(context.text)
-                    .foregroundStyle(tone(context.tone))
-                    .padding(.trailing, 2)
-            }
-            if let model {
-                CaptionChip(name: "Model", value: model, busy: openingCommand == "/model") {
-                    open("/model")
-                } label: {
-                    Text(model)
-                }
-                .layoutPriority(1)
-            }
-            if let thinking = header?.thinking {
-                CaptionChip(name: "Thinking", value: thinking, busy: openingCommand == "/thinking") {
-                    open("/thinking")
-                } label: {
-                    Text(thinking)
+                HStack(spacing: 6) {
+                    Spacer(minLength: 0)
+                    agent(height: 36)
                 }
             }
         }
@@ -612,6 +611,42 @@ private struct ModeCaption: View {
         .lineLimit(1)
         .padding(.horizontal, 4)
         .sensoryFeedback(.selection, trigger: openingCommand) { _, new in new != nil }
+    }
+
+    @ViewBuilder private func mode(height: CGFloat) -> some View {
+        if let mode = header?.permissionMode, !mode.isEmpty {
+            let notice = Text(header?.modeNotice.map { " · \($0)" } ?? "").foregroundStyle(Palette.subtle)
+            CaptionChip(name: "Permission mode", value: mode, busy: openingCommand == "/permissions", height: height) {
+                open("/permissions")
+            } label: {
+                Text("\(Text(mode).foregroundStyle(permissionColor(mode)))\(notice)")
+            }
+        }
+    }
+
+    @ViewBuilder private var gauge: some View {
+        if let context = header?.context {
+            Text(context.text)
+                .foregroundStyle(tone(context.tone))
+                .padding(.trailing, 2)
+        }
+    }
+
+    @ViewBuilder private func agent(height: CGFloat) -> some View {
+        if let model {
+            CaptionChip(name: "Model", value: model, busy: openingCommand == "/model", height: height, truncation: .middle) {
+                open("/model")
+            } label: {
+                Text(model)
+            }
+        }
+        if let thinking = header?.thinking {
+            CaptionChip(name: "Thinking", value: thinking, busy: openingCommand == "/thinking", height: height) {
+                open("/thinking")
+            } label: {
+                Text(thinking)
+            }
+        }
     }
 
     private func tone(_ tone: Header.Gauge.Tone) -> Color {
@@ -630,6 +665,9 @@ private struct CaptionChip<Content: View>: View {
     let name: String
     let value: String
     let busy: Bool
+    // The row it sits in, all of which takes the tap.
+    var height: CGFloat = 44
+    var truncation: Text.TruncationMode = .tail
     let action: () -> Void
     @ViewBuilder let label: Content
 
@@ -638,7 +676,7 @@ private struct CaptionChip<Content: View>: View {
             HStack(spacing: 5) {
                 label
                     .foregroundStyle(Palette.muted)
-                    .truncationMode(.tail)
+                    .truncationMode(truncation)
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.system(size: 7.5, weight: .bold))
                     .foregroundStyle(Palette.subtle)
@@ -647,7 +685,7 @@ private struct CaptionChip<Content: View>: View {
             .padding(.horizontal, 10)
             .frame(height: 26)
             .background(Capsule().fill(.white.opacity(busy ? 0.11 : 0.06)))
-            .frame(minHeight: 44)
+            .frame(minHeight: height)
             .contentShape(Rectangle())
         }
         .buttonStyle(RowPress())

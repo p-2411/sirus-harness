@@ -51,7 +51,8 @@ limit() {
 }
 
 boot() {
-  xcrun simctl boot "$1"
+  echo "$(date +%T) booting $1"
+  limit 300 xcrun simctl boot "$1" || echo "boot timed out" >&2
   limit 600 xcrun simctl bootstatus "$1" -b >/dev/null
   xcrun simctl status_bar "$1" override --time 9:41 --batteryState charged --batteryLevel 100 --wifiBars 3 --cellularBars 4
 }
@@ -110,11 +111,11 @@ run() {
   sleep 4
   shot "$udid" "$label-setup"
 
-  # Setup after a failed connect, from a link to a Mac that isn't there.
-  launch "$udid"
-  sleep 3
-  limit 30 xcrun simctl openurl "$udid" "sirus://connect?host=nope.invalid" || echo "openurl failed" >&2
-  sleep 8
+  # Setup after a failed connect to a Mac that isn't there. (A sirus://
+  # link would do the same, but the system asks before opening it and the
+  # question stays up over every later scene.)
+  launch "$udid" -connectTo nope.invalid
+  sleep 9
   shot "$udid" "$label-setup-failed"
 
   # The lobby for a known Mac that can't be reached.
@@ -165,7 +166,7 @@ xcrun simctl ui "$small" content_size extra-extra-extra-large
 scene "$small" small conversation-largest-text conversation 6
 scene "$small" small question-largest-text question 6
 xcrun simctl ui "$small" content_size large
-xcrun simctl shutdown "$small"
+limit 120 xcrun simctl shutdown "$small" || echo "shutdown timed out" >&2
 
 boot "$large"
 run "$large" large

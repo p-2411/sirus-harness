@@ -115,6 +115,16 @@ struct SetupView: View {
         .animation(.smooth(duration: 0.3), value: typing)
         .animation(.easeOut(duration: 0.2), value: store.scanning)
         .sensoryFeedback(.error, trigger: store.problem?.errorDescription) { _, new in new != nil }
+        #if DEBUG
+        .task {
+            // Screenshot hook, as the composer's: -connectTo <name> types a
+            // name and connects, as a first connect by hand would.
+            if let preset = UserDefaults.standard.string(forKey: "connectTo") {
+                host = preset
+                connect()
+            }
+        }
+        #endif
     }
 
     // Under the field: the look in progress, or what stopped the last one.

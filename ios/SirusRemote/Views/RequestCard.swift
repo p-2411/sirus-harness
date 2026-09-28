@@ -76,7 +76,7 @@ private struct Bounded<Content: View>: View {
         }
         .scrollBounceBehavior(.basedOnSize)
         .scrollDismissesKeyboard(.interactively)
-        .frame(maxHeight: height > 0 ? min(height, limit) : limit)
+        .frame(maxHeight: min(max(height, 1), limit))
     }
 }
 
@@ -114,34 +114,40 @@ private struct ApprovalBody: View {
             // the easy tap.
             let prominent = (request.options.first(where: { $0.kind == "allow_once" })
                 ?? request.options.first(where: { !$0.rejects }))?.id
-            VStack(spacing: 8) {
-                ForEach(request.options) { option in
-                    let primary = option.id == prominent
-                    Button { choose(option) } label: {
-                        HStack(spacing: 10) {
-                            if busy == option.id {
-                                ProgressView().controlSize(.small).tint(primary ? Palette.ground : Palette.muted)
-                            } else {
-                                Image(systemName: glyph(option.kind)).font(.system(size: 14, weight: .semibold))
+            // The answers keep their room before the detail does, and scroll
+            // too once even they don't fit, so the card never grows past
+            // the top of the screen.
+            Bounded(limit: .infinity) {
+                VStack(spacing: 8) {
+                    ForEach(request.options) { option in
+                        let primary = option.id == prominent
+                        Button { choose(option) } label: {
+                            HStack(spacing: 10) {
+                                if busy == option.id {
+                                    ProgressView().controlSize(.small).tint(primary ? Palette.ground : Palette.muted)
+                                } else {
+                                    Image(systemName: glyph(option.kind)).font(.system(size: 14, weight: .semibold))
+                                }
+                                Text(option.label)
+                                    .font(.system(size: 16, weight: primary ? .semibold : .medium))
+                                    .multilineTextAlignment(.leading)
+                                    .lineLimit(3)
                             }
-                            Text(option.label)
-                                .font(.system(size: 16, weight: primary ? .semibold : .medium))
-                                .multilineTextAlignment(.leading)
-                                .lineLimit(3)
+                            .foregroundStyle(primary ? Palette.ground : Palette.white)
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 8)
+                            .frame(maxWidth: .infinity, minHeight: 48)
+                            .background(Capsule().fill(primary ? AnyShapeStyle(Palette.platinum) : AnyShapeStyle(Palette.fill)))
+                            .contentShape(Capsule())
                         }
-                        .foregroundStyle(primary ? Palette.ground : Palette.white)
-                        .padding(.horizontal, 18)
-                        .padding(.vertical, 8)
-                        .frame(maxWidth: .infinity, minHeight: 48)
-                        .background(Capsule().fill(primary ? AnyShapeStyle(Palette.platinum) : AnyShapeStyle(Palette.fill)))
-                        .contentShape(Capsule())
+                        .buttonStyle(RowPress())
+                        .disabled(busy != nil)
                     }
-                    .buttonStyle(RowPress())
-                    .disabled(busy != nil)
                 }
+                .padding(.horizontal, 12)
+                .padding(.top, 4)
             }
-            .padding(.horizontal, 12)
-            .padding(.top, 4)
+            .layoutPriority(1)
         }
         .padding(.bottom, 12)
         .sensoryFeedback(.impact(weight: .medium), trigger: answered)
