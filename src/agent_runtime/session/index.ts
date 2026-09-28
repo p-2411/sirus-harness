@@ -380,10 +380,7 @@ export class Session {
   // Resolve the input's destination at submission time. Explicit mentions
   // retain their routing (including creating agents); plain text uses the tab.
   messageForParticipant(message: Draft, participantName: string): Draft {
-    let text = textOf(message);
-    for (const file of parseFileMentions(text, this.directory).reverse()) {
-      text = text.slice(0, file.start) + ' '.repeat(file.end - file.start) + text.slice(file.end);
-    }
+    const text = this.withoutFileMentions(textOf(message));
     return message.to?.length || this.roster.readMentions(text).length
       ? message
       : { ...message, to: [this.roster.require(participantName).name] };
@@ -404,10 +401,7 @@ export class Session {
       const messageText = textOf(message);
       // File mentions share the @ sigil with participants. Blank them out,
       // keeping every offset, so routing sees participant mentions only.
-      let routingText = messageText;
-      for (const file of parseFileMentions(messageText, this.directory).reverse()) {
-        routingText = routingText.slice(0, file.start) + ' '.repeat(file.end - file.start) + routingText.slice(file.end);
-      }
+      const routingText = this.withoutFileMentions(messageText);
       const mentions = message.to?.length ? [] : this.roster.readMentions(routingText);
       // Resolve every attachment before creating participants or adding history.
       // Keep this synchronous so the input can observe acceptance immediately.
@@ -890,6 +884,13 @@ export class Session {
     this.changes.notify();
   }
 
+  private withoutFileMentions(text: string): string {
+    for (const file of parseFileMentions(text, this.directory).reverse()) {
+      text = text.slice(0, file.start) + ' '.repeat(file.end - file.start) + text.slice(file.end);
+    }
+    return text;
+  }
+
   queueMessage(message: string, images?: readonly ImageBlock[], content?: readonly MessageBlock[], to?: readonly string[]): void {
     this.queue.push(message, images, content, to);
     this.changes.notify();
@@ -915,11 +916,7 @@ export class Session {
         if (atSafePoint) {
           if (atSafePoint.activeReply?.content.some(block => block.type === 'tool_call'
             && (block.status === 'pending' || block.status === 'in_progress'))) break;
-          let text = next.text;
-          for (const file of parseFileMentions(text, this.directory).reverse()) {
-            text = text.slice(0, file.start) + ' '.repeat(file.end - file.start) + text.slice(file.end);
-          }
-          const mentions = this.roster.readMentions(text);
+          const mentions = this.roster.readMentions(this.withoutFileMentions(next.text));
           const names = next.to ?? (mentions.length ? mentions.map(mention => mention.name) : [this.roster.default.name]);
           const busy = names.map(name => this.roster.find(name)).filter(agent => agent?.busy);
           // A tool boundary for one participant must not interrupt another.
