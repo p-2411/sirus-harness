@@ -18,6 +18,9 @@ import Observation
     private(set) var header: Header?
     private(set) var rows: [Row] = []
     private(set) var requests: [Request] = []
+    // Whether the subscribed conversation's first view has arrived, so an
+    // empty list is known to be empty rather than still on its way.
+    private(set) var loaded = false
 
     @ObservationIgnored var onSessions: (@MainActor (RemoteClient) -> Void)?
     @ObservationIgnored var onLive: (@MainActor (RemoteClient) -> Void)?
@@ -56,8 +59,15 @@ import Observation
         if subscription?.sessionId != sessionId || subscription?.participant != participant {
             subscription = (sessionId, participant)
             rows = []
+            loaded = false
         }
         _ = try await request(.subscribe(sessionId, participant))
+    }
+
+    // Whether this conversation's own rows are here: subscribed to, and its
+    // first view arrived. Until then the rows are another's, or none yet.
+    func shows(_ sessionId: String, _ participant: String) -> Bool {
+        loaded && subscription?.sessionId == sessionId && subscription?.participant == participant
     }
 
     func send(_ text: String, sessionId: String, participant: String) async throws -> ResultFrame {
@@ -157,6 +167,7 @@ import Observation
         if requests != frame.requests { requests = frame.requests }
         if frame.reset {
             if rows != frame.rows { rows = frame.rows }
+            if !loaded { loaded = true }
             return
         }
         guard !frame.rows.isEmpty || !frame.removed.isEmpty else { return }
@@ -179,7 +190,7 @@ import Observation
         var frame = frame
         frame.id = String(sequence)
         let id = frame.id
-        let text = String(decoding: try JSONEncoder().encode(frame), as: UTF8.self)
+        let text = try frame.encoded()
         return try await withCheckedThrowingContinuation { continuation in
             pending[id] = continuation
             socket.send(.string(text)) { error in

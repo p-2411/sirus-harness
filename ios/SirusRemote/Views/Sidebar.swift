@@ -16,11 +16,27 @@ struct Sidebar: View {
     // How far in the header sits from each edge: clear of the rail, and
     // centred on the screen.
     static let gutter = inset + railWidth + 12
+    // What the header's agent tabs keep clear of on each side: just the rail.
+    static let clearance = inset + railWidth + 2
+    // From the sidebar's top to where the rail's marks begin: the toggle,
+    // then the rule under it.
+    private static let marksTop: CGFloat = 2 + 48 + 5
 
     let store: RemoteStore
     let selected: String?
     @Binding var expanded: Bool
+    // Where on screen the rail must end: above the conversation's bottom
+    // bar, so a request card there is never under it.
+    var railEnd: CGFloat = .infinity
+    // The sidebar's own top on screen, which the rail's height can't move.
+    @State private var top: CGFloat = 0
+    // The marks the rail shows. They follow `fittingMarks` once the bar has
+    // come to rest, in one animated step: the bar springs in many small
+    // steps, and the pane's glass, resized at each of them, was drawn apart
+    // from its content, or not at all.
+    @State private var marks = 0
     @State private var seen: [String: Int] = [:]
+    @State private var confirmingForget = false
     @GestureState private var drag: CGFloat = 0
 
     var body: some View {
@@ -47,8 +63,24 @@ struct Sidebar: View {
                 .padding(.top, 2)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { top = $0 }
+        .task(id: fittingMarks) {
+            do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+            withAnimation(.smooth(duration: 0.25)) { marks = fittingMarks }
+        }
         .sensoryFeedback(.selection, trigger: selected)
         .sensoryFeedback(.impact(weight: .light), trigger: expanded)
+        // Forgetting the Mac leaves only setup, and connecting again needs
+        // its name or QR code, so it asks first.
+        .confirmationDialog("Change Mac?", isPresented: $confirmingForget, titleVisibility: .visible) {
+            Button("Forget \(store.host)", role: .destructive) {
+                setExpanded(false)
+                store.forget()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("To connect again, scan the code `/rc` shows on your Mac or enter its name.")
+        }
         .onChange(of: store.sessions, initial: true) { _, sessions in
             // As in the TUI's sidebar: a session is unread once an agent
             // wrote something while another session was open.
@@ -70,9 +102,8 @@ struct Sidebar: View {
                     Spacer(minLength: 0)
                     Menu {
                         Button("Look Again", systemImage: "arrow.clockwise") { Task { await store.rescan() } }
-                        Button("Change Mac", systemImage: "desktopcomputer") {
-                            setExpanded(false)
-                            store.forget()
+                        Button("Change Mac…", systemImage: "desktopcomputer", role: .destructive) {
+                            confirmingForget = true
                         }
                     } label: {
                         Image(systemName: "ellipsis")
@@ -88,7 +119,7 @@ struct Sidebar: View {
             .padding([.top, .horizontal], expanded ? Self.cornerInset : 0)
             if expanded {
                 panel.transition(.opacity)
-            } else if !store.sessions.isEmpty {
+            } else if marks > 0 {
                 rail.transition(.opacity)
             }
         }
@@ -110,6 +141,18 @@ struct Sidebar: View {
                 if expanded, value.translation.width < -60 { setExpanded(false) }
                 if !expanded, value.translation.width > 30 { setExpanded(true) }
             })
+    }
+
+    // How many marks fit: one per session, seven at most, and only whole
+    // ones above the conversation's bottom bar. The rail steps down a mark
+    // at a time as the bar comes up, and goes when none fit, leaving the
+    // toggle: squeezed to a sliver, it took the pane's glass and the toggle
+    // with it.
+    private var fittingMarks: Int {
+        let fit = min(store.sessions.count, 7)
+        let room = (railEnd - top - Self.marksTop - 12) / 44
+        guard room.isFinite else { return fit }
+        return min(fit, Int(max(0, min(room, 7))))
     }
 
     // One mark per session, the open one picked out.
@@ -138,7 +181,8 @@ struct Sidebar: View {
             }
             .scrollIndicators(.hidden)
             .scrollBounceBehavior(.basedOnSize)
-            .frame(height: min(CGFloat(store.sessions.count), 7) * 44)
+            // The rest scroll.
+            .frame(height: CGFloat(marks) * 44)
         }
         .frame(width: Self.railWidth)
         .padding(.bottom, 4)
@@ -157,6 +201,8 @@ struct Sidebar: View {
                 LazyVStack(spacing: 2) {
                     ForEach(store.sessions) { session in
                         Button { select(session.id) } label: { row(session) }
+                            .accessibilityValue(mark(session).description)
+                            .accessibilityAddTraits(session.id == selected ? .isSelected : [])
                             .buttonStyle(RowPress())
                     }
                 }
@@ -166,11 +212,20 @@ struct Sidebar: View {
             .refreshable { await store.rescan() }
             .overlay {
                 if store.sessions.isEmpty {
-                    Text(store.link == .live ? "Nothing is remote controlled yet." : "No sessions to show.")
-                        .font(.system(size: 15))
-                        .foregroundStyle(Palette.muted)
-                        .multilineTextAlignment(.center)
-                        .padding(24)
+                    // Connecting is not empty: the list is on its way.
+                    if store.link == .connecting {
+                        ProgressView()
+                            .tint(Palette.silver)
+                            .accessibilityLabel("Connecting")
+                    } else {
+                        Text(store.link == .live
+                             ? "Nothing is remote controlled yet. Run `/rc` in a Sirus session on your Mac."
+                             : "Can't reach \(store.host).")
+                            .font(.system(size: 15))
+                            .foregroundStyle(Palette.muted)
+                            .multilineTextAlignment(.center)
+                            .padding(24)
+                    }
                 }
             }
             Hairline().padding(.horizontal, 18)
@@ -219,7 +274,7 @@ struct Sidebar: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 11)
         .background {
-            if current { RoundedRectangle(cornerRadius: 20, style: .continuous).fill(.white.opacity(0.08)) }
+            if current { RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Palette.fill) }
         }
         .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
@@ -246,7 +301,7 @@ struct Sidebar: View {
     }
 
     private func setExpanded(_ value: Bool) {
-        if value { UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) }
+        if value { dismissKeyboard() }
         withAnimation(.spring(duration: 0.45, bounce: 0.16)) { expanded = value }
     }
 }
@@ -308,7 +363,7 @@ private struct LinkLine: View {
             Image(systemName: store.link == .offline ? "wifi.slash" : "desktopcomputer")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(color)
-                .symbolEffect(.pulse, isActive: store.link == .connecting)
+                .symbolEffect(.pulse, isActive: store.link == .connecting || store.scanning)
             Text(store.host)
                 .foregroundStyle(Palette.muted)
                 .lineLimit(1)
@@ -327,11 +382,14 @@ private struct LinkLine: View {
         }
     }
 
+    // A look under way comes first, so Look Again and pull to refresh show
+    // they are doing something even while connected.
     private var caption: String {
+        if store.scanning { return "looking…" }
         switch store.link {
-        case .live: store.clients.count > 1 ? "\(store.clients.filter { $0.link == .live }.count) processes" : "connected"
-        case .connecting: "connecting"
-        case .offline: "offline"
+        case .live: return store.clients.count > 1 ? "\(store.clients.filter { $0.link == .live }.count) processes" : "connected"
+        case .connecting: return "connecting"
+        case .offline: return "offline"
         }
     }
 }

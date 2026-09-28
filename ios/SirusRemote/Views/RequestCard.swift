@@ -16,11 +16,13 @@ struct RequestCard: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(tone)
                 Text(request.requester).fontWeight(.semibold).foregroundStyle(Palette.platinum)
-                Text(verb).foregroundStyle(Palette.muted)
-                Spacer()
-                if waiting > 0 { Text("\(waiting) more").foregroundStyle(Palette.subtle) }
+                    .truncationMode(.middle)
+                Text(verb).foregroundStyle(Palette.muted).fixedSize()
+                Spacer(minLength: 4)
+                if waiting > 0 { Text("\(waiting) more").foregroundStyle(Palette.subtle).fixedSize() }
             }
             .font(.mono(12))
+            .lineLimit(1)
             .padding(.horizontal, 20)
             .padding(.top, 18)
             switch request.kind {
@@ -29,7 +31,10 @@ struct RequestCard: View {
             case .other:
                 VStack(alignment: .leading, spacing: 8) {
                     if let title = request.title ?? request.message {
-                        Text(title).font(.system(size: 17, weight: .medium)).foregroundStyle(Palette.white)
+                        Bounded(limit: 220) {
+                            Text(title).font(.system(size: 17, weight: .medium)).foregroundStyle(Palette.white)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                     }
                     Text("Answer this in Sirus on your Mac.").font(.system(size: 14)).foregroundStyle(Palette.muted)
                 }
@@ -57,9 +62,13 @@ struct RequestCard: View {
 }
 
 // Content that may be long sits in its own scroll, so the card never pushes
-// the transcript off the screen.
+// the transcript off the screen: as tall as the content up to the limit,
+// and shorter still when the keyboard leaves less room. Dragging it puts
+// the keyboard away, as a number pad has no key for that.
 private struct Bounded<Content: View>: View {
     let limit: CGFloat
+    // What it keeps however short of room the card is.
+    var minimum: CGFloat = 0
     @ViewBuilder let content: Content
     @State private var height: CGFloat = 0
 
@@ -68,7 +77,8 @@ private struct Bounded<Content: View>: View {
             content.onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
         }
         .scrollBounceBehavior(.basedOnSize)
-        .frame(height: min(max(height, 1), limit))
+        .scrollDismissesKeyboard(.interactively)
+        .frame(minHeight: min(height, minimum), maxHeight: min(max(height, 1), limit))
     }
 }
 
@@ -82,7 +92,9 @@ private struct ApprovalBody: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Bounded(limit: 220) {
+            // What is being approved stays in view: at least its first lines,
+            // with the answers scrolling first when there are many.
+            Bounded(limit: 220, minimum: 96) {
                 VStack(alignment: .leading, spacing: 12) {
                     Text(request.title ?? "Use a tool")
                         .font(.system(size: 18, weight: .medium))
@@ -97,7 +109,7 @@ private struct ApprovalBody: View {
                 .padding(.vertical, 12)
             }
             if let failure {
-                Text(failure).font(.system(size: 13)).foregroundStyle(Palette.red)
+                Text(failure).font(.system(size: 13)).foregroundStyle(Palette.red).lineLimit(3)
                     .padding(.horizontal, 20).padding(.bottom, 8)
             }
             // Allowing once is the prominent answer, else the first that
@@ -106,33 +118,40 @@ private struct ApprovalBody: View {
             // the easy tap.
             let prominent = (request.options.first(where: { $0.kind == "allow_once" })
                 ?? request.options.first(where: { !$0.rejects }))?.id
-            VStack(spacing: 8) {
-                ForEach(request.options) { option in
-                    let primary = option.id == prominent
-                    Button { choose(option) } label: {
-                        HStack(spacing: 10) {
-                            if busy == option.id {
-                                ProgressView().controlSize(.small).tint(primary ? Palette.ground : Palette.muted)
-                            } else {
-                                Image(systemName: glyph(option.kind)).font(.system(size: 14, weight: .semibold))
+            // The answers keep their room before the detail does, and scroll
+            // too once even they don't fit, so the card never grows past
+            // the top of the screen.
+            Bounded(limit: .infinity) {
+                VStack(spacing: 8) {
+                    ForEach(request.options) { option in
+                        let primary = option.id == prominent
+                        Button { choose(option) } label: {
+                            HStack(spacing: 10) {
+                                if busy == option.id {
+                                    ProgressView().controlSize(.small).tint(primary ? Palette.ground : Palette.muted)
+                                } else {
+                                    Image(systemName: glyph(option.kind)).font(.system(size: 14, weight: .semibold))
+                                }
+                                Text(option.label)
+                                    .font(.system(size: 16, weight: primary ? .semibold : .medium))
+                                    .multilineTextAlignment(.leading)
+                                    .lineLimit(3)
                             }
-                            Text(option.label)
-                                .font(.system(size: 16, weight: primary ? .semibold : .medium))
-                                .multilineTextAlignment(.leading)
+                            .foregroundStyle(primary ? Palette.ground : Palette.white)
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 8)
+                            .frame(maxWidth: .infinity, minHeight: 48)
+                            .background(Capsule().fill(primary ? AnyShapeStyle(Palette.platinum) : AnyShapeStyle(Palette.fill)))
+                            .contentShape(Capsule())
                         }
-                        .foregroundStyle(primary ? Palette.ground : Palette.white)
-                        .padding(.horizontal, 18)
-                        .padding(.vertical, 8)
-                        .frame(maxWidth: .infinity, minHeight: 48)
-                        .background(Capsule().fill(primary ? AnyShapeStyle(Palette.platinum) : AnyShapeStyle(.white.opacity(0.08))))
-                        .contentShape(Capsule())
+                        .buttonStyle(RowPress())
+                        .disabled(busy != nil)
                     }
-                    .buttonStyle(RowPress())
-                    .disabled(busy != nil)
                 }
+                .padding(.horizontal, 12)
+                .padding(.top, 4)
             }
-            .padding(.horizontal, 12)
-            .padding(.top, 4)
+            .layoutPriority(1)
         }
         .padding(.bottom, 12)
         .sensoryFeedback(.impact(weight: .medium), trigger: answered)
@@ -191,7 +210,7 @@ private struct QuestionBody: View {
                 .padding(.vertical, 12)
             }
             if let failure {
-                Text(failure).font(.system(size: 13)).foregroundStyle(Palette.red)
+                Text(failure).font(.system(size: 13)).foregroundStyle(Palette.red).lineLimit(3)
                     .padding(.horizontal, 20).padding(.bottom, 8)
             }
             HStack(spacing: 8) {
@@ -200,7 +219,7 @@ private struct QuestionBody: View {
                         .foregroundStyle(Palette.muted)
                         .padding(.horizontal, 20)
                         .frame(minHeight: 44)
-                        .background(Capsule().fill(.white.opacity(0.08)))
+                        .background(Capsule().fill(Palette.fill))
                         .contentShape(Capsule())
                 }
                 Spacer()
@@ -306,11 +325,10 @@ private struct QuestionBody: View {
     }
 
     private func numberPrompt(_ field: QuestionField) -> String {
-        let format = { (value: Double) in value.rounded() == value ? String(Int(value)) : String(value) }
         switch (field.minimum, field.maximum) {
-        case let (low?, high?): return "\(format(low))–\(format(high))"
-        case let (low?, nil): return "At least \(format(low))"
-        case let (nil, high?): return "At most \(format(high))"
+        case let (low?, high?): return "\(numberText(low))–\(numberText(high))"
+        case let (low?, nil): return "At least \(numberText(low))"
+        case let (nil, high?): return "At most \(numberText(high))"
         default: return field.integer ? "A whole number" : "A number"
         }
     }
@@ -350,12 +368,14 @@ private struct QuestionBody: View {
                 if otherOn.contains(field.key) && custom.isEmpty { return fail("Enter your own answer for \(title).") }
                 if field.multiple {
                     let values = picked[field.key, default: []]
-                    let minimum = max(field.required ? 1 : 0, Int(field.minimum ?? 0))
-                    if custom.isEmpty && (field.required || !values.isEmpty) && values.count < minimum {
-                        return fail("Choose at least \(minimum) for \(title).")
+                    // Counted in Double: the bounds come from the agent, and
+                    // one past Int's range would trap in a conversion.
+                    let minimum = max(field.required ? 1 : 0, (field.minimum ?? 0).rounded(.towardZero))
+                    if custom.isEmpty && (field.required || !values.isEmpty) && Double(values.count) < minimum {
+                        return fail("Choose at least \(numberText(minimum)) for \(title).")
                     }
-                    if let maximum = field.maximum, values.count > Int(maximum) {
-                        return fail("Choose at most \(Int(maximum)) for \(title).")
+                    if let maximum = field.maximum?.rounded(.towardZero), Double(values.count) > maximum {
+                        return fail("Choose at most \(numberText(maximum)) for \(title).")
                     }
                     if !values.isEmpty || field.required || !custom.isEmpty { content[field.key] = .strings(values) }
                 } else if let value = chosen[field.key] {
@@ -394,8 +414,9 @@ private struct QuestionBody: View {
         send(.accept(content))
     }
 
+    // A whole number without its ".0", when it fits in an Int.
     private func numberText(_ value: Double) -> String {
-        value.rounded() == value ? String(Int(value)) : String(value)
+        value.rounded() == value && abs(value) < 1e15 ? String(Int(value)) : String(value)
     }
 
     private func fail(_ message: String) { failure = message }
@@ -410,7 +431,7 @@ private struct QuestionBody: View {
         }
     }
 
-    // questions.ts questionText: Claude puts a lone question in the message
+    // QuestionCard.tsx questionText: Claude puts a lone question in the message
     // and a short header in the title; Codex the question in the title and a
     // header in the description.
     private func questionText(_ field: QuestionField) -> (question: String, label: String?) {

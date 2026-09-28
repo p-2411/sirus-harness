@@ -10,10 +10,10 @@
 
 [] /rc without Tailscale installed should offer the fix right there (`brew install --cask tailscale`, or a link that opens tailscale.com/download) instead of only saying it's missing.
 
-[] the iOS app's setup screen should explain a failed connection (Tailscale not running on the phone or the Mac) and link straight to Tailscale in the App Store.
+[x] the iOS app's setup screen should explain a failed connection (Tailscale not running on the phone or the Mac) and link straight to Tailscale in the App Store.
 
 [] each session should be owned by a sirus instance so i can't modify a session in two diff sirus isntances (e.g. terminal windows)
 
 
 ## ios
-[] should be able to change permission mode, thinking mode, model by clicking on the info underneath the message bar
+[x] should be able to change permission mode, thinking mode, model by clicking on the info underneath the message bar

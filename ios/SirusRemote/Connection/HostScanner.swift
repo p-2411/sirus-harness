@@ -21,8 +21,16 @@ enum HostScanner {
             switch self {
             case .invalid: "Enter your Mac's Tailscale name, like mac.tailnet.ts.net."
             case .refused(let host): "\(host) turned this phone away. Sign in to Tailscale on the phone as the same user as the Mac."
-            case .none(let host): "No Sirus is listening on \(host). Run /rc in a Sirus session on your Mac, and check Tailscale is on here."
+            case .none(let host): "No Sirus is listening on \(host). Run /\u{2060}rc in a Sirus session on your Mac, and check Tailscale is on here."
             }
+        }
+
+        // A name that was not reached, or that turned the phone away, is
+        // almost always Tailscale: off on one side, or signed in as someone
+        // else. A name that did not parse is only a typo.
+        var concernsTailscale: Bool {
+            if case .invalid = self { return false }
+            return true
         }
     }
 

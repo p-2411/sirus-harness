@@ -1,7 +1,8 @@
 import SwiftUI
 
-// The server sends nearest matches last; the bottom row stays beside the
-// composer, including when there are more results than fit on screen.
+// The `/` and `@` menu, floating just above the composer. The server sends
+// nearest matches last; the bottom row stays beside the composer, including
+// when there are more results than fit on screen.
 struct CompletionMenu: View {
     let items: [CompletionItem]
     let choose: (CompletionItem) -> Void
@@ -26,25 +27,28 @@ struct CompletionMenu: View {
                                     .foregroundStyle(Palette.muted)
                                     .lineLimit(1)
                             }
-                            .padding(.horizontal, 16)
+                            .padding(.horizontal, 18)
                             .frame(minHeight: 44)
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(RowPress())
                         .id(item.id)
                         if item.id != items.last?.id {
-                            Hairline().padding(.horizontal, 16)
+                            Hairline().padding(.horizontal, 18)
                         }
                     }
                 }
+                .padding(.vertical, 4)
             }
             .scrollBounceBehavior(.basedOnSize)
-            .frame(height: CGFloat(min(items.count, 5) * 45))
+            .scrollIndicators(.hidden)
+            // Five rows at most, fewer when the keyboard leaves less room.
+            .frame(maxHeight: CGFloat(min(items.count, 5)) * 45 + 8)
             .onAppear { if let last = items.last { proxy.scrollTo(last.id, anchor: .bottom) } }
             .onChange(of: items.last?.id) { _, last in
                 if let last { proxy.scrollTo(last, anchor: .bottom) }
             }
         }
-        .glassEffect(.regular, in: .rect(cornerRadius: 20, style: .continuous))
+        .glassEffect(.regular, in: .rect(cornerRadius: 24, style: .continuous))
     }
 }

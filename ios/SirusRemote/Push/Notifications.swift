@@ -7,7 +7,7 @@ import UserNotifications
 // the payload for that kind, and waits for the result.
 enum Push {
     static func categories() -> Set<UNNotificationCategory> {
-        // Allowing runs something on the Mac, so it asks for Face ID first;
+        // Allowing runs something on the Mac, so it needs the phone unlocked;
         // denying never needs to.
         let allow = UNNotificationAction(identifier: "allow_once", title: "Allow", options: [.authenticationRequired])
         let always = UNNotificationAction(identifier: "allow_always", title: "Always Allow", options: [.authenticationRequired])
@@ -70,7 +70,7 @@ enum Push {
         var frame = ClientFrame.approve(requestId, optionId)
         frame.id = "push-\(UUID().uuidString)"
         do {
-            try await socket.send(.string(String(decoding: try JSONEncoder().encode(frame), as: UTF8.self)))
+            try await socket.send(.string(try frame.encoded()))
             while true {
                 guard case .string(let text) = try await socket.receive(),
                       case .result(let result) = ServerFrame.decode(Data(text.utf8)), result.id == frame.id else { continue }
@@ -78,7 +78,7 @@ enum Push {
                 return result.ok ? nil : result.error ?? "Sirus could not take that answer."
             }
         } catch {
-            return "Couldn't reach Sirus on \(host). Open the app to answer."
+            return "Couldn't reach Sirus on \(host) (\(error.localizedDescription)). Open the app to answer."
         }
     }
 

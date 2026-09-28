@@ -1,0 +1,47 @@
+name: Build iOS app
+
+# Compiles Sirus Remote for the simulator, so a change to the app is
+# checked by a real compiler even when it was written somewhere without
+# Xcode. Standard macOS runners are free for public repositories.
+on:
+  push:
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios.yml"
+  pull_request:
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      # The app targets iOS 26, so it needs Xcode 26 or later: take the
+      # newest the image has.
+      - name: Select Xcode
+        run: |
+          ls -d /Applications/Xcode*.app
+          xcode=$(ls -d /Applications/Xcode_2[6-9]*.app | sort -V | tail -n 1)
+          sudo xcode-select --switch "$xcode"
+          xcodebuild -version
+      - name: Build for the simulator
+        working-directory: ios
+        run: |
+          xcodebuild build \
+            -project SirusRemote.xcodeproj \
+            -scheme SirusRemote \
+            -configuration Debug \
+            -destination "generic/platform=iOS Simulator" \
+            CODE_SIGNING_ALLOWED=NO

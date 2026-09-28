@@ -1,0 +1,56 @@
+name: iOS screenshots
+
+# Shoots the phone app in each state against a stand-in Sirus, on the
+# smallest and the largest iPhone it supports, and keeps the screenshots
+# as an artifact. It runs when the scenes change, and by hand after a
+# change to how the app looks. Standard macOS runners are free for public
+# repositories.
+on:
+  push:
+    paths:
+      - "ios/Screenshots/**"
+      - ".github/workflows/ios-screens.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-screens-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shoot:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+      # The app targets iOS 26, so it needs Xcode 26 or later: take the
+      # newest the image has.
+      - name: Select Xcode
+        run: |
+          xcode=$(ls -d /Applications/Xcode_2[6-9]*.app | sort -V | tail -n 1)
+          sudo xcode-select --switch "$xcode"
+          xcodebuild -version
+      - name: Build for the simulator
+        working-directory: ios
+        run: |
+          xcodebuild build \
+            -project SirusRemote.xcodeproj \
+            -scheme SirusRemote \
+            -configuration Debug \
+            -destination "generic/platform=iOS Simulator" \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO
+      - name: Shoot every scene
+        run: bash ios/Screenshots/shoot.sh ios/build/Build/Products/Debug-iphonesimulator/SirusRemote.app screenshots
+      - name: Keep the screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-screenshots
+          path: screenshots
+          retention-days: 14

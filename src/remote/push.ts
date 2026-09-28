@@ -89,11 +89,15 @@ function participantOf(session: Session, event: RemoteEvent): string {
 
 // An approval's category picks the lock-screen buttons, by the kinds of
 // option it offers; `sirus.options` maps each kind to the option to answer
-// with, so the app answers by kind.
-function approvalFields(request: ApprovalRequest) {
-  const options = Object.fromEntries(request.options
-    .filter(option => option.kind === 'allow_once' || option.kind === 'allow_always' || option.kind === 'reject_once')
-    .map(option => [option.kind, option.optionId]));
+// with, so the app answers by kind. That is the first option of the kind,
+// as `chosenOption` picks it in the terminal: a vendor can list a broader
+// grant under the same kind later, and a fixed button must not reach it.
+export function approvalFields(request: Pick<ApprovalRequest, 'options'>) {
+  const options: Record<string, string> = {};
+  for (const option of request.options) {
+    if (option.kind !== 'allow_once' && option.kind !== 'allow_always' && option.kind !== 'reject_once') continue;
+    options[option.kind] ??= option.optionId;
+  }
   return { category: 'allow_always' in options ? 'APPROVAL_ALWAYS' : 'APPROVAL', options };
 }
 
