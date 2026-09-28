@@ -428,7 +428,7 @@ export class Session {
       const creationModels = mentions.flatMap(mention => mention.modelSpan ? [mention.modelSpan] : []);
       const stored = creationModels.length > 0 ? { ...resolved, creationModels } : resolved;
       const queued = withoutCreationModels({ ...message, creationModels });
-      const introduced = mentions.filter(mention => mention.model);
+      const introduced = mentions.filter(mention => mention.introduces);
       if (this.timeline.isEmpty() && this.autoNamePending) {
         // Name from the user's text, not the contents of resolved attachments.
         this.startNaming(textOf(queued));
@@ -1240,6 +1240,11 @@ export class Session {
   // The session's workers, oldest first, restored records included.
   getWorkers(): SubagentRun[] {
     return this.roster.workers();
+  }
+
+  // Whether a worker is still running, for the whole session or one owner.
+  hasWorkingWorkers(owner?: string): boolean {
+    return this.roster.workers().some(run => run.status === 'working' && (owner === undefined || run.owner === owner));
   }
 
   // Stops one working worker and waits for it to wind down.

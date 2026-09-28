@@ -10,6 +10,7 @@ import { terminalText } from './terminal/text';
 import { Spinner } from './chat/Spinner';
 import { getPermissionsVersion, pendingApprovals, subscribePermissions } from '../agent_runtime/permissions/approvals';
 import { getQuestionsVersion, pendingQuestions, subscribeQuestions } from '../agent_runtime/permissions/questions';
+import { getSubagentsVersion, subscribeSubagents } from '../agent_runtime/tools/subagents';
 import { isFocusInput } from './terminal/window-focus';
 import { isMouseInput, parseMouseWheel } from './interaction/mouse';
 import { rowToLine } from './terminal/screen';
@@ -163,6 +164,7 @@ export function SessionItem({ session, isSelected, onSelect, onDelete, onRename,
 
   useSyncExternalStore(subscribePermissions, getPermissionsVersion);
   useSyncExternalStore(subscribeQuestions, getQuestionsVersion);
+  useSyncExternalStore(subscribeSubagents, getSubagentsVersion);
   const needsYou = pendingApprovals(session.getId()).length > 0 || pendingQuestions(session.getId()).length > 0;
   const status = sessionStatusAppearance(session.getStatus(), hasUnread && !isSelected, needsYou);
   const activity = formatRelativeTime(session.getLastActivity(), now);
@@ -175,7 +177,7 @@ export function SessionItem({ session, isSelected, onSelect, onDelete, onRename,
       <Box justifyContent="space-between">
         <Box flexShrink={1}>
           <Box width={1} flexShrink={0}>
-            {session.getStatus() === 'working' && !needsYou ? <Spinner /> : <Text color={status.color}>{status.symbol}</Text>}
+            {(session.getStatus() === 'working' || session.hasWorkingWorkers()) && !needsYou ? <Spinner /> : <Text color={status.color}>{status.symbol}</Text>}
           </Box>
           {!collapsed && (confirmingDelete ? <Text color={theme.danger}> Delete session?</Text> : rename ? <Text wrap="truncate-start"> <Text inverse={rename.selected}>
             {terminalText(rename.text.slice(0, rename.cursor))}{!rename.selected && <Text inverse>{terminalText(rename.text[rename.cursor] ?? ' ')}</Text>}{terminalText(rename.text.slice(rename.cursor + (rename.selected ? 0 : 1)))}

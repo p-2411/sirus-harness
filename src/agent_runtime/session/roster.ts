@@ -7,12 +7,15 @@ import type { SubagentRun } from '../tools/subagents';
 import type { ChangeFeed } from './changeFeed';
 import type { Transcript } from './transcript';
 
-// A participant named in a prompt, and where the name is. New participants
-// carry the model that introduces them, any thinking level after it, and the
-// span of prompt text that named them.
+// A participant named in a prompt, and where the name is. A model written
+// after the name, any thinking level after it, and the span of that text
+// configure the participant: they create a new one, or switch an existing one
+// when the user wrote them.
 export interface Mention {
   name: string;
   span: { start: number; end: number };
+  // The mention adds the participant to the session.
+  introduces: boolean;
   model?: string;
   thinkingLevel?: ThinkingLevel;
   modelSpan?: { start: number; end: number };
@@ -62,7 +65,7 @@ function* scanMentions(text: string): Generator<MentionMatch> {
   }
 }
 
-// The model written straight after a new name, as `/model` would take it
+// The model written straight after a name, as `/model` would take it
 // (`opus` for `opus[1m]`) and no looser, since this is prose, and a thinking
 // level the new participant starts at after it: `@reviewer opus high`.
 function configurationAfter({ range, localEnd }: MentionMatch): Pick<Mention, 'model' | 'thinkingLevel' | 'modelSpan'> | undefined {
@@ -169,9 +172,9 @@ export class ParticipantRoster {
   }
 
   // Reads known @names and explicit @name model introductions, in the order
-  // written, wherever they are in the prompt's prose. Other @words are
-  // ordinary prose and leave the participant list alone, as do the words
-  // after a known name.
+  // written, wherever they are in the prompt's prose, with any model and
+  // thinking level written after a known name. Other @words are ordinary
+  // prose and leave the participant list alone.
   readMentions(text: string): Mention[] {
     const mentions: Mention[] = [];
     const seen = new Set<string>();
@@ -179,45 +182,57 @@ export class ParticipantRoster {
       const key = keyOf(match.name);
       if (seen.has(key)) continue;
       const existing = this.find(match.name);
-      const introduction = existing ? undefined : configurationAfter(match);
-      if (!existing && !introduction) continue;
+      const configuration = configurationAfter(match);
+      if (!existing && !configuration) continue;
       seen.add(key);
       mentions.push({
         name: existing?.name ?? match.name,
         span: { start: match.start, end: match.range.start + match.localEnd },
-        ...introduction,
+        introduces: !existing,
+        ...configuration,
       });
     }
     return mentions;
   }
 
-  // Creates whatever participants the prompt introduced and returns the
-  // round's targets in mention order. An unmentioned turn goes to the default.
+  // Creates whatever participants the prompt introduced, switches the model
+  // and thinking level of existing ones it configured, and returns the round's
+  // targets in mention order. An unmentioned turn goes to the default.
   resolveMentions(mentions: readonly Mention[]): SessionAgent[] {
     if (mentions.length === 0) return [this.defaultAgent];
     // Validate the complete turn first, then mutate the participant list.
     // This avoids partially creating agents when a later mention is bad.
     for (const mention of mentions) {
-      if (!this.find(mention.name)) {
+      const existing = this.find(mention.name);
+      if (!existing) {
         requireParticipantName(mention.name);
         if (!mention.model) throw new Error(`Model not specified for new participant @${mention.name}`);
-        requireKnownModel(mention.model);
+      } else if (mention.model && existing.busy) {
+        throw new Error(`Wait for @${existing.name} to finish before switching its model.`);
       }
+      if (mention.model) requireKnownModel(mention.model);
     }
     for (const mention of mentions) {
-      if (!this.find(mention.name)) this.add(mention.name, mention.model!, mention.thinkingLevel);
+      const existing = this.find(mention.name);
+      if (!existing) this.add(mention.name, mention.model!, mention.thinkingLevel);
+      else if (mention.model) {
+        this.changeModel(existing.name, mention.model);
+        if (mention.thinkingLevel) this.setThinkingLevel(mention.thinkingLevel, existing.name);
+      }
     }
     return mentions.map(mention => this.find(mention.name)!);
   }
 
   // Agent replies use the same introduction syntax as user messages, but
-  // never invoke the speaker or fall back to the default agent.
+  // never invoke the speaker, fall back to the default agent, or switch an
+  // existing participant's model.
   routeAgentMessage(message: Message, speaker: SessionAgent): { recipients: SessionAgent[]; introduced: Mention[] } {
     const mentions = this.readMentions(textOf(message))
-      .filter(mention => keyOf(mention.name) !== keyOf(speaker.name));
+      .filter(mention => keyOf(mention.name) !== keyOf(speaker.name))
+      .map(mention => mention.introduces ? mention : { name: mention.name, span: mention.span, introduces: false });
     return {
       recipients: mentions.length > 0 ? this.resolveMentions(mentions) : [],
-      introduced: mentions.filter(mention => mention.model),
+      introduced: mentions.filter(mention => mention.introduces),
     };
   }
 
