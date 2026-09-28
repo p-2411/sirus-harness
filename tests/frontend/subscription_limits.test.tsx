@@ -13,10 +13,10 @@ import Sidebar from '../../src/frontend/Sidebar';
 
 test('renders compact subscription percentages, including zero and unavailable', () => {
   const text = stripAnsi(renderToString(<SubscriptionLimitRows rows={[
-    { id: 'gpt:one', label: 'Codex 7d', remaining: 0 },
-    { id: 'claude:one', label: 'Claude 5h', remaining: null },
+    { id: 'gpt:one', label: 'codex', remaining: 0 },
+    { id: 'claude:one', label: 'claude', remaining: null },
   ]} />, { columns: 23 }));
-  expect(text).toBe('Codex 7d: 0% left\nClaude 5h: unavailable');
+  expect(text).toBe('codex: 0%\nclaude: unavailable');
 });
 
 test('shows the active subscription and follows fallback, removal and API selection', async () => {
@@ -58,25 +58,25 @@ test('shows the active subscription and follows fallback, removal and API select
   };
   try {
     expect(firstFrame).toContain('sirus');
-    expect(firstFrame).toContain('Codex 7d: 35% left');
-    expect(firstFrame).toContain('Claude 5h: loading…');
+    expect(firstFrame).toContain('codex: 35%');
+    expect(firstFrame).toContain('claude: loading…');
     await flush();
-    expect(output).toContain('Codex 7d: 35% left');
-    expect(output).toContain('Claude 5h: loading…');
+    expect(output).toContain('codex: 35%');
+    expect(output).toContain('claude: loading…');
     expect(output).not.toContain('unavailable');
     releaseLimits();
     await flush();
-    expect(output).toContain('Codex 7d: 10% left');
+    expect(output).toContain('codex: 10%');
     expect(output).not.toContain('codex 2');
-    expect(output).toContain('Claude 5h: 80% left');
+    expect(output).toContain('claude: 80%');
     expect(reader.mock.calls.map(call => call[2]).sort()).toEqual(['claude-one', 'two']);
     limitsReady = new Promise<void>(resolve => { releaseLimits = resolve; });
     // A change to the list that leaves the active source alone: the rows keep
     // their values while the refresh it triggers is in flight.
     current.sources.promote('two');
     await flush();
-    expect(output).toContain('Codex 7d: 10% left');
-    expect(output).toContain('Claude 5h: 80% left');
+    expect(output).toContain('codex: 10%');
+    expect(output).toContain('claude: 80%');
     expect(output).not.toContain('loading');
     expect(output).not.toContain('unavailable');
     releaseLimits();
@@ -85,20 +85,20 @@ test('shows the active subscription and follows fallback, removal and API select
     // row follows the credential that runtime is actually on.
     current.markActive('sidebar-test', subscription('one'));
     await flush();
-    expect(output).toContain('Codex 7d: 75% left');
-    expect(output).not.toContain('Codex 7d: 10% left');
+    expect(output).toContain('codex: 75%');
+    expect(output).not.toContain('codex: 10%');
     current.sources.remove('one');
     await flush();
-    expect(output).toContain('Codex 7d: 10% left');
+    expect(output).toContain('codex: 10%');
     expect(output).not.toContain('codex 2');
     current.sources.addApiKey('sidebar-test-key');
     await flush();
-    expect(output).toContain('Codex 7d: 10% left');
-    expect(output).toContain('Claude 5h: 80% left');
+    expect(output).toContain('codex: 10%');
+    expect(output).toContain('claude: 80%');
     reader.mockResolvedValue({ windows: [], unavailable: 'could not read limits' });
     providerFor('claude').sources.promote('claude-one');
     await flush();
-    expect(output).toContain('Claude 5h: unavailable');
+    expect(output).toContain('claude: unavailable');
   } finally {
     releaseLimits();
     current.clearActive('sidebar-test');

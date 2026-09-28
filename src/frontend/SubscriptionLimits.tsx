@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
 import { onProviderChange, providerFor } from '../agent_runtime/providers';
 import { VENDOR_INFO, VENDORS } from '../agent_runtime/providers/catalog';
-import { cachedSubscriptionRemaining, formatRemaining, readSubscriptionUsage, remainingAllowance } from '../agent_runtime/providers/usage';
+import { cachedSubscriptionRemaining, readSubscriptionUsage, remainingAllowance } from '../agent_runtime/providers/usage';
 import { theme } from './styles/theme';
 
 export interface SubscriptionLimitRow {
@@ -12,10 +12,12 @@ export interface SubscriptionLimitRow {
   remaining: number | null | undefined;
 }
 
+// One line per signed-in subscription, "claude: 54%": how much of the
+// vendor's allowance is left. `/usage` has both windows in words.
 export function SubscriptionLimitRows({ rows }: { rows: readonly SubscriptionLimitRow[] }) {
   return <Box flexDirection="column" flexShrink={0}>
     {rows.map(row => <Text key={row.id} color={theme.textSubtle}>
-      {row.label}: {row.remaining === undefined ? 'loading…' : formatRemaining(row.remaining)}
+      {row.label}: {row.remaining === undefined ? 'loading…' : row.remaining === null ? 'unavailable' : `${row.remaining}%`}
     </Text>)}
   </Box>;
 }
@@ -30,11 +32,10 @@ function activeSubscriptions() {
       ? active
       : provider.sources.list().find(item => item.kind === 'subscription');
     if (!source || source.kind !== 'subscription') return [];
-    // The vendor and the window the figure is for: "Claude 5h", "Codex 7d".
     return [{
       vendor, source,
       id: `${vendor}:${source.id}`,
-      label: `${VENDOR_INFO[vendor].displayName} ${VENDOR_INFO[vendor].limitPeriod === '5-hour' ? '5h' : '7d'}`,
+      label: VENDOR_INFO[vendor].displayName.toLowerCase(),
     }];
   });
 }
