@@ -53,6 +53,9 @@ struct RootView: View {
                 .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
                     screensLog.notice("\("layout: root \(frame), rail aside \(railAside)", privacy: .public)")
                 }
+                .onChange(of: railAside, initial: true) { _, aside in
+                    screensLog.notice("layout: rail aside \(aside), menu open \(menuOpen), expanded \(sidebarExpanded)")
+                }
                 #endif
             }
         }

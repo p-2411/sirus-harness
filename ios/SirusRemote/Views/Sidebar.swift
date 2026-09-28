@@ -69,6 +69,7 @@ struct Sidebar: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { top = $0 }
         #if DEBUG
+        .overlay { if UserDefaults.standard.bool(forKey: "debugLayout") { Rectangle().stroke(.yellow, lineWidth: 3) } }
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
             screensLog.notice("\("layout: sidebar \(frame)", privacy: .public)")
         }
@@ -134,6 +135,9 @@ struct Sidebar: View {
         .frame(maxHeight: expanded ? .infinity : nil, alignment: .top)
         .clipShape(shape)
         .glassEffect(.regular, in: shape)
+        #if DEBUG
+        .overlay { if UserDefaults.standard.bool(forKey: "debugLayout") { Rectangle().stroke(.red, lineWidth: 3) } }
+        #endif
         .offset(x: drag)
         .simultaneousGesture(DragGesture(minimumDistance: 16)
             .updating($drag) { value, state, _ in

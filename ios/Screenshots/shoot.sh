@@ -168,6 +168,10 @@ run() {
   scene "$udid" "$label" stress stress 7
   scene "$udid" "$label" question-keyboard question 8 -composerFocused YES
   scene "$udid" "$label" note-long conversation 5 -sendOnLaunch /long-note
+  # The same scenes with the sidebar's frames outlined, to see what hides it.
+  scene "$udid" "$label" approval-outlined approval 6 -debugLayout YES
+  scene "$udid" "$label" question-outlined question 6 -debugLayout YES
+  scene "$udid" "$label" conversation-outlined conversation 6 -debugLayout YES
 
   # Offline: the Mac goes away while the conversation is on screen.
   if wanted offline; then
