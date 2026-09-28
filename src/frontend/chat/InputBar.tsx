@@ -178,6 +178,7 @@ export function InputBar({
   const editorPrefix = useRef(false);
   const { suspendTerminal } = useApp();
   const { stdout } = useStdout();
+  const shortcutPageSize = Math.max(1, Math.min(12, Math.floor(((stdout.rows || 24) - 12) / 3)));
   const inputBox = useRef<DOMElement>(null);
   const { width: boxWidth } = useBoxMetrics(inputBox);
   const participantColors = participantColorMap(participants);
@@ -433,10 +434,9 @@ export function InputBar({
       return;
     }
     if (shortcuts !== null) {
-      const pageSize = Math.max(1, Math.min(12, Math.floor(((stdout.rows || 24) - 12) / 3)));
       if (key.escape || enteredInput === '?' || (key.ctrl && enteredInput === 'c')) setShortcuts(null);
-      else if (key.downArrow || key.pageDown) setShortcuts(Math.min(KEY_BINDINGS.length - pageSize, shortcuts + (key.pageDown ? pageSize : 1)));
-      else if (key.upArrow || key.pageUp) setShortcuts(Math.max(0, shortcuts - (key.pageUp ? pageSize : 1)));
+      else if (key.downArrow || key.pageDown) setShortcuts(Math.min(KEY_BINDINGS.length - shortcutPageSize, shortcuts + (key.pageDown ? shortcutPageSize : 1)));
+      else if (key.upArrow || key.pageUp) setShortcuts(Math.max(0, shortcuts - (key.pageUp ? shortcutPageSize : 1)));
       return;
     }
     if (search) {
@@ -683,9 +683,9 @@ export function InputBar({
       <QueuedRow messages={queuedMessages.map(message => message.text)} participantColors={participantColors} />
       {shortcuts !== null && <Box marginX={1} paddingX={1} borderStyle="round" borderColor={theme.border} flexDirection="column">
         <Text color={theme.accent}>Keyboard shortcuts · ↑/↓ scroll · esc closes</Text>
-        {KEY_BINDINGS.slice(shortcuts, shortcuts + Math.max(1, Math.min(12, Math.floor(((stdout.rows || 24) - 12) / 3)))).map(([keys, action]) =>
+        {KEY_BINDINGS.slice(shortcuts, shortcuts + shortcutPageSize).map(([keys, action]) =>
           <Text key={keys} wrap="wrap"><Text color={theme.accentSoft}>{keys}</Text>{'  '}{action}</Text>)}
-        <Text color={theme.textSubtle}>{shortcuts + 1}–{Math.min(KEY_BINDINGS.length, shortcuts + Math.max(1, Math.min(12, Math.floor(((stdout.rows || 24) - 12) / 3))))} of {KEY_BINDINGS.length}</Text>
+        <Text color={theme.textSubtle}>{shortcuts + 1}–{Math.min(KEY_BINDINGS.length, shortcuts + shortcutPageSize)} of {KEY_BINDINGS.length}</Text>
       </Box>}
       {search && <Box marginX={1} paddingX={1} flexDirection="column">
         <Text color={theme.accent}>History search: {search.query}<Text inverse> </Text></Text>
