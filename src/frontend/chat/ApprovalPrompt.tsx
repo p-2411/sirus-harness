@@ -129,7 +129,7 @@ export function ApprovalPrompt({ request, waiting, selected, requesterName, feed
         <Box flexDirection="column" marginBottom={1}>
           {detail.map((line, index) => (
             <Box key={index} paddingLeft={2}>
-              <Text color={plan ? theme.text : detailColor(line)} wrap={plan ? 'wrap' : 'truncate-end'}>{line}</Text>
+              <Text color={plan ? theme.text : detailColor(line)} wrap={plan ? 'wrap' : 'truncate-end'}>{terminalText(line)}</Text>
             </Box>
           ))}
         </Box>

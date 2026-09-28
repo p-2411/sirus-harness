@@ -511,10 +511,10 @@ function SpawnAgentEntry({ call, sessionId }: { call: ToolCallBlock; sessionId?:
 			<Box ref={ref} flexDirection="column">
 				<Text wrap="truncate-end">
 					<Text color={color}>{'  '}●</Text>
-					<Text color={hovered ? theme.accentSoft : theme.text} bold> {name}</Text>
+					<Text color={hovered ? theme.accentSoft : theme.text} bold> {singleLine(name)}</Text>
 					{task && <Text color={hovered ? theme.accentSoft : theme.textMuted}>({task})</Text>}
 					{run && <Text color={theme.textSubtle} dimColor> · {singleLine(run.model)}{run.thinkingLevel ? ` ${run.thinkingLevel}` : ''} · {run.id}</Text>}
-					{run?.branch && <Text color={theme.textSubtle} dimColor> · {run.branch}</Text>}
+					{run?.branch && <Text color={theme.textSubtle} dimColor> · {singleLine(run.branch)}</Text>}
 					{awaiting && <Text color={theme.pending}> · waiting for approval</Text>}
 					{!awaiting && call.outcome && <Text color={stopColors[call.outcome]}> · {call.outcome}</Text>}
 				</Text>
@@ -526,12 +526,12 @@ function SpawnAgentEntry({ call, sessionId }: { call: ToolCallBlock; sessionId?:
 			</Box>
 			{expanded && report && (
 				<Box marginLeft={6}>
-					<Markdown>{report}</Markdown>
+					<Markdown>{terminalText(report)}</Markdown>
 				</Box>
 			)}
 			{expanded && !report && prompt.trim() && (
 				<Box marginLeft={6}>
-					<Text color={theme.textMuted} wrap="wrap">{prompt.trim()}</Text>
+					<Text color={theme.textMuted} wrap="wrap">{terminalText(prompt).trim()}</Text>
 				</Box>
 			)}
 		</Box>
@@ -670,8 +670,8 @@ function PromptText({ text, start, spans, participantColors }: {
 				return (
 					<WrappedText key={index} color={theme.text}>
 						{line ? pieces.map((piece, at) => piece.model
-							? <Text key={at} color={theme.textSubtle} dimColor>{expandTabs(piece.text)}</Text>
-							: <MentionText key={at} colors={participantColors}>{expandTabs(piece.text)}</MentionText>)
+							? <Text key={at} color={theme.textSubtle} dimColor>{expandTabs(terminalText(piece.text))}</Text>
+							: <MentionText key={at} colors={participantColors}>{expandTabs(terminalText(piece.text))}</MentionText>)
 							: ' '}
 					</WrappedText>
 				);
@@ -879,8 +879,8 @@ const MessageBody = memo(function MessageBody({
 				>
 					{isUser ? "you" : participantName}
 				</Text>
-				{!isUser && model && <Text color={theme.textSubtle} dimColor> {model}</Text>}
-				{!isUser && message.to?.length ? <Text color={theme.textMuted}> → {message.to.map(name => `@${name}`).join(', ')}</Text> : null}
+				{!isUser && model && <Text color={theme.textSubtle} dimColor> {singleLine(model)}</Text>}
+				{!isUser && message.to?.length ? <Text color={theme.textMuted}> → {message.to.map(name => `@${singleLine(name)}`).join(', ')}</Text> : null}
 			</Text>
 			{isUser && <UserPrompt message={message} participantColors={participantColors} />}
 			{segments.map((block, index) => {

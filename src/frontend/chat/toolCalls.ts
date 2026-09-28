@@ -1,4 +1,5 @@
 import path from 'path';
+import { singleLine } from '../terminal/text';
 import { toolRegistry } from '../../agent_runtime/tools';
 import type { ToolCallBlock, ToolCallDiff, ToolKind } from '../../agent_runtime/types';
 
@@ -7,10 +8,6 @@ import type { ToolCallBlock, ToolCallDiff, ToolKind } from '../../agent_runtime/
 // notification; the change it made, as numbered lines; why it failed; and a
 // run of calls summed up in a phrase. Everything here is text; the rows that
 // show it are in `ChatMessage`.
-
-export function singleLine(text: string): string {
-  return text.replace(/\s+/g, ' ').trim();
-}
 
 // ── Naming a call ────────────────────────────────────────────────────────
 
@@ -148,7 +145,7 @@ export function callLabel(call: NamedCall, directory?: string): CallLabel {
 export function toolLine(call: NamedCall, limit?: number, directory?: string): string {
   const { verb, subject } = callLabel(call, directory);
   const shown = limit !== undefined && subject.length > limit ? `${subject.slice(0, limit - 1)}…` : subject;
-  return [verb, shown].filter(Boolean).join(' ') || 'Tool call';
+  return singleLine([verb, shown].filter(Boolean).join(' ')) || 'Tool call';
 }
 
 // A call's arguments as readable lines, a long value over several: what an

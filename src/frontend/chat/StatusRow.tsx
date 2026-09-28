@@ -1,5 +1,6 @@
 import { Box, Text } from 'ink';
 import { theme } from '../styles/theme';
+import { singleLine } from '../terminal/text';
 import { CONTEXT_LOW_PERCENT, contextPercent, formatTokens, type ContextUsage } from '../../agent_runtime/usage';
 import { PERMISSION_MODE_NAMES } from '../../agent_runtime/permissions/policy';
 import type { PermissionMode } from '../../agent_runtime/types';
@@ -61,7 +62,7 @@ export function StatusRow({
         {permissionMode && (
           <Text color={MODE_COLORS[permissionMode]} wrap="truncate-end">
             {PERMISSION_MODE_NAMES[permissionMode]}
-            {modeNotice && <Text color={theme.textSubtle} dimColor> · {modeNotice}</Text>}
+            {modeNotice && <Text color={theme.textSubtle} dimColor> · {singleLine(modeNotice)}</Text>}
             <Text color={theme.textSubtle}> · shift+tab</Text>
           </Text>
         )}
@@ -75,7 +76,7 @@ export function StatusRow({
         {contextUsage && model && <Text color={theme.textSubtle} dimColor> · </Text>}
         {model && (
           <Text color={theme.textSubtle} dimColor>
-            {model}{thinkingLevel ? ` · ${thinkingLevel}` : ''}
+            {singleLine(model)}{thinkingLevel ? ` · ${singleLine(thinkingLevel)}` : ''}
           </Text>
         )}
       </Box>
