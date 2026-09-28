@@ -17,7 +17,7 @@ import { theme } from '../styles/theme';
 import { singleLine, terminalText } from '../terminal/text';
 import { HORSE } from '../branding/horse';
 import { ChatHistory, formatElapsed, PlanChecklist, thoughtHeading, visibleContent } from './ChatMessage';
-import { finished, toolLine } from './toolCalls';
+import { finished, runningToolLine } from './toolCalls';
 import { useClickable } from '../interaction/clickable';
 import { Spinner } from './Spinner';
 import { InputBar, createInputDraftState, type InputDraftState, type InputMode } from './InputBar';
@@ -187,7 +187,7 @@ export function turnPhase(messages: readonly Message[], directory?: string): str
   const running = [...content]
     .reverse()
     .find((block): block is ToolCallBlock => block.type === 'tool_call' && !finished(block));
-  if (running) return `running ${toolLine(running, PHASE_TITLE_LENGTH, directory)}`;
+  if (running) return runningToolLine(running, PHASE_TITLE_LENGTH, directory);
   const thought = turnThought(last);
   if (thought) {
     const { title, body } = thoughtHeading(terminalText(thought));

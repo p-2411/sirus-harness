@@ -936,7 +936,7 @@ describe('turn status', () => {
 
   test('distinguishes thinking, tool activity, and writing', () => {
     expect(turnPhase([])).toBe('thinking');
-    expect(turnPhase([{ seq: 0, role: 'assistant', content: [running] }])).toBe('running Run bun test');
+    expect(turnPhase([{ seq: 0, role: 'assistant', content: [running] }])).toBe('running bun test');
     expect(turnPhase([{
       seq: 0,
       role: 'assistant',
@@ -950,12 +950,24 @@ describe('turn status', () => {
   test('cuts a long tool title down to the status line', () => {
     const title = 'bun test --coverage --reporter junit tests/frontend';
     expect(turnPhase([{ seq: 0, role: 'assistant', content: [{ ...running, title }] }]))
-      .toBe(`running Run ${title.slice(0, 39)}…`);
+      .toBe(`running ${title.slice(0, 39)}…`);
   });
 
-  test('names a running call the way its row does', () => {
+  test('describes running calls from their row labels', () => {
     const reading: Message = { seq: 3, role: 'assistant', content: [{ ...running, kind: 'read', title: "Read file '/project/notes.txt'" }] };
-    expect(turnPhase([reading], '/project')).toBe("running Read file 'notes.txt'");
+    expect(turnPhase([reading], '/project')).toBe("reading file 'notes.txt'");
+    const phase = (kind: ToolCallBlock['kind'], title: string) => turnPhase([
+      { seq: 3, role: 'assistant', content: [{ ...running, kind, title }] },
+    ]);
+    expect(phase('other', 'Start subagent opt-3: Sirus')).toBe('starting subagent opt-3: Sirus');
+    expect(turnPhase([{ seq: 3, role: 'assistant', content: [{
+      ...running, kind: 'other', title: 'mcp__sirus__SpawnAgent',
+      input: { name: 'opt-3', description: 'Sirus' },
+    }] }])).toBe('starting subagent opt-3: Sirus');
+    expect(phase('edit', 'Write notes.txt')).toBe('writing notes.txt');
+    expect(phase('search', 'Search for todo')).toBe('searching for todo');
+    expect(phase('search', 'Web search: Sirus')).toBe('searching the web: Sirus');
+    expect(phase('other', 'Docker build')).toBe('running Docker build');
   });
 
   test('formats elapsed seconds and minutes', () => {

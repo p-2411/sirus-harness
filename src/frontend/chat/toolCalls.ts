@@ -148,6 +148,28 @@ export function toolLine(call: NamedCall, limit?: number, directory?: string): s
   return singleLine([verb, shown].filter(Boolean).join(' ')) || 'Tool call';
 }
 
+// A live call describes an action, while its transcript row names the call.
+// Only change verbs whose continuous form is unambiguous; a noun title keeps
+// the ordinary "running" prefix.
+const ACTIVITY_VERBS: Record<string, string> = {
+  apply: 'applying', cancel: 'cancelling', check: 'checking', create: 'creating',
+  delete: 'deleting', edit: 'editing', fetch: 'fetching', find: 'finding',
+  get: 'getting', grep: 'grepping', list: 'listing', load: 'loading',
+  message: 'messaging', move: 'moving', open: 'opening', read: 'reading',
+  run: 'running', save: 'saving', search: 'searching', start: 'starting',
+  update: 'updating', view: 'viewing', wait: 'waiting', write: 'writing',
+};
+
+export function runningToolLine(call: NamedCall, limit?: number, directory?: string): string {
+  const line = toolLine(call, limit, directory);
+  if (/^Web search\b/i.test(line)) return `searching the web${line.slice('Web search'.length)}`;
+  const first = /^([A-Za-z]+)\b/.exec(line)?.[1];
+  const doing = first && ACTIVITY_VERBS[first.toLowerCase()];
+  if (doing) return `${doing}${line.slice(first.length)}`;
+  if (/^(?:editing|preparing|searching|writing)\b/i.test(line)) return line.replace(/^./, char => char.toLowerCase());
+  return `running ${line}`;
+}
+
 // A call's arguments as readable lines, a long value over several: what an
 // approval prompt and an opened row show when there is nothing better.
 export function argumentLines(call: Pick<ToolCallBlock, 'input'>): string[] {
