@@ -83,7 +83,13 @@ describe('allowance display', () => {
       { label: '7-day', usedPercent: 0, resetsAt: 1000 },
     ] })).toBe('5h unavailable · 7d 100% left');
     expect(describeSubscriptionUsage({ windows: [], unavailable: 'request timed out' }))
-      .toBe('5h unavailable · 7d unavailable');
+      .toBe('limits unavailable');
+  });
+
+  test('omits windows the vendor does not report', () => {
+    expect(describeSubscriptionUsage(codexSubscriptionUsage({ rateLimitsByLimitId: {
+      codex: { primary: { usedPercent: 10, windowDurationMins: 10080 } },
+    } }))).toBe('7d 90% left');
   });
 });
 
