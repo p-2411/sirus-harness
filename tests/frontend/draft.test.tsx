@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readPromptHistory } from '../../src/persistence/promptHistory';
-import { render as renderInk } from 'ink';
+import { Box, render as renderInk } from 'ink';
 import { PassThrough } from 'node:stream';
 import { useState } from 'react';
 import stripAnsi from 'strip-ansi';
@@ -72,7 +72,8 @@ function renderDraft(options: { history?: string[]; directory?: string; initial?
     />;
   }
 
-  const app = renderInk(<Harness />, {
+  // At the foot of the screen, as in the app, so menus have room to open upward.
+  const app = renderInk(<Box width={100} height={30} flexDirection="column" justifyContent="flex-end"><Harness /></Box>, {
     stdin: stdin as unknown as NodeJS.ReadStream,
     stdout: stdout as unknown as NodeJS.WriteStream,
     debug: true,

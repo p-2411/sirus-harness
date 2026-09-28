@@ -1340,7 +1340,8 @@ function renderQueueInput(session: Session, history: readonly string[] = []) {
       onExitHint={() => events.push('exit-hint')}
     />;
   }
-  const app = renderInk(<Harness />, {
+  // At the foot of the screen, as in the app, so menus have room to open upward.
+  const app = renderInk(<Box width={100} height={35} flexDirection="column" justifyContent="flex-end"><Harness /></Box>, {
     stdin: stdin as unknown as NodeJS.ReadStream, stdout: stdout as unknown as NodeJS.WriteStream,
     debug: true, patchConsole: false, exitOnCtrlC: false,
   });

@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput, usePaste } from 'ink';
 import { theme } from '../styles/theme';
 import { moveSelection, SelectMenu } from './SelectMenu';
+import { Overlay } from './Overlay';
 import { ApprovalPrompt, approvalChoices } from './ApprovalPrompt';
 import { QuestionCard } from './QuestionCard';
 import {
@@ -171,7 +172,7 @@ export function PromptBar({ mode, feedback, participantColors, queuedMessages, w
 
   return (
     <>
-      {mode.type === 'menu' && <SelectMenu items={mode.items} selected={selected} />}
+      {mode.type === 'menu' && <Overlay><SelectMenu items={mode.items} selected={selected} /></Overlay>}
       <InputFeedback feedback={feedback} participantColors={participantColors} />
       <QueuedRow messages={queuedMessages} participantColors={participantColors} />
       <Box

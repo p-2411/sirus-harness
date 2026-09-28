@@ -41,7 +41,8 @@ function terminal(component: ReactNode) {
     const frame = stripAnsi(chunk.toString());
     if (frame.trim()) output = frame;
   });
-  const app = render(<Box width={120} height={35}>{component}</Box>, {
+  // At the foot of the screen, as in the app, so menus have room to open upward.
+  const app = render(<Box width={120} height={35} flexDirection="column" justifyContent="flex-end">{component}</Box>, {
     stdin: stdin as unknown as NodeJS.ReadStream,
     stdout: stdout as unknown as NodeJS.WriteStream,
     debug: true, patchConsole: false, exitOnCtrlC: false,

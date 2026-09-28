@@ -5,6 +5,7 @@ import { theme } from '../styles/theme';
 import { CommandMenu, useCommandMenu } from './CommandMenu';
 import { commandTokenAt, isNativeCommand, isSirusCommand } from '../../commands/registry';
 import { MentionMenu, useFileSuggestions, useMentionMenu } from './MentionMenu';
+import { Overlay } from './Overlay';
 import { DraftRow, TrailingImages } from './DraftText';
 import { describeImage, attachImageFile } from '../../images';
 import { readPromptHistory, appendPromptHistory } from '../../persistence/promptHistory';
@@ -685,28 +686,30 @@ export function InputBar({
 
   return (
     <>
-      <CommandMenu matches={commands.matches} selected={commands.selected} offset={commands.offset} />
-      {mentionActive && <MentionMenu
-        items={mentions.items}
-        participants={participants}
-        selected={mentions.selected}
-        offset={mentions.offset}
-        loading={fileSuggestions.loading}
-        error={fileSuggestions.error}
-      />}
+      <Overlay>
+        <CommandMenu matches={commands.matches} selected={commands.selected} offset={commands.offset} />
+        {mentionActive && <MentionMenu
+          items={mentions.items}
+          participants={participants}
+          selected={mentions.selected}
+          offset={mentions.offset}
+          loading={fileSuggestions.loading}
+          error={fileSuggestions.error}
+        />}
+        {shortcuts !== null && <Box marginX={1} paddingX={1} borderStyle="round" borderColor={theme.border} flexDirection="column">
+          <Text color={theme.accent}>Keyboard shortcuts · ↑/↓ scroll · esc closes</Text>
+          {KEY_BINDINGS.slice(shortcuts, shortcuts + shortcutPageSize).map(([keys, action]) =>
+            <Text key={keys} wrap="wrap"><Text color={theme.accentSoft}>{keys}</Text>{'  '}{action}</Text>)}
+          <Text color={theme.textSubtle}>{shortcuts + 1}–{Math.min(KEY_BINDINGS.length, shortcuts + shortcutPageSize)} of {KEY_BINDINGS.length}</Text>
+        </Box>}
+        {search && <Box marginX={1} paddingX={1} flexDirection="column">
+          <Text color={theme.accent}>History search: {search.query}<Text inverse> </Text></Text>
+          <Text wrap="truncate-end" color={searchResult ? theme.text : theme.textSubtle}>{searchResult?.replace(/\n/g, ' ↵ ') ?? 'No matching prompts'}</Text>
+          <Text color={theme.textSubtle}>ctrl+r older · ctrl+s newer · enter selects · esc restores</Text>
+        </Box>}
+      </Overlay>
       <InputFeedback feedback={localFeedback ?? feedback} participantColors={participantColors} />
       <QueuedRow messages={queuedMessages.map(message => message.text)} participantColors={participantColors} />
-      {shortcuts !== null && <Box marginX={1} paddingX={1} borderStyle="round" borderColor={theme.border} flexDirection="column">
-        <Text color={theme.accent}>Keyboard shortcuts · ↑/↓ scroll · esc closes</Text>
-        {KEY_BINDINGS.slice(shortcuts, shortcuts + shortcutPageSize).map(([keys, action]) =>
-          <Text key={keys} wrap="wrap"><Text color={theme.accentSoft}>{keys}</Text>{'  '}{action}</Text>)}
-        <Text color={theme.textSubtle}>{shortcuts + 1}–{Math.min(KEY_BINDINGS.length, shortcuts + shortcutPageSize)} of {KEY_BINDINGS.length}</Text>
-      </Box>}
-      {search && <Box marginX={1} paddingX={1} flexDirection="column">
-        <Text color={theme.accent}>History search: {search.query}<Text inverse> </Text></Text>
-        <Text wrap="truncate-end" color={searchResult ? theme.text : theme.textSubtle}>{searchResult?.replace(/\n/g, ' ↵ ') ?? 'No matching prompts'}</Text>
-        <Text color={theme.textSubtle}>ctrl+r older · ctrl+s newer · enter selects · esc restores</Text>
-      </Box>}
       <Box ref={inputBox} borderStyle="round" borderColor={theme.accent} paddingX={1} marginX={1} flexShrink={0} flexDirection="column">
         {/* columns rather than rows, so the draft is one box a selection can be held to */}
         <Box>
