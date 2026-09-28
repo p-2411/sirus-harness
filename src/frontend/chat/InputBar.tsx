@@ -34,6 +34,7 @@ import { MentionText, participantColorMap } from '../MentionText';
 import { isMouseInput } from '../interaction/mouse';
 import { isFocusInput } from '../terminal/window-focus';
 import { clearSelection, getSelectionSnapshot, hasSelection, subscribeSelection } from '../interaction/selection';
+import { useSelectionRegion } from '../interaction/useTextSelection';
 import type { Feedback } from '../../commands/feedback';
 import type { Participant } from '../../agent_runtime/agent';
 import type { QueuedMessage } from '../../agent_runtime/session/messageQueue';
@@ -181,6 +182,11 @@ export function InputBar({
   const shortcutPageSize = Math.max(1, Math.min(12, Math.floor(((stdout.rows || 24) - 12) / 3)));
   const inputBox = useRef<DOMElement>(null);
   const { width: boxWidth } = useBoxMetrics(inputBox);
+  // A drag in the bar stays in the bar, and one that starts on the draft
+  // stays on the draft: the prompt mark, hint and border are not text.
+  const draftColumn = useRef<DOMElement>(null);
+  useSelectionRegion(inputBox);
+  useSelectionRegion(draftColumn);
   const participantColors = participantColorMap(participants);
   const status: StatusRowProps = { permissionMode, modeNotice, model, thinkingLevel, contextUsage, tasksVisible };
 
@@ -358,6 +364,7 @@ export function InputBar({
   const cursorRow = draftCursorRow(rows, editor.cursor);
   const maxRows = Math.max(2, Math.min(8, Math.floor((stdout.rows || 24) / 3)));
   const rowOffset = Math.max(0, cursorRow - maxRows + 1);
+  const shownRows = rows.slice(rowOffset, rowOffset + maxRows);
   const searchMatches = search ? recallHistory.filter(text => text.toLowerCase().includes(search.query.toLowerCase())).reverse() : [];
   const searchResult = searchMatches[search?.index ?? 0];
   const openEditor = async () => {
@@ -693,21 +700,26 @@ export function InputBar({
         <Text color={theme.textSubtle}>ctrl+r older · ctrl+s newer · enter selects · esc restores</Text>
       </Box>}
       <Box ref={inputBox} borderStyle="round" borderColor={theme.accent} paddingX={1} marginX={1} flexShrink={0} flexDirection="column">
-        {rows.slice(rowOffset, rowOffset + maxRows).map((cells, index, shown) => <Box key={rowOffset + index}>
-          <Box width={2} flexShrink={0}><Text color={theme.accentSoft}>{rowOffset + index === 0 ? '› ' : '  '}</Text></Box>
-          <Box flexGrow={1} minWidth={0}>
+        {/* columns rather than rows, so the draft is one box a selection can be held to */}
+        <Box>
+          <Box width={2} flexShrink={0} flexDirection="column">
+            {shownRows.map((_, index) => <Text key={rowOffset + index} color={theme.accentSoft}>{rowOffset + index === 0 ? '› ' : '  '}</Text>)}
+          </Box>
+          <Box ref={draftColumn} flexGrow={1} minWidth={0} flexDirection="column">
             {input
-              ? <DraftRow cells={cells} cursor={editor.cursor} participantColors={participantColors} />
+              ? shownRows.map((cells, index) => <DraftRow key={rowOffset + index} cells={cells} cursor={editor.cursor} participantColors={participantColors} />)
               : <Text wrap="truncate-end"><Text inverse> </Text><Text color={theme.textSubtle}> message {recipient} or <MentionText colors={participantColors}>@mention</MentionText> an agent…</Text></Text>}
           </Box>
-          <Box width={hintWidth} flexShrink={0} justifyContent="flex-end">
-            {index === 0
-              ? <Text color={showCopied ? theme.success : theme.textSubtle} wrap="truncate-end">{showCopied ? 'copied ✓' : enterHint}</Text>
-              : index === shown.length - 1 && rows.length > maxRows
-                ? <Text color={theme.textSubtle}>{rowOffset + 1}–{Math.min(rows.length, rowOffset + maxRows)}/{rows.length}</Text>
-                : null}
+          <Box width={hintWidth} flexShrink={0} flexDirection="column">
+            {shownRows.map((_, index) => <Box key={rowOffset + index} height={1} justifyContent="flex-end">
+              {index === 0
+                ? <Text color={showCopied ? theme.success : theme.textSubtle} wrap="truncate-end">{showCopied ? 'copied ✓' : enterHint}</Text>
+                : index === shownRows.length - 1 && rows.length > maxRows
+                  ? <Text color={theme.textSubtle}>{rowOffset + 1}–{Math.min(rows.length, rowOffset + maxRows)}/{rows.length}</Text>
+                  : null}
+            </Box>)}
           </Box>
-        </Box>)}
+        </Box>
         {trailingImages.length > 0 && <TrailingImages images={trailingImages} after={false} />}
       </Box>
       <WorkerStrip workers={workers} selection={workerSelection} />
