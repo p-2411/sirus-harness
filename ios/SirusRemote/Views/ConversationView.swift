@@ -147,6 +147,9 @@ private struct Conversation: View {
             }
             .onChange(of: showsMenu, initial: true) { _, shown in menuOpen = shown }
             .onDisappear { menuOpen = false }
+            #if DEBUG
+            .task { await screenshotHooks() }
+            #endif
             .sensoryFeedback(.impact(weight: .medium), trigger: client.requests.first?.id) { _, new in new != nil }
             .sensoryFeedback(.impact(weight: .light), trigger: chosenCompletion)
     }
@@ -401,6 +404,26 @@ private struct Conversation: View {
     private func show(_ text: String, failed: Bool) {
         notify(Note(text: text, failed: failed))
     }
+
+    #if DEBUG
+    // Screenshot hooks beside the composer's: -openPicker /model opens a
+    // picker as a caption tap would, and -sendOnLaunch <text> sends a
+    // message, once the conversation is live.
+    private func screenshotHooks() async {
+        let defaults = UserDefaults.standard
+        let command = defaults.string(forKey: "openPicker"), message = defaults.string(forKey: "sendOnLaunch")
+        guard command != nil || message != nil else { return }
+        var waited = 0
+        while (client.link != .live || header == nil) && waited < 100 {
+            try? await Task.sleep(for: .milliseconds(100))
+            waited += 1
+        }
+        if let command { openPicker(command) }
+        if let message {
+            do { try await send(message, from: .composer) } catch { show(error.localizedDescription, failed: true) }
+        }
+    }
+    #endif
 
     // Shows a note until its time is up or another replaces it; nil puts
     // the current one away.
