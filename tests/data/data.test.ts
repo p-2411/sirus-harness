@@ -800,7 +800,7 @@ describe('Session model', () => {
     ]);
   });
 
-  test('keeps two messages apart, records what the turn used, and recaps an interruption', async () => {
+  test('keeps two messages apart, records what the turn used, and recaps a reply cut short', async () => {
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     let turns = 0;
@@ -829,7 +829,8 @@ describe('Session model', () => {
     const restored = Session.fromSnapshot(session.toSnapshot());
     const next = bindScriptedRuntime(testModel, textTurn('Ok'));
     await restored.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Third' }] });
-    expect(next.runtimes[0]!.prompts[0]!.text).toContain('@sirus: Half\n@sirus: [interrupted by the user]\n');
+    expect(next.runtimes[0]!.prompts[0]!.text).toContain('@sirus: Half\n');
+    expect(next.runtimes[0]!.prompts[0]!.text).not.toContain('interrupted');
   });
 
   test('keeps notices out of mention routing, peer prompts and rebuilt runtime history', async () => {
@@ -1447,7 +1448,7 @@ describe('Session model', () => {
     expect(runtimeSignal?.aborted).toBe(true);
     expect(session.getStatus()).toBe('idle');
     expect(session.wasLastTurnCancelled()).toBe(true);
-    // Where the turn was cut short stays in the record.
+    // What it wrote before it was cut short stays in the record, and nothing more.
     expect(session.getMessages()).toEqual([
       { seq: 0, role: 'user', to: ['sirus'], content: [{ type: 'text', text: 'Start' }] },
       {
@@ -1457,7 +1458,6 @@ describe('Session model', () => {
         model: testModel,
         content: [
           { type: 'text', text: 'Partial' },
-          { type: 'notice', severity: 'interrupted', title: 'Interrupted', description: 'What should @sirus do instead?' },
         ],
         startedAt: expect.any(Number),
         finishedAt: expect.any(Number),

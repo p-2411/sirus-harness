@@ -62,9 +62,6 @@ export interface NoticeBlock {
   description?: string;
 }
 
-// The severity of the notice that marks where a turn was cut short.
-export const INTERRUPTED_SEVERITY = 'interrupted';
-
 // ACP's vocabulary for what a tool call does. The kind picks the verb and the
 // icon; the title is the line.
 export const TOOL_KINDS = ['read', 'edit', 'delete', 'move', 'search', 'execute', 'think', 'fetch', 'switch_mode', 'other'] as const;

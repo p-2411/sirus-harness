@@ -114,6 +114,18 @@ describe('session persistence', () => {
     expect(restored.getMessages()[0]!.content).toEqual(session.getMessages()[0]!.content);
   });
 
+  test('drops the Interrupted rows earlier builds saved where a turn was cut short', () => {
+    const session = new Session({ messages: [
+      { seq: 0, role: 'assistant', content: [
+        { type: 'text', text: 'Partial' },
+        { type: 'notice', severity: 'interrupted', title: 'Interrupted', description: 'What should @sirus do instead?' },
+      ] },
+    ] });
+    expect(saveSessionSnapshots([session.toSnapshot()], session.getId(), directory)).toBe(true);
+    const restored = Session.fromSnapshot(loadSessionSnapshots(directory).snapshots[0]!);
+    expect(restored.getMessages()[0]!.content).toEqual([{ type: 'text', text: 'Partial' }]);
+  });
+
   test('round-trips images, checkpoints, tools, notices, compaction and naming metadata together', () => {
     const image = { type: 'image' as const, path: path.join(directory, 'images', 'screenshot.png'), mediaType: 'image/png' as const, bytes: 123 };
     const checkpoint = {
@@ -144,7 +156,6 @@ describe('session persistence', () => {
           { type: 'text', text: 'Explanation' },
           { type: 'notice', severity: 'vendor-hint', title: 'Finished' },
           { type: 'compaction', summary: 'The screenshot was explained.' },
-          { type: 'notice', severity: 'interrupted', title: 'Interrupted' },
         ] },
       ],
       checkpoints: [checkpoint],

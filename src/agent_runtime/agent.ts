@@ -36,7 +36,6 @@ import type { SpawnOptions, SubagentHost } from './tools/types';
 import {
   failOpenToolCalls,
   fitThinkingLevel,
-  INTERRUPTED_SEVERITY,
   isPlanCall,
   offeredThinkingLevels,
   planCall,
@@ -341,13 +340,6 @@ export class SessionAgent {
       if (!signal.aborted && !isAbortError(error)) {
         const title = error instanceof Error ? error.message : String(error);
         this.record?.({ type: 'notice', severity: 'error', title });
-      } else {
-        // Where the turn was cut short stays in the record, the way both
-        // vendors' terminals mark it, whether or not anything came before.
-        this.record?.({
-          type: 'notice', severity: INTERRUPTED_SEVERITY, title: 'Interrupted',
-          ...(this.subagentId ? {} : { description: `What should @${this.name} do instead?` }),
-        });
       }
       throw error;
     } finally {

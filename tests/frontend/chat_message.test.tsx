@@ -756,14 +756,6 @@ describe('a finished turn', () => {
     expect(stripAnsi(renderToString(<ChatMessage message={reply({})} />))).not.toContain('@sirus');
   });
 
-  test('marks where the user interrupted it', () => {
-    const output = stripAnsi(renderToString(<ChatMessage message={reply({ content: [
-      { type: 'text', text: 'Partial' },
-      { type: 'notice', severity: 'interrupted', title: 'Interrupted', description: 'What should @sirus do instead?' },
-    ] })} />, { columns: 120 }));
-    expect(output).toContain('Interrupted · What should @sirus do instead?');
-  });
-
   test('keeps two messages of one reply apart', () => {
     const output = stripAnsi(renderToString(<ChatMessage message={reply({ content: [
       { type: 'text', text: 'task details.' },

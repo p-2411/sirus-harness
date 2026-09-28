@@ -1,6 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import {
-	INTERRUPTED_SEVERITY,
 	isPlanCall,
 	planEntriesOf,
 	type CompactionBlock,
@@ -234,7 +233,7 @@ function PlanRow({ call }: { call: ToolCallBlock }) {
 
 function NoticeRow({ block }: { block: NoticeBlock }) {
 	const color = block.severity === 'warning' ? theme.pending
-		: block.severity === 'error' || block.severity === INTERRUPTED_SEVERITY ? theme.danger : theme.textMuted;
+		: block.severity === 'error' ? theme.danger : theme.textMuted;
 	return (
 		<Box paddingX={1}>
 			<Text color={color} dimColor wrap="truncate-end">

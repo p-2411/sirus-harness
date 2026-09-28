@@ -226,8 +226,7 @@ app restarts too. Missing sessions, directories, credentials or profile homes, a
 resume refusals, produce a brief notice and use the same recap fallback. A cancelled
 startup keeps an existing handle for the next attempt. A turn that is cancelled or fails
 marks the tool calls it left open as failed, since nothing more will be heard of them; a
-cancelled one marks them cancelled, and leaves an `Interrupted` notice where it stopped,
-which a recap passes on. A snapshot restores an open call as cancelled.
+cancelled one marks them cancelled. A snapshot restores an open call as cancelled.
 
 A participant keeps the time its runtime last reported anything (`quietFor`), not counting
 time spent waiting on the user's approval or inside a tool call that is still running. After

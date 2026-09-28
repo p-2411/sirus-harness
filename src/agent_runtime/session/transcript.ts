@@ -1,5 +1,5 @@
 import path from 'path';
-import { INTERRUPTED_SEVERITY, isPlanCall, textOf, withoutCreationModels, type Message, type MessageBlock, type ToolCallBlock } from '../types';
+import { isPlanCall, textOf, withoutCreationModels, type Message, type MessageBlock, type ToolCallBlock } from '../types';
 
 export { textOf };
 
@@ -101,8 +101,6 @@ function blockText(speaker: string, block: MessageBlock): string {
       : block.status === 'failed' ? ' (failed)' : block.status === 'completed' ? '' : ` (${block.status})`;
     return `${speaker} ${VERBS[block.kind]}: ${block.title}${outcome}`;
   }
-  // The vendors' own records say where the user cut a turn short.
-  if (block.type === 'notice' && block.severity === INTERRUPTED_SEVERITY) return `${speaker}: [interrupted by the user]`;
   return '';
 }
 

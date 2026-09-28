@@ -313,6 +313,9 @@ function toBlocks(content: readonly StoredBlock[]): MessageBlock[] {
   const blocks: MessageBlock[] = [];
   for (const block of content) {
     if (block.type === 'tool_result') continue;
+    // Builds of 2026-09-28 marked a cut-short turn with an "Interrupted" row,
+    // which is no longer shown.
+    if (block.type === 'notice' && block.severity === 'interrupted') continue;
     if (block.type === 'tool_call' && 'name' in block) {
       blocks.push(legacyToolCall(block, results));
       continue;
