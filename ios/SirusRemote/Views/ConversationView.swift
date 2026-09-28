@@ -172,9 +172,14 @@ private struct Conversation: View {
             return
         }
         let text = draft
+        // The field reports its cursor as an index into its own copy of the
+        // text, which can run ahead of `draft` for a moment: a tap into an
+        // empty field does. An index this draft does not have counts as its
+        // end; measuring it against the draft anyway traps.
         let cursor: Int
-        if case .selection(let range) = selection?.indices {
-            cursor = max(0, min(range.lowerBound.utf16Offset(in: text), text.utf16.count))
+        if case .selection(let range) = selection?.indices,
+           let caret = String.Index(range.lowerBound, within: text.utf16) {
+            cursor = text.utf16.distance(from: text.utf16.startIndex, to: caret)
         } else { cursor = text.utf16.count }
         completionTask = Task {
             try? await Task.sleep(for: .milliseconds(80))
