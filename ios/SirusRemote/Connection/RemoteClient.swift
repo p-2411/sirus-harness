@@ -5,7 +5,7 @@ import Observation
 // subscribed to, and requests answered by id. It reconnects with backoff
 // while the app is in front, and resubscribes when it does.
 @MainActor @Observable final class RemoteClient {
-    enum Link { case connecting, live, offline }
+    enum Link: Equatable { case connecting, live, offline }
 
     let endpoint: Endpoint
     private(set) var link = Link.connecting
@@ -60,8 +60,12 @@ import Observation
         _ = try await request(.subscribe(sessionId, participant))
     }
 
-    func send(_ text: String, sessionId: String, participant: String) async throws -> String? {
-        try await request(.send(sessionId, participant, text)).feedback
+    func send(_ text: String, sessionId: String, participant: String) async throws -> ResultFrame {
+        try await request(.send(sessionId, participant, text))
+    }
+
+    func complete(_ text: String, cursor: Int, sessionId: String, participant: String) async throws -> [CompletionItem] {
+        try await request(.complete(sessionId, participant, text, cursor)).items
     }
 
     func cancel(sessionId: String) async throws { _ = try await request(.cancel(sessionId)) }

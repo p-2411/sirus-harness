@@ -17,6 +17,9 @@ struct Composer: View {
     let working: Bool
     @Binding var draft: String
     @Binding var note: Note?
+    @Binding var selection: TextSelection?
+    let onFocus: (Bool) -> Void
+    let onResult: (ResultFrame) -> Void
     @State private var sending = false
     @State private var sent = 0
     @State private var stopped = 0
@@ -28,7 +31,8 @@ struct Composer: View {
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 4) {
-            TextField("", text: $draft, prompt: Text("Message \(participant)").foregroundStyle(Palette.subtle), axis: .vertical)
+            TextField("", text: $draft, selection: $selection,
+                      prompt: Text("Message \(participant)").foregroundStyle(Palette.subtle), axis: .vertical)
                 .font(.body)
                 .foregroundStyle(Palette.white)
                 .lineLimit(1...6)
@@ -45,11 +49,17 @@ struct Composer: View {
         .animation(.easeOut(duration: 0.15), value: empty)
         .sensoryFeedback(.impact(weight: .light), trigger: sent)
         .sensoryFeedback(.impact(weight: .medium), trigger: stopped)
+        .onChange(of: focused) { _, now in onFocus(now) }
         #if DEBUG
         .task {
             // Screenshot hooks: -composerDraft <text> and -composerFocused YES.
-            if let preset = UserDefaults.standard.string(forKey: "composerDraft") { draft = preset }
+            let preset = UserDefaults.standard.string(forKey: "composerDraft")
+            if let preset { draft = preset }
             focused = UserDefaults.standard.bool(forKey: "composerFocused")
+            if preset != nil {
+                await Task.yield()
+                selection = TextSelection(range: draft.endIndex..<draft.endIndex)
+            }
         }
         #endif
     }
@@ -76,9 +86,8 @@ struct Composer: View {
         Task {
             defer { sending = false }
             do {
-                if let feedback = try await client.send(message, sessionId: sessionId, participant: participant), !feedback.isEmpty {
-                    show(feedback, failed: false)
-                }
+                let result = try await client.send(message, sessionId: sessionId, participant: participant)
+                onResult(result)
             } catch {
                 if draft.isEmpty { draft = message }
                 show(error.localizedDescription, failed: true)

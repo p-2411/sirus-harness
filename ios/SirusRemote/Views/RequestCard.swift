@@ -1,9 +1,8 @@
 import SwiftUI
 
-// A waiting approval or question, standing where the input bar stands, as
-// the TUI's framed cards do: who is asking at the top, what for, and the
-// answers. The conversation draws it on glass that morphs out of the
-// composer's. Amber for an approval, platinum for a question.
+// A waiting approval or question, with who is asking, what for, and the
+// answers. The conversation morphs an approval from the composer and a
+// question from the status pill. Amber marks approvals, platinum questions.
 struct RequestCard: View {
     let request: Request
     let waiting: Int

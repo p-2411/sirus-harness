@@ -296,6 +296,85 @@ struct ResultFrame: Decodable {
     let ok: Bool
     let error: String?
     let feedback: String?
+    let draft: String?
+    let picker: CommandPicker?
+    let items: [CompletionItem]
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        id = try c.decode(String.self, forKey: "id")
+        ok = c.take("ok") ?? false
+        error = c.take("error")
+        feedback = c.take("feedback")
+        draft = c.take("draft")
+        picker = c.take("picker")
+        items = c.list("items")
+    }
+}
+
+struct CompletionItem: Decodable, Identifiable {
+    var id: String { "\(kind.rawValue):\(start):\(end):\(insert)" }
+    enum Kind: String { case command, participant, create, file, directory, other }
+    let kind: Kind
+    let label: String
+    let description: String
+    let tag: String?
+    let start: Int
+    let end: Int
+    let insert: String
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        kind = Kind(rawValue: c.take("kind") ?? "") ?? .other
+        label = c.take("label") ?? ""
+        description = c.take("description") ?? ""
+        tag = c.take("tag")
+        start = c.take("start") ?? 0
+        end = c.take("end") ?? 0
+        insert = c.take("insert") ?? ""
+    }
+}
+
+struct CommandPicker: Decodable {
+    let title: String
+    let entries: [Entry]
+
+    struct Entry: Decodable, Identifiable {
+        var id: String { "\(kind.rawValue):\(label):\(command ?? "")" }
+        enum Kind: String { case heading, info, item, other }
+        struct Prompt: Decodable {
+            let text: String
+            let secret: Bool
+
+            init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: Keys.self)
+                text = c.take("text") ?? "Value"
+                secret = c.take("secret") ?? false
+            }
+        }
+        let kind: Kind
+        let label: String
+        let description: String?
+        let command: String?
+        let current: Bool
+        let prompt: Prompt?
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: Keys.self)
+            kind = Kind(rawValue: c.take("kind") ?? "") ?? .other
+            label = c.take("label") ?? ""
+            description = c.take("description")
+            command = c.take("command")
+            current = c.take("current") ?? false
+            prompt = c.take("prompt")
+        }
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        title = c.take("title") ?? "Choose"
+        entries = c.list("entries")
+    }
 }
 
 enum ServerFrame {
@@ -326,6 +405,7 @@ struct ClientFrame: Encodable, Sendable {
     var sessionId: String?
     var participant: String?
     var text: String?
+    var cursor: Int?
     var requestId: String?
     var optionId: String?
     var answer: QuestionAnswer?
@@ -337,6 +417,9 @@ struct ClientFrame: Encodable, Sendable {
     }
     static func send(_ sessionId: String, _ participant: String, _ text: String) -> Self {
         Self(type: "send", sessionId: sessionId, participant: participant, text: text)
+    }
+    static func complete(_ sessionId: String, _ participant: String, _ text: String, _ cursor: Int) -> Self {
+        Self(type: "complete", sessionId: sessionId, participant: participant, text: text, cursor: cursor)
     }
     static func cancel(_ sessionId: String) -> Self { Self(type: "cancel", sessionId: sessionId) }
     static func approve(_ requestId: String, _ optionId: String) -> Self {

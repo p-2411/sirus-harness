@@ -2,7 +2,7 @@ import SwiftUI
 
 // One participant's conversation in a session, laid out as the TUI lays it
 // out: agent tabs on top, the transcript, the live status line, and the
-// input bar, which a waiting request takes the place of. The chrome floats
+// input bar, which an approval takes the place of. The chrome floats
 // over the transcript in glass, and the transcript scrolls under it.
 struct ConversationView: View {
     let store: RemoteStore
@@ -38,6 +38,14 @@ private struct Conversation: View {
     // composer's place leaves the draft waiting, as the TUI does.
     @State private var draft = ""
     @State private var note: Note?
+    @State private var selection: TextSelection?
+    @State private var composerFocused = false
+    @State private var completions: [CompletionItem] = []
+    @State private var completionTask: Task<Void, Never>?
+    @State private var completionGeneration = 0
+    @State private var picker: CommandPicker?
+    @State private var pickerRevision = 0
+    @State private var chosenCompletion = 0
     @Namespace private var glass
 
     private var header: Header? { client.header }
@@ -46,6 +54,9 @@ private struct Conversation: View {
         header?.participants.first { $0.name == participant }?.working ?? false
     }
     private var status: Status? { header?.status.flatMap { $0.participant == participant ? $0 : nil } }
+    private var waitingQuestion: Request? {
+        client.requests.first?.kind == .question ? client.requests.first : nil
+    }
 
     var body: some View {
         Transcript(rows: client.rows, names: names, loading: header == nil)
@@ -74,6 +85,14 @@ private struct Conversation: View {
                 // subscribes again as soon as it is.
                 try? await client.subscribe(sessionId: session.id, participant: participant)
             }
+            .onChange(of: draft) { _, _ in updateCompletions() }
+            .onChange(of: selection) { _, _ in updateCompletions() }
+            .onChange(of: composerFocused) { _, _ in updateCompletions() }
+            .onChange(of: client.requests.first?.id) { _, _ in updateCompletions() }
+            .onChange(of: picker?.title) { _, _ in updateCompletions() }
+            .onChange(of: participant) { _, _ in updateCompletions() }
+            .onChange(of: session.id) { _, _ in updateCompletions() }
+            .onChange(of: client.link) { _, _ in updateCompletions() }
     }
 
     // What floats at the bottom: the live status, feedback on the last
@@ -83,7 +102,12 @@ private struct Conversation: View {
         GlassEffectContainer(spacing: 8) {
             // Centred: the status and notes above the full-width composer.
             VStack(alignment: .center, spacing: 10) {
-                if client.link != .live {
+                if let question = waitingQuestion {
+                    RequestCard(request: question, waiting: client.requests.count - 1, client: client, names: names)
+                        .id(question.id)
+                        .glassEffect(.regular, in: .rect(cornerRadius: 30, style: .continuous))
+                        .glassEffectID("status", in: glass)
+                } else if client.link != .live {
                     Pill(tone: Palette.muted) {
                         Image(systemName: client.link == .offline ? "wifi.slash" : "arrow.triangle.2.circlepath")
                             .symbolEffect(.rotate, isActive: client.link == .connecting)
@@ -101,19 +125,30 @@ private struct Conversation: View {
                     }
                     .glassEffectID("note", in: glass)
                 }
-                if let request = client.requests.first {
+                if !completions.isEmpty && composerFocused && picker == nil &&
+                    (client.requests.first == nil || client.requests.first?.kind == .question) {
+                    CompletionMenu(items: completions, choose: chooseCompletion)
+                        .padding(.leading, Sidebar.gutter - 12)
+                }
+                if let request = client.requests.first, request.kind != .question {
                     RequestCard(request: request, waiting: client.requests.count - 1, client: client, names: names)
                         .id(request.id)
                         .glassEffect(.regular,
                                      in: .rect(cornerRadius: 30, style: .continuous))
                         .glassEffectID("input", in: glass)
+                } else if let picker {
+                    PickerCard(picker: picker, dismiss: { self.picker = nil }, send: sendCommand)
+                        .id(pickerRevision)
+                        .glassEffect(.regular, in: .rect(cornerRadius: 30, style: .continuous))
+                        .glassEffectID("input", in: glass)
                 } else {
                     Composer(client: client, sessionId: session.id, participant: participant, working: working,
-                             draft: $draft, note: $note)
+                             draft: $draft, note: $note, selection: $selection,
+                             onFocus: { composerFocused = $0 }, onResult: receive)
                         .glassEffect(.regular, in: .rect(cornerRadius: 23, style: .continuous))
                         .glassEffectID("input", in: glass)
                 }
-                ModeCaption(header: header, participant: participant)
+                ModeCaption(header: header, participant: participant, send: sendCommand)
             }
         }
         .padding(.horizontal, 12)
@@ -121,7 +156,70 @@ private struct Conversation: View {
         .animation(.smooth(duration: 0.3), value: working || status != nil)
         .animation(.smooth(duration: 0.3), value: client.link)
         .animation(.smooth(duration: 0.25), value: note)
+        .animation(.spring(duration: 0.4, bounce: 0.14), value: picker?.title)
         .sensoryFeedback(.impact(weight: .medium), trigger: client.requests.first?.id) { _, new in new != nil }
+        .sensoryFeedback(.impact(weight: .light), trigger: chosenCompletion)
+    }
+
+    private func updateCompletions() {
+        completionGeneration += 1
+        let generation = completionGeneration
+        completionTask?.cancel()
+        guard composerFocused, picker == nil,
+              client.requests.first == nil || client.requests.first?.kind == .question,
+              client.link == .live else {
+            completions = []
+            return
+        }
+        let text = draft
+        let cursor: Int
+        if case .selection(let range) = selection?.indices {
+            cursor = max(0, min(range.lowerBound.utf16Offset(in: text), text.utf16.count))
+        } else { cursor = text.utf16.count }
+        completionTask = Task {
+            try? await Task.sleep(for: .milliseconds(80))
+            guard !Task.isCancelled else { return }
+            let items = try? await client.complete(text, cursor: cursor, sessionId: session.id, participant: participant)
+            guard !Task.isCancelled, generation == completionGeneration else { return }
+            completions = items ?? []
+        }
+    }
+
+    private func chooseCompletion(_ item: CompletionItem) {
+        guard item.start >= 0, item.end >= item.start,
+              let range = Range(NSRange(location: item.start, length: item.end - item.start), in: draft) else { return }
+        let offset = item.start + item.insert.utf16.count
+        draft.replaceSubrange(range, with: item.insert)
+        let caret = String.Index(utf16Offset: offset, in: draft)
+        selection = TextSelection(range: caret..<caret)
+        chosenCompletion += 1
+        updateCompletions()
+    }
+
+    private func sendCommand(_ command: String) {
+        Task {
+            do { receive(try await client.send(command, sessionId: session.id, participant: participant)) }
+            catch { show(error.localizedDescription, failed: true) }
+        }
+    }
+
+    private func receive(_ result: ResultFrame) {
+        if result.picker != nil { pickerRevision += 1 }
+        picker = result.picker
+        if let restored = result.draft {
+            draft = restored
+            selection = TextSelection(range: draft.endIndex..<draft.endIndex)
+        }
+        if let feedback = result.feedback, !feedback.isEmpty { show(feedback, failed: false) }
+    }
+
+    private func show(_ text: String, failed: Bool) {
+        let shown = Note(text: text, failed: failed)
+        note = shown
+        Task {
+            try? await Task.sleep(for: .seconds(failed ? 6 : 8))
+            if note == shown { note = nil }
+        }
     }
 }
 
@@ -193,30 +291,48 @@ private struct StatusPill: View {
 private struct ModeCaption: View {
     let header: Header?
     let participant: String
+    let send: (String) -> Void
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 6) {
             if let mode = permissionMode(header?.permissionMode) {
                 let notice = Text(header?.modeNotice.map { " · \($0)" } ?? "").foregroundStyle(Palette.subtle)
-                Text("\(Text(mode.name).foregroundStyle(mode.color))\(notice)")
-                    .truncationMode(.tail)
+                Button { send("/permissions") } label: {
+                    Text("\(Text(mode.name).foregroundStyle(mode.color))\(notice)")
+                        .truncationMode(.tail)
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(RowPress())
             }
             Spacer(minLength: 0)
-            // The gauge, model and level keep their width; the mode gives way.
-            right.layoutPriority(1)
+            if let context = header?.context {
+                Text(context.text).foregroundStyle(tone(context.tone))
+            }
+            if let model = header?.participants.first(where: { $0.name == participant })?.model {
+                if header?.context != nil { Text("·").foregroundStyle(Palette.subtle) }
+                Button { send("/model") } label: {
+                    Text(model).foregroundStyle(Palette.subtle).lineLimit(1)
+                        .frame(minHeight: 44).contentShape(Rectangle())
+                }
+                .buttonStyle(RowPress())
+                .layoutPriority(1)
+            }
+            if let thinking = header?.thinking {
+                if header?.context != nil || header?.participants.first(where: { $0.name == participant })?.model != nil {
+                    Text("·").foregroundStyle(Palette.subtle)
+                }
+                Button { send("/thinking") } label: {
+                    Text(thinking).foregroundStyle(Palette.subtle).lineLimit(1)
+                        .frame(minHeight: 44).contentShape(Rectangle())
+                }
+                .buttonStyle(RowPress())
+            }
         }
         .font(.mono(11))
         .lineLimit(1)
         .padding(.horizontal, 18)
         .padding(.bottom, 2)
-    }
-
-    private var right: Text {
-        let model = header?.participants.first(where: { $0.name == participant })?.model
-        let tail = [model, header?.thinking].compactMap { $0 }.joined(separator: " · ")
-        guard let context = header?.context else { return Text(tail).foregroundStyle(Palette.subtle) }
-        let gauge = Text(context.text).foregroundStyle(tone(context.tone))
-        return tail.isEmpty ? gauge : Text("\(gauge)\(Text(" · \(tail)").foregroundStyle(Palette.subtle))")
     }
 
     private func tone(_ tone: Header.Gauge.Tone) -> Color {
