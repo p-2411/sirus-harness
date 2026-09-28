@@ -158,6 +158,18 @@ export function isSirusCommand(text: string, nativeCommands: readonly NativeComm
   return !isAutoSendable(text) && !isNativeCommand(text, nativeCommands);
 }
 
+// Commands that can run while another turn is active. Native /effort and
+// /fast keep their existing immediate behavior without becoming Sirus specs.
+const IMMEDIATE_COMMAND_NAMES = new Set([
+  'model', 'thinking', 'effort', 'fast', 'status', 'usage', 'mcp',
+  'config', 'permissions', 'agents', 'tasks',
+]);
+
+export function isImmediateCommand(text: string): boolean {
+  const name = /^\/(\S+)/.exec(text)?.[1];
+  return name !== undefined && IMMEDIATE_COMMAND_NAMES.has(name);
+}
+
 // Prefix matches while a command name is being typed ('/' alone matches
 // everything); none once args have begun or the text isn't a command at all.
 // Sirus's commands come first, then the vendors'.

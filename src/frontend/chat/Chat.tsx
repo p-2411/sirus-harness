@@ -28,6 +28,7 @@ import {
   commandMenu,
   commandRegistry,
   executeCommand,
+  isImmediateCommand,
   isSirusCommand,
   parseCommandLine,
   vendorCommandFor,
@@ -613,7 +614,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   // Commands are exactly what the background queue leaves for a mounted Chat.
   const send = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[], recipient = selected, to?: readonly string[], queuedMessage?: QueuedMessage): boolean => {
     const commandName = /^\/(\S+)/.exec(text)?.[1];
-    const immediate = commandName && ['model', 'thinking', 'effort', 'fast', 'status', 'usage', 'mcp', 'config', 'permissions', 'agents', 'tasks'].includes(commandName);
+    const immediate = isImmediateCommand(text);
     // An agent's own command goes to the agent on that command's vendor: the
     // selected one when it is, else another. One that only reports runs aside
     // at once, whatever the agents are doing, and is kept nowhere.
