@@ -67,6 +67,17 @@ describe('prompt history', () => {
     expect(history.at(-1)).toBe('prompt 1004');
   });
 
+  test('reads backward across chunk and UTF-8 boundaries without losing older valid prompts', () => {
+    const project = path.join(directory, 'project');
+    appendPromptHistory(project, 'oldest');
+    appendPromptHistory(project, `wide ${'é'.repeat(33_000)}`);
+    appendPromptHistory(project, 'newest');
+    const folder = path.join(directory, 'prompt-history');
+    const file = path.join(folder, readdirSync(folder)[0]!);
+    writeFileSync(file, `${readFileSync(file, 'utf8')}broken {\n`);
+    expect(readPromptHistory(project)).toEqual(['oldest', `wide ${'é'.repeat(33_000)}`, 'newest']);
+  });
+
   test('concurrent processes append without replacing another window’s prompts', async () => {
     const project = path.join(directory, 'project');
     const module = path.resolve(import.meta.dir, '../../src/persistence/promptHistory.ts');

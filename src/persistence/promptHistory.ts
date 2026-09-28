@@ -1,5 +1,5 @@
 import { createHash } from 'crypto';
-import { appendFileSync, mkdirSync, readFileSync, realpathSync } from 'fs';
+import { appendFileSync, closeSync, constants, fstatSync, mkdirSync, openSync, readSync, realpathSync } from 'fs';
 import path from 'path';
 import { dataDirectory } from '../dataDirectory';
 
@@ -15,20 +15,46 @@ function historyPath(directory: string): string {
 }
 
 export function readPromptHistory(directory: string): string[] {
+  let descriptor: number;
+  try { descriptor = openSync(historyPath(directory), constants.O_RDONLY | constants.O_NONBLOCK); }
+  catch { return []; }
   try {
-    const lines = readFileSync(historyPath(directory), 'utf8').split('\n');
+    const stat = fstatSync(descriptor);
+    if (!stat.isFile()) return [];
     const history: string[] = [];
-    for (let index = lines.length - 1; index >= 0 && history.length < 1_000; index--) {
+    const fragments: Buffer[] = [];
+    const accept = (start: Buffer) => {
       try {
-        const text: unknown = JSON.parse(lines[index]!);
+        const line = Buffer.concat([start, ...fragments.reverse()]).toString('utf8');
+        const text: unknown = JSON.parse(line);
         if (typeof text === 'string' && text.trim()) history.push(text);
       } catch {
         // A partial or damaged record does not hide the remaining prompts.
       }
+      fragments.length = 0;
+    };
+    const chunk = Buffer.alloc(64 * 1024);
+    let position = stat.size;
+    while (position > 0 && history.length < 1_000) {
+      const length = Math.min(chunk.length, position);
+      position -= length;
+      const bytes = readSync(descriptor, chunk, 0, length, position);
+      if (bytes !== length) break;
+      let end = bytes;
+      for (let index = bytes - 1; index >= 0; index--) {
+        if (chunk[index] !== 10) continue;
+        accept(chunk.subarray(index + 1, end));
+        if (history.length === 1_000) break;
+        end = index;
+      }
+      if (history.length < 1_000 && end > 0) fragments.push(Buffer.from(chunk.subarray(0, end)));
     }
+    if (position === 0 && history.length < 1_000 && fragments.length) accept(Buffer.alloc(0));
     return history.reverse();
   } catch {
     return [];
+  } finally {
+    closeSync(descriptor);
   }
 }
 
