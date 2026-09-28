@@ -277,13 +277,25 @@ struct BlockView: View {
         }
     }
 
-    private func prose(_ text: String) -> some View {
-        Text(inline(text))
+    @ViewBuilder private func prose(_ text: String) -> some View {
+        let rendered = inline(text)
+        let protectedCode = String(rendered.characters).contains("\u{2060}")
+        let label = Text(rendered)
             .font(compact ? .mono(12) : .system(size: 16))
             .lineSpacing(compact ? 2 : 4)
             .foregroundStyle(color)
-            .textSelection(.enabled)
-            .fixedSize(horizontal: false, vertical: true)
+        if protectedCode {
+            label
+                .textSelection(.disabled)
+                .contextMenu {
+                    Button("Copy") {
+                        UIPasteboard.general.string = String(rendered.characters)
+                            .replacingOccurrences(of: "\u{2060}", with: "")
+                    }
+                }
+        } else {
+            label.textSelection(.enabled)
+        }
     }
 
     // Inline markdown, with code spans in platinum and `@name` tinted when
@@ -291,6 +303,20 @@ struct BlockView: View {
     private func inline(_ source: String) -> AttributedString {
         var text = (try? AttributedString(markdown: source, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(source)
+        for run in Array(text.runs).reversed() where run.inlinePresentationIntent?.contains(.code) == true {
+            let code = String(text[run.range].characters)
+            var protected = ""
+            for index in code.indices {
+                let character = code[index]
+                let next = code.index(after: index)
+                protected.append(character)
+                if (character == "/" || character == "-" || character == "."),
+                   next < code.endIndex, !code[next].isWhitespace {
+                    protected.append("\u{2060}")
+                }
+            }
+            text.replaceSubrange(run.range, with: AttributedString(protected, attributes: run.attributes))
+        }
         for run in text.runs where run.inlinePresentationIntent?.contains(.code) == true {
             text[run.range].foregroundColor = Palette.platinum
             text[run.range].font = .mono(compact ? 12 : 14.5)
