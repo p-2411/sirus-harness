@@ -50,10 +50,10 @@ export async function createWorktree(
   } catch (error) {
     // A repository that cannot make one fails the spawn: running the worker
     // in the user's own checkout instead is not a fallback. Git may have
-    // made the branch, or part of the checkout, before it failed; `-d`
-    // deletes the branch only while it holds nothing HEAD lacks.
+    // made the branch, or part of the checkout, before it failed. Delete
+    // its ref only if nobody has moved it beyond the starting commit.
     await discardWorktree(project, directory);
-    await git(project, ['branch', '-d', branch]).catch(() => {});
+    await git(project, ['update-ref', '-d', `refs/heads/${branch}`, startHead]).catch(() => {});
     throw new Error(`Could not create a worktree for the worker: ${errorMessage(error)}`);
   }
   return { directory, branch, startHead };
@@ -84,7 +84,7 @@ export async function removeUnchangedWorktree(project: string, worktree: Worktre
     return false;
   }
   // Once removed, a failed branch cleanup must not report a retained path.
-  await git(project, ['branch', '-D', worktree.branch]).catch(() => undefined);
+  await git(project, ['update-ref', '-d', `refs/heads/${worktree.branch}`, worktree.startHead]).catch(() => undefined);
   return true;
 }
 

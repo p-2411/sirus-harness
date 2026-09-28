@@ -37,6 +37,7 @@ const {
 const { closeAllMemoryStores } = await import('../../src/memory/store');
 const { openSettings } = await import('../../src/persistence/settings');
 const { createWorktree, removeUnchangedWorktree } = await import('../../src/agent_runtime/tools/subagents/worktree');
+const checkpointStore = await import('../../src/checkpoints');
 
 type SubagentHost = import('../../src/agent_runtime/tools/types').SubagentHost;
 type SubagentSpawnCall = import('../../src/agent_runtime/tools/types').SubagentSpawnCall;
@@ -116,6 +117,34 @@ test('worktree setup falls back only outside Git and rejects unborn or invalid r
   mkdirSync(invalid);
   writeFileSync(join(invalid, '.git'), 'invalid gitfile');
   await expect(createWorktree(invalid, SESSION, 'invalid')).rejects.toThrow('Could not inspect the repository');
+});
+
+test('worktree cleanup preserves a branch that advances after the checkout is removed', async () => {
+  const project = join(testDirectory, 'project');
+  mkdirSync(project);
+  const git = (...args: string[]) => execFileSync('git', ['-C', project, ...args], { encoding: 'utf8' }).trim();
+  git('init', '-q');
+  git('config', 'user.name', 'Test');
+  git('config', 'user.email', 'test@example.com');
+  git('commit', '-q', '--allow-empty', '-m', 'base');
+  const worktree = await createWorktree(project, SESSION, 'advanced');
+  expect(worktree).not.toBeNull();
+  git('commit', '-q', '--allow-empty', '-m', 'later');
+  const advanced = git('rev-parse', 'HEAD');
+  const projectGit = checkpointStore.projectGit;
+  const remove = spyOn(checkpointStore, 'projectGit').mockImplementation(async (directory, args, timeout) => {
+    const result = await projectGit(directory, args, timeout);
+    if (args[0] === 'worktree' && args[1] === 'remove') {
+      git('update-ref', `refs/heads/${worktree!.branch}`, advanced);
+    }
+    return result;
+  });
+  try {
+    expect(await removeUnchangedWorktree(project, worktree!)).toBe(true);
+    expect(git('rev-parse', worktree!.branch)).toBe(advanced);
+  } finally {
+    remove.mockRestore();
+  }
 });
 
 // The MCP client as a runtime would be configured: the entry's URL and
