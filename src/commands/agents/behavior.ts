@@ -152,6 +152,41 @@ export function changeModel(
   };
 }
 
+// A word `/model` or `/thinking` takes for a thinking level.
+export function isThinkingArgument(word: string | undefined): boolean {
+  return word === 'default' || parseThinkingLevel(word) !== null;
+}
+
+function isModelReference(word: string | undefined): boolean {
+  if (word === undefined) return false;
+  try {
+    resolveModelReference(word);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// `/model`'s grammar in a prompt: whom it is for, the model, and a thinking
+// level after it, `/model @codex gpt-5.5 high`; `/model subagent` and the
+// model subagents run on.
+export function modelArgumentCount(words: readonly string[], session: CommandSession): number | undefined {
+  if (words.length === 0) return 0;
+  if (words[0] === 'subagent') return words[1] === 'default' || isModelReference(words[1]) ? 2 : 1;
+  const named = words[0].startsWith('@') || session.getParticipants()
+    .some(participant => participant.name.toLocaleLowerCase() === words[0].toLocaleLowerCase()) ? 1 : 0;
+  if (!isModelReference(words[named])) return undefined;
+  return named + 1 + (isThinkingArgument(words[named + 1]) ? 1 : 0);
+}
+
+// `/thinking`'s: an @agent, a level, or both.
+export function thinkingArgumentCount(words: readonly string[]): number | undefined {
+  if (words.length === 0) return 0;
+  const named = words[0].startsWith('@') ? 1 : 0;
+  if (isThinkingArgument(words[named])) return named + 1;
+  return named === 1 ? 1 : undefined;
+}
+
 // `/model subagent` reads or sets the model spawned subagents run on, a
 // setting of the session. `default` clears it: then each spawn's model
 // argument decides, else the agent definition's, else the spawning

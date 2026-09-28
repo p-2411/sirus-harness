@@ -1811,6 +1811,18 @@ describe('Session model', () => {
     expect(sirus.runtimes[0].prompts[1].text).toBe('@sirus @reviewer compare notes');
   });
 
+  test('a participant introduced mid-prompt starts at the thinking level written after its model', async () => {
+    const reviewer = bindScriptedRuntime(testModel, textTurn('reviewed'));
+    const session = new Session({ model: secondTestModel });
+    await session.sendMessage({
+      role: 'user',
+      content: [{ type: 'text', text: 'please ask @reviewer test-session-model high to check it' }],
+    });
+    expect(session.getThinkingLevel('reviewer')).toBe('high');
+    expect(reviewer.runtimes[0].prompts[0].text).toBe('please ask @reviewer to check it');
+    expect(session.getMessages()[0]?.creationModels).toEqual([{ start: 20, end: 44 }]);
+  });
+
   test('runs unique mentions in parallel and orders replies by their first output', async () => {
     let releaseFirst!: () => void;
     let releaseSecond!: () => void;

@@ -1,17 +1,20 @@
 import { requireKnownModel, servesModel, servableModelIds } from '../providers';
 import { modelNamed } from '../providers/catalog';
 import { SessionAgent, type Participant, type RuntimeHost } from '../agent';
-import { textOf, type Message, type PermissionMode, type ThinkingLevel } from '../types';
+import { parseThinkingLevel, textOf, type Message, type PermissionMode, type ThinkingLevel } from '../types';
 import { rootTextRanges, type RootTextRange } from '../../mentions';
 import type { SubagentRun } from '../tools/subagents';
 import type { ChangeFeed } from './changeFeed';
 import type { Transcript } from './transcript';
 
-// A participant named in a user prompt. New participants carry the model
-// that introduces them and the span of prompt text that named it.
+// A participant named in a prompt, and where the name is. New participants
+// carry the model that introduces them, any thinking level after it, and the
+// span of prompt text that named them.
 export interface Mention {
   name: string;
+  span: { start: number; end: number };
   model?: string;
+  thinkingLevel?: ThinkingLevel;
   modelSpan?: { start: number; end: number };
 }
 
@@ -41,6 +44,7 @@ const RESERVED_NAMES = new Set(['subagent']);
 
 interface MentionMatch {
   name: string;
+  start: number;
   // The prose range the mention was found in, and where the mention ends
   // inside it, so a caller can read what follows without rescanning.
   range: RootTextRange;
@@ -52,9 +56,26 @@ interface MentionMatch {
 function* scanMentions(text: string): Generator<MentionMatch> {
   for (const range of rootTextRanges(text)) {
     for (const match of range.text.matchAll(mentionPattern)) {
-      yield { name: match[1], range, localEnd: (match.index ?? 0) + match[0].length };
+      const index = match.index ?? 0;
+      yield { name: match[1], start: range.start + index, range, localEnd: index + match[0].length };
     }
   }
+}
+
+// The model written straight after a new name, as `/model` would take it
+// (`opus` for `opus[1m]`) and no looser, since this is prose, and a thinking
+// level the new participant starts at after it: `@reviewer opus high`.
+function configurationAfter({ range, localEnd }: MentionMatch): Pick<Mention, 'model' | 'thinkingLevel' | 'modelSpan'> | undefined {
+  const word = /^[ \t]+([^\s,;]+)/;
+  const after = range.text.slice(localEnd);
+  const modelMatch = word.exec(after);
+  const model = modelMatch ? modelNamed(modelMatch[1], servableModelIds()) : undefined;
+  if (!modelMatch || !model) return undefined;
+  const levelMatch = word.exec(after.slice(modelMatch[0].length));
+  const thinkingLevel = parseThinkingLevel(levelMatch?.[1]);
+  const start = range.start + localEnd;
+  const end = start + modelMatch[0].length + (thinkingLevel && levelMatch ? levelMatch[0].length : 0);
+  return { model, ...(thinkingLevel ? { thinkingLevel } : {}), modelSpan: { start, end } };
 }
 
 // Participants are the same participant whatever case they are written in.
@@ -110,14 +131,14 @@ export class ParticipantRoster {
     return this.agents.map(agent => agent.toParticipant());
   }
 
-  add(name: string, model: string): void {
+  add(name: string, model: string, level: ThinkingLevel | undefined = this.newLevel): void {
     const normalizedName = bareName(name);
     requireParticipantName(normalizedName);
     if (this.find(normalizedName)) {
       throw new Error(`Participant @${normalizedName} already exists`);
     }
     requireKnownModel(model);
-    this.agents.push(this.createAgent({ name: normalizedName, model, ...(this.newLevel ? { thinkingLevel: this.newLevel } : {}) }));
+    this.agents.push(this.createAgent({ name: normalizedName, model, ...(level ? { thinkingLevel: level } : {}) }));
     this.changes.notify();
   }
 
@@ -147,33 +168,24 @@ export class ParticipantRoster {
     }
   }
 
-  // Reads known @names and explicit @name model introductions. Other @words
-  // are ordinary prose and leave the participant list alone.
+  // Reads known @names and explicit @name model introductions, in the order
+  // written, wherever they are in the prompt's prose. Other @words are
+  // ordinary prose and leave the participant list alone, as do the words
+  // after a known name.
   readMentions(text: string): Mention[] {
     const mentions: Mention[] = [];
     const seen = new Set<string>();
-    for (const { name, range, localEnd } of scanMentions(text)) {
-      const key = keyOf(name);
+    for (const match of scanMentions(text)) {
+      const key = keyOf(match.name);
       if (seen.has(key)) continue;
-      const existing = this.find(name);
-      if (existing) {
-        seen.add(key);
-        mentions.push({ name: existing.name });
-        continue;
-      }
-
-      // The model as `/model` would take it (`opus` for `opus[1m]`), and no
-      // looser, since this is prose. No thinking level follows it: the new
-      // participant runs at its model's default until one is chosen.
-      const modelMatch = /^([ \t]+)([^\s,;]+)/.exec(range.text.slice(localEnd));
-      const model = modelMatch ? modelNamed(modelMatch[2], servableModelIds()) : undefined;
-      if (!modelMatch || !model) continue;
+      const existing = this.find(match.name);
+      const introduction = existing ? undefined : configurationAfter(match);
+      if (!existing && !introduction) continue;
       seen.add(key);
-      const modelStart = range.start + localEnd;
       mentions.push({
-        name,
-        model,
-        modelSpan: { start: modelStart, end: modelStart + modelMatch[0].length },
+        name: existing?.name ?? match.name,
+        span: { start: match.start, end: match.range.start + match.localEnd },
+        ...introduction,
       });
     }
     return mentions;
@@ -193,7 +205,7 @@ export class ParticipantRoster {
       }
     }
     for (const mention of mentions) {
-      if (!this.find(mention.name)) this.add(mention.name, mention.model!);
+      if (!this.find(mention.name)) this.add(mention.name, mention.model!, mention.thinkingLevel);
     }
     return mentions.map(mention => this.find(mention.name)!);
   }

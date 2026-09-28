@@ -27,11 +27,11 @@ import { historyParts } from './history';
 import { InputFeedback } from './InputRows';
 import {
   commandMenu,
-  commandRegistry,
   executeCommand,
   isImmediateCommand,
-  isSirusCommand,
   parseCommandLine,
+  promptContent,
+  splitPrompt,
   vendorCommandFor,
   type CommandMenuEntry,
   type CommandMenuItem,
@@ -42,6 +42,7 @@ import { parseMouseWheel } from '../interaction/mouse';
 import { SIDEBAR_WIDTH } from '../Sidebar';
 import { useSelectionRegion } from '../interaction/useTextSelection';
 import type { Feedback } from '../../commands/feedback';
+import { isThinkingArgument } from '../../commands/agents/behavior';
 import { participantColorMap, type ParticipantColors } from '../MentionText';
 import { isAbortError, TurnCancelledError } from '../../abort';
 import {
@@ -84,6 +85,10 @@ export function ChatHeader({ session, activity = new Map(), width = 100, onSelec
     </Box>
   );
 }
+
+// What running a command came to: it failed, opened its menu, or ran, with
+// what it said once it had.
+type CommandOutcome = { status: 'failed' } | { status: 'menu' } | { status: 'ran'; feedback?: Feedback };
 
 interface AgentView {
   history: HistoryPosition;
@@ -543,11 +548,14 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   // command (e.g. shift+tab's /permissions, fired while /login is still
   // awaiting the browser) must never touch, let alone clear, another
   // command's still-live abort handle. A typed command also hands over its
-  // arguments as they were typed.
-  const runCommand = (command: string, args: readonly string[], recipient = selected, argumentText?: string) => {
-    // Agent-specific pickers bake their destination into the resulting command.
+  // arguments as they were typed. What it came to tells a prompt the command
+  // was written in whether it can go on.
+  const runCommand = (command: string, args: readonly string[], recipient = selected, argumentText?: string): CommandOutcome => {
+    // Agent-specific pickers bake their destination into the resulting
+    // command, as does a model, with or without a level, named alone.
+    const unnamed = args.length === 1 || (command === 'model' && args.length === 2 && isThinkingArgument(args[1]));
     if (['model', 'thinking', 'effort', 'fast'].includes(command)
-      && (args.length === 0 || (args.length === 1 && !args[0].startsWith('@') && args[0] !== 'subagent'))) {
+      && (args.length === 0 || (unnamed && !args[0].startsWith('@') && args[0] !== 'subagent'))) {
       args = [`@${recipient}`, ...args];
     }
     setFeedback(null);
@@ -558,11 +566,11 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       menu = commandMenu(command, args, currSession, controller.signal);
     } catch (e) {
       setFeedback({ kind: 'error', text: e instanceof Error ? e.message : 'Something went wrong.' });
-      return;
+      return { status: 'failed' };
     }
     if (menu) {
       openMenu(menu, controller);
-      return;
+      return { status: 'menu' };
     }
     let result;
     try {
@@ -604,7 +612,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       });
     } catch (e) {
       setFeedback({ kind: 'error', text: e instanceof Error ? e.message : 'Something went wrong.' });
-      return;
+      return { status: 'failed' };
     }
     if (result instanceof Promise) {
       // a long-running command (browser login) holds the input like a turn
@@ -626,7 +634,9 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         });
     } else if (result) {
       setFeedback(result);
+      return { status: 'ran', feedback: result };
     }
+    return { status: 'ran' };
   };
 
   // A vendor command that only reports runs on a throwaway fork of the
@@ -653,10 +663,52 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       });
   };
 
-  // A command leaves any attachments waiting for the next real message.
-  // Commands are exactly what the background queue leaves for a mounted Chat.
+  // A prompt's own commands run first, in the order written (see
+  // splitPrompt), and what is left of it then goes to the agents. Commands
+  // that must wait for the turn hold the prompt back with them, each queued
+  // as an item of its own so none is read again with another's words. A
+  // command that fails keeps the draft; one that opens its menu leaves the
+  // prompt there until the choice is made. A command leaves any attachments
+  // waiting for the next real message. Commands are exactly what the
+  // background queue leaves for a mounted Chat.
   const send = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[], recipient = selected, to?: readonly string[], queuedMessage?: QueuedMessage): boolean => {
-    const commandName = /^\/(\S+)/.exec(text)?.[1];
+    const typed = content ? content.flatMap(block => block.type === 'text' ? [block.text] : []).join('') : text;
+    const parts = splitPrompt(typed, currSession.getNativeCommands(recipient), currSession);
+    const prompt = parts.cuts.length > 0 ? parts.prompt : text;
+    const promptBlocks = content && parts.cuts.length > 0 ? promptContent(content, parts) : content;
+    if (parts.commands.length === 0) return sendToAgents(prompt, images, promptBlocks, recipient, to, queuedMessage);
+
+    const waits = (commandAbort.current !== null || currSession.getStatus() === 'working')
+      && !parts.commands.every(command => isImmediateCommand(command.text));
+    if (waits) {
+      if (queuedMessage) return true;
+      for (const command of parts.commands) queue(command.text, [], undefined, recipient);
+      if (prompt) queue(prompt, images, promptBlocks, recipient);
+      return true;
+    }
+    if (queuedMessage) currSession.takeQueuedMessages([queuedMessage.id]);
+    let said: Feedback | undefined;
+    for (const command of parts.commands) {
+      const outcome = runCommand(command.name, command.args, recipient, command.argumentText);
+      if (outcome.status === 'failed') return !prompt;
+      if (outcome.status === 'menu') {
+        if (!prompt) return true;
+        currSession.setInputContent(prompt, recipient);
+        return false;
+      }
+      said = outcome.feedback ?? said;
+    }
+    if (!prompt) return true;
+    const sent = sendToAgents(prompt, images, promptBlocks, recipient, to);
+    // Sending clears the feedback line; what the commands said stays on it.
+    if (said) setFeedback(said);
+    return sent;
+  };
+
+  // Text with no command of Sirus's in it. An agent's own command, or a
+  // name nobody knows, goes out as a message and the agent's harness makes of
+  // it what it will.
+  const sendToAgents = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[], recipient = selected, to?: readonly string[], queuedMessage?: QueuedMessage): boolean => {
     const immediate = isImmediateCommand(text);
     // An agent's own command goes to the agent on that command's vendor: the
     // selected one when it is, else another. One that only reports runs aside
@@ -673,33 +725,23 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     const routed = currSession.messageForParticipant({ role: 'user', ...(addressed ? { to: addressed } : {}),
       content: content ?? [...images, { type: 'text', text }] }, recipient);
     const targetsBusy = routed.to?.some(name => currSession.isParticipantWorking(name)) ?? false;
-    const taskCommand = commandName && commandRegistry.some(spec => spec.name === commandName);
-    if ((targetsBusy || commandAbort.current || (taskCommand && currSession.getStatus() === 'working')) && !immediate) {
+    if ((targetsBusy || commandAbort.current) && !immediate) {
       if (!queuedMessage) queue(text, images, content, recipient);
       return true;
     }
-    // A Sirus command runs here. Anything else that starts with a slash, an
-    // agent's own command or a name nobody knows, goes out as a message and
-    // the agent's harness makes of it what it will.
-    const command = isSirusCommand(text, currSession.getNativeCommands(recipient)) ? parseCommandLine(text) : null;
-    if (command && commandRegistry.some(spec => spec.name === command.name)) {
-      if (queuedMessage) currSession.takeQueuedMessages([queuedMessage.id]);
-      runCommand(command.name, command.args, recipient, command.rest);
-    } else {
-      const previousLength = currSession.getMessages().length;
-      const previousDraft = currSession.getInputContent(recipient);
-      deliver(routed, images, queuedMessage)
-        .catch((caught: unknown) => {
-          if (currSession.getMessages().length === previousLength && !currSession.getInputContent(recipient)) {
-            currSession.setInputContent(previousDraft, recipient);
-          }
-          setFeedback(isAbortError(caught)
-            ? null
-            : { kind: 'error', text: caught instanceof Error ? caught.message : 'Something went wrong.' });
-        });
-    }
+    const previousLength = currSession.getMessages().length;
+    const previousDraft = currSession.getInputContent(recipient);
+    deliver(routed, images, queuedMessage)
+      .catch((caught: unknown) => {
+        if (currSession.getMessages().length === previousLength && !currSession.getInputContent(recipient)) {
+          currSession.setInputContent(previousDraft, recipient);
+        }
+        setFeedback(isAbortError(caught)
+          ? null
+          : { kind: 'error', text: caught instanceof Error ? caught.message : 'Something went wrong.' });
+      });
     return true;
-  }
+  };
 
   // The user's message to the agents, however it was started: typed, or sent
   // by a command such as /init. Settles when the turn it starts is over.
