@@ -24,6 +24,14 @@ enum HostScanner {
             case .none(let host): "No Sirus is listening on \(host). Run /rc in a Sirus session on your Mac, and check Tailscale is on here."
             }
         }
+
+        // A name that was not reached, or that turned the phone away, is
+        // almost always Tailscale: off on one side, or signed in as someone
+        // else. A name that did not parse is only a typo.
+        var concernsTailscale: Bool {
+            if case .invalid = self { return false }
+            return true
+        }
     }
 
     // What a person might type or paste: a bare name, a URL, a name with a

@@ -10,6 +10,11 @@ struct RootView: View {
     // reaches the view outside the animation it was made in, so the sidebar
     // would snap instead of springing.
     @State private var sidebarExpanded = UserDefaults.standard.bool(forKey: "sidebarExpanded")
+    @State private var menuOpen = false
+
+    // A menu over the conversation takes its whole width, so the rail steps
+    // aside until it closes.
+    private var railAside: Bool { menuOpen && !sidebarExpanded }
 
     var body: some View {
         Group {
@@ -18,7 +23,7 @@ struct RootView: View {
             } else {
                 ZStack {
                     if let id = store.openSession {
-                        ConversationView(store: store, sessionId: id)
+                        ConversationView(store: store, sessionId: id, menuOpen: $menuOpen)
                             .id(id)
                             .transition(.opacity)
                     } else {
@@ -26,8 +31,11 @@ struct RootView: View {
                     }
                     Sidebar(store: store, selected: store.openSession, expanded: $sidebarExpanded)
                         .ignoresSafeArea(.keyboard)
+                        .opacity(railAside ? 0 : 1)
+                        .allowsHitTesting(!railAside)
                 }
                 .animation(.smooth(duration: 0.25), value: store.openSession)
+                .animation(.smooth(duration: 0.2), value: railAside)
             }
         }
         .background(Palette.ground.ignoresSafeArea())
@@ -60,6 +68,11 @@ struct RootView: View {
 private struct Lobby: View {
     let store: RemoteStore
 
+    // Unreachable is nearly always Tailscale, so what to check comes with it.
+    private var helps: Bool {
+        store.link == .offline && (store.problem?.concernsTailscale ?? true)
+    }
+
     var body: some View {
         VStack(spacing: 12) {
             Image("Horse")
@@ -76,7 +89,17 @@ private struct Lobby: View {
                     .font(.system(size: 15))
                     .foregroundStyle(Palette.muted)
             }
-            if store.link != .connecting {
+            if helps {
+                ConnectionHelp()
+                    .frame(maxWidth: 400)
+                    .padding(.top, 10)
+                    .transition(.opacity)
+            }
+            if store.link == .connecting {
+                ProgressView()
+                    .tint(Palette.silver)
+                    .padding(.top, 8)
+            } else {
                 Button { Task { await store.rescan() } } label: {
                     Label(store.link == .offline ? "Try Again" : "Look Again", systemImage: "arrow.clockwise")
                         .font(.system(size: 15, weight: .medium))
@@ -84,11 +107,11 @@ private struct Lobby: View {
                         .frame(minHeight: 36)
                 }
                 .buttonStyle(.glass)
-                .padding(.top, 12)
+                .padding(.top, helps ? 4 : 12)
             }
         }
         .multilineTextAlignment(.center)
-        .padding(.horizontal, 32)
+        .padding(.horizontal, 24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(.smooth, value: store.link)
     }
@@ -101,11 +124,17 @@ private struct Lobby: View {
         }
     }
 
+    // The checklist says what to try; a Mac that turned the phone away
+    // also says so.
     private var detail: String? {
         switch store.link {
-        case .connecting: nil
-        case .offline: store.problem ?? "Check that Sirus is running on your Mac and Tailscale is on here."
-        case .live: "Run `/rc` in a Sirus session on your Mac."
+        case .connecting:
+            return nil
+        case .offline:
+            if case .refused? = store.problem { return store.problem?.errorDescription }
+            return helps ? nil : store.problem?.errorDescription
+        case .live:
+            return "Run `/rc` in a Sirus session on your Mac."
         }
     }
 }

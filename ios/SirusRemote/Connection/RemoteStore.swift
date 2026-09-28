@@ -9,7 +9,9 @@ import Observation
     private(set) var host = UserDefaults.standard.string(forKey: "host") ?? ""
     private(set) var clients: [RemoteClient] = []
     private(set) var scanning = false
-    private(set) var problem: String?
+    // Why the last look for Sirus failed, kept whole so the screens can say
+    // what to check rather than only that it failed.
+    private(set) var problem: HostScanner.Failure?
     var openSession: String?
 
     // Observed, so a tab chosen in the conversation switches it at once.
@@ -57,7 +59,7 @@ import Observation
     @discardableResult
     func connect(to raw: String) async -> Bool {
         guard let host = HostScanner.normalize(raw) else {
-            problem = HostScanner.Failure.invalid.errorDescription
+            problem = .invalid
             return false
         }
         scanning = true
@@ -77,7 +79,7 @@ import Observation
             Push.register(asking: true)
             return true
         } catch {
-            problem = error.errorDescription
+            problem = error
             return false
         }
     }

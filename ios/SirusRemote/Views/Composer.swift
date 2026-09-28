@@ -1,10 +1,13 @@
 import SwiftUI
 
 // Command feedback, or why a message did not go, shown a moment over the
-// composer.
+// composer: long enough to read, then out of the way. A failure stays a
+// little longer.
 struct Note: Equatable {
     let text: String
     let failed: Bool
+
+    static func duration(failed: Bool) -> Double { failed ? 6 : 3.5 }
 }
 
 // The input bar, drawn on the glass the conversation gives it. While the
@@ -106,7 +109,7 @@ struct Composer: View {
         let shown = Note(text: text, failed: failed)
         note = shown
         Task {
-            try? await Task.sleep(for: .seconds(failed ? 6 : 8))
+            try? await Task.sleep(for: .seconds(Note.duration(failed: failed)))
             if note == shown { note = nil }
         }
     }

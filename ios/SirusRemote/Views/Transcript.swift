@@ -49,7 +49,17 @@ struct Transcript: View {
             if loading {
                 Pulse(color: Palette.subtle, size: 7)
             } else if rows.isEmpty {
-                Text("Nothing here yet.").font(.system(size: 15)).foregroundStyle(Palette.subtle)
+                VStack(spacing: 12) {
+                    Image("Horse")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 44)
+                        .foregroundStyle(Palette.line)
+                    Text("No messages yet")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(Palette.muted)
+                }
+                .accessibilityElement(children: .combine)
             }
         }
         .overlay(alignment: .bottomTrailing) {
@@ -103,7 +113,14 @@ struct RowView: View, Equatable {
             if labelled { label }
             switch row.kind {
             case .user:
+                // What the user sent, on a quiet bubble, so a right-aligned
+                // paragraph reads as one message rather than loose lines.
                 Blocks(blocks: row.blocks, names: names, color: Palette.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background {
+                        RoundedRectangle(cornerRadius: 20, style: .continuous).fill(.white.opacity(0.08))
+                    }
                     .padding(.leading, 40)
             case .tool:
                 if let tool = row.tool { ToolLine(tool: tool, names: names) }
@@ -352,16 +369,40 @@ struct BlockView: View {
 }
 
 // Code as a block of mono, scrolling sideways rather than wrapping. A diff's
-// added and removed lines take the TUI's green and red.
+// added and removed lines take the TUI's green and red. Outside a tool's
+// detail, the block names its language and has a copy button, since
+// selecting a long block by hand is fiddly on a phone.
 private struct Code: View {
     let text: String
     let language: String?
     let compact: Bool
+    @State private var copied = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if let language, !language.isEmpty, !compact {
-                Text(language).font(.mono(10)).foregroundStyle(Palette.subtle)
+        VStack(alignment: .leading, spacing: 4) {
+            if !compact {
+                HStack(spacing: 8) {
+                    if let language, !language.isEmpty {
+                        Text(language).font(.mono(10)).foregroundStyle(Palette.subtle)
+                    }
+                    Spacer(minLength: 0)
+                    Button(action: copy) {
+                        HStack(spacing: 5) {
+                            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                                .font(.system(size: 10, weight: .semibold))
+                                .contentTransition(.symbolEffect(.replace))
+                            Text(copied ? "Copied" : "Copy")
+                        }
+                        .font(.mono(10))
+                        .foregroundStyle(copied ? Palette.platinum : Palette.subtle)
+                        .padding(.leading, 16)
+                        .frame(minHeight: 28)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(RowPress())
+                    .accessibilityLabel(copied ? "Copied" : "Copy code")
+                }
+                .sensoryFeedback(.success, trigger: copied) { _, now in now }
             }
             ScrollView(.horizontal) {
                 Text(highlighted)
@@ -376,6 +417,15 @@ private struct Code: View {
         }
         .padding(.leading, 14)
         .overlay(alignment: .leading) { Rectangle().fill(Palette.line).frame(width: 2) }
+    }
+
+    private func copy() {
+        UIPasteboard.general.string = text
+        copied = true
+        Task {
+            try? await Task.sleep(for: .seconds(1.6))
+            copied = false
+        }
     }
 
     private var highlighted: AttributedString {
