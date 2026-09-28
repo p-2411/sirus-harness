@@ -15,7 +15,7 @@ struct Sidebar: View {
     let store: RemoteStore
     let selected: String?
     @Binding var expanded: Bool
-    @State private var seen: [String: Double] = [:]
+    @State private var seen: [String: Int] = [:]
     @GestureState private var drag: CGFloat = 0
 
     var body: some View {
@@ -45,13 +45,14 @@ struct Sidebar: View {
         .sensoryFeedback(.selection, trigger: selected)
         .sensoryFeedback(.impact(weight: .light), trigger: expanded)
         .onChange(of: store.sessions, initial: true) { _, sessions in
-            // A session is unread once it moved on while another was open.
+            // As in the TUI's sidebar: a session is unread once an agent
+            // wrote something while another session was open.
             for session in sessions where seen[session.id] == nil || session.id == selected {
-                seen[session.id] = session.lastActivity
+                seen[session.id] = session.assistantVersion
             }
         }
         .onChange(of: selected) { _, id in
-            if let id, let session = store.session(id) { seen[id] = session.lastActivity }
+            if let id, let session = store.session(id) { seen[id] = session.assistantVersion }
         }
     }
 
@@ -114,6 +115,7 @@ struct Sidebar: View {
                     ForEach(store.sessions) { session in
                         Button { select(session.id) } label: {
                             StatusMark(mark: mark(session))
+                                .opacity(reachable(session) ? 1 : 0.35)
                                 .frame(width: 36, height: 36)
                                 .background {
                                     if session.id == selected { Circle().fill(.white.opacity(0.13)) }
@@ -187,7 +189,7 @@ struct Sidebar: View {
     private func row(_ session: RemoteSession) -> some View {
         let current = session.id == selected
         return HStack(alignment: .top, spacing: 12) {
-            StatusMark(mark: mark(session)).frame(width: 20, height: 22)
+            StatusMark(mark: mark(session)).opacity(reachable(session) ? 1 : 0.35).frame(width: 20, height: 22)
             VStack(alignment: .leading, spacing: 4) {
                 Text(session.name)
                     .font(.system(size: 16, weight: current ? .semibold : .regular))
@@ -216,15 +218,20 @@ struct Sidebar: View {
         .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
-    // A session whose Sirus can't be reached is an error, whatever it last
-    // said; otherwise as sessionStatusAppearance: waiting on the user, then
-    // working, then unread or idle.
+    // As sessionStatusAppearance: waiting on the user, then working or a
+    // failed turn, then unread or idle.
     private func mark(_ session: RemoteSession) -> SessionMark {
-        if store.client(for: session.id)?.link == .offline { return .error }
         if session.needsYou { return .attention }
         if session.working { return .working }
-        let unread = session.id != selected && session.lastActivity > seen[session.id, default: .infinity]
+        if session.failed { return .error }
+        let unread = session.id != selected && session.assistantVersion > seen[session.id, default: .max]
         return unread ? .unread : .idle
+    }
+
+    // A session whose Sirus can't be reached keeps its last mark, faded:
+    // the TUI has no such state, and the link line says why.
+    private func reachable(_ session: RemoteSession) -> Bool {
+        store.client(for: session.id)?.link != .offline
     }
 
     private func select(_ id: String) {
@@ -247,7 +254,7 @@ enum SessionMark: CustomStringConvertible {
         case .unread: "new activity"
         case .working: "working"
         case .attention: "needs you"
-        case .error: "unreachable"
+        case .error: "last turn failed"
         }
     }
 }

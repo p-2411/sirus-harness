@@ -209,13 +209,17 @@ export function viewOf(session: Session, participant: string): ViewFrame {
   };
 }
 
-// A session as the sessions list shows it.
+// A session as the sessions list shows it. `status` and `assistantVersion`
+// are what the TUI's sidebar marks come from: the phone applies the same
+// rules, unread included, for the session it has open.
 export function sessionEntry(session: Session) {
   return {
     id: session.getId(), name: session.getName(),
     directory: session.getDirectory().replace(homedir(), '~'),
+    status: session.getStatus(),
     working: session.getStatus() === 'working',
     needsYou: pendingApprovals(session.getId()).length + pendingQuestions(session.getId()).length > 0,
     lastActivity: session.getLastActivity(),
+    assistantVersion: session.getAssistantVersion(),
   };
 }

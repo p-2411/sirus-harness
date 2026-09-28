@@ -22,8 +22,12 @@ struct RemoteSession: Decodable, Identifiable, Equatable {
     let name: String
     let directory: String
     let working: Bool
+    // The session's last turn failed: the TUI's red mark.
+    let failed: Bool
     let needsYou: Bool
     let lastActivity: Double
+    // Grows with every agent output; the sidebar's unread rule reads it.
+    let assistantVersion: Int
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
@@ -31,8 +35,10 @@ struct RemoteSession: Decodable, Identifiable, Equatable {
         name = c.take("name") ?? "Untitled"
         directory = c.take("directory") ?? ""
         working = c.take("working") ?? false
+        failed = (c.take("status") as String?) == "error"
         needsYou = c.take("needsYou") ?? false
         lastActivity = c.take("lastActivity") ?? 0
+        assistantVersion = c.take("assistantVersion") ?? 0
     }
 }
 

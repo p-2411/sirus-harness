@@ -87,8 +87,10 @@ Server → client:
 { "type": "sessions", "focus": { "sessionId": "…", "participant": "sirus", "at": 1759000000000 } | null,
   "sessions": [ {
     "id": "…", "name": "Fix login redirect", "directory": "~/code/app",
+    "status": "idle" | "working" | "error",  // the session's status; error: its last turn failed
     "working": true, "needsYou": false,      // needsYou: an approval or question is waiting
-    "lastActivity": 1759000000000 } ] }
+    "lastActivity": 1759000000000,
+    "assistantVersion": 42 } ] }             // grows with every agent output; unread = it grew while another session was open, as in the TUI sidebar
 
 // Sent after `subscribe`, then on every change (throttled 100 ms).
 // `rows` is an upsert list: new ids append, known ids replace. `removed` drops ids.
