@@ -7,6 +7,7 @@ import { pendingQuestions, resolveQuestion, subscribeQuestions, type QuestionAns
 import { commandMenu, executeCommand, type PromptCommand } from '../commands/registry';
 import { commandArgs, commandsWait, queueDraft, queueInput, routeInput, splitDraft } from '../frontend/chat/send';
 import { APNS_ENVIRONMENTS, openSettings } from '../persistence/settings';
+import { subscribeSubagents } from '../agent_runtime/tools/subagents';
 import { SIRUS_VERSION } from '../version';
 import { sessionEntry, viewOf } from './view';
 
@@ -226,6 +227,11 @@ subscribePermissions(() => {
   for (const socket of sockets) viewChanged(socket);
 });
 subscribeQuestions(() => {
+  listChanged();
+  for (const socket of sockets) viewChanged(socket);
+});
+// A worker starting or ending changes who is working.
+subscribeSubagents(() => {
   listChanged();
   for (const socket of sockets) viewChanged(socket);
 });

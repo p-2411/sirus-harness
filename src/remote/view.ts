@@ -196,7 +196,7 @@ export function viewOf(session: Session, participant: string): ViewFrame {
         const vendor = vendorOf(agent.model);
         return {
           name: agent.name, model: agent.model, ...(vendor ? { vendor: VENDOR_INFO[vendor].displayName } : {}),
-          working: session.isParticipantWorking(agent.name), needsYou: needsYou(session, agent.name),
+          working: session.isParticipantWorking(agent.name) || session.hasWorkingWorkers(agent.name), needsYou: needsYou(session, agent.name),
         };
       }),
       status: statusOf(session, participant, messages),
@@ -209,15 +209,22 @@ export function viewOf(session: Session, participant: string): ViewFrame {
   };
 }
 
+// A directory under the home directory as `~/…`; only a leading match counts.
+function homeRelative(directory: string): string {
+  const home = homedir();
+  return directory === home || directory.startsWith(`${home}/`) ? `~${directory.slice(home.length)}` : directory;
+}
+
 // A session as the sessions list shows it. `status` and `assistantVersion`
 // are what the TUI's sidebar marks come from: the phone applies the same
 // rules, unread included, for the session it has open.
 export function sessionEntry(session: Session) {
   return {
     id: session.getId(), name: session.getName(),
-    directory: session.getDirectory().replace(homedir(), '~'),
+    directory: homeRelative(session.getDirectory()),
     status: session.getStatus(),
-    working: session.getStatus() === 'working',
+    // A running worker counts, as in the TUI's sidebar and header.
+    working: session.getStatus() === 'working' || session.hasWorkingWorkers(),
     needsYou: pendingApprovals(session.getId()).length + pendingQuestions(session.getId()).length > 0,
     lastActivity: session.getLastActivity(),
     assistantVersion: session.getAssistantVersion(),
