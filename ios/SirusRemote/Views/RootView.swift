@@ -1,4 +1,7 @@
 import SwiftUI
+#if DEBUG
+import os
+#endif
 
 // Setup until a Mac is known; then one screen, the open session's
 // conversation with the sidebar floating over its leading edge. Links from
@@ -46,6 +49,11 @@ struct RootView: View {
                 }
                 .animation(.smooth(duration: 0.25), value: store.openSession)
                 .animation(.smooth(duration: 0.2), value: railAside)
+                #if DEBUG
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
+                    screensLog.notice("\("layout: root \(frame), rail aside \(railAside)", privacy: .public)")
+                }
+                #endif
             }
         }
         .background(Palette.ground.ignoresSafeArea())

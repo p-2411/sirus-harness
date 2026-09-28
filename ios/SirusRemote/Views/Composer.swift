@@ -51,14 +51,20 @@ struct Composer: View {
         #if DEBUG
         .task {
             // Screenshot hooks: -composerDraft <text> and -composerFocused YES.
-            // Focus asked for before the field is on screen raises the
-            // keyboard without the focus state hearing of it, so the menu
-            // would never open; a tap never comes that early.
+            // Focus asked for while the screen is still settling can raise
+            // the keyboard without the focus state hearing of it, and then
+            // the menu never opens; a tap never comes that early. So it
+            // waits, and asks again until the state has it.
             let preset = UserDefaults.standard.string(forKey: "composerDraft")
             if let preset { draft = preset }
             if UserDefaults.standard.bool(forKey: "composerFocused") {
-                try? await Task.sleep(for: .milliseconds(700))
-                focus.wrappedValue = true
+                for _ in 0..<8 {
+                    try? await Task.sleep(for: .milliseconds(700))
+                    if focus.wrappedValue { break }
+                    focus.wrappedValue = false
+                    await Task.yield()
+                    focus.wrappedValue = true
+                }
             }
             if preset != nil {
                 await Task.yield()

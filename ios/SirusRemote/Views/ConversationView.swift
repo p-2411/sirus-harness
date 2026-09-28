@@ -3,7 +3,7 @@ import SwiftUI
 import os
 
 // What the screenshot runs read back from the simulator's log.
-private let screensLog = Logger(subsystem: "com.sirus.remote", category: "screens")
+let screensLog = Logger(subsystem: "com.sirus.remote", category: "screens")
 #endif
 
 // One participant's conversation in a session, laid out as the TUI lays it
@@ -261,7 +261,12 @@ private struct Conversation: View {
         }
         .padding(.horizontal, 12)
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { barHeight = $0 }
-        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { chromeTop = $0 }
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: {
+            chromeTop = $0
+            #if DEBUG
+            screensLog.notice("layout: bar starts at \(Double($0))")
+            #endif
+        }
         .animation(.spring(duration: 0.4, bounce: 0.14), value: client.requests.first?.id)
         .animation(.smooth(duration: 0.3), value: working || status != nil)
         .animation(.smooth(duration: 0.3), value: client.link)

@@ -1,4 +1,7 @@
 import SwiftUI
+#if DEBUG
+import os
+#endif
 
 // src/frontend/Sidebar.tsx on the phone, floating over the conversation.
 // Collapsed, a slim glass rail on the leading edge with one mark per session;
@@ -56,9 +59,20 @@ struct Sidebar: View {
             pane
                 .padding(.leading, Self.inset)
                 .padding(.top, 2)
+                #if DEBUG
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
+                    let line = "layout: pane \(frame), rail end \(railEnd), sidebar top \(top)"
+                    screensLog.notice("\(line, privacy: .public)")
+                }
+                #endif
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { top = $0 }
+        #if DEBUG
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
+            screensLog.notice("\("layout: sidebar \(frame)", privacy: .public)")
+        }
+        #endif
         .sensoryFeedback(.selection, trigger: selected)
         .sensoryFeedback(.impact(weight: .light), trigger: expanded)
         // Forgetting the Mac leaves only setup, and connecting again needs
