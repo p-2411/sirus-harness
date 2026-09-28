@@ -116,8 +116,16 @@ scene() {
   local udid=$1 label=$2 name=$3 mock_scene=$4 wait=$5
   shift 5
   wanted "$name" || return 0
+  # The last scene's app, gone before this stand-in starts, can't reach it.
+  limit 30 xcrun simctl terminate "$udid" "$bundle" >/dev/null 2>&1 || true
   start_mock "$mock_scene"
   launch "$udid" -host 127.0.0.1 "$@"
+  # A cold start can take a while, so the scene's wait starts once the app
+  # has asked the stand-in something, or after ten seconds.
+  for _ in $(seq 50); do
+    grep -q '"type"' "$out/../mock.log" 2>/dev/null && break
+    sleep 0.2
+  done
   sleep "$wait"
   shot "$udid" "$label-$name"
   stop_mock
@@ -168,10 +176,6 @@ run() {
   scene "$udid" "$label" stress stress 7
   scene "$udid" "$label" question-keyboard question 8 -composerFocused YES
   scene "$udid" "$label" note-long conversation 5 -sendOnLaunch /long-note
-  # The same scenes with the sidebar's frames outlined, to see what hides it.
-  scene "$udid" "$label" approval-outlined approval 6 -debugLayout YES
-  scene "$udid" "$label" question-outlined question 6 -debugLayout YES
-  scene "$udid" "$label" conversation-outlined conversation 6 -debugLayout YES
 
   # Offline: the Mac goes away while the conversation is on screen.
   if wanted offline; then

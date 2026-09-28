@@ -1,7 +1,4 @@
 import SwiftUI
-#if DEBUG
-import os
-#endif
 
 // src/frontend/Sidebar.tsx on the phone, floating over the conversation.
 // Collapsed, a slim glass rail on the leading edge with one mark per session;
@@ -59,21 +56,9 @@ struct Sidebar: View {
             pane
                 .padding(.leading, Self.inset)
                 .padding(.top, 2)
-                #if DEBUG
-                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
-                    let line = "layout: pane \(frame), rail end \(railEnd), sidebar top \(top)"
-                    screensLog.notice("\(line, privacy: .public)")
-                }
-                #endif
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { top = $0 }
-        #if DEBUG
-        .overlay { if UserDefaults.standard.bool(forKey: "debugLayout") { Rectangle().stroke(.yellow, lineWidth: 3) } }
-        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
-            screensLog.notice("\("layout: sidebar \(frame)", privacy: .public)")
-        }
-        #endif
         .sensoryFeedback(.selection, trigger: selected)
         .sensoryFeedback(.impact(weight: .light), trigger: expanded)
         // Forgetting the Mac leaves only setup, and connecting again needs
@@ -125,7 +110,7 @@ struct Sidebar: View {
             .padding([.top, .horizontal], expanded ? Self.cornerInset : 0)
             if expanded {
                 panel.transition(.opacity)
-            } else if !store.sessions.isEmpty {
+            } else if railMarks > 0 {
                 rail.transition(.opacity)
             }
         }
@@ -135,9 +120,6 @@ struct Sidebar: View {
         .frame(maxHeight: expanded ? .infinity : nil, alignment: .top)
         .clipShape(shape)
         .glassEffect(.regular, in: shape)
-        #if DEBUG
-        .overlay { if UserDefaults.standard.bool(forKey: "debugLayout") { Rectangle().stroke(.red, lineWidth: 3) } }
-        #endif
         .offset(x: drag)
         .simultaneousGesture(DragGesture(minimumDistance: 16)
             .updating($drag) { value, state, _ in
@@ -150,6 +132,18 @@ struct Sidebar: View {
                 if expanded, value.translation.width < -60 { setExpanded(false) }
                 if !expanded, value.translation.width > 30 { setExpanded(true) }
             })
+    }
+
+    // How many marks the rail shows: one per session, seven at most, and
+    // only whole ones above the conversation's bottom bar. It steps down a
+    // mark at a time as the bar comes up, and goes when none fit, leaving
+    // the toggle: squeezed to a sliver, it took the pane's glass and the
+    // toggle with it.
+    private var railMarks: Int {
+        let fit = min(store.sessions.count, 7)
+        let room = (railEnd - top - Self.marksTop - 12) / 44
+        guard room.isFinite else { return fit }
+        return min(fit, Int(max(0, min(room, 7))))
     }
 
     // One mark per session, the open one picked out.
@@ -178,9 +172,8 @@ struct Sidebar: View {
             }
             .scrollIndicators(.hidden)
             .scrollBounceBehavior(.basedOnSize)
-            // Seven marks at most, fewer when the bottom bar comes up to
-            // meet it, down to none; the rest scroll.
-            .frame(height: min(min(CGFloat(store.sessions.count), 7) * 44, max(0, railEnd - top - Self.marksTop - 12)))
+            // The rest scroll.
+            .frame(height: CGFloat(railMarks) * 44)
         }
         .frame(width: Self.railWidth)
         .padding(.bottom, 4)
