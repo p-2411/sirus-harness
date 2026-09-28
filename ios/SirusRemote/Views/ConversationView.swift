@@ -626,13 +626,15 @@ private struct ModeCaption: View {
     // mode and the context over the model and thinking level, so none is
     // cut to a letter. The gauge drops its trailing parts before the mode
     // gives any room, since the mode says whether anything is asked; a
-    // long model id gives way in the middle.
+    // long model id gives way in the middle. Whether it takes one line or
+    // two doesn't hang on the gauge, which arrives only once the agent has
+    // run and grows as the context fills: the model and thinking level
+    // stay where they are.
     var body: some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 6) {
                 mode(height: 44)
-                Spacer(minLength: 4)
-                gauge(gaugeForms.first)
+                gaugeSlot
                 agent(height: 44)
             }
             VStack(spacing: 0) {
@@ -680,6 +682,28 @@ private struct ModeCaption: View {
         let parts = text.components(separatedBy: " · ")
         return (1...parts.count).reversed().map { parts.prefix($0).joined(separator: " · ") }
     }
+
+    // The gauge's place on the one-line caption: room for its shortest
+    // wording counts towards whether the line fits, with a gauge or without
+    // one yet, and it takes whatever the line has spare, its longest
+    // wording that fits there first.
+    private var gaugeSlot: some View {
+        Color.clear
+            .frame(height: 26)
+            .frame(minWidth: Self.gaugeRoom, maxWidth: .infinity)
+            .overlay(alignment: .trailing) {
+                ViewThatFits(in: .horizontal) {
+                    ForEach(gaugeForms, id: \.self) { form in gauge(form) }
+                }
+            }
+    }
+
+    // The width of a gauge's shortest wording, "ctx 184k", in the caption's
+    // monospaced type, and the gap before it.
+    private static let gaugeRoom: CGFloat = {
+        let font = UIFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        return ("ctx 000k" as NSString).size(withAttributes: [.font: font]).width.rounded(.up) + 2 + 4
+    }()
 
     @ViewBuilder private func gauge(_ text: String?) -> some View {
         if let text, let context = header?.context {

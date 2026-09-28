@@ -176,6 +176,9 @@ run() {
   scene "$udid" "$label" stress stress 7
   scene "$udid" "$label" question-keyboard question 8 -composerFocused YES
   scene "$udid" "$label" note-long conversation 5 -sendOnLaunch /long-note
+  # The caption before an agent has run, with no gauge yet, and after.
+  scene "$udid" "$label" caption-fresh caption-fresh 6
+  scene "$udid" "$label" caption caption 6
 
   # Offline: the Mac goes away while the conversation is on screen.
   if wanted offline; then

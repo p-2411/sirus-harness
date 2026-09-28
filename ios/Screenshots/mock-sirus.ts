@@ -41,7 +41,9 @@ const focusSession: Record<string, string> = {
   stress: 's-stress',
 };
 // The agent each scene opens on: the stress scene opens on its widest name.
-const focusParticipant = scene === 'stress' ? 'コードレビュー担当エージェント' : 'sirus';
+// The caption scenes open on codex, whose short model id leaves room for
+// the caption on one line on a large phone.
+const focusParticipant = scene === 'stress' ? 'コードレビュー担当エージェント' : scene.startsWith('caption') ? 'codex' : 'sirus';
 const focusId = focusSession[scene] ?? 's-main';
 
 const participants: Record<string, { name: string; model: string; vendor: string; working: boolean; needsYou: boolean }[]> = {
@@ -85,7 +87,10 @@ function header(participant: string): Frame {
     queued: scene === 'conversation' ? 2 : 0,
     permissionMode: 'ask for approval',
     modeNotice: scene === 'conversation' ? 'plan mode, edits need approval' : null,
-    context: { text: scene === 'empty' ? 'ctx 3k (1%)' : 'ctx 184k · 8% left · /compact', tone: scene === 'empty' ? 'subtle' : 'warning' },
+    // Before an agent has run, Sirus has no gauge for it.
+    context: scene === 'caption-fresh' ? null
+      : scene === 'caption' ? { text: 'ctx 184k (18%)', tone: 'subtle' }
+      : { text: scene === 'empty' ? 'ctx 3k (1%)' : 'ctx 184k · 8% left · /compact', tone: scene === 'empty' ? 'subtle' : 'warning' },
     thinking: 'high',
   };
 }
