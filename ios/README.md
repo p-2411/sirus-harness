@@ -36,4 +36,17 @@ The simulator reaches the Mac's loopback. Start Sirus with
 
 Launch arguments set the interface up for screenshots without tapping:
 `-host <name>` (an empty name shows setup), `-sidebarExpanded YES`, and in
-debug builds `-composerDraft <text>` and `-composerFocused YES`.
+debug builds `-composerDraft <text>`, `-composerFocused YES`,
+`-openPicker <command>`, `-sendOnLaunch <text>` and `-connectTo <name>`.
+
+## Screenshots
+
+`Screenshots/shoot.sh` shoots every screen in each state worth checking on
+the iPhone SE and the largest iPhone, and at the largest text size, against
+a stand-in Sirus (`Screenshots/mock-sirus.ts`) with long names, many agents
+and waiting requests. The iOS screenshots workflow runs it on a change under
+`Screenshots/`, or from the Actions tab, and keeps the pictures as an
+artifact. Each shot prints what the app asked the stand-in and what it
+logged, and the gist of any crash. To look at a few scenes quickly, list
+them in `ONLY` or in a file named `Screenshots/only`, for example
+`menu-command approval`; those are shot on the iPhone SE only.
