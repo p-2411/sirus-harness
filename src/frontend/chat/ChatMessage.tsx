@@ -43,7 +43,6 @@ import {
 	argumentLines,
 	callArguments,
 	callLabel,
-	diffsOf,
 	DIFF_PREVIEW_LINES,
 	editCounts,
 	editPreview,
@@ -373,9 +372,7 @@ function DiffPreview({ lines, failed = false }: { lines: readonly DiffLine[]; fa
 }
 
 // One call, collapsed to its summary line until clicked; open, it also shows
-// what the call carried. Two kinds open by themselves, since each is what the
-// user came to read: a change once it is made, and a failure, with why. A
-// click still closes them.
+// what the call carried. A click closes it again.
 function ToolCallEntry({ call, indent, sessionId, directory }: {
 	sessionId?: string;
 	directory?: string;
@@ -383,8 +380,7 @@ function ToolCallEntry({ call, indent, sessionId, directory }: {
 	indent?: string;
 }) {
 	const failed = stopLabel(call) === 'failed';
-	const opensItself = failed || (call.status === 'completed' && diffsOf(call).length > 0);
-	const [expanded, toggle] = useRowExpansion(`call:${call.id}`, opensItself);
+	const [expanded, toggle] = useRowExpansion(`call:${call.id}`, false);
 	const ref = useRef<DOMElement>(null);
 	const hovered = useClickable(ref, toggle);
 	const detail = expanded ? callDetail(call, directory) : [];
@@ -413,11 +409,7 @@ export function ToolRunGroup({ calls, defaultExpanded = false, sessionId, direct
 	calls: readonly ToolCallBlock[];
 	defaultExpanded?: boolean;
 }) {
-	// A group opens for whatever would open its row by itself: a change made,
-	// or a failure. It follows arriving calls until the user chooses.
-	const opensItself = calls.some(call => stopLabel(call) === 'failed'
-		|| (call.status === 'completed' && diffsOf(call).length > 0));
-	const [expanded, toggle] = useRowExpansion(`group:${calls[0]?.id}`, defaultExpanded || opensItself);
+	const [expanded, toggle] = useRowExpansion(`group:${calls[0]?.id}`, defaultExpanded);
 	const ref = useRef<DOMElement>(null);
 	const hovered = useClickable(ref, toggle);
 	const complete = calls.every(finished);
@@ -479,16 +471,16 @@ function runSummary(run: SubagentRun): string {
 
 // A SpawnAgent call is the anchor of the worker it started, laid out the way
 // Claude Code lays out an Agent row: the worker's name, or "Agent" for one
-// given none, with its task; under it how the run stands; and once it has
-// ended, the report its owner received, whole and as Markdown. A spawn that
+// given none, with its task; under it how the run stands; and, opened once it
+// has ended, the report its owner received, whole and as Markdown. A spawn that
 // never started a worker says why, and one the user declined or whose turn
-// was cancelled says so. A click folds the report away and back, and opens a
-// running one's task in full.
+// was cancelled says so. A click opens the report, or a running one's task in
+// full, and folds it away again.
 function SpawnAgentEntry({ call, sessionId }: { call: ToolCallBlock; sessionId?: string }) {
 	const { run, status } = useSubagentRun(call, sessionId);
 	const awaiting = useAwaitingApproval(call, sessionId);
 	const report = spawnReport(call);
-	const [expanded, toggle] = useRowExpansion(`spawn:${call.id}`, report !== '' && status !== 'working');
+	const [expanded, toggle] = useRowExpansion(`spawn:${call.id}`, false);
 	const ref = useRef<DOMElement>(null);
 	const hovered = useClickable(ref, toggle);
 	const args = callArguments(call);

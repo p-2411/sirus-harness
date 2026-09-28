@@ -842,14 +842,14 @@ test('copying from the history copies the lines on screen after a row was opened
   };
   try {
     await chat.flush();
-    // A finished edit opens itself; a click closes it, and the lines below
-    // move up by the diff's height.
-    expect(chat.frame()).toContain('+ new line');
+    // A finished edit stays closed; a click opens it, and the lines below
+    // move down by the diff's height.
+    expect(chat.frame()).not.toContain('+ new line');
     const row = cellOf('● Edit notes.md');
     expect(pressAt(row)).toBe(true);
     expect(releaseAt(row)).toBe(true);
     await chat.flush();
-    expect(chat.frame()).not.toContain('+ new line');
+    expect(chat.frame()).toContain('+ new line');
 
     const reply = cellOf('The edit is done.');
     beginSelection(reply);
@@ -863,7 +863,7 @@ test('copying from the history copies the lines on screen after a row was opened
   }
 });
 
-test('a message steered into a reply leaves the rows closed in it alone', async () => {
+test('a message steered into a reply leaves the rows opened in it alone', async () => {
   const model = 'test-chat-steered-row';
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
@@ -886,15 +886,15 @@ test('a message steered into a reply leaves the rows closed in it alone', async 
       await new Promise(resolve => setTimeout(resolve, 10));
       await chat.flush();
     }
-    // A finished edit opens itself; the user closes the first one.
-    expect(chat.frame()).toContain('+ first line');
+    // A finished edit stays closed; the user opens the first one.
+    expect(chat.frame()).not.toContain('+ first line');
     const lines = chat.frame().split('\n');
     const line = lines.findIndex(text => text.includes('● Edit first.md'));
     const row = { line, col: lines[line]!.indexOf('● Edit first.md') };
     expect(pressAt(row)).toBe(true);
     expect(releaseAt(row)).toBe(true);
     await chat.flush();
-    expect(chat.frame()).not.toContain('+ first line');
+    expect(chat.frame()).toContain('+ first line');
 
     await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Also the second file.' }] });
     release();
@@ -904,9 +904,9 @@ test('a message steered into a reply leaves the rows closed in it alone', async 
     const frame = chat.frame();
     expect(frame.indexOf('● Edit first.md')).toBeLessThan(frame.indexOf('Also the second file.'));
     expect(frame.indexOf('Also the second file.')).toBeLessThan(frame.indexOf('● Edit second.md'));
-    // The first stays as the user left it, and the second opened itself.
-    expect(frame).not.toContain('+ first line');
-    expect(frame).toContain('+ second line');
+    // The first stays as the user left it, and the second stays closed.
+    expect(frame).toContain('+ first line');
+    expect(frame).not.toContain('+ second line');
   } finally {
     release();
     await turn.catch(() => undefined);
