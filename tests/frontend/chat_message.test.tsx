@@ -6,13 +6,13 @@ import stripAnsi from 'strip-ansi';
 import * as markdown from '../../src/frontend/markdown/Markdown';
 import {
   callDetail,
+  PlanChecklist,
   ChatMessage,
   ChatHistory,
   messageSegments,
-  PlanChecklist,
-  toolLine,
   ToolRunGroup,
 } from '../../src/frontend/chat/ChatMessage';
+import { editCounts, editPreview, groupSummary, toolLine } from '../../src/frontend/chat/toolCalls';
 import {
   registerSubagent,
   notifySubagents,
@@ -80,13 +80,15 @@ describe('chat message', () => {
       await app.waitUntilRenderFlush();
       expect(frames.at(-1)).toContain('Streamed reply continues');
 
-      message.content.push({ type: 'thought', text: 'Still thinking' });
+      message.content.push({ type: 'thought', text: '**Still thinking**' });
       app.rerender(view(true));
       await app.waitUntilRenderFlush();
-      expect(frames.at(-1)).toContain('Still thinking');
+      expect(frames.at(-1)).toContain('Thinking · Still thinking');
+      (message.content.at(-1) as { endedAt?: number }).endedAt = Date.now();
       app.rerender(view());
       await app.waitUntilRenderFlush();
-      expect(frames.at(-1)).not.toContain('Still thinking');
+      expect(frames.at(-1)).not.toContain('Thinking');
+      expect(frames.at(-1)).toContain('∴ Thought');
 
       call.output = 'Worker finished the review';
       app.rerender(view());
@@ -190,15 +192,67 @@ describe('chat message', () => {
     expect(toolLine({ kind: 'read', title: 'one.ts' })).toBe('Read one.ts');
     expect(toolLine({ kind: 'delete', title: 'old.ts' })).toBe('Delete old.ts');
     expect(toolLine({ kind: 'move', title: 'a → b' })).toBe('Move a → b');
-    expect(toolLine({ kind: 'think', title: '' })).toBe('Think');
     expect(toolLine({ kind: 'fetch', title: 'https://example.com' })).toBe('Fetch https://example.com');
-    expect(toolLine({ kind: 'switch_mode', title: 'auto' })).toBe('Mode auto');
-    expect(toolLine({ kind: 'other', title: 'sirus - SpawnAgent' })).toBe('Tool sirus - SpawnAgent');
+    // Thinking, mode changes and other tools are named by their titles alone.
+    expect(toolLine({ kind: 'think', title: 'Create task: tests' })).toBe('Create task: tests');
+    expect(toolLine({ kind: 'switch_mode', title: 'auto' })).toBe('auto');
+    expect(toolLine({ kind: 'other', title: 'Load skill: review' })).toBe('Load skill: review');
+    expect(toolLine({ kind: 'think', title: '' })).toBe('Tool call');
     // A title the caller has less room for than a row does.
     expect(toolLine({ kind: 'execute', title: 'bun test --coverage' }, 8)).toBe('Run bun tes…');
   });
 
-  test('shows a file change as its line counts until expanded', () => {
+  test('never says a verb twice when the vendor’s title carries one', () => {
+    expect(toolLine({ kind: 'read', title: 'Read src/app.ts' })).toBe('Read src/app.ts');
+    expect(toolLine({ kind: 'edit', title: 'Edit src/app.ts' })).toBe('Edit src/app.ts');
+    expect(toolLine({ kind: 'edit', title: 'Write notes.txt' })).toBe('Write notes.txt');
+    expect(toolLine({ kind: 'search', title: 'Find `*.ts`' })).toBe('Find `*.ts`');
+    expect(toolLine({ kind: 'fetch', title: 'Fetch https://example.com' })).toBe('Fetch https://example.com');
+    expect(toolLine({ kind: 'read', title: "Read file '/project/notes.txt'" }, undefined, '/project'))
+      .toBe("Read file 'notes.txt'");
+    expect(toolLine({ kind: 'search', title: "Search for 'todo' in src" })).toBe("Search for 'todo' in src");
+    expect(toolLine({ kind: 'read', title: "List files in 'src'" })).toBe("List files in 'src'");
+    expect(toolLine({ kind: 'execute', title: 'Run command' })).toBe('Run command');
+    // Codex names no file while it edits; the change does.
+    expect(toolLine({
+      kind: 'edit', title: 'Editing files',
+      content: [{ type: 'diff', path: '/project/notes.txt', oldText: 'a', newText: 'b' }],
+    }, undefined, '/project')).toBe('Edit notes.txt');
+    expect(toolLine({
+      kind: 'edit', title: 'Edit files',
+      locations: [{ path: 'a.ts' }, { path: 'b.ts' }, { path: 'c.ts' }],
+    })).toBe('Edit a.ts and 2 more files');
+  });
+
+  test('names Sirus’s own tools and other MCP tools readably', () => {
+    // Claude sends the arguments as they are, Codex wraps them.
+    expect(toolLine({ kind: 'other', title: 'mcp__sirus__SpawnAgent', input: { prompt: 'Review the diff\nthoroughly' } }))
+      .toBe('Start subagent: Review the diff');
+    expect(toolLine({ kind: 'other', title: 'mcp__sirus__SpawnAgent', input: { prompt: 'Long task', description: 'review' } }))
+      .toBe('Start subagent: review');
+    expect(toolLine({ kind: 'other', title: 'mcp__sirus__SpawnAgent', input: { prompt: 'List the files', name: 'scout' } }))
+      .toBe('Start subagent scout: List the files');
+    expect(toolLine({
+      kind: 'execute', title: 'mcp.sirus.CheckAgent',
+      input: { server: 'sirus', tool: 'CheckAgent', arguments: { id: 'sub-1' } },
+    })).toBe('Check subagent sub-1');
+    expect(toolLine({ kind: 'other', title: 'mcp__sirus__WaitAgent', input: { ids: ['sub-1', 'sub-2'] } }))
+      .toBe('Wait for subagents sub-1, sub-2');
+    expect(toolLine({ kind: 'other', title: 'mcp__sirus__ListAgents' })).toBe('List subagents');
+    expect(toolLine({ kind: 'other', title: 'mcp__sirus__SearchMemories', input: { query: 'deploy steps' } }))
+      .toBe('Search memories for “deploy steps”');
+    expect(toolLine({ kind: 'other', title: 'mcp__github__create_issue' })).toBe('github - create_issue (MCP)');
+    expect(toolLine({ kind: 'execute', title: 'mcp.linear.list_issues' })).toBe('linear - list_issues (MCP)');
+    // Claude's plan approval and Codex's reviewer.
+    expect(toolLine({ kind: 'switch_mode', title: 'Approve Plan', input: { plan: '# Add notes\n\n1. Write it' } }))
+      .toBe('Plan: Add notes');
+    expect(toolLine({
+      id: 'guardian_assessment:1', kind: 'think', title: 'Guardian Review',
+      content: [{ type: 'text', text: 'Status: Denied\nAction: shell rm -rf build\nRisk: high' }],
+    })).toBe('Auto-review denied: shell rm -rf build');
+  });
+
+  test('shows a change it made as a line diff, open without a click', () => {
     const output = stripAnsi(renderToString(
       <ChatMessage message={{
         seq: 0,
@@ -214,28 +268,108 @@ describe('chat message', () => {
       { columns: 120 },
     ));
 
-    expect(output).toContain('● Edit src/app.ts +4 −2');
-    expect(output).not.toMatch(/[›⌄]/);
+    // Two lines were added; the two before them are context, not removals.
+    expect(output).toContain('● Edit src/app.ts +2 −0');
+    expect(output).toContain('  a');
+    expect(output).toContain('+ c');
+    expect(output).toContain('+ d');
     expect(output).not.toContain('- a');
-    expect(output).not.toContain('+ c');
   });
 
-  test('shows file changes inside grouped tool activity as line counts', () => {
+  test('opens a group for the change made inside it', () => {
     const edit = toolCall({
       id: 'edit-1',
       kind: 'edit',
       title: 'src/new.ts',
-      content: [{ type: 'diff', path: 'src/new.ts', oldText: null, newText: 'first\nsecond' }],
+      content: [{ type: 'diff', path: 'src/new.ts', oldText: null, newText: 'first\nsecond\n', line: 1 }],
     });
     const output = stripAnsi(renderToString(
       <ToolRunGroup calls={[calls[0], edit]} />,
       { columns: 120 },
     ));
 
-    expect(output).toContain('● Edit src/new.ts +2');
-    expect(output).not.toContain('−');
-    expect(output).not.toMatch(/[›⌄]/);
-    expect(output).not.toContain('+ first');
+    expect(output).toContain('Read 1 file, edited 1 file');
+    expect(output).toContain('● Edit src/new.ts +2 −0');
+    expect(output).toContain('1 + first');
+    expect(output).toContain('2 + second');
+  });
+
+  test('counts and numbers a change as a line diff does', () => {
+    // Claude sends a hunk with three lines of context either side and the
+    // line it starts at; five lines added and one removed is +5 −1, not the
+    // whole hunk both ways.
+    const before = ['one', 'two', 'three', 'old', 'four', 'five', 'six'];
+    const after = ['one', 'two', 'three', 'new 1', 'new 2', 'new 3', 'new 4', 'new 5', 'four', 'five', 'six'];
+    const hunk = toolCall({
+      id: 'hunk', kind: 'edit', title: 'Edit app.ts',
+      content: [{ type: 'diff', path: 'app.ts', oldText: before.join('\n'), newText: after.join('\n'), line: 10 }],
+    });
+    expect(editCounts(hunk)).toEqual({ added: 5, removed: 1 });
+    const lines = editPreview(hunk);
+    expect(lines[0]).toEqual({ sign: ' ', text: 'one', line: 10 });
+    expect(lines).toContainEqual({ sign: '-', text: 'old', line: 13 });
+    expect(lines).toContainEqual({ sign: '+', text: 'new 1', line: 13 });
+    expect(lines.at(-1)).toEqual({ sign: ' ', text: 'six', line: 20 });
+    // Codex sends the whole file before and after; only the change and a
+    // little around it is shown, and a second hunk is set off by a gap.
+    const file = Array.from({ length: 30 }, (_, index) => `line ${index + 1}`);
+    const changed = file.map(line => line === 'line 5' ? 'line five' : line === 'line 25' ? 'line twenty-five' : line);
+    const whole = toolCall({
+      id: 'whole', kind: 'edit', title: 'Editing files',
+      content: [{ type: 'diff', path: 'long.txt', oldText: `${file.join('\n')}\n`, newText: `${changed.join('\n')}\n`, line: 1 }],
+    });
+    expect(editCounts(whole)).toEqual({ added: 2, removed: 2 });
+    const shown = editPreview(whole);
+    expect(shown[0]).toEqual({ sign: ' ', text: 'line 2', line: 2 });
+    expect(shown).toContainEqual({ sign: '-', text: 'line 5', line: 5 });
+    expect(shown).toContainEqual({ sign: '+', text: 'line five', line: 5 });
+    expect(shown).toContainEqual({ sign: '…', text: '' });
+    expect(shown).toContainEqual({ sign: '-', text: 'line 25', line: 25 });
+    expect(shown.some(line => line.text === 'line 15')).toBe(false);
+    // A later hunk of the same file numbers its removed lines where they were.
+    const hunks = toolCall({
+      id: 'hunks', kind: 'edit', title: 'Edit app.ts',
+      content: [
+        { type: 'diff', path: 'app.ts', oldText: 'a', newText: 'a\nb\nc', line: 1 },
+        { type: 'diff', path: 'app.ts', oldText: 'x', newText: 'y', line: 12 },
+      ],
+    });
+    expect(editPreview(hunks)).toContainEqual({ sign: '-', text: 'x', line: 10 });
+    expect(editPreview(hunks)).toContainEqual({ sign: '+', text: 'y', line: 12 });
+  });
+
+  test('says how a call ended when it did not end well, and opens a failure', () => {
+    const declined = toolCall({
+      id: 'declined', kind: 'edit', title: 'Write greet.txt', status: 'failed', outcome: 'declined',
+      content: [{ type: 'diff', path: 'greet.txt', oldText: null, newText: 'hi\nbye\n' }],
+    });
+    const cancelled = toolCall({ id: 'cancelled', kind: 'execute', title: 'sleep 60', status: 'failed', outcome: 'cancelled' });
+    const failed = toolCall({
+      id: 'failed', kind: 'execute', title: 'bun test', status: 'failed',
+      output: { formatted_output: Array.from({ length: 12 }, (_, index) => `out ${index + 1}`).join('\n'), exit_code: 2 },
+    });
+    const output = stripAnsi(renderToString(
+      <ChatMessage message={{ seq: 0, role: 'assistant', content: [declined, { type: 'text', text: 'Next' }, cancelled, { type: 'text', text: 'Then' }, failed] }} />,
+      { columns: 120 },
+    ));
+    // A declined change wrote nothing, so it counts nothing.
+    expect(output).toContain('● Write greet.txt · declined');
+    expect(output).not.toContain('+2');
+    expect(output).toContain('● Run sleep 60 · cancelled');
+    expect(output).toContain('● Run bun test · failed');
+    expect(output).toContain('Exit code 2');
+    expect(output).toContain('4 earlier lines');
+    expect(output).toContain('out 12');
+    expect(output).not.toContain('out 4\n');
+    // Claude's error is fenced; the fence goes.
+    expect(callDetail(toolCall({
+      id: 'error', kind: 'read', title: 'Read x', status: 'failed',
+      content: [{ type: 'text', text: '```\nFile does not exist.\n```' }],
+    }))).toEqual([{ sign: ' ', text: 'File does not exist.' }]);
+    expect(callDetail(toolCall({
+      id: 'tool-error', kind: 'edit', title: 'Edit x', status: 'failed',
+      content: [{ type: 'text', text: '```\n<tool_use_error>String to replace not found in file.</tool_use_error>\n```' }],
+    }))).toEqual([{ sign: ' ', text: 'String to replace not found in file.' }]);
   });
 
   test('reveals file rows when a running group completes, diffs on click, and respects manual collapse', async () => {
@@ -257,11 +391,13 @@ describe('chat message', () => {
     try {
       await app.waitUntilRenderFlush();
       expect(frames.at(-1)).not.toContain('new.ts');
+      expect(frames.at(-1)).toContain('Read 1 file, editing 1 file');
       app.rerender(<ToolRunGroup calls={completed} />);
       await app.waitUntilRenderFlush();
-      expect(frames.at(-1)).toContain('● Edit new.ts +1');
+      expect(frames.at(-1)).toContain('Read 1 file, edited 1 file');
+      expect(frames.at(-1)).toContain('● Edit new.ts +1 −0');
       expect(frames.at(-1)).not.toMatch(/[›⌄]/);
-      expect(frames.at(-1)).not.toContain('+ new content');
+      expect(frames.at(-1)).toContain('+ new content');
 
       await new Promise<void>(resolve => setImmediate(resolve));
       const row = cellOf(frames.at(-1)!, '● Edit new.ts');
@@ -270,10 +406,9 @@ describe('chat message', () => {
       await new Promise<void>(resolve => setImmediate(resolve));
       await app.waitUntilRenderFlush();
       expect(frames.at(-1)).toContain('● Edit new.ts +1');
-      expect(frames.at(-1)).not.toMatch(/[›⌄]/);
-      expect(frames.at(-1)).toContain('+ new content');
+      expect(frames.at(-1)).not.toContain('+ new content');
 
-      const summary = cellOf(frames.at(-1)!, 'Ran 2 commands');
+      const summary = cellOf(frames.at(-1)!, 'Read 1 file, edited 1 file');
       expect(pressAt(summary)).toBe(true);
       expect(releaseAt(summary)).toBe(true);
       await new Promise<void>(resolve => setImmediate(resolve));
@@ -331,7 +466,7 @@ describe('chat message', () => {
       <ChatMessage message={{ seq: 0, role: 'assistant', content }} sessionId="session" />,
       { columns: 140 },
     ));
-    expect(output).toContain('Ran 2 commands');
+    expect(output).toContain('Read 1 file, ran 1 command');
     expect(output).toContain('Subagent sub-1234 done after 45s.');
     expect(output).toContain('Subagent sub-5678 done after 45s.');
   });
@@ -368,19 +503,27 @@ describe('chat message', () => {
       { columns: 120 },
     ));
 
-    expect(completed).toContain('Ran 2 commands');
+    expect(completed).toContain('Read 1 file, ran 1 command');
     expect(completed).not.toContain('one.ts');
-    expect(running).toContain('Running 2 commands.');
+    expect(running).toContain('Read 1 file, running 1 command.');
     expect(running).not.toContain('bun test');
+    // MCP tools are tools, whatever kind the vendor gave them.
+    expect(groupSummary([
+      toolCall({ id: 'a', kind: 'execute', title: 'mcp.sirus.CheckAgent' }),
+      toolCall({ id: 'b', kind: 'search', title: 'grep x' }),
+      toolCall({ id: 'c', kind: 'search', title: 'grep y' }),
+    ])).toBe('Used 1 tool, searched for 2 patterns');
   });
 
-  test('counts a failed call as finished', () => {
+  test('counts a failed call as finished, says so, and opens on it', () => {
     const output = stripAnsi(renderToString(
-      <ToolRunGroup calls={[calls[0], { ...calls[1], status: 'failed' }]} />,
+      <ToolRunGroup calls={[calls[0], { ...calls[1], status: 'failed', output: 'error: boom' }]} />,
       { columns: 120 },
     ));
 
-    expect(output).toContain('Ran 2 commands');
+    expect(output).toContain('Read 1 file, ran 1 command · 1 failed');
+    expect(output).toContain('● Run bun test · failed');
+    expect(output).toContain('error: boom');
   });
 
   test('expands a tool group into compact indented one-line calls', () => {
@@ -391,10 +534,10 @@ describe('chat message', () => {
     const lines = output.split('\n');
 
     expect(lines).toHaveLength(3);
-    expect(lines[0]).toContain('Ran 2 commands');
+    expect(lines[0]).toContain('Read 1 file, ran 1 command');
     expect(lines[1]).toContain('● Read one.ts');
     expect(lines[2]).toContain('● Run bun test');
-    expect(lines[1].indexOf('●')).toBeGreaterThan(lines[0].indexOf('Ran'));
+    expect(lines[1].indexOf('●')).toBeGreaterThan(lines[0].indexOf('Read'));
     expect(output).not.toMatch(/[›⌄]/);
   });
 
@@ -410,8 +553,8 @@ describe('chat message', () => {
     ];
     const output = stripAnsi(renderToString(<ChatMessage message={{ seq: 0, role: 'assistant', content }} />, { columns: 100 }));
     const lines = output.split('\n').map(line => line.trim());
-    const first = lines.indexOf('Ran 2 commands');
-    const last = lines.lastIndexOf('Ran 2 commands');
+    const first = lines.indexOf('Read 1 file, ran 1 command');
+    const last = lines.lastIndexOf('Read 1 file, ran 1 command');
     expect(lines.slice(first, last + 1).every(Boolean)).toBe(true);
     expect(lines[first - 1]).toBe('');
     expect(lines[first - 2]).toBe('Checking the corpus.');
@@ -483,32 +626,49 @@ describe('thinking', () => {
     content: [{ type: 'thought' as const, text: 'Weighing\nthe options carefully.' }],
   };
 
-  test('hides finished thoughts without leaving a speaker row', () => {
-    expect(stripAnsi(renderToString(<ChatMessage message={message} />))).toBe('');
+  test('keeps a finished thought as one line that says how long it took', () => {
+    const timed = { ...message, content: [{ ...message.content[0], startedAt: 1_000, endedAt: 4_400 }] };
+    const output = stripAnsi(renderToString(<ChatMessage message={timed} />, { columns: 120 }));
+    expect(output).toContain('∴ Thought for 3s');
+    expect(output).not.toContain('Weighing');
+    // A thought saved before thoughts were timed says only that it happened.
+    expect(stripAnsi(renderToString(<ChatMessage message={message} />))).toContain('∴ Thought\n');
   });
 
-  test('shows only the current thought and removes it when text or a tool follows', () => {
+  test('says what the model is thinking about while it does, and keeps every thought in its place', () => {
     const content: MessageBlock[] = [
-      { type: 'thought', text: 'Earlier step' },
-      { type: 'thought', text: '**Checking the result**\nDetails of the check.' },
+      { type: 'thought', text: 'Earlier step', startedAt: 0, endedAt: 2_000 },
+      calls[0]!,
+      { type: 'thought', text: '**Checking the result**\nDetails of the check.', startedAt: 2_000 },
     ];
     const output = () => stripAnsi(renderToString(
       <ChatMessage message={{ ...message, content }} live />, { columns: 120 },
     ));
-    expect(output()).toContain('Checking the result');
-    expect(output()).not.toContain('Earlier step');
+    expect(output()).toContain('Thinking · Checking the result');
+    expect(output()).toContain('∴ Thought for 2s');
     expect(output()).not.toContain('Details of the check');
-    content.push(calls[0]!);
-    expect(output()).not.toContain('Checking the result');
-    expect(output()).toContain('one.ts');
-    content.push({ type: 'thought', text: 'One last check' });
-    expect(output()).toContain('One last check');
+    expect(output().indexOf('Thought for 2s')).toBeLessThan(output().indexOf('one.ts'));
+    (content[2] as { endedAt?: number }).endedAt = 5_000;
     content.push({ type: 'text', text: 'The final answer.' });
-    expect(output()).not.toContain('One last check');
+    expect(output()).toContain('∴ Thought for 3s');
     expect(output()).toContain('The final answer.');
   });
 
-  test('collapses a thought to one line and expands it on a click', async () => {
+  test('never draws an empty thought', () => {
+    const content: MessageBlock[] = [
+      calls[0]!,
+      { type: 'thought', text: '\n\n' },
+      calls[1]!,
+    ];
+    const output = stripAnsi(renderToString(
+      <ChatMessage message={{ ...message, content }} live />, { columns: 120 },
+    ));
+    expect(output).not.toContain('∴');
+    // The calls around it group as though it was never there.
+    expect(output).toContain('Read 1 file, ran 1 command');
+  });
+
+  test('opens a thought on a click', async () => {
     const stdout = Object.assign(new PassThrough(), { columns: 120 }) as unknown as NodeJS.WriteStream;
     const frames: string[] = [];
     stdout.on('data', data => frames.push(stripAnsi(data.toString())));
@@ -517,21 +677,95 @@ describe('thinking', () => {
     });
     try {
       await app.waitUntilRenderFlush();
-      expect(frames.at(-1)).toContain('Weighing the options carefully.');
-      expect(frames.at(-1)).not.toContain('thinking');
+      // One line, named by its opening words, until it is opened.
+      expect(frames.at(-1)).toContain('Thinking · Weighing the options carefully.');
+      expect(frames.at(-1)).not.toMatch(/^\s+the options carefully\.$/m);
       await new Promise<void>(resolve => setImmediate(resolve));
-      const row = cellOf(frames.at(-1)!, 'Weighing');
+      const row = cellOf(frames.at(-1)!, 'Thinking');
       expect(pressAt(row)).toBe(true);
       expect(releaseAt(row)).toBe(true);
       await new Promise<void>(resolve => setImmediate(resolve));
       await app.waitUntilRenderFlush();
-      expect(frames.at(-1)).not.toContain('Weighing the options');
-      expect(frames.at(-1)).toContain('Weighing');
-      expect(frames.at(-1)).toContain('the options carefully.');
+      expect(frames.at(-1)).toMatch(/^\s+Weighing$/m);
+      expect(frames.at(-1)).toMatch(/^\s+the options carefully\.$/m);
     } finally {
       app.unmount();
       await app.waitUntilExit();
     }
+  });
+});
+
+describe('the user’s prompt', () => {
+  test('is shown exactly as typed, with no Markdown', () => {
+    const output = stripAnsi(renderToString(
+      <ChatMessage message={{ seq: 0, role: 'user', content: [{ type: 'text', text: '# x\n2) `code` and *x* and **y**' }] }} />,
+      { columns: 80 },
+    ));
+    expect(output).toContain('# x');
+    expect(output).toContain('2) `code` and *x* and **y**');
+  });
+
+  test('keeps the model that introduced a participant, and names the files it attached', () => {
+    const output = stripAnsi(renderToString(
+      <ChatMessage
+        message={{
+          seq: 0, role: 'user', creationModels: [{ start: 4, end: 17 }],
+          content: [
+            { type: 'text', text: '@bob gpt-5.6-luna read @notes.txt' },
+            { type: 'text', filePath: 'notes.txt', text: '\n\n```\nFile: "notes.txt"\nhello\nworld\n\n```' },
+          ],
+        }}
+        participantColors={new Map([['bob', '#8B93D6']])}
+      />,
+      { columns: 80 },
+    ));
+    expect(output).toContain('@bob gpt-5.6-luna read @notes.txt');
+    expect(output).toContain('Read notes.txt (2 lines)');
+    expect(output).not.toContain('hello');
+  });
+
+  test('wraps without starting a row on a space', () => {
+    const output = stripAnsi(renderToString(
+      <ChatMessage message={{ seq: 0, role: 'user', content: [{ type: 'text', text: 'aaaa bbbb cccc dddd eeee ffff gggg' }] }} />,
+      { columns: 20 },
+    ));
+    for (const line of output.split('\n').slice(1)) expect(line.trimEnd()).not.toMatch(/ {2,}[a-g]{4}$|^ [a-g]/);
+    const rows = output.split('\n').map(line => line.trim()).filter(Boolean).slice(1);
+    for (const row of rows) expect(row).toMatch(/^[a-g]{4}/);
+  });
+});
+
+describe('a finished turn', () => {
+  const reply = (message: Partial<Message>): Message => ({
+    seq: 1, role: 'assistant', participant: 'sirus', content: [{ type: 'text', text: 'Done.' }], ...message,
+  });
+
+  test('closes with how long it took, when it ended, and how many tokens it wrote', () => {
+    const finishedAt = new Date(2026, 8, 28, 16, 4).getTime();
+    const output = stripAnsi(renderToString(<ChatMessage message={reply({
+      startedAt: finishedAt - 12_400, finishedAt,
+      usage: { inputTokens: 20_000, outputTokens: 3_100, totalTokens: 23_100 },
+    })} />, { columns: 120 }));
+    expect(output).toMatch(/\n\s*12s · 4:04\s?PM · ↓ 3\.1k\n/);
+    // The whole turn's tokens are for /status and /usage.
+    expect(output).not.toContain('23k');
+    // A Codex turn of several model calls reports nothing written.
+    expect(stripAnsi(renderToString(<ChatMessage message={reply({
+      startedAt: finishedAt - 12_400, finishedAt, usage: { totalTokens: 87_349 },
+    })} />, { columns: 120 }))).toMatch(/\n\s*12s · 4:04\s?PM\n/);
+    // Not while it runs, nor for a turn saved before turns were timed.
+    expect(stripAnsi(renderToString(<ChatMessage message={reply({ startedAt: finishedAt, finishedAt })} live />)))
+      .not.toContain('4:04');
+    expect(stripAnsi(renderToString(<ChatMessage message={reply({})} />))).not.toContain(' · ');
+  });
+
+  test('keeps two messages of one reply apart', () => {
+    const output = stripAnsi(renderToString(<ChatMessage message={reply({ content: [
+      { type: 'text', text: 'task details.' },
+      { type: 'text', text: 'What concrete follow-up?' },
+    ] })} />, { columns: 120 }));
+    expect(output).not.toContain('details.What');
+    expect(output).toMatch(/task details\.\n\n\s+What concrete follow-up\?/);
   });
 });
 

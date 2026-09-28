@@ -10,7 +10,7 @@ import { abortable, abortReason, errorMessage, isAbortError, throwIfAborted, Tur
 import type { Requester } from './permissions/approvals';
 import { PERMISSION_MODE_NAMES } from './permissions/policy';
 import { providerFor } from './providers';
-import { DEFAULT_MODEL, rememberListedModels, VENDOR_INFO, vendorOf, type Vendor } from './providers/catalog';
+import { DEFAULT_MODEL, modelFacts, rememberListedModels, rememberModelFacts, VENDOR_INFO, vendorOf, type Vendor } from './providers/catalog';
 import { sourceEnvironment, sourceProfileHome } from './providers/profiles';
 import { maskKeys, type Source } from './providers/sources';
 import { turnFailure, type TurnFailure } from './runtime/errors';
@@ -20,6 +20,7 @@ import {
   runtimeGeneration,
   trackRuntime,
   type BackgroundTask,
+  type McpServerState,
   type ModeKind,
   type Runtime,
   type RuntimeOptions,
@@ -35,27 +36,28 @@ import { awaitForeground, cancelSubagent, checkSubagent, messageSubagent, startS
 import type { SpawnOptions, SubagentHost } from './tools/types';
 import {
   DEFAULT_PARTICIPANT,
-  DEFAULT_THINKING_LEVEL,
   failOpenToolCalls,
+  fitThinkingLevel,
   isPlanCall,
+  offeredThinkingLevels,
   planCall,
   type ImageBlock,
   type Message,
+  type MessageBlock,
   type NativeSession,
   type NoticeBlock,
   type PermissionMode,
   type ThinkingLevel,
   type ToolCallBlock,
 } from './types';
-import type { ContextUsage } from './usage';
+import { addTurnUsage, type ContextUsage } from './usage';
 
 // The persisted shape of an agent: what a session snapshot stores and what
 // the UI lists.
 export interface Participant {
   name: string;
   model: string;
-  // Absent in older snapshots and for untouched participants; high is the
-  // default in both cases.
+  // Absent when nobody chose one: the agent runs at its model's default.
   thinkingLevel?: ThinkingLevel;
   nativeSession?: NativeSession;
 }
@@ -103,6 +105,13 @@ export interface TurnInput {
   images?: readonly ImageBlock[];
 }
 
+// What a reporting command printed when run aside (`runAside`), and the MCP
+// servers its fork reported on the way.
+export interface AsideOutput {
+  text: string;
+  mcpServers: McpServerState[] | null;
+}
+
 export interface RespondOptions {
   // The assistant entry this turn fills in. Its content is replaced on
   // every update, so whoever holds it sees the response as it arrives.
@@ -128,6 +137,8 @@ export class SessionAgent {
   readonly transcript = new Transcript();
   // The latest usage update of the live runtime, or null before the first.
   context: ContextUsage | null = null;
+  // The MCP servers the runtime last said it has, or null before it said.
+  mcpServers: McpServerState[] | null = null;
   // Set when the vendor could not put the session in the mode Sirus asked
   // for, so the status row can say so instead of auto silently meaning ask.
   modeNotice: string | null = null;
@@ -203,19 +214,44 @@ export class SessionAgent {
     return this.subagentId ? { subagent: this.subagentId } : { participant: this.name };
   }
 
-  get thinkingLevel(): ThinkingLevel {
-    return this.level ?? DEFAULT_THINKING_LEVEL;
+  // The level chosen for this agent; undefined leaves it at its model's
+  // default, which only the vendor knows until a runtime on it has shown it.
+  get thinkingLevel(): ThinkingLevel | undefined {
+    return this.level;
   }
 
-  // A live runtime that cannot take the level is rebuilt on it, unless it
-  // has been replaced by the time the vendor says so, as with `setModel`.
-  set thinkingLevel(level: ThinkingLevel) {
+  set thinkingLevel(level: ThinkingLevel | undefined) {
     this.level = level;
-    const runtime = this.runtime;
-    if (!runtime) return;
-    void runtime.setThinkingLevel(level).catch(() => {
-      if (this.runtime === runtime) this.releaseRuntime();
-    });
+    this.fitThinkingLevel();
+    void this.runtime?.setThinkingLevel(this.level).catch(() => this.releaseRuntime());
+  }
+
+  // The depth the vendor gives this agent's model when nobody sets one, once
+  // a runtime on it has shown it.
+  get modelThinkingDefault(): string | undefined {
+    return modelFacts(this.model).defaultEffort;
+  }
+
+  // The levels this agent's model offers, once a runtime on it has said:
+  // empty for a model with no effort to set, null while nobody knows.
+  get offeredThinkingLevels(): ThinkingLevel[] | null {
+    return offeredThinkingLevels(modelFacts(this.model).efforts);
+  }
+
+  // Keeps the recorded level one the model runs at. The runtime lowers a
+  // level the model lacks to the nearest one it offers; recording the same
+  // lowering lets the status row show what runs instead of what was asked.
+  private fitThinkingLevel(): void {
+    const offered = this.offeredThinkingLevels;
+    if (!this.level || !offered || offered.length === 0) return;
+    const fitted = fitThinkingLevel(this.level, offered);
+    if (fitted && fitted !== this.level) this.level = fitted;
+  }
+
+  // The credential the runtime is on, or the one its next turn would try
+  // first; null when the vendor has none.
+  get credential(): Source | null {
+    return this.source ?? this.candidateSources()[0] ?? null;
   }
 
   get busy(): boolean {
@@ -262,6 +298,7 @@ export class SessionAgent {
     this.heardAt = Date.now();
     const { signal } = controller;
     this.entry = options.entry;
+    options.entry.startedAt = Date.now();
     this.record = this.recorder(options.entry, options.onUpdate);
     let answered = false;
     try {
@@ -303,7 +340,7 @@ export class SessionAgent {
       }
       const vendor = this.vendor;
       if (!failure) {
-        throw new Error(`No ${VENDOR_INFO[vendor].displayName} credentials. Run /login to connect a Claude or ChatGPT subscription, or add an API key.`);
+        throw new Error(`No ${VENDOR_INFO[vendor].displayName} credentials. Run /login to sign in to Claude or Codex, or add an API key.`);
       }
       throw new Error(failure.message);
     } catch (error) {
@@ -317,7 +354,9 @@ export class SessionAgent {
       // arriving after this are dropped, so a call it left open would read
       // as running for good.
       if (!answered && this.opening) this.releaseRuntime();
-      if (!answered && failOpenToolCalls(options.entry.content)) options.onUpdate?.();
+      if (!answered && failOpenToolCalls(options.entry.content, signal.aborted ? 'cancelled' : undefined)) options.onUpdate?.();
+      endThought(options.entry.content);
+      options.entry.finishedAt = Date.now();
       this.turn = null;
       this.record = null;
       this.entry = null;
@@ -366,13 +405,82 @@ export class SessionAgent {
       // The fork runs on the credential the owner's process was started on,
       // so the next turn does not mistake it for a runtime on another one.
       this.source = owner.source;
-      this.context = forked.context;
+      this.context = this.fitContext(forked.context);
       this.seededRuntime = true;
       this.saveNativeSession(forked, owner.source, owner.savedSession?.profileHome);
       return true;
     } catch {
       return false;
     }
+  }
+
+  // Runs a vendor command that only reports, such as `/context` or `/mcp`,
+  // on a throwaway fork of this agent's runtime, so the conversation, its
+  // record and its checkpoints stay as they were, and hands back what the
+  // command printed instead of recording a turn. A busy runtime is forked
+  // mid-turn, and a cold one with a vendor session to reopen is started first,
+  // the way its next turn would start it. Until the vendor holds a
+  // conversation there is nothing to fork (Codex keeps no thread file before
+  // the first turn), so the command runs in a fresh session of its own, which
+  // is what the agent's would be.
+  async runAside(text: string, signal: AbortSignal): Promise<AsideOutput> {
+    const source = this.candidateSources()[0];
+    if (source === undefined) throw new Error(`No ${VENDOR_INFO[this.vendor].displayName} credentials. Run /login to sign in to Claude or Codex, or add an API key.`);
+    const output: AsideOutput = { text: '', mcpServers: null };
+    const hooks: Pick<RuntimeOptions, 'onPermission' | 'onElicitation' | 'onUpdate'> = {
+      // A reporting command asks nothing; anything that does is declined.
+      onPermission: async () => ({ outcome: { outcome: 'cancelled' } }),
+      onElicitation: async () => ({ action: 'decline' }),
+      onUpdate: update => {
+        if (update.type === 'text') output.text += update.text;
+        else if (update.type === 'notice') output.text += `\n${[update.title, update.description].filter(Boolean).join(': ')}\n`;
+        else if (update.type === 'mcp_servers') output.mcpServers = update.servers;
+      },
+    };
+    const aside = {
+      directory: this.host.directory,
+      model: this.model,
+      thinkingLevel: this.thinkingLevel,
+      systemPrompt: this.systemPrompt(),
+      tools: this.definition?.tools,
+      readOnly: true,
+      permissionMode: 'ask' as const,
+      mcpServer: await this.host.mcpServer(this),
+      ...hooks,
+    };
+    // A warmed runtime has a vendor session but no conversation in it yet.
+    const conversation = this.runtime ? this.seededRuntime
+      : this.savedSession !== undefined && this.transcript.entries().length > 0;
+    let opening: Promise<Runtime>;
+    if (conversation) {
+      const runtime = this.busy && this.runtime ? this.runtime : (await this.ensureRuntime(source, signal)).runtime;
+      opening = runtime.fork(aside);
+    } else {
+      const vendor = this.vendor;
+      opening = createRuntime({
+        ...aside, vendor, signal,
+        env: source && vendorOf(this.model) ? sourceEnvironment(vendor, source) : { ...process.env },
+      });
+    }
+    let runtime: Runtime;
+    try {
+      runtime = await abortable(opening, signal);
+    } catch (error) {
+      void opening.then(late => late.dispose(), () => undefined);
+      throw error;
+    }
+    try {
+      await runtime.prompt({ text, images: [] }, signal);
+    } finally {
+      runtime.dispose();
+    }
+    return { ...output, text: output.text.trim() };
+  }
+
+  // The runtime's window, or a larger one already seen for the model: the
+  // adapter's placeholder until its first reply is never the true size.
+  private fitContext(usage: ContextUsage | null): ContextUsage | null {
+    return usage && { tokens: usage.tokens, window: Math.max(usage.window, modelFacts(this.model).window ?? 0) };
   }
 
   // Stops the turn still running. True if there was one.
@@ -398,6 +506,7 @@ export class SessionAgent {
     this.runtime = null;
     this.seededRuntime = false;
     this.context = null;
+    this.mcpServers = null;
     this.limitResetsAt = undefined;
     for (const task of this.backgroundTasks.values()) {
       if (task.state === 'running' || task.state === 'paused') {
@@ -426,6 +535,7 @@ export class SessionAgent {
       this.resetRuntime();
     }
     this.model = model;
+    this.fitThinkingLevel();
     const runtime = this.runtime;
     if (!runtime) {
       this.savedSession = undefined;
@@ -437,6 +547,8 @@ export class SessionAgent {
     }
     void runtime.setModel(model).then(applied => {
       if (!applied && this.runtime === runtime && this.model === model) { this.resetRuntime(); warn(); }
+      // The effort option is the new model's, fitted to it on the way in.
+      else if (applied && this.runtime === runtime && this.level) void runtime.setThinkingLevel(this.level).catch(() => undefined);
     }).catch(() => {
       if (this.runtime === runtime && this.model === model) { this.resetRuntime(); warn(); }
     });
@@ -582,7 +694,7 @@ export class SessionAgent {
         this.runtime = runtime;
         this.generation = generation;
         this.source = source;
-        this.context = runtime.context;
+        this.context = this.fitContext(runtime.context);
         this.seededRuntime = !!resume;
         this.saveNativeSession(runtime, source, profileHome, resume?.directory);
         if (source) this.provider?.markActive(this.runtimeId, source);
@@ -649,6 +761,23 @@ export class SessionAgent {
       if (vendor) rememberListedModels(vendor, update.models);
       return;
     }
+    // And what its model offers, which `/thinking` lists; the recorded
+    // level follows what the runtime set.
+    if (update.type === 'efforts') {
+      rememberModelFacts(this.model, { efforts: update.efforts, ...(update.default ? { defaultEffort: update.default } : {}) });
+      this.fitThinkingLevel();
+      return;
+    }
+    if (update.type === 'mcp_servers') {
+      this.mcpServers = update.servers;
+      return;
+    }
+    // The gauge follows the runtime between turns too. A window smaller than
+    // one already seen for the model is the adapter's placeholder.
+    if (update.type === 'context') {
+      rememberModelFacts(this.model, { window: update.usage.window });
+      this.context = this.fitContext(update.usage);
+    }
     if (update.type === 'notice' && !this.record) {
       this.host.notice(this, update);
       return;
@@ -694,25 +823,37 @@ export class SessionAgent {
   }
 
   // Everything the runtime reports lands in the entry: text and thoughts as
-  // blocks, tool calls merged by id, compaction as a boundary; usage and mode
-  // changes on the agent itself.
+  // blocks, tool calls merged by id, compaction as a boundary, what the turn
+  // used; the context window and mode changes on the agent itself.
   private recorder(entry: Message, onUpdate?: () => void): (update: RuntimeUpdate) => void {
+    // When the runtime last said anything, which is when a thought that
+    // starts now began, and the message the last text chunk belonged to.
+    let heardAt = Date.now();
+    let messageId: string | undefined;
+    const append = (block: MessageBlock) => {
+      endThought(entry.content);
+      entry.content.push(block);
+    };
     return update => {
       switch (update.type) {
         case 'text': {
+          // A new message starts a new block, so two messages in a row do not
+          // run together as one paragraph.
           const last = entry.content[entry.content.length - 1];
-          if (last?.type === 'text' && !last.filePath) last.text += update.text;
-          else entry.content.push({ type: 'text', text: update.text });
+          const sameMessage = update.messageId === undefined || update.messageId === messageId;
+          if (last?.type === 'text' && !last.filePath && sameMessage) last.text += update.text;
+          else append({ type: 'text', text: update.text });
+          messageId = update.messageId;
           break;
         }
         case 'thought': {
           const last = entry.content[entry.content.length - 1];
           if (last?.type === 'thought') last.text += update.text;
-          else entry.content.push({ type: 'thought', text: update.text });
+          else entry.content.push({ type: 'thought', text: update.text, startedAt: heardAt });
           break;
         }
         case 'notice':
-          entry.content.push(update);
+          append(update);
           break;
         case 'tool_call': {
           const run = this.listSubagents().find(run => run.callId === update.call.id && run.status !== 'working');
@@ -720,7 +861,7 @@ export class SessionAgent {
           const index = entry.content.findIndex(
             (block): block is ToolCallBlock => block.type === 'tool_call' && block.id === update.call.id,
           );
-          if (index === -1) entry.content.push(update.call);
+          if (index === -1) append(update.call);
           else entry.content[index] = update.call;
           break;
         }
@@ -730,21 +871,26 @@ export class SessionAgent {
           const last = entry.content.length - 1;
           const previous = entry.content[last];
           if (previous?.type === 'tool_call' && isPlanCall(previous)) entry.content[last] = planCall(update.entries, previous.id);
-          else entry.content.push(planCall(update.entries));
+          else append(planCall(update.entries));
           break;
         }
         case 'compaction': {
           if (update.status !== 'completed') return;
-          entry.content.push({ type: 'compaction', ...(update.summary ? { summary: update.summary } : {}) });
+          append({ type: 'compaction', ...(update.summary ? { summary: update.summary } : {}) });
           break;
         }
+        case 'usage':
+          // A turn retried after a lost runtime used both attempts.
+          entry.usage = addTurnUsage(entry.usage, update.usage);
+          break;
         case 'context':
-          this.context = update.usage;
+          // Kept on the agent as it arrives (`hear`); the entry only repaints.
           break;
         case 'mode':
           this.noteMode(this.host.permissionMode(), update, true);
           break;
       }
+      heardAt = Date.now();
       onUpdate?.();
     };
   }
@@ -904,7 +1050,7 @@ export class SessionAgent {
 
   // The agent that does one worker's work: its own runtime and record under
   // this agent's session, in its own directory, with the subagent contract.
-  createSubagent(id: string, model: string, thinkingLevel: ThinkingLevel, directory: string, definition?: AgentDefinition): SessionAgent {
+  createSubagent(id: string, model: string, thinkingLevel: ThinkingLevel | undefined, directory: string, definition?: AgentDefinition): SessionAgent {
     return new SessionAgent({
       name: DEFAULT_PARTICIPANT,
       model,
@@ -924,6 +1070,11 @@ export class SessionAgent {
       ? `Unknown subagent "${id}". Known subagents: ${known.join(', ')}`
       : `Unknown subagent "${id}". No subagent has been spawned yet.`);
   }
+}
+// A thought is over once anything follows it, or once its turn is.
+function endThought(content: MessageBlock[]): void {
+  const last = content[content.length - 1];
+  if (last?.type === 'thought' && last.endedAt === undefined) last.endedAt = Date.now();
 }
 
 function isDirectory(directory: string): boolean {

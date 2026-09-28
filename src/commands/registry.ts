@@ -6,23 +6,35 @@ import {
   logoutCommandSpec,
   usageCommandSpec,
 } from './authentication/commands';
+import { configCommandSpec } from './config/commands';
 import { helpCommand } from './help/commands';
 import { memoryCommandSpec } from './memory/commands';
-import { newCommand, resumeCommand, archiveCommand, deleteCommand, forkCommand, exportCommand, copyCommand, clearCommand, compactCommandSpec, exitCommand, quitCommand, permissionsCommandSpec, renameCommand } from './session/commands';
+import { initCommand, reviewCommand } from './project/commands';
+import { newCommand, resumeCommand, archiveCommand, deleteCommand, forkCommand, exportCommand, copyCommand, clearCommand, compactCommandSpec, exitCommand, quitCommand, mcpCommandSpec, permissionsCommandSpec, renameCommand, statusCommandSpec } from './session/commands';
 import { updateCommandSpec, versionCommandSpec } from './update/commands';
 import { rewindCommandSpec, undoCommandSpec } from './checkpoints/commands';
 import { imageCommandSpec } from './images/commands';
 import { notifyCommandSpec } from './notifications/commands';
-import type { NativeCommand } from '../agent_runtime/runtime/commands';
 import { isAutoSendable } from '../agent_runtime/session/messageQueue';
-import {
-  commandUsage,
-  type CommandCapabilities,
-  type CommandContext,
-  type CommandMenuEntry,
-  type CommandResult,
-  type CommandSession,
-  type CommandSpec,
+import { commandUsage } from './types';
+import { VENDOR_INFO, type Vendor } from '../agent_runtime/providers/catalog';
+import { isReportingCommand, vendorPrefixed, type NativeCommand } from '../agent_runtime/runtime/commands';
+import type {
+  CommandCapabilities,
+  CommandContext,
+  CommandMenuEntry,
+  CommandResult,
+  CommandSession,
+  CommandSpec,
+} from './types';
+
+export type {
+  CommandContext,
+  CommandMenuEntry,
+  CommandMenuItem,
+  CommandResult,
+  CommandSession,
+  CommandSpec,
 } from './types';
 
 // The input menu and executor share this registry. Definitions are assembled
@@ -32,11 +44,16 @@ export const commandRegistry: readonly CommandSpec[] = [
   clearCommand,
   compactCommandSpec,
   thinkingCommandSpec,
+  initCommand,
+  reviewCommand,
+  statusCommandSpec,
   agentsCommandSpec,
   tasksCommandSpec,
+  mcpCommandSpec,
   loginCommandSpec,
   logoutCommandSpec,
   usageCommandSpec,
+  configCommandSpec,
   updateCommandSpec,
   versionCommandSpec,
   doctorCommandSpec,
@@ -77,25 +94,60 @@ export function parseCommandLine(text: string): { name: string; args: string[]; 
   };
 }
 
-// One line of the `/` menu: a Sirus command, or one of the vendor's own
-// commands of the participant the prompt goes to.
+// One line of the `/` menu: a Sirus command, or one of the vendors' own
+// commands, tagged with the vendor.
 export interface CommandMatch {
   name: string;
   args?: string;
   description: string;
+  // The vendor's name as typed, for the tag: "(claude)", "(codex)".
+  vendor?: string;
 }
 
-// The vendor commands `/name` reaches. A Sirus command of the same name wins:
-// `/model`, `/rename` and `/logout` are Sirus's in both vendors' lists.
-function invocableNativeCommands(commands: readonly NativeCommand[]): NativeCommand[] {
-  return commands.filter(command => !commandRegistry.some(spec => spec.name === command.name));
+// The name `/name` reaches each vendor command by: its own, unless a Sirus
+// command or an earlier vendor's command has it, in which case the vendor's
+// prefix, `/claude:agents` or `/codex:status`. The session lists the vendor
+// of the default participant first, so its commands keep their bare names.
+export function vendorCommandNames(commands: readonly NativeCommand[]): { name: string; command: NativeCommand }[] {
+  const taken = new Set(commandRegistry.map(spec => spec.name));
+  return commands.flatMap(command => {
+    if (!taken.has(command.name)) {
+      taken.add(command.name);
+      return [{ name: command.name, command }];
+    }
+    return command.vendor ? [{ name: `${VENDOR_INFO[command.vendor].command}:${command.name}`, command }] : [];
+  });
 }
 
-// Text that calls one of those commands: sent to the agent as a prompt rather
-// than run here.
-function isNativeCommand(text: string, commands: readonly NativeCommand[]): boolean {
-  const name = /^\/(\S+)/.exec(text)?.[1];
-  return name !== undefined && invocableNativeCommands(commands).some(command => command.name === name);
+// A vendor command the text calls, as `/name` or `/vendor:name`, with what
+// follows it, and whether it only reports and runs aside; null for any
+// other text. A prefixed name reaches any of that vendor's commands.
+export function vendorCommandFor(text: string, commands: readonly NativeCommand[]): {
+  command: NativeCommand;
+  vendor?: Vendor;
+  args: string;
+  reporting: boolean;
+} | null {
+  const match = /^\/(\S+)/.exec(text);
+  if (!match) return null;
+  const args = text.slice(match[0].length).trim();
+  const prefixed = vendorPrefixed(match[1]);
+  const command = prefixed
+    ? commands.find(candidate => candidate.vendor === prefixed.vendor && candidate.name === prefixed.name)
+    : vendorCommandNames(commands).find(entry => entry.name === match[1])?.command;
+  if (!command) return null;
+  return {
+    command,
+    ...(command.vendor ? { vendor: command.vendor } : {}),
+    args,
+    reporting: command.vendor !== undefined && isReportingCommand(command.vendor, command.name, args),
+  };
+}
+
+// Text that calls one of those commands: sent to the agent as a prompt, or
+// run aside, rather than run here.
+export function isNativeCommand(text: string, commands: readonly NativeCommand[]): boolean {
+  return vendorCommandFor(text, commands) !== null;
 }
 
 // Text the chat runs as one of Sirus's commands: a `/name` line, as the
@@ -108,19 +160,20 @@ export function isSirusCommand(text: string, nativeCommands: readonly NativeComm
 
 // Prefix matches while a command name is being typed ('/' alone matches
 // everything); none once args have begun or the text isn't a command at all.
-// Sirus's commands come first, then the vendor's.
+// Sirus's commands come first, then the vendors'.
 export function matchCommands(input: string, commands: readonly NativeCommand[] = []): CommandMatch[] {
   if (!input.startsWith('/')) return [];
   const typed = input.slice(1);
   if (typed.includes(' ')) return [];
   return [
     ...commandRegistry.filter(spec => spec.name.startsWith(typed)),
-    ...invocableNativeCommands(commands)
-      .filter(command => command.name.startsWith(typed))
-      .map(command => ({
-        name: command.name,
+    ...vendorCommandNames(commands)
+      .filter(({ name, command }) => name.startsWith(typed) || command.name.startsWith(typed))
+      .map(({ name, command }) => ({
+        name,
         ...(command.argumentHint ? { args: command.argumentHint } : {}),
         description: command.description,
+        ...(command.vendor ? { vendor: VENDOR_INFO[command.vendor].command } : {}),
       })),
   ];
 }

@@ -86,7 +86,7 @@ export function describeRun(run: SubagentRun): Record<string, unknown> {
 // and lists of their own and the final message keeps its own formatting.
 export function workerReport(run: SubagentRun): string {
   const sections = [
-    `Subagent ${workerTitle(run)} ${run.status} after ${elapsedSeconds(run)}s on ${run.model} (${run.thinkingLevel}).\nTask: ${truncate(run.prompt, COMMAND_PREVIEW_CHARS)}`,
+    `Subagent ${workerTitle(run)} ${run.status} after ${elapsedSeconds(run)}s on ${run.model}${run.thinkingLevel ? ` (${run.thinkingLevel})` : ''}.\nTask: ${truncate(run.prompt, COMMAND_PREVIEW_CHARS)}`,
   ];
   if (run.branch) {
     sections.push(`Its work is on branch ${run.branch}, in its own worktree at ${run.directory}, not in your working directory.\n`

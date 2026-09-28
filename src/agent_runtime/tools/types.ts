@@ -72,5 +72,10 @@ export interface Tool<A = Record<string, unknown>> {
   // A capability the tool needs switched on; without it the tool is hidden
   // and direct calls are refused.
   requires?: 'memory';
+  // How a call reads in the chat and on an approval prompt, from what it was
+  // asked: the verb and what it acts on. The vendors know the tool only by
+  // its MCP name (`mcp__sirus__SpawnAgent`, `mcp.sirus.SpawnAgent`), so this
+  // is the only readable name it has. Arguments arrive unchecked.
+  label(args: Record<string, unknown>): { verb: string; subject: string };
   run(args: A, ctx: ToolContext): Promise<unknown>;
 }

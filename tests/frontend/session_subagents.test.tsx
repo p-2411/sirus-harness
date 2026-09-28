@@ -17,7 +17,6 @@ import { stopSirusMcpServer } from '../../src/agent_runtime/tools/server';
 import Chat from '../../src/frontend/chat/Chat';
 import { ChatMessage } from '../../src/frontend/chat/ChatMessage';
 import {
-  lastDecision,
   pendingApprovals,
   requestPermission,
   resolveApproval,
@@ -152,7 +151,7 @@ test('the worker strip follows only the displayed session’s workers', async ()
     await flush();
     stdin.write('\r');
     await flush();
-    expect(output).toContain('ChatGPT');
+    expect(output).toContain('Codex');
     expect(strip()).toContain(theirs.id);
 
     // The same call id in two sessions decorates only the row of the session
@@ -167,9 +166,9 @@ test('the worker strip follows only the displayed session’s workers', async ()
       <ChatMessage message={{ seq: 0, role: 'assistant', content: [call] }} sessionId={session.getId()} />,
       { columns: 140 },
     ));
-    expect(toolRow(first)).toContain(`● Agent(Work) · ${model} high · ${mine.id}`);
+    expect(toolRow(first)).toContain(`● Agent(Work) · ${model} · ${mine.id}`);
     expect(toolRow(first)).toContain('⎿ Cancelled by CancelAgent (0 tool uses');
-    expect(toolRow(second)).not.toContain(`high · ${mine.id}`);
+    expect(toolRow(second)).not.toContain(`${model} · ${mine.id}`);
     expect(toolRow(second)).not.toContain('Cancelled by CancelAgent (');
     // The report is under the row, without the user having to open it.
     expect(toolRow(first)).toContain(`Subagent ${mine.id} cancelled`);
@@ -225,9 +224,9 @@ test('tool approval indicators do not leak between sessions reusing a call ID', 
     for (const approval of pendingApprovals(second.getId())) resolveApproval(approval.id, 'deny');
     await pending;
   }
-  // The vendor moves on, but the transcript keeps saying what the user chose.
-  expect(row(second)).toContain('declined by user');
-  expect(row(first)).not.toContain('declined by user');
+  // What the user chose is the call's own record from here on.
+  expect(row(second)).not.toContain('waiting for approval');
+  expect(row(first)).not.toContain('declined');
   for (const session of [first, second]) session.dispose();
 });
 
@@ -247,5 +246,4 @@ test('a denial with no reject option to pick answers cancelled, never an allow',
   const [approval] = pendingApprovals(sessionId);
   resolveApproval(approval.id, 'deny');
   expect(await answer).toEqual({ outcome: { outcome: 'cancelled' } });
-  expect(lastDecision('deny-call', sessionId)).toBe('deny');
 });

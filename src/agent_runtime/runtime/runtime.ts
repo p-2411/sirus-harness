@@ -12,6 +12,7 @@ import { abortable, abortReason, throwIfAborted, TurnCancelledError } from '../.
 import { vendorOf, type ListedModel, type Vendor } from '../providers/catalog';
 import {
   TOOL_KINDS,
+  type TurnUsage,
   type ImageBlock,
   type NoticeBlock,
   type PermissionMode,
@@ -48,7 +49,8 @@ export interface RuntimeOptions {
   signal?: AbortSignal;
   vendor: Vendor;
   model: string;
-  thinkingLevel: ThinkingLevel;
+  // Unset leaves the model at its own default depth.
+  thinkingLevel?: ThinkingLevel;
   // Where the session runs; relative paths in tool calls resolve here.
   directory: string;
   // Reopen the vendor's conversation in the directory it was created in.
@@ -126,13 +128,17 @@ export function backgroundTaskFrom(update: unknown, previous?: BackgroundTask): 
 export type RuntimeUpdate =
   | { type: 'async_task'; task: BackgroundTask }
   | { type: 'rate_limit'; resetsAt?: number }
-  | { type: 'text'; text: string }
+  // A chunk of the reply. Chunks of one message share its id, when the
+  // vendor sends one; a new id starts a new message.
+  | { type: 'text'; text: string; messageId?: string }
   | { type: 'thought'; text: string }
   | NoticeBlock
   // A new call, or an update to one already reported: merge by id.
   | { type: 'tool_call'; call: ToolCallBlock }
   | { type: 'context'; usage: ContextUsage }
-  | { type: 'compaction'; status: CompactionStatus; summary?: string }
+  // What the turn used, once it has ended.
+  | { type: 'usage'; usage: TurnUsage }
+  | { type: 'compaction'; status: 'in_progress' | 'completed' | 'failed' | 'cancelled'; summary?: string }
   // The vendor changed the session's mode, on request or on its own. Kind is
   // null when the vendor did not tag the mode.
   | { type: 'mode'; modeId: string; kind: ModeKind | null }
@@ -140,8 +146,21 @@ export type RuntimeUpdate =
   | { type: 'commands'; commands: NativeCommand[] }
   // The models the vendor's harness offers, as its session opened.
   | { type: 'models'; models: ListedModel[] }
+  // The reasoning depths the vendor's effort option offers for the model the
+  // session is on now, empty when it has no such option, and the one the
+  // vendor picks for that model when nobody sets one, once the session has seen it.
+  | { type: 'efforts'; efforts: string[]; default?: string }
+  // The MCP servers the vendor's harness has for this session and how each
+  // connection stands, as Claude Code reports them at the start of a turn.
+  | { type: 'mcp_servers'; servers: McpServerState[] }
   // The agent's plan, the whole of it: Claude's todo list, Codex's plan.
   | { type: 'plan'; entries: PlanEntry[] };
+
+export interface McpServerState {
+  name: string;
+  // The vendor's word: connected, failed, needs-auth, pending, disabled.
+  status: string;
+}
 
 export interface PromptInput {
   text: string;
@@ -192,7 +211,8 @@ export interface Runtime {
   // `session/set_config_option` for the model. False when the option cannot
   // apply, in which case the caller rebuilds the runtime.
   setModel(model: string): Promise<boolean>;
-  setThinkingLevel(level: ThinkingLevel): Promise<void>;
+  // Undefined puts the session back at its model's default depth.
+  setThinkingLevel(level: ThinkingLevel | undefined): Promise<void>;
   // `session/fork`: a second session on the same adapter process that
   // starts from this one's conversation so far, prompted separately from
   // then on. Works while this runtime is mid-prompt. Rejects when the vendor
@@ -319,19 +339,38 @@ function toolKind(kind: unknown): ToolKind {
   return (TOOL_KINDS as readonly unknown[]).includes(kind) ? kind as ToolKind : 'other';
 }
 
-function toolContent(content: ToolCall['content'] | ToolCallUpdate['content']): ToolCallContent[] | undefined {
+// Where each diff starts. Claude sends one diff per hunk of a change, each
+// with a location carrying its line, in the same order. codex-acp sends whole
+// files, old and new, tagged with the change's kind in `_meta`; so is a new
+// file anyone sends. An excerpt with no line has no position to give.
+function diffLine(
+  item: { path: string; oldText?: string | null; _meta?: { [key: string]: unknown } | null },
+  location: { path: string; line?: number | null } | undefined,
+): number | undefined {
+  if (location?.path === item.path && typeof location.line === 'number') return location.line;
+  return item.oldText == null || typeof item._meta?.kind === 'string' ? 1 : undefined;
+}
+
+function toolContent(
+  content: ToolCall['content'] | ToolCallUpdate['content'],
+  locations: ToolCall['locations'] | ToolCallUpdate['locations'],
+): ToolCallContent[] | undefined {
   if (!content) return undefined;
   const blocks: ToolCallContent[] = [];
+  let diffs = 0;
   for (const item of content) {
     if (item.type === 'diff') {
-      blocks.push({ type: 'diff', path: item.path, oldText: item.oldText ?? null, newText: item.newText });
+      const line = diffLine(item, locations?.[diffs++]);
+      blocks.push({
+        type: 'diff', path: item.path, oldText: item.oldText ?? null, newText: item.newText,
+        ...(line !== undefined ? { line } : {}),
+      });
     } else if (item.type === 'content' && item.content.type === 'text') {
       blocks.push({ type: 'text', text: item.content.text });
-    } else if (item.type === 'terminal') {
-      // Terminals are never advertised, so none arrive; a vendor that sends
-      // one anyway is shown its id and nothing else.
-      blocks.push({ type: 'text', text: `[terminal ${item.terminalId}]` });
     }
+    // A terminal carries nothing to show: Sirus advertises none, yet
+    // codex-acp names one for every shell command. The command's output
+    // arrives as its raw output instead.
   }
   return blocks;
 }
@@ -354,7 +393,7 @@ export function toolCallBlockFrom(call: ToolCall | ToolCallUpdate, existing?: To
     locations: [],
     content: [],
   };
-  const content = toolContent(call.content);
+  const content = toolContent(call.content, call.locations);
   const locations = toolLocations(call.locations);
   return {
     ...base,

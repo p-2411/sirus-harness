@@ -21,6 +21,8 @@ import { moveAt, pressAt, releaseAt } from '../../src/frontend/interaction/click
 import { lineToRow } from '../../src/frontend/terminal/screen';
 
 const noOp = () => {};
+// A sidebar row holding nothing but the arrow that says more sessions are below.
+const arrowRow = (frame: string) => frame.split('\n').some(line => /^\s*↓\s*│/.test(line));
 
 function mountSidebar() {
   let sessions = Array.from({ length: 30 }, (_, index) => new Session({
@@ -172,7 +174,10 @@ describe('sidebar scrolling', () => {
       const initial = app.frame();
       expect(initial).toContain('Session 00');
       expect(initial).not.toContain('Session 29');
+      // The last row says more sessions are below, and a blank line keeps them off the controls.
+      expect(arrowRow(initial)).toBe(true);
       const footerLine = initial.split('\n').findIndex(line => line.includes('new session'));
+      expect(initial.split('\n')[footerLine - 2]).toMatch(/^\s*│/);
       await app.wheel('down', 30); // Over chat, not the sidebar.
       await app.wheel('down', 3, 0); // Over the fixed header.
       expect(app.frame()).toBe(initial);
@@ -181,7 +186,7 @@ describe('sidebar scrolling', () => {
       expect(app.frame()).not.toContain('Session 00');
       expect(app.frame().split('\n')[footerLine]).toContain('new session');
       expect(app.frame().split('\n')[0]).toContain('sirus');
-      expect(app.frame()).toContain('┃');
+      expect(arrowRow(app.frame())).toBe(false);
       const bottom = app.frame();
       await app.wheel('down');
       expect(app.frame()).toBe(bottom);
@@ -221,7 +226,7 @@ describe('sidebar scrolling', () => {
       expect(app.frame()).toContain('Session 00');
       await app.resize(14);
       expect(app.frame()).toContain('Session 02');
-      expect(app.frame()).not.toContain('┃');
+      expect(arrowRow(app.frame())).toBe(false);
     } finally {
       await app.close();
     }
@@ -383,6 +388,39 @@ describe('sidebar session status', () => {
 
 
 describe('sidebar management', () => {
+  test.each(['search', 'rename', 'delete'])('Escape unwinds %s before returning to the conversation', async mode => {
+    const app = mountSidebar();
+    try {
+      await app.flush();
+      await app.manage();
+      await app.type('Session 12');
+      if (mode === 'rename') {
+        await app.type('\x12');
+        await app.type('Discarded rename');
+        expect(app.frame()).toContain('Discarded rename');
+      } else if (mode === 'delete') {
+        await app.type('\x04');
+        expect(app.frame()).toContain('Delete session?');
+      }
+      await app.type('\x1b');
+      if (mode !== 'search') {
+        expect(app.focused()).toBe(true);
+        expect(app.frame()).toContain('search: Session 12▌');
+        expect(app.frame()).toContain('Session 12');
+        expect(app.frame()).not.toContain('Discarded rename');
+        expect(app.frame()).not.toContain('Delete session?');
+        await app.type('\x1b');
+      }
+      expect(app.selected().getName()).toBe('Session 00');
+      expect(app.deleted()).toHaveLength(0);
+      expect(app.focused()).toBe(false);
+      expect(app.frame()).not.toContain('search:');
+      expect(app.frame()).toContain('manage session');
+      expect(app.frame()).not.toContain('Discarded rename');
+      expect(app.frame()).not.toContain('Delete session?');
+    } finally { await app.close(); }
+  });
+
   test('filters by typing, renames, archives, and requires confirmation to delete', async () => {
     const app = mountSidebar();
     try {

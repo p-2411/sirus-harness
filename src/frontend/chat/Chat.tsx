@@ -15,7 +15,8 @@ import { Box, Text, measureElement, renderToString, useApp, useBoxMetrics, useIn
 import { theme } from '../styles/theme';
 import { singleLine, terminalText } from '../terminal/text';
 import { HORSE } from '../branding/horse';
-import { ChatHistory, PlanChecklist, thoughtHeading, toolLine } from './ChatMessage';
+import { ChatHistory, formatElapsed, PlanChecklist, thoughtHeading, visibleContent } from './ChatMessage';
+import { finished, toolLine } from './toolCalls';
 import { useClickable } from '../interaction/clickable';
 import { Spinner } from './Spinner';
 import { InputBar, createInputDraftState, type InputDraftState, type InputMode } from './InputBar';
@@ -28,8 +29,11 @@ import {
   executeCommand,
   isSirusCommand,
   parseCommandLine,
+  vendorCommandFor,
+  type CommandMenuEntry,
+  type CommandMenuItem,
 } from '../../commands/registry';
-import type { CommandMenuEntry, CommandMenuItem } from '../../commands/types';
+
 import { parseMouseWheel } from '../interaction/mouse';
 import { SIDEBAR_WIDTH } from '../Sidebar';
 import { useSelectionRegion } from '../interaction/useTextSelection';
@@ -159,16 +163,17 @@ function turnThought(messages: readonly Message[]): string | null {
 }
 
 // What the agents are up to, read off the end of the timeline: the tool call
-// the turn is waiting on, text arriving, or nothing visible yet.
-export function turnPhase(messages: readonly Message[]): string {
+// the turn is waiting on, text arriving, or nothing visible yet. A call is
+// named the way its row names it.
+export function turnPhase(messages: readonly Message[], directory?: string): string {
   const last = messages[messages.length - 1];
   if (!last || last.role !== 'assistant') return 'thinking';
-  const running = [...last.content]
+  const content = visibleContent(last.content);
+  const running = [...content]
     .reverse()
-    .find((block): block is ToolCallBlock =>
-      block.type === 'tool_call' && block.status !== 'completed' && block.status !== 'failed');
-  if (running) return `running ${toolLine(running, PHASE_TITLE_LENGTH)}`;
-  const tail = last.content[last.content.length - 1];
+    .find((block): block is ToolCallBlock => block.type === 'tool_call' && !finished(block));
+  if (running) return `running ${toolLine(running, PHASE_TITLE_LENGTH, directory)}`;
+  const tail = content[content.length - 1];
   if (tail?.type === 'text' && tail.text) return 'writing';
   const thought = turnThought(messages);
   if (thought) {
@@ -178,19 +183,16 @@ export function turnPhase(messages: readonly Message[]): string {
   return 'thinking';
 }
 
-export function formatElapsed(ms: number): string {
-  const seconds = Math.max(0, Math.floor(ms / 1000));
-  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-}
-
 // A turn whose runtime has said nothing for this long says so, since a
 // vendor that has stalled looks the same as one that is thinking.
 const QUIET_NOTICE_MS = 60_000;
 
 // The line at the foot of the history while a turn runs: what the agents are
 // doing, or that they are waiting on the user, and for how long.
-export function TurnStatus({ messages, awaitingApproval, awaitingAnswer, compacting, startedAt, quietFor }: {
+export function TurnStatus({ messages, directory, awaitingApproval, awaitingAnswer, compacting, startedAt, quietFor }: {
   messages: readonly Message[];
+  // The session's directory: paths inside it are named relative to it.
+  directory?: string;
   awaitingApproval: boolean;
   awaitingAnswer: boolean;
   compacting: boolean;
@@ -215,7 +217,7 @@ export function TurnStatus({ messages, awaitingApproval, awaitingAnswer, compact
   const phase = awaitingApproval ? 'waiting for your approval'
     : awaitingAnswer ? 'waiting for your answer'
     : compacting ? 'compacting context'
-      : turnPhase(messages);
+      : turnPhase(messages, directory);
   const quiet = waitingOnUser || compacting ? 0 : quietFor();
   return (
     <Box flexDirection="column" paddingX={3} marginBottom={1}>
@@ -523,6 +525,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         session: currSession,
         participant: recipient,
         notify: text => setFeedback({ kind: 'info', text }),
+        sendPrompt: text => deliver(currSession.messageForParticipant({ role: 'user', content: [{ type: 'text', text }] }, recipient)).then(() => undefined),
         attachImage,
         exit: () => { currSession.setInputContent(''); exit(); },
         newSession: onNewSession,
@@ -581,12 +584,47 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     }
   };
 
+  // A vendor command that only reports runs on a throwaway fork of the
+  // participant's runtime and its output is shown here, kept nowhere: no
+  // turn, no checkpoint, nothing the agents read later.
+  const runAside = (participant: string, text: string) => {
+    setFeedback(null);
+    const controller = new AbortController();
+    commandAbort.current = controller;
+    setCommandIsLoading(true);
+    currSession.runCommandAside(participant, text, controller.signal)
+      .then(output => {
+        if (!mounted.current) return;
+        setFeedback({ kind: 'info', showIcon: false, panel: true, markdown: true,
+          text: output.text || `@${participant} printed nothing for ${text}.` });
+      })
+      .catch((caught: unknown) => {
+        if (mounted.current) setFeedback(isAbortError(caught) ? null
+          : { kind: 'error', text: caught instanceof Error ? caught.message : 'Something went wrong.' });
+      })
+      .finally(() => {
+        if (commandAbort.current === controller) commandAbort.current = null;
+        setCommandIsLoading(false);
+      });
+  };
+
   // A command leaves any attachments waiting for the next real message.
   // Commands are exactly what the background queue leaves for a mounted Chat.
   const send = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[], recipient = selected, to?: readonly string[]): boolean => {
     const commandName = /^\/(\S+)/.exec(text)?.[1];
-    const immediate = commandName && ['model', 'thinking', 'effort', 'fast', 'status', 'usage', 'permissions', 'agents', 'tasks'].includes(commandName);
-    const routed = currSession.messageForParticipant({ role: 'user', ...(to?.length ? { to: [...to] } : {}),
+    const immediate = commandName && ['model', 'thinking', 'effort', 'fast', 'status', 'usage', 'mcp', 'config', 'permissions', 'agents', 'tasks'].includes(commandName);
+    // An agent's own command goes to the agent on that command's vendor: the
+    // selected one when it is, else another. One that only reports runs aside
+    // at once, whatever the agents are doing, and is kept nowhere.
+    const vendorCommand = vendorCommandFor(text, currSession.getNativeCommands(recipient));
+    const vendorTarget = vendorCommand?.vendor ? currSession.participantOn(vendorCommand.vendor, recipient) : null;
+    if (vendorCommand?.reporting && vendorTarget) {
+      // In the vendor's own words: `/codex:status` is Codex's `/status`.
+      runAside(vendorTarget, vendorCommand.command.invocation);
+      return true;
+    }
+    const addressed = to?.length ? [...to] : vendorTarget && vendorTarget !== recipient ? [vendorTarget] : undefined;
+    const routed = currSession.messageForParticipant({ role: 'user', ...(addressed ? { to: addressed } : {}),
       content: content ?? [...images, { type: 'text', text }] }, recipient);
     const targetsBusy = routed.to?.some(name => currSession.isParticipantWorking(name)) ?? false;
     const taskCommand = commandName && commandRegistry.some(spec => spec.name === commandName);
@@ -597,33 +635,13 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     // A Sirus command runs here. Anything else that starts with a slash, an
     // agent's own command or a name nobody knows, goes out as a message and
     // the agent's harness makes of it what it will.
-    const command = isSirusCommand(text, currSession.getNativeCommands(recipient))
-      ? parseCommandLine(text)
-      : null;
+    const command = isSirusCommand(text, currSession.getNativeCommands(recipient)) ? parseCommandLine(text) : null;
     if (command && commandRegistry.some(spec => spec.name === command.name)) {
       runCommand(command.name, command.args, recipient, command.rest);
     } else {
-      // Images sit where the draft placed them. The session stamps the
-      // entry's seq when it enters the transcript.
-      const msg = routed;
-      followLatest();
-      setFeedback(null);
-      // Chat is remounted per session (key={session id}), so if the user
-      // navigates away mid-request the unmounted Chat no longer repaints its
-      // history. The session-owned status still updates its sidebar row.
       const previousLength = currSession.getMessages().length;
       const previousDraft = currSession.getInputContent(recipient);
-      const turn = currSession.sendMessage(msg);
-      // Validation can reject a turn before its user message is appended.
-      // Keep those images available so the user can correct the prompt.
-      if ((currSession.getMessages().length > previousLength || currSession.getQueuedMessages().some(item => item.images?.some(image => images.some(sent => sent.path === image.path)))) && images.length > 0) {
-        const sentPaths = new Set(images.map(image => image.path));
-        replaceAttachments(view.attachments.filter(image => !sentPaths.has(image.path)));
-      }
-      // A startup draft becomes a real sidebar session only after the turn is
-      // valid and sendMessage has appended its user message.
-      if (!currSession.isEmpty()) onStartSession?.(currSession);
-      turn
+      deliver(routed, images)
         .catch((caught: unknown) => {
           if (currSession.getMessages().length === previousLength && !currSession.getInputContent(recipient)) {
             currSession.setInputContent(previousDraft, recipient);
@@ -635,6 +653,30 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     }
     return true;
   }
+
+  // The user's message to the agents, however it was started: typed, or sent
+  // by a command such as /init. Settles when the turn it starts is over.
+  const deliver = (msg: Parameters<Session['sendMessage']>[0], images: readonly ImageBlock[] = []) => {
+    // Images sit where the draft placed them. The session stamps the
+    // entry's seq when it enters the transcript.
+    followLatest();
+    setFeedback(null);
+    // Chat is remounted per session (key={session id}), so if the user
+    // navigates away mid-request the unmounted Chat no longer repaints its
+    // history. The session-owned status still updates its sidebar row.
+    const previousLength = currSession.getMessages().length;
+    const turn = currSession.sendMessage(msg);
+    // Validation can reject a turn before its user message is appended.
+    // Keep those images available so the user can correct the prompt.
+    if ((currSession.getMessages().length > previousLength || currSession.getQueuedMessages().some(item => item.images?.some(image => images.some(sent => sent.path === image.path)))) && images.length > 0) {
+      const sentPaths = new Set(images.map(image => image.path));
+      replaceAttachments(view.attachments.filter(image => !sentPaths.has(image.path)));
+    }
+    // A startup draft becomes a real sidebar session only after the turn is
+    // valid and sendMessage has appended its user message.
+    if (!currSession.isEmpty()) onStartSession?.(currSession);
+    return turn;
+  };
 
   const queue = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[], recipient = selected) => {
     const message = currSession.messageForParticipant({ role: 'user', content: content ?? [{ type: 'text', text }] }, recipient);
@@ -691,14 +733,15 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
               ))}
             </Box>
           }
-          <Text color={theme.textMuted}>{hasCredentials ? 'What shall we build?' : 'Welcome to Sirus.'}</Text>
-          {!hasCredentials && <Text color={theme.textMuted}>Use /login to connect a Claude or ChatGPT subscription, or add an API key.</Text>}
+          <Text color={theme.textMuted}>What shall we build?</Text>
+          {!hasCredentials && <Text color={theme.textSubtle}>Use /login to sign in to Claude or Codex, or add an API key.</Text>}
         </Box>
       )}
       <ChatHistory
         messages={messages}
         participants={participants}
         sessionId={currSession.getId()}
+        directory={currSession.getDirectory()}
         participantColors={participantColors}
         isMessageLive={message => currSession.isMessageLive(message)}
         hideThoughtFor={isWorking ? messages.at(-1)?.seq : undefined}
@@ -706,6 +749,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       {isWorking && (
         <TurnStatus
           messages={messages}
+          directory={currSession.getDirectory()}
           awaitingApproval={approvals.length > 0}
           awaitingAnswer={questions.length > 0}
           compacting={currSession.isCompacting()}
@@ -781,7 +825,8 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         onOverlayChange={setInputOverlay}
         onRemoveAttachment={removeAttachment}
         model={participants.find(participant => participant.name === selected)!.model}
-        thinkingLevel={currSession.getThinkingLevel(selected)}
+        thinkingLevel={currSession.getOfferedThinkingLevels(selected)?.length === 0 ? undefined
+          : currSession.getThinkingLevel(selected) ?? currSession.getModelThinkingDefault(selected)}
         history={history}
         queuedMessages={currSession.getQueuedMessages().filter(message => !message.to?.length || message.to.includes(selected))}
         onSendNow={sendNow}

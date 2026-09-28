@@ -1,5 +1,7 @@
 import path from 'path';
-import { DEFAULT_PARTICIPANT, isPlanCall, type Message, type MessageBlock, type ToolCallBlock } from '../types';
+import { DEFAULT_PARTICIPANT, isPlanCall, textOf, withoutCreationModels, type Message, type MessageBlock, type ToolCallBlock } from '../types';
+
+export { textOf };
 
 // One participant's record: every entry that was directed to it, in the
 // order it arrived. A user prompt that mentions it, a message from another
@@ -84,7 +86,8 @@ function blockText(speaker: string, block: MessageBlock): string {
     return `${speaker} plan:\n${checklist}`;
   }
   if (block.type === 'tool_call') {
-    const outcome = block.status === 'failed' ? ' (failed)' : block.status === 'completed' ? '' : ` (${block.status})`;
+    const outcome = block.outcome ? ` (${block.outcome})`
+      : block.status === 'failed' ? ' (failed)' : block.status === 'completed' ? '' : ` (${block.status})`;
     return `${speaker} ${VERBS[block.kind]}: ${block.title}${outcome}`;
   }
   return '';
@@ -119,7 +122,7 @@ export function transcriptText(entries: readonly Message[]): string {
   let remaining = budget;
   let omitted = false;
   outer: for (let index = entries.length - 1; index >= cut.from; index--) {
-    const entry = entries[index];
+    const entry = withoutCreationModels(entries[index]);
     const speaker = entry.role === 'user' ? 'User' : `@${entry.participant ?? DEFAULT_PARTICIPANT}`;
     for (let at = entry.content.length - 1; at >= (index === cut.from ? cut.block : 0); at--) {
       const text = blockText(speaker, entry.content[at]);

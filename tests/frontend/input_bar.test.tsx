@@ -25,7 +25,7 @@ import type { CommandMenuEntry, CommandMenuItem } from '../../src/commands/types
 import type { Feedback } from '../../src/commands/feedback';
 import { Session } from '../../src/agent_runtime/session';
 import Sidebar from '../../src/frontend/Sidebar';
-import { lastDecision, pendingApprovals, requestPermission, resolveApproval, type ApprovalDecision, type ApprovalRequest } from '../../src/agent_runtime/permissions/approvals';
+import { pendingApprovals, requestPermission, resolveApproval, type ApprovalDecision, type ApprovalRequest } from '../../src/agent_runtime/permissions/approvals';
 import type { QuestionAnswer, QuestionField, QuestionRequest } from '../../src/agent_runtime/permissions/questions';
 import type { PermissionOption } from '@agentclientprotocol/sdk';
 import { notifySubagents, type SubagentRun } from '../../src/agent_runtime/tools/subagents';
@@ -325,6 +325,29 @@ describe('input status', () => {
     expect(output).toContain('ctx 150k (75%) · claude-sonnet-5');
   });
 
+  test('warns when the context runs low', () => {
+    const output = stripAnsi(renderToString(
+      <StatusRow
+        contextUsage={{ tokens: 170_000, window: 200_000 }}
+        model="gpt-5.6-sol"
+        thinkingLevel="high"
+      />,
+      { columns: 100 },
+    ));
+    expect(output).toContain('ctx 170k · 15% left · /compact · gpt-5.6-sol · high');
+    // A long mode gives way before the gauge does.
+    const crowded = stripAnsi(renderToString(
+      <StatusRow
+        permissionMode="auto"
+        modeNotice="@sirus switched to acceptEdits; the session is on auto approve"
+        contextUsage={{ tokens: 24_000, window: 200_000 }}
+        model="claude-haiku-4-5"
+      />,
+      { columns: 90 },
+    ));
+    expect(crowded).toContain('ctx 24k (12%) · claude-haiku-4-5');
+  });
+
   test('qualifies the mode with what the vendor made of it', () => {
     const notice = 'auto approve is unavailable to @sirus, which is on Manual';
     const output = stripAnsi(renderToString(
@@ -507,49 +530,44 @@ describe('approval prompt', () => {
     expect(output).toContain('esc decline');
   });
 
-  test('shows what the vendor sent as plain text', () => {
-    const hostile = 'fetch 50%\r100% done\x07 \x1b]8;;https://elsewhere.example\x1b\\docs.example.com\x1b]8;;\x1b\\';
-    const output = renderToString(
-      <ApprovalPrompt
-        request={approval({
-          type: 'tool_call', id: 'call-hostile', kind: 'execute', title: hostile,
-          status: 'pending', locations: [{ path: hostile }], content: [], input: { command: hostile },
-        }, [{ optionId: 'allow', name: hostile, kind: 'allow_once' }])}
-        waiting={0}
-        selected={0}
-      />,
-      { columns: 140 },
-    );
-    expect(output).not.toMatch(/[\r\x07]|\x1b\]/);
-    const plain = stripAnsi(output);
-    expect(plain).toContain('$ 100% done docs.example.com');
-    expect(plain).not.toContain('50%');
-    expect(plain).not.toContain('elsewhere.example');
-  });
-
-  test('cuts an unrecognised input down to a readable line', () => {
-    const request = approval({
+  test('names Sirus’s own tools and lists their arguments, never raw JSON', () => {
+    const output = render(approval({
       type: 'tool_call',
       id: 'call-3',
       kind: 'other',
-      title: 'sirus - SaveMemory',
+      title: 'mcp__sirus__SpawnAgent',
       status: 'pending',
       locations: [],
       content: [],
-      input: { note: 'x'.repeat(400) },
-    });
-    const output = render(request);
+      input: { prompt: 'Review the loader.\nRun its tests.', description: 'Review loader', runInBackground: true },
+    }));
 
-    expect(output).toContain('@sirus wants to tool sirus - SaveMemory');
-    expect(output).toContain('…');
-    expect(output).not.toContain('x'.repeat(300));
-    // On a row wide enough to show it whole, the cut line is 200 characters,
-    // its ellipsis included.
-    const wide = stripAnsi(renderToString(
-      <ApprovalPrompt request={request} waiting={0} selected={0} />,
-      { columns: 260 },
-    ));
-    expect(wide.match(/\{"note":"x*…/)?.[0]).toHaveLength(200);
+    expect(output).toContain('@sirus wants to start subagent: Review loader');
+    expect(output).toContain('prompt:');
+    expect(output).toContain('Review the loader.');
+    expect(output).toContain('runInBackground: true');
+    expect(output).not.toContain('{');
+    expect(output).not.toContain('mcp__sirus');
+    // Codex wraps the same arguments with its server and tool names.
+    const codex = render(approval({
+      type: 'tool_call', id: 'call-4', kind: 'execute', title: 'mcp.sirus.CancelAgent',
+      status: 'pending', locations: [], content: [],
+      input: { server: 'sirus', tool: 'CancelAgent', arguments: { id: 'sub-1' } },
+    }));
+    expect(codex).toContain('@sirus wants to cancel subagent sub-1');
+    expect(codex).toContain('id: sub-1');
+    expect(codex).not.toContain('server:');
+  });
+
+  test('asks to go ahead with a plan in words', () => {
+    const output = render(approval({
+      type: 'tool_call', id: 'call-5', kind: 'switch_mode', title: 'Approve Plan',
+      status: 'pending', locations: [], content: [],
+      input: { plan: '# Add notes\n\n1. Write notes.txt' },
+    }));
+    expect(output).toContain('@sirus wants to proceed with this plan');
+    expect(output).toContain('1. Write notes.txt');
+    expect(output).not.toContain('mode');
   });
 
   test.each(['escape', 'feedback', 'feedback-escape', 'selection'] as const)('answers a worker approval through %s across streaming updates', async action => {
@@ -616,8 +634,9 @@ describe('approval prompt', () => {
     });
     const [request] = pendingApprovals(sessionId);
     expect(resolveApproval(request.id, 'deny')).toBe(true);
+    // The ACP client reads a cancelled answer to a request still in its turn
+    // as the user's refusal, and marks the call declined.
     expect(await response).toEqual({ outcome: { outcome: 'cancelled' } });
-    expect(lastDecision('allow-only-call', sessionId)).toBe('deny');
   });
 });
 

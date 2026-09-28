@@ -5,7 +5,9 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../styles/theme';
-import { subagentColors, toolLine } from './ChatMessage';
+import { toolLine } from './toolCalls';
+import { subagentColors } from './ChatMessage';
+import { singleLine } from '../terminal/text';
 import { workerAge } from '../../commands/agents/behavior';
 import {
   getSubagentsVersion,
@@ -67,12 +69,12 @@ function WorkerLine({ run, now, selected, position }: {
       <Text color={theme.accent}>{selected ? '› ' : '  '}</Text>
       {position && <Text color={theme.textSubtle}>{position} </Text>}
       <Text color={subagentColors[run.status]}>●</Text>
-      <Text color={theme.textMuted}> {run.name ?? run.id}</Text>
-      <Text color={theme.textSubtle}> · {run.model} {run.thinkingLevel}</Text>
+      <Text color={theme.textMuted}> {singleLine(run.name ?? run.id)}</Text>
+      <Text color={theme.textSubtle}> · {singleLine(run.model)}{run.thinkingLevel ? ` ${run.thinkingLevel}` : ''}</Text>
       <Text color={theme.textSubtle}> · {workerAge(run, now)}</Text>
-      <Text color={theme.textSubtle}> · {workerActivity(run)}</Text>
-      {run.description && <Text color={theme.textSubtle}> · {run.description}</Text>}
-      {run.branch && <Text color={theme.textSubtle}> · {run.branch}</Text>}
+      <Text color={theme.textSubtle}> · {singleLine(workerActivity(run))}</Text>
+      {run.description && <Text color={theme.textSubtle}> · {singleLine(run.description)}</Text>}
+      {run.branch && <Text color={theme.textSubtle}> · {singleLine(run.branch)}</Text>}
     </Text>
   );
 }

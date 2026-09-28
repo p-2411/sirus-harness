@@ -156,9 +156,12 @@ export class Timeline {
 
   // Takes charge of one round's assistant entries: when they enter their
   // speaker's transcript, what fills them in, and which never earned a place.
+  // An entry takes its seq when it enters, so replies stand in the order they
+  // began to arrive: one that started first is never pushed below a peer that
+  // started later but was mentioned earlier.
   openRound(speakers: readonly { name: string; model: string; transcript: Transcript }[]): RoundHandle {
     const entries: Message[] = speakers.map(speaker => ({
-      seq: this.nextSeq(),
+      seq: -1,
       role: 'assistant' as const,
       participant: speaker.name,
       model: speaker.model,
@@ -169,6 +172,7 @@ export class Timeline {
     const publish = (index: number) => {
       if (published.has(index)) return;
       published.add(index);
+      entries[index].seq = this.nextSeq();
       speakers[index].transcript.append(entries[index]);
       this.finishedAt = Date.now();
       this.changes.notifyAssistantActivity();

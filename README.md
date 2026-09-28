@@ -19,7 +19,7 @@ Run `sirus` on its own to open the current directory. The npm package includes t
 
 Inside Sirus:
 
-1. Type `/login` and choose Claude or ChatGPT, then sign in with an existing subscription or enter an API key through the masked input. Repeat `/login` to connect more accounts—as many as you want.
+1. Type `/login` and choose Claude or Codex, then sign in with an existing subscription or enter an API key through the masked input. Repeat `/login` to connect more accounts—as many as you want.
 2. Optionally type `/model` and pick a model. The choices come only from your connected vendors and are cached between launches; Sirus fetches missing lists automatically. Short names such as `/model opus` work with vendor aliases such as `opus[1m]`. New sessions use your saved model preference, or `gpt-5.6-luna` by default.
 3. Give Sirus a task:
 
@@ -57,11 +57,13 @@ Each agent runs its own vendor's tools: reading, searching, creating and editing
 
 Choose the model for each participant and adjust its reasoning depth. Bring in a second model to review an implementation or challenge a design while keeping the conversation in one place.
 
-Create a named participant by mentioning a new name followed by a supported model and a prompt:
+You or an agent can create a named participant by mentioning a new name followed by a supported model and a prompt:
 
 ```text
 @reviewer claude-sonnet-5 Read the uncommitted changes in this project and review them for bugs and missing tests.
 ```
+
+For an agent, put the introduction in a normal prose paragraph of its reply. The new participant appears in the header and receives that reply after the sender finishes, with the sender's name attached. It starts with that message rather than the sender's history, and the user's selected conversation stays in place. Mentions inside code, quotes, lists, or other Markdown examples do not create or invoke agents.
 
 Then address that participant by name:
 
@@ -107,13 +109,13 @@ Restoring the chat is refused while any of the session's subagents is still star
 
 Sirus can remember durable preferences and project decisions, then retrieve them by meaning in later sessions. Global memories carry preferences across projects; project memories stay scoped to the session's directory.
 
-Memory is enabled by default. Ask Sirus to remember, update, or forget something, or use `/memory off` to disable agent access. Memories are stored locally.
+Memory is enabled by default. Ask Sirus to remember, update, or forget something, use `/memory list` to see what is remembered and `/memory forget <name>` to remove one, or `/memory off` to disable agent access. Memories are stored locally.
 
 ### Context that compacts itself
 
 Long sessions fill the model's window. Each participant's runtime folds its own conversation when its window fills, the way Claude Code and Codex do on their own, including in the middle of a very long turn. Sirus records where that happened: a `context compacted` rule appears in that participant's part of the chat, with the summary the runtime reported.
 
-Use `/compact` to ask for it now. There is nothing to turn on or off: compaction belongs to the runtime. `/undo` and `/rewind` treat the rule like any other entry, and rewinding the chat to before one puts the whole conversation back.
+Use `/compact` to ask for it now, optionally followed by what the summary should keep. Claude Code uses those instructions; Codex compacts without them, and Sirus says when it ignores them. There is nothing to turn on or off: compaction belongs to the runtime. `/undo` and `/rewind` treat the rule like any other entry, and rewinding the chat to before one puts the whole conversation back.
 
 ### Keep several tasks moving
 
@@ -143,7 +145,7 @@ The runtime Sirus uses to name a session reads no project instructions.
 
 Each agent uses its own vendor's skills and slash commands, found where Claude Code or Codex would find them: Claude its skills, commands and enabled plugins, GPT its Codex skills and built-in commands. Each also gets the other vendor's skills it lacks: a Claude participant those in `.agents/skills` and `.codex/skills` (the project's, up to the Git root, and yours) and in third-party Codex plugins you enabled, and a GPT participant those in `.claude/skills` and in third-party Claude plugins you enabled that have a description and that the model may invoke; none that shares a name with one it has already. Sirus links them from a folder under its data directory, and neither vendor's own folders change.
 
-Type `/` to find one: after Sirus's own commands, the menu lists what the selected agent's runtime reports it offers, with what each takes. The list is the one last reported for that vendor in the session's directory, kept on disk, so once a runtime has run there the menu has it before the first prompt; a skill you add appears once the runtime reports its list again. `Tab` completes the name so you can add arguments, including `@file` mentions, and `Enter` sends it. Sirus hands it to the agent as the vendor's own terminal would, `/deploy prod` for Claude or `$deploy prod` for a Codex skill, so it runs as it would in Claude Code or Codex. A Sirus command of the same name takes precedence, and a few of the vendors' commands stay out of the menu: `/effort`, which would change the reasoning depth behind `/thinking`'s back, and Claude's internal session commands.
+Type `/` to find one: after Sirus's own commands, the menu lists what each vendor represented in the session last reported, tagged `claude` or `codex`, with what each takes. The list is the one last reported for that vendor in the session's directory, kept on disk, so once a runtime has run there the menu has it before the first prompt; a skill you add appears once the runtime reports its list again. `Tab` completes the name so you can add arguments, including `@file` mentions, and `Enter` sends it. Sirus hands it to the agent as the vendor's own terminal would, `/deploy prod` for Claude or `$deploy prod` for a Codex skill, so it runs as it would in Claude Code or Codex. A Sirus command of the same name takes precedence; use `/claude:name` or `/codex:name` to reach a vendor command with that name. Reporting commands with no arguments run aside and leave no turn in the transcript. A few vendor commands stay out of the menu, including `/effort`, which would change the reasoning depth behind `/thinking`'s back, and Claude's internal session commands.
 
 Codex on an OpenAI key, or on any ChatGPT account after the first you signed in with, runs in a profile of its own under Sirus's data directory. Sirus links the skills in your `~/.codex/skills` (or `$CODEX_HOME/skills`) into that profile, so Codex finds them there too.
 
@@ -191,7 +193,7 @@ Use `/usage` to see reported subscription allowance and how full each participan
 | `Shift+Enter` or `\` then `Enter` | Insert a new line. |
 | `Esc` | Close a menu, or interrupt the turn and send queued messages. |
 | `/rename <name>` | Give the current session a useful name. |
-| `/thinking` | Show or change reasoning depth. |
+| `/thinking` | Show or change reasoning depth; `default` leaves it to the model. |
 | `/agents` | Watch, message, cancel, or clear the session's subagents. |
 | `/undo` / `/rewind` | Choose what to restore from a checkpoint. |
 | `/notify` | Configure desktop notifications. |

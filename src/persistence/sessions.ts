@@ -11,6 +11,7 @@ import {
   PERMISSION_MODES,
   SUBAGENT_STATUSES,
   THINKING_LEVELS,
+  TOOL_CALL_OUTCOMES,
   TOOL_CALL_STATUSES,
   TOOL_KINDS,
   WORKER_CONTEXTS,
@@ -42,6 +43,8 @@ const imageBlockSchema = z.object({
 const thoughtBlockSchema = z.object({
   type: z.literal('thought'),
   text: z.string(),
+  startedAt: z.number().optional(),
+  endedAt: z.number().optional(),
 });
 
 const compactionBlockSchema = z.object({
@@ -65,7 +68,10 @@ function knownBlocks(value: unknown, types: ReadonlySet<string>): unknown {
 }
 
 const toolCallContentSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('diff'), path: z.string(), oldText: z.string().nullable(), newText: z.string() }),
+  z.object({
+    type: z.literal('diff'), path: z.string(), oldText: z.string().nullable(), newText: z.string(),
+    line: z.number().int().positive().optional(),
+  }),
   z.object({ type: z.literal('text'), text: z.string() }),
 ]);
 const toolCallContentTypes = new Set(toolCallContentSchema.options.map(schema => schema.shape.type.value));
@@ -80,6 +86,7 @@ const toolCallBlockSchema = z.object({
   content: z.preprocess(value => knownBlocks(value, toolCallContentTypes), z.array(toolCallContentSchema)),
   input: z.unknown().optional(),
   output: z.unknown().optional(),
+  outcome: z.enum(TOOL_CALL_OUTCOMES).optional(),
 });
 
 // Files written before the runtimes ran the tools: a call Sirus made and the
@@ -127,12 +134,27 @@ const messageSchema = z.object({
     block: z.number().int().nonnegative(),
     offset: z.number().int().nonnegative(),
   }).optional(),
+  creationModels: z.array(z.object({ start: z.number().int().nonnegative(), end: z.number().int().nonnegative() })).optional(),
+  startedAt: z.number().optional(),
+  finishedAt: z.number().optional(),
   // A compaction summary written by Sirus itself, before the runtimes
   // compacted their own conversations. It becomes a boundary with the
   // summary text; the token figures it carried are gone with the gauge.
   compaction: z.object({}).passthrough().optional(),
-  // Token usage the old transports reported per message; not kept.
-  usage: z.object({}).passthrough().optional(),
+  // What the turn used. The old transports wrote another shape under the
+  // same name, per message and without a total; that one is not kept.
+  usage: z.unknown().optional(),
+});
+
+// A Codex turn of several model calls has a total and no breakdown.
+const turnUsageSchema = z.object({
+  totalTokens: z.number().nonnegative(),
+  inputTokens: z.number().nonnegative().optional(),
+  outputTokens: z.number().nonnegative().optional(),
+  cachedReadTokens: z.number().nonnegative().optional(),
+  cachedWriteTokens: z.number().nonnegative().optional(),
+  thoughtTokens: z.number().nonnegative().optional(),
+  costUsd: z.number().nonnegative().optional(),
 });
 
 const nativeSessionSchema = z.object({
@@ -171,7 +193,7 @@ const workerSchema = z.object({
   callId: z.string().min(1).nullable(),
   owner: z.string().min(1),
   model: z.string().min(1),
-  thinkingLevel: z.enum(THINKING_LEVELS),
+  thinkingLevel: z.enum(THINKING_LEVELS).optional(),
   context: z.enum(WORKER_CONTEXTS),
   prompt: z.string(),
   directory: z.string().min(1),
@@ -309,6 +331,9 @@ function toBlocks(content: readonly StoredBlock[]): MessageBlock[] {
   const blocks: MessageBlock[] = [];
   for (const block of content) {
     if (block.type === 'tool_result') continue;
+    // Builds of 2026-09-28 marked a cut-short turn with an "Interrupted" row,
+    // which is no longer shown.
+    if (block.type === 'notice' && block.severity === 'interrupted') continue;
     if (block.type === 'tool_call' && 'name' in block) {
       blocks.push(legacyToolCall(block, results));
       continue;
@@ -317,7 +342,7 @@ function toBlocks(content: readonly StoredBlock[]): MessageBlock[] {
   }
   // Nothing is running after a restart: a call saved mid-turn ended with the
   // process that ran it.
-  failOpenToolCalls(blocks);
+  failOpenToolCalls(blocks, 'cancelled');
   return blocks;
 }
 
@@ -328,6 +353,7 @@ function toMessage(stored: StoredMessage, index: number, defaultParticipant: str
     ? [{ type: 'compaction' as const, summary: stored.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n') }]
     : toBlocks(stored.content);
   const role = stored.compaction ? 'assistant' : stored.role;
+  const usage = turnUsageSchema.safeParse(stored.usage);
   return {
     seq: stored.seq ?? index,
     role,
@@ -337,6 +363,10 @@ function toMessage(stored: StoredMessage, index: number, defaultParticipant: str
     ...(stored.model ? { model: stored.model } : {}),
     ...(stored.hidden ? { hidden: true as const } : {}),
     ...(stored.injectedAt ? { injectedAt: stored.injectedAt } : {}),
+    ...(stored.creationModels?.length ? { creationModels: stored.creationModels } : {}),
+    ...(stored.startedAt !== undefined ? { startedAt: stored.startedAt } : {}),
+    ...(stored.finishedAt !== undefined ? { finishedAt: stored.finishedAt } : {}),
+    ...(usage.success ? { usage: usage.data } : {}),
   };
 }
 

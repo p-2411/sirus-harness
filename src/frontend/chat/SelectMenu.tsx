@@ -35,7 +35,7 @@ export function SelectMenu({
 }) {
   if (items.length === 0) return null;
   const choices = items.filter(item => item.type === 'item');
-  const column = Math.max(0, ...choices.map(item => item.label.length)) + 2;
+  const column = Math.max(0, ...choices.map(item => item.label.length + (item.current ? 2 : 0))) + 2;
   let choiceIndex = -1;
 
   return (
@@ -50,11 +50,19 @@ export function SelectMenu({
         }
         choiceIndex++;
         const active = choiceIndex === selected;
+        // What is in effect now carries a check after its label.
+        const label = item.current ? `${item.label} ✓` : item.label;
+        // One line per choice: the label keeps its column and a long
+        // description is cut at the edge rather than wrapped under it.
         return (
           <Box key={item.key}>
-            <Text color={active ? theme.accent : theme.textSubtle}>{active ? '› ' : '  '}</Text>
-            <Text color={active ? theme.accent : theme.text}>{item.description ? item.label.padEnd(column) : item.label}</Text>
-            {item.description && <Text color={theme.textMuted}>{item.description}</Text>}
+            <Box width={2} flexShrink={0}>
+              <Text color={active ? theme.accent : theme.textSubtle}>{active ? '› ' : '  '}</Text>
+            </Box>
+            <Box flexShrink={0} {...(item.description ? { width: column } : {})}>
+              <Text color={active ? theme.accent : theme.text}>{label}</Text>
+            </Box>
+            {item.description && <Text color={theme.textMuted} wrap="truncate-end">{item.description}</Text>}
           </Box>
         );
       })}

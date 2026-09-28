@@ -1,4 +1,6 @@
-import { cachedJsonFile } from '../../persistence/atomicJson';
+import path from 'path';
+import { dataDirectory } from '../../dataDirectory';
+import { readJson, writeJson } from '../../persistence/atomicJson';
 import type { LimitPeriod } from '../types';
 
 // Every fact about the models and vendors Sirus can talk to. This module
@@ -41,14 +43,18 @@ export interface ModelInfo {
 }
 
 export interface VendorInfo {
+  // The key settings and session files store the vendor under. Never shown:
+  // `gpt` predates Codex being the only harness Sirus runs for it.
   id: Vendor;
-  // The vendor's name as it appears on an API key, for messages to the user.
+  // The vendor's one name everywhere the user reads it: the harness Sirus
+  // runs for it.
   displayName: string;
-  // The consumer account behind a subscription, for messages to the user.
+  // The same name as the user types it: `/login codex`, `/codex:status`, and
+  // the tag on the vendor's own rows of the `/` menu.
+  command: string;
+  // The account a subscription signs in with, which is not always the
+  // vendor's name: Codex takes a ChatGPT login.
   accountName: string;
-  // The short label the sidebar shows next to a subscription's remaining
-  // allowance.
-  sidebarLabel: string;
   // The environment variable an API key may come from: the Sirus-facing
   // name `sources.ts` reads.
   apiKeyEnv: string;
@@ -71,9 +77,9 @@ export interface VendorInfo {
 const VENDOR_TABLE = {
   claude: {
     id: 'claude',
-    displayName: 'Anthropic',
+    displayName: 'Claude',
+    command: 'claude',
     accountName: 'Claude',
-    sidebarLabel: 'claude',
     apiKeyEnv: 'ANTHROPIC_API',
     credentialEnv: 'ANTHROPIC_API_KEY',
     scrubEnv: [
@@ -90,9 +96,9 @@ const VENDOR_TABLE = {
   },
   gpt: {
     id: 'gpt',
-    displayName: 'OpenAI',
+    displayName: 'Codex',
+    command: 'codex',
     accountName: 'ChatGPT',
-    sidebarLabel: 'codex',
     apiKeyEnv: 'OPENAI_SECRET',
     credentialEnv: 'OPENAI_API_KEY',
     scrubEnv: ['OPENAI_API_KEY', 'CODEX_API_KEY'],
@@ -108,9 +114,17 @@ export const VENDOR_INFO: Record<Vendor, VendorInfo> = VENDOR_TABLE;
 
 export const VENDORS: readonly Vendor[] = Object.keys(VENDOR_TABLE) as Vendor[];
 
+// A vendor as the user typed it: its command word, or the stored key, which
+// older habits and scripts still use (`/login gpt`).
+export function vendorNamed(name: string | undefined): Vendor | undefined {
+  const typed = name?.toLocaleLowerCase();
+  return VENDORS.find(vendor => vendor === typed || VENDOR_TABLE[vendor].command === typed);
+}
+
 export function parseVendor(name: string | undefined): Vendor {
-  if (name !== undefined && name in VENDOR_TABLE) return name as Vendor;
-  throw new Error(`Unknown provider "${name ?? ''}". Try: ${VENDORS.join(', ')}`);
+  const vendor = vendorNamed(name);
+  if (vendor) return vendor;
+  throw new Error(`Unknown provider "${name ?? ''}". Try: ${VENDORS.map(id => VENDOR_TABLE[id].command).join(', ')}`);
 }
 
 // Primary-source research refreshed 28 September 2026. Vendor-listed models
@@ -332,6 +346,18 @@ export function modelIds(): string[] {
   return [...new Set(VENDORS.flatMap(modelsOf))];
 }
 
+// The model a short reference names without guessing: an id in any case, or
+// a vendor alias written without its qualifier (`opus` for Claude's
+// `opus[1m]`). A mention is read out of prose, so it goes no further; `/model`
+// also matches part of an id.
+export function modelNamed(reference: string, ids: readonly string[] = modelIds()): string | undefined {
+  const key = reference.toLocaleLowerCase();
+  const exact = ids.find(id => id.toLocaleLowerCase() === key);
+  if (exact) return exact;
+  const aliases = ids.filter(id => id.toLocaleLowerCase().replace(/\[[^\]]+\]$/, '') === key);
+  return aliases.length === 1 ? aliases[0] : undefined;
+}
+
 // Selectable models come only from the vendor. Profiles describe models;
 // they do not establish availability, even before the first discovery.
 export function modelsOf(vendor: Vendor): string[] {
@@ -352,7 +378,9 @@ export function vendorOf(id: string): Vendor | undefined {
 // Claude Code's aliases (`sonnet`, `opus[1m]`), which always name that line's
 // newest model, and Codex's ids. The last list per vendor is kept, on disk
 // too, so the menu is right before any runtime has started. A model only a
-// vendor lists can be chosen and run without a catalog profile.
+// vendor lists can be chosen and run without a catalog profile. What a
+// runtime shows about its own model (its reasoning depths, its window) is
+// kept beside the lists, by model id.
 
 export interface ListedModel {
   id: string;
@@ -360,9 +388,33 @@ export interface ListedModel {
   description: string;
 }
 
+// What a runtime showed about the model it runs, beyond the name: the
+// reasoning depths its effort option offers (none when it has no such
+// option), the one the vendor picks when nobody sets one, and the context
+// window it reported. Claude's adapter reports a
+// 200k window until its first reply names the real one, so the largest
+// window seen stands, and the gauge does not read 20% and then 4% for the
+// same tokens.
+export interface ModelFacts {
+  efforts?: string[];
+  defaultEffort?: string;
+  window?: number;
+}
+
 const LISTED_FILE_VERSION = 1;
 
-type ListedByVendor = Partial<Record<Vendor, ListedModel[]>>;
+interface Listed {
+  file: string;
+  byVendor: Partial<Record<Vendor, ListedModel[]>>;
+  facts: Record<string, ModelFacts>;
+}
+
+// Read once per data directory, which the test suite moves between files.
+let listed: Listed | null = null;
+
+function listedFile(): string {
+  return path.join(dataDirectory(), 'listed-models.json');
+}
 
 function isListedModel(value: unknown): value is ListedModel {
   if (typeof value !== 'object' || value === null) return false;
@@ -370,24 +422,56 @@ function isListedModel(value: unknown): value is ListedModel {
   return typeof model.id === 'string' && model.id.length > 0 && typeof model.description === 'string';
 }
 
-const listedFile = cachedJsonFile<ListedByVendor>(
-  'listed-models.json',
-  stored => {
-    const read = stored as { version?: unknown; vendors?: Record<string, unknown> } | null;
-    const byVendor: ListedByVendor = {};
-    if (read?.version === LISTED_FILE_VERSION && read.vendors) {
-      for (const vendor of VENDORS) {
-        const models = read.vendors[vendor];
-        if (Array.isArray(models)) byVendor[vendor] = models.filter(isListedModel);
-      }
-    }
-    return byVendor;
-  },
-  byVendor => ({ version: LISTED_FILE_VERSION, vendors: byVendor }),
-);
+function isModelFacts(value: unknown): value is ModelFacts {
+  if (typeof value !== 'object' || value === null) return false;
+  const facts = value as Record<string, unknown>;
+  return (facts.efforts === undefined || (Array.isArray(facts.efforts) && facts.efforts.every(level => typeof level === 'string')))
+    && (facts.defaultEffort === undefined || typeof facts.defaultEffort === 'string')
+    && (facts.window === undefined || (typeof facts.window === 'number' && facts.window > 0));
+}
 
-function listedModels(): ListedByVendor {
-  return listedFile.read();
+function readListed(): Listed {
+  const file = listedFile();
+  if (listed?.file === file) return listed;
+  const read = readJson(file) as { version?: unknown; vendors?: Record<string, unknown>; facts?: Record<string, unknown> } | null;
+  const byVendor: Partial<Record<Vendor, ListedModel[]>> = {};
+  const facts: Record<string, ModelFacts> = {};
+  if (read?.version === LISTED_FILE_VERSION && read.vendors) {
+    for (const vendor of VENDORS) {
+      const models = read.vendors[vendor];
+      if (Array.isArray(models)) byVendor[vendor] = models.filter(isListedModel);
+    }
+    for (const [id, value] of Object.entries(read.facts ?? {})) if (isModelFacts(value)) facts[id] = value;
+  }
+  listed = { file, byVendor, facts };
+  return listed;
+}
+
+function writeListed(next: Omit<Listed, 'file'>): void {
+  listed = { file: listedFile(), ...next };
+  writeJson(listed.file, { version: LISTED_FILE_VERSION, vendors: next.byVendor, facts: next.facts });
+}
+
+function listedModels(): Partial<Record<Vendor, ListedModel[]>> {
+  return readListed().byVendor;
+}
+
+export function modelFacts(id: string): ModelFacts {
+  return readListed().facts[id] ?? {};
+}
+
+// Keeps what a runtime just showed about its model. A window only grows.
+export function rememberModelFacts(id: string, facts: ModelFacts): void {
+  const current = readListed();
+  const previous = current.facts[id] ?? {};
+  const next: ModelFacts = {
+    ...previous,
+    ...(facts.efforts ? { efforts: [...facts.efforts] } : {}),
+    ...(facts.defaultEffort ? { defaultEffort: facts.defaultEffort } : {}),
+    ...(facts.window && facts.window > (previous.window ?? 0) ? { window: facts.window } : {}),
+  };
+  if (JSON.stringify(next) === JSON.stringify(previous)) return;
+  writeListed({ byVendor: current.byVendor, facts: { ...current.facts, [id]: next } });
 }
 
 function listedVendorOf(id: string): Vendor | undefined {
@@ -407,7 +491,7 @@ export function listedDescription(id: string): string | undefined {
 
 // Keeps what a vendor's runtime just said it offers.
 export function rememberListedModels(vendor: Vendor, models: readonly ListedModel[]): void {
-  const current = listedModels();
-  if (JSON.stringify(current[vendor] ?? []) === JSON.stringify(models)) return;
-  listedFile.write({ ...current, [vendor]: [...models] });
+  const current = readListed();
+  if (JSON.stringify(current.byVendor[vendor] ?? []) === JSON.stringify(models)) return;
+  writeListed({ byVendor: { ...current.byVendor, [vendor]: [...models] }, facts: current.facts });
 }

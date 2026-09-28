@@ -27,7 +27,10 @@ One user prompt, in the order a reader opens the files:
    `session.sendMessage(draft)`.
 2. `agent_runtime/session/index.ts`: `Session.sendMessage` reads the mentions through
    `ParticipantRoster`, stamps the entry with the session-wide sequence number and puts it
-   in the transcript of every participant it addresses, and nothing else's. The pre-turn
+   in the transcript of every participant it addresses, and nothing else's. The entry keeps
+   the prompt as typed; the model that introduced a participant is marked
+   (`creationModels`) and everything a runtime reads goes without it
+   (`withoutCreationModels`). The pre-turn
    checkpoint is awaited before anything is prompted, because the runtimes run their tools
    themselves and cannot wait on a barrier. Then the round goes to `TurnRunner`.
 3. `agent_runtime/session/turnRunner.ts`: the round loop. Every addressed participant runs
@@ -48,8 +51,12 @@ One user prompt, in the order a reader opens the files:
    the credential, and `session()`, which every session opened on that process goes
    through.
 7. The adapter process runs the model and the vendor's own file, shell, search and web
-   tools. Its `session/update` notifications become transcript entries: text, thoughts,
-   tool calls merged by id, the context gauge, a compaction boundary.
+   tools. Its `session/update` notifications become transcript entries: text (a new block
+   for each message), timed thoughts, tool calls merged by id, the context gauge, a
+   compaction boundary, and once the turn ends what it used (`TurnUsage`: the prompt
+   response's tally from Claude; from Codex, whose response covers its last model call
+   only, the sum of the turn's usage updates when it made several). A call the user declined at the approval prompt is marked so in `acp.ts`
+   (`outcome`), since both vendors report it only as failed.
 8. `agent_runtime/tools/server.ts`: a Sirus tool the model called arrives here over
    loopback HTTP, carrying the session's bearer token and the caller's name, so the call
    knows which session it belongs to and who issued it. The registry is `tools/index.ts`;
@@ -72,15 +79,17 @@ facade over collaborators in the same folder, each constructible on its own:
   user prompt that addressed it, another participant's message that mentioned it, its own
   responses. The same entry object sits in every transcript it was delivered to.
 - `Timeline`: what sits above the transcripts. It hands out the session-wide sequence
-  numbers, merges the transcripts into the one ordered view the UI and the snapshot read,
+  numbers, a reply's when its first output arrives, so replies running in parallel stand
+  in the order they began; merges the transcripts into the one ordered view the UI and the snapshot read,
   keeps the activity clocks, and owns the identity of the assistant entries a round fills
   in.
-- `ParticipantRoster`: the agents in the session and all `@name` routing. The mention
-  grammar exists once, here; the chat's colouring (`MentionText.tsx`) and the `@` menu
-  import it.
+- `ParticipantRoster`: the agents in the session and all `@name` routing. Users and
+  participants can introduce peers with `@name <model> <task>`; names and models are
+  validated before adding them. The mention grammar exists once, here.
 - `TurnRunner`: the round loop, and the one place that decides what a participant is
-  prompted with, including who a user prompt added to the session
-  (`withIntroductions`), since the model that created them is stripped from its text.
+  prompted with, including who a user or peer message added to the session
+  (`withIntroductions`), since the runtimes read the message without the model that created
+  them.
 - `CheckpointLog`: directory snapshots taken before each turn, and the cross-session
   interlock that makes restoring one safe. Injectable `DirectoryActivity`; the default is
   process-wide.
@@ -132,10 +141,19 @@ spawn still setting up its worker. A worktree a worker changed outlives the sess
 reach.
 
 Compaction belongs to the runtime. Each one folds its own conversation when its window
-fills and reports it; `Session.compact` asks the selected participant's runtime to do it now
-by sending `/compact` as a prompt, which both vendors take as a slash command. What comes
-back is a compaction block in that participant's record, rendered as a rule in the chat.
-There is no automatic step of Sirus's own and nothing to switch off.
+fills and reports it; `Session.compact` asks a participant's runtime (the selected one's
+unless named) to do it now by sending `/compact` as a prompt, which both vendors take as a
+slash command, with whatever the user wants the summary to keep after it: Claude Code reads
+those as instructions, Codex compacts without any and the command says so. What comes back
+is a compaction block in that participant's record, rendered as a rule in the chat. There is
+no automatic step of Sirus's own and nothing to switch off.
+
+The status row shows the selected agent's context gauge, model and thinking level, the tab
+the chat is on. The gauge warns from `CONTEXT_LOW_PERCENT` on, and a window smaller than one
+already seen for the model is taken for the adapter's placeholder. What each turn used is kept on the assistant entry it
+wrote (`Message.usage`), whose output count its footer shows; a participant's total, which `/status` and
+`/usage` show, is the sum over its entries (`getTurnUsage`), a figure of the breakdown only
+when every turn reported one.
 
 ## Participants and runtimes
 
@@ -184,22 +202,25 @@ project's and those of third-party plugins the user enabled, linked from `shared
 under the data directory: Claude gets them as local plugins (`claudeSkillPlugins`), Codex as
 additional directories (`codexSkillDirectories`), and neither vendor's own folders change.
 
-The `/` menu lists the vendor's own commands after Sirus's. A runtime reports what its
-harness offers in `available_commands_update`, and `runtime/commands.ts` keeps it:
-`nativeCommandFrom` turns each entry into a `NativeCommand`, leaving out the names in
-`HIDDEN` (Claude's internal session commands, and `/effort`, which would change the thinking
-level behind `/thinking`'s back) and any that start with `_`, and `rememberNativeCommands`
-keeps the last list per vendor and directory in `native-commands.json`, so `nativeCommands`
-has something for the menu before the first turn of the day. A worker's list is not kept.
-`Session.getNativeCommands` answers for the selected participant, since that is who a bare
-`/name` reaches. `isSirusCommand` in `commands/registry.ts` is what makes `Chat.send` run a
-`/` line as a Sirus command or send it as a prompt: a vendor command goes to the agent
-unless a Sirus command has the same name. `TurnRunner` puts it in the addressed
-participant's vendor's words (`nativePrompt`): `/name` as it is, or `$name` for a Codex
-skill, which Codex lists and resolves that way. Claude reads a slash command only from the
-prompt's last text block, so a cold runtime seeded with its record gets that record as a
-block of its own ahead of the command (`PromptInput.context`), and every prompt sends its
-images before its text.
+The vendors' own commands, skills included, are what each runtime reports in
+`available_commands_update` (`runtime/commands.ts`); the last list per vendor and directory
+is kept on disk. The `/` menu shows those of every vendor a participant runs on after Sirus's
+commands, tagged "(claude)" or "(codex)", the selected agent's vendor first; one whose
+name a Sirus command or an earlier vendor already has is listed and reached with the
+vendor's prefix, `/claude:agents` or `/codex:status` (`vendorCommandNames`). `Chat.send`
+sends such a line as a prompt to the selected agent when it is on that vendor, else to one
+that is (`participantOn`), and `TurnRunner` puts it in
+that vendor's words (`nativePrompt`): the prefix goes, and a Codex skill reads `$name`. A
+command that only reports and takes no arguments (`isReportingCommand`: Claude's `/context`,
+Codex's `/status`) is not sent at all: `SessionAgent.runAside` runs it on a throwaway fork of
+the participant's runtime, or on a fresh runtime while the vendor holds no conversation yet,
+and the chat shows what it printed as a panel, so it leaves no turn, no checkpoint and nothing
+in any record. Sirus's own `/init` and `/review` go the prompt way too: the chat shows
+`/init`, and `nativePrompt` hands the participant Sirus's prompt for it, except that Codex's
+`/review` stays Codex's. Claude reads a slash command only from the prompt's last text
+block, so a cold runtime seeded with its record gets that record as a block of its own
+ahead of the command (`PromptInput.context`), and every prompt sends its images before its
+text.
 
 Delegation is the participant's own: `spawnSubagent` settles the worker's model (the
 session's fixed subagent model, else the one the spawn named, else its agent definition's,
@@ -228,8 +249,8 @@ handle and starts fresh with the bounded text recap. Prompt hashes catch changes
 app restarts too. Missing sessions, directories, credentials or profile homes, and vendor
 resume refusals, produce a brief notice and use the same recap fallback. A cancelled
 startup keeps an existing handle for the next attempt. A turn that is cancelled or fails
-marks the tool calls it left open as failed, since nothing more will be heard of them, and
-a snapshot restores an open call the same way.
+marks the tool calls it left open as failed, since nothing more will be heard of them; a
+cancelled one marks them cancelled. A snapshot restores an open call as cancelled.
 
 A participant keeps the time its runtime last reported anything (`quietFor`), not counting
 time spent waiting on the user's approval or inside a tool call that is still running. After
@@ -240,13 +261,16 @@ report says why.
 
 Reduced to credentials: nothing here knows a wire protocol or runs a turn.
 
-- `catalog.ts`: every fact about the models and vendors. `MODELS` (id, vendor, and the
-  profile SpawnAgent's description shows an agent choosing a model for delegated work),
-  `VENDOR_INFO` (display names, the API-key environment variable Sirus reads, the one
-  the vendor's harness reads, the credentials a subscription child must not inherit, the
-  profile directory variable, the allowance window), and the models each vendor's runtime
-  last reported offering (`rememberListedModels`, kept in `listed-models.json`), which is
-  what `/model` lists. Consumers import model facts straight from here.
+- `catalog.ts`: vendor and model definitions, plus the cached model lists and runtime facts. `MODELS` (id, vendor, and the profile the router reads) and
+  `VENDOR_INFO` (the one name the user reads and types for each vendor, Claude and Codex,
+  over a stored key that stays `claude` and `gpt`; the API-key environment variable Sirus
+  reads, the one the vendor's harness reads, the credentials a subscription child must not
+  inherit, the profile directory variable, the allowance window). Consumers import model
+  facts straight from here, including what the vendors listed and what a runtime showed
+  about its model: the efforts it offers, which `/thinking` offers, the one the vendor picks
+  when nobody sets one, and the largest window it reported, which keeps the gauge from
+  reading a placeholder. An agent with no thinking level of its own never sets the vendor's
+  effort, so it runs at its model's default, and `/thinking default` puts it back there.
 - `sources.ts`: a vendor's credentials, API keys and subscription profiles, in priority
   order, persisted through settings. The head of the list is the preferred one.
   `onProviderChange` is how the sidebar hears that a credential or the one in use changed.
@@ -278,7 +302,9 @@ so nothing fails silently.
 
 The vendors run their own file, shell, search and web tools, so what is left in
 `tools/index.ts` is what only Sirus can do: memory and delegation. A `Tool` is a plain
-object: name, description, argument schema, optional `audience` and `requires`, and `run`.
+object: name, description, argument schema, optional `audience` and `requires`, `label`
+(how a call reads in the chat and on an approval prompt, since the vendors know it only by
+its MCP name) and `run`.
 Adding a tool is one entry in one family file.
 
 `tools/server.ts` is the one MCP server inside the Sirus process, on loopback at an
@@ -304,16 +330,14 @@ repository git fails to cut a worktree from fails the spawn instead.
 
 Permissions are the vendor's. `policy.ts` holds the vocabulary of the three modes;
 `runtime/runtime.ts` maps each onto the vendor mode kind (`standard`, `auto_review`,
-`full_access`) and picks the first vendor mode of that kind. In `ask` Claude asks about
-every action that is not a read, while Codex's mode of that kind (`read-only` in codex-acp)
-still writes and runs commands inside the working directory without asking, in a sandbox
-with no network, and asks about what leaves it. In `auto` the vendor's own reviewer
-escalates only what it judges unsafe, and in `bypass` nothing is asked. `approvals.ts` is
-the queue for what does get escalated: the prompt renders from the ACP tool call and nothing
-else, and the answer is one of the vendor's own options, so "allow for this session" is the
-vendor's allow-always and Sirus keeps no allowance of its own. The queue is built by
-`userRequestQueue`, which builds the questions' queue too. There is no
-`permissions/index.ts`: every import names the file that defines the symbol.
+`full_access`) and picks the first vendor mode of that kind. In `ask` the vendor asks about
+every action that is not a read, in `auto` its own reviewer escalates only what it judges
+unsafe, in `bypass` nothing is asked. `approvals.ts` is the queue for what does get
+escalated: the prompt renders from the ACP tool call and nothing else, and the answer is one
+of the vendor's own options, so "allow for this session" is the vendor's allow-always and
+Sirus keeps no allowance of its own. What the user decided stays on the call itself: the
+ACP client marks one they declined, and the transcript keeps saying so after a restart. There is no `permissions/index.ts`: every import names
+the file that defines the symbol.
 
 Questions are the vendors' too: Claude's AskUserQuestion (which `CLAUDE_TOOLS_OFF` leaves
 on) and Codex's request_user_input (on in every mode through
@@ -357,7 +381,7 @@ are the zero-dependency `agent_runtime/types.ts`, `src/dataDirectory.ts` and, in
 
 A command is a `CommandSpec` with `run(args, context)` where `context` is
 `{ session: CommandSession, signal, notify }` plus opt-in capabilities (`AttachesImages`,
-`QuitsApp`). `CommandSession` is the structural subset of `Session` that commands use, so
+`QuitsApp`, `sendPrompt` for one that talks to the agents, as `/init` does). `CommandSession` is the structural subset of `Session` that commands use, so
 the command layer never depends on the class. The registry array fixes the user-visible
 order. See `src/commands/README.md` for the file-layout rule.
 
@@ -373,11 +397,14 @@ it the keyboard against a list frozen as focus arrives, so nothing moves under t
 `enter` sends `/agents <id>` down the path typing it takes; the ordering is the strip's own,
 while `/agents` keeps listing every run nobody has dismissed. A worker goes by the name its owner gave it (`workerName`), or its id when it has none, in
 all of these and on its approval prompts. In the history, `ChatMessage.tsx` lets the
-SpawnAgent row follow the run it started and keeps it out of the `Ran N commands` groups. The
+SpawnAgent row follow the run it started and keeps it out of the groups of ordinary calls. The
 row is laid out like Claude Code's Agent row: the worker and its task, then how the run stands
 (`runSummary`, "Done (3 tool uses · 24k tokens · 16s)"), then the report the session set as
 the call's output, whole and as Markdown, open already once the run has ended. A spawn that
-started no worker shows the tool's error instead.
+started no worker shows the tool's error instead. How every other call reads is
+`frontend/chat/toolCalls.ts`: its line (the kind's verb unless the vendor's title has one,
+Sirus's own tools by their `label`), the change it made as a numbered line diff, why it
+failed, and a group of calls summed up by kind ("Read 2 files, edited 1 file").
 
 ## Verification
 

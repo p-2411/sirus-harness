@@ -1,6 +1,7 @@
 import { existsSync } from 'fs';
 import path from 'path';
 import { z } from 'zod';
+import { PERMISSION_MODES, THINKING_LEVELS, type PermissionMode, type ThinkingLevel } from '../agent_runtime/types';
 import { dataDirectory } from '../dataDirectory';
 import { PROFILE_NAME_PATTERN } from '../agent_runtime/types';
 import { readJson, setAside, writeJson } from './atomicJson';
@@ -59,6 +60,10 @@ const settingsFileSchema = z.object({
   sirusModel: z.string().min(1).optional(),
   // When to send desktop notifications; absent means background only.
   notifications: z.enum(NOTIFICATION_PREFERENCES).optional(),
+  // What a new session starts in, from /config; absent means the built-in
+  // defaults. Sessions keep their own once created.
+  permissionMode: z.enum(PERMISSION_MODES).optional(),
+  thinkingLevel: z.enum(THINKING_LEVELS).optional(),
 }).passthrough();
 
 // The sections of the file this build could read. One that failed its schema
@@ -75,6 +80,9 @@ export interface SettingsShape {
   apiKeys: StoredApiKeys;
   sirusModel: string | null;
   notifications: NotificationPreference;
+  // Null leaves a new session on the built-in default.
+  permissionMode: PermissionMode | null;
+  thinkingLevel: ThinkingLevel | null;
 }
 
 // The single list of settings: its keys drive both the fallbacks a read uses
@@ -86,11 +94,12 @@ const DEFAULTS: SettingsShape = {
   apiKeys: {},
   sirusModel: null,
   notifications: 'background',
+  permissionMode: null,
+  thinkingLevel: null,
 };
 
-// How one setting maps onto the file. Most are a plain key of the same name;
-// `memoryEnabled` is `memory.enabled`, and a cleared Sirus model is an absent
-// key.
+// How one setting maps onto the file. Only `memoryEnabled` is not a plain
+// key of the same name, and a cleared preference is an absent key.
 interface Codec<K extends keyof SettingsShape> {
   // The top-level key of the file the setting is stored under.
   section: SectionName;
@@ -135,6 +144,16 @@ const CODECS: { [K in keyof SettingsShape]: Codec<K> } = {
     section: 'notifications',
     read: file => file.notifications,
     write: (file, value) => { file.notifications = value; },
+  },
+  permissionMode: {
+    section: 'permissionMode',
+    read: file => file.permissionMode,
+    write: (file, value) => { if (value === null) delete file.permissionMode; else file.permissionMode = value; },
+  },
+  thinkingLevel: {
+    section: 'thinkingLevel',
+    read: file => file.thinkingLevel,
+    write: (file, value) => { if (value === null) delete file.thinkingLevel; else file.thinkingLevel = value; },
   },
 };
 
@@ -216,4 +235,10 @@ export function openSettings(directory: string = dataDirectory()): Settings {
       return writeJson(settingsPath(directory), next);
     },
   };
+}
+
+// New sessions read defaults through the settings object.
+export function loadSessionDefaults(directory?: string) {
+  const settings = openSettings(directory);
+  return { permissionMode: settings.get('permissionMode'), thinkingLevel: settings.get('thinkingLevel') };
 }

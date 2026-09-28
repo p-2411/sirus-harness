@@ -37,7 +37,7 @@ export interface ScriptedRuntime extends Omit<Runtime, 'context' | 'model' | 'fo
   disposed: boolean;
   prompts: PromptInput[];
   permissionMode: string;
-  thinkingLevel: string;
+  thinkingLevel?: string;
   // Every text `steer` took, in order.
   steers: string[];
   stoppedTasks: string[];

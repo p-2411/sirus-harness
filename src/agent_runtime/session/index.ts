@@ -1,15 +1,16 @@
 import crypto from 'crypto';
-import { SessionAgent, type Participant, type RuntimeHost } from '../agent';
+import { SessionAgent, type AsideOutput, type RuntimeHost } from '../agent';
 import { isMemoryAccessEnabled } from '../memory-access';
 import { requestPermission } from '../permissions/approvals';
 import { requestAnswers } from '../permissions/questions';
 import { DEFAULT_PERMISSION_MODE } from '../permissions/policy';
 import { sirusPrompt } from '../prompt';
-import { requireKnownModel } from '../providers';
-import { DEFAULT_MODEL, vendorOf } from '../providers/catalog';
+import { requireKnownModel, servableModelIds, servesModel } from '../providers';
+import { DEFAULT_MODEL, vendorOf, type Vendor } from '../providers/catalog';
 import { discoverMissingModels } from '../providers/discovery';
+import type { Source } from '../providers/sources';
 import { nativeCommands, type NativeCommand } from '../runtime/commands';
-import type { BackgroundTask } from '../runtime/runtime';
+import type { BackgroundTask, McpServerState } from '../runtime/runtime';
 import { registerToolSession, sirusMcpServerEntry, unregisterToolSession, workerRequester } from '../tools/server';
 import {
   notifySubagents,
@@ -25,15 +26,17 @@ import type { SubagentHost } from '../tools/types';
 import {
   DEFAULT_PARTICIPANT,
   textOf,
+  withoutCreationModels,
+  type PermissionMode,
   type ImageBlock,
   type MessageBlock,
   type Message,
   type NoticeBlock,
-  type PermissionMode,
   type ThinkingLevel,
   type ToolCallBlock,
+  type TurnUsage,
 } from '../types';
-import type { ContextUsage } from '../usage';
+import { addTurnUsage, type ContextUsage } from '../usage';
 import { parseFileMentions, resolveFileMentions } from '../../fileMentions';
 import { isAbortError, TurnCancelledError } from '../../abort';
 import type { Checkpoint } from '../../checkpoints';
@@ -41,7 +44,8 @@ import { ChangeFeed } from './changeFeed';
 import { CheckpointLog, type RewindOptions, type RewindPreview, type RewindResult } from './checkpointLog';
 import { MessageQueue, isAutoSendable, type QueuedMessage } from './messageQueue';
 import { generateSessionName } from './naming';
-import { keyOf, ParticipantRoster, stripCreationModels } from './roster';
+import { keyOf, NAME_PATTERN_SOURCE, ParticipantRoster } from './roster';
+import type { Participant } from '../agent';
 import { Timeline, type Draft } from './timeline';
 import { TurnRunner, withIntroductions } from './turnRunner';
 
@@ -73,6 +77,8 @@ export interface SessionOptions {
   messages?: readonly (Message | Draft)[];
   checkpoints?: readonly Checkpoint[];
   permissionMode?: PermissionMode;
+  // The level participants new to the session start at; high when absent.
+  thinkingLevel?: ThinkingLevel;
   // The model spawned subagents run on; null for the owner's own.
   subagentModel?: string | null;
   // Workers of this session as the snapshot kept them. One still working
@@ -224,6 +230,7 @@ export class Session {
       defaultParticipant: resolved.defaultParticipant,
       participants: resolved.participants,
       host: this.runtimeHost(),
+      ...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}),
     });
     this.selectedParticipant = this.roster.find(options.selectedParticipant ?? '')?.name ?? this.roster.default.name;
     for (const [name, draft] of Object.entries(options.participantDrafts ?? {})) {
@@ -408,15 +415,17 @@ export class Session {
         ? [...new Set(message.to.map(name => this.roster.require(name)))]
         : this.roster.resolveMentions(mentions);
 
-      // A model following a newly introduced @name is host routing metadata,
-      // not part of the conversation. Strip it before either the UI history or
-      // any runtime sees the turn.
-      const stored = stripCreationModels(resolved, mentions);
-      const queued = stripCreationModels(message, mentions);
+      // A model following a newly introduced @name is routing, not
+      // conversation. The history keeps the prompt as typed and marks where
+      // it is; everything a runtime reads goes without it, told instead who
+      // the prompt introduced.
+      const creationModels = mentions.flatMap(mention => mention.modelSpan ? [mention.modelSpan] : []);
+      const stored = creationModels.length > 0 ? { ...resolved, creationModels } : resolved;
+      const queued = withoutCreationModels({ ...message, creationModels });
       const introduced = mentions.filter(mention => mention.model);
       if (this.timeline.isEmpty() && this.autoNamePending) {
         // Name from the user's text, not the contents of resolved attachments.
-        this.startNaming(textOf(stripCreationModels(message, mentions)));
+        this.startNaming(textOf(queued));
       }
       if (this.activeSends === 1) this.timeline.startConversationIfNeeded(Date.now());
       accepted = true;
@@ -456,10 +465,12 @@ export class Session {
           const reply = target.activeReply;
           const tail = reply?.content.at(-1);
           const textTail = tail?.type === 'text' || tail?.type === 'thought';
-          const injectedAt = reply ? { seq: reply.seq,
+          // A reply takes its seq with its first output; one that has none
+          // yet has nothing for the message to sit inside.
+          const injectedAt = reply && reply.seq >= 0 ? { seq: reply.seq,
             block: reply.content.length - (textTail ? 1 : 0),
             offset: textTail ? tail.text.length : 0 } : undefined;
-          await target.steer(withIntroductions(textOf(stored), introduced, target.name));
+          await target.steer(withIntroductions(textOf(withoutCreationModels(stored)), introduced, target.name));
           entry.injectedAt ??= injectedAt;
           this.timeline.deliver(entry, [{ name: target.name, transcript: target.transcript }]);
         } catch (error) {
@@ -691,11 +702,13 @@ export class Session {
     return cancelled || this.activeSends > 0;
   }
 
-  // Asks the selected participant's runtime to fold its own conversation now:
-  // `/compact` is a slash command both vendors take as a prompt. What the
-  // runtime reports lands in the record like any other turn. Like a rewind,
-  // it waits for nothing else to be running and nothing else runs meanwhile.
-  async compact(signal?: AbortSignal, participantName = this.selectedParticipant): Promise<void> {
+  // Asks a participant's runtime (the selected one's unless named) to fold
+  // its own conversation now: `/compact` is a slash command both vendors take
+  // as a prompt, and Claude Code reads what follows it as instructions for
+  // the summary. What the runtime reports lands in the record like any other
+  // turn. Like a rewind, it waits for nothing else to be running and nothing
+  // else runs meanwhile.
+  async compact(signal?: AbortSignal, participantName = this.selectedParticipant, instructions: string = ''): Promise<void> {
     if (this.activeSends > 0 || this.rewinding || this.compacting) {
       throw new Error('Wait for the current operation to finish before compacting.');
     }
@@ -707,7 +720,7 @@ export class Session {
     this.setStatus('working');
     const round = this.timeline.openRound([{ name: agent.name, model: agent.model, transcript: agent.transcript }]);
     try {
-      await agent.respond({ text: '/compact' }, {
+      await agent.respond({ text: ['/compact', instructions.trim()].filter(Boolean).join(' ') }, {
         entry: round.entries[0],
         onUpdate: () => round.update(0),
         ...(signal ? { signal } : {}),
@@ -819,7 +832,9 @@ export class Session {
         droppedMessages = fork.messages.length - retained.length;
         fork.messages = retained;
         fork.checkpoints = fork.checkpoints?.slice(0, found.index);
-        fork.inputContent = prompt?.role === 'user' ? textOf(prompt) : '';
+        // The fork keeps every participant, so a model that introduced one
+        // would now be read as prose.
+        fork.inputContent = prompt?.role === 'user' ? textOf(withoutCreationModels(prompt)) : '';
       }
       return { checkpoint: found.checkpoint, files, droppedMessages, fork };
     } finally {
@@ -985,19 +1000,52 @@ export class Session {
     return this.timeline.conversationStartedAt;
   }
 
-  // A participant's window as its runtime last reported it, or for the
-  // status row the default participant's, else the last responder's.
-  getContextUsage(participantName?: string): ContextUsage | null {
-    if (participantName) return this.roster.require(participantName).context;
-    if (this.roster.default.context) return this.roster.default.context;
-    const entries = this.timeline.entries();
-    for (let index = entries.length - 1; index >= 0; index--) {
-      const entry = entries[index];
-      if (entry.role !== 'assistant' || !entry.participant) continue;
-      const context = this.roster.find(entry.participant)?.context;
-      if (context) return context;
-    }
-    return null;
+  // A participant's window as its runtime last reported it; unnamed, the
+  // selected participant's, which the status row shows.
+  getContextUsage(participantName = this.selectedParticipant): ContextUsage | null {
+    return this.roster.require(participantName).context;
+  }
+
+  // What a participant's turns have used so far in this session: the sum of
+  // the usage on the entries they wrote, which is what each turn's footer
+  // shows; null before its first reported turn.
+  getTurnUsage(participantName: string): TurnUsage | null {
+    const name = keyOf(this.roster.require(participantName).name);
+    return this.timeline.entries().reduce<TurnUsage | null>((total, entry) =>
+      entry.role === 'assistant' && entry.usage && keyOf(entry.participant ?? this.roster.default.name) === name
+        ? addTurnUsage(total ?? undefined, entry.usage)
+        : total, null);
+  }
+
+  // The credential a participant's runtime is on, or would start on.
+  getCredential(participantName: string): Source | null {
+    return this.roster.require(participantName).credential;
+  }
+
+  // The MCP servers a participant's runtime last reported; null before it
+  // reported any.
+  getMcpServers(participantName: string): McpServerState[] | null {
+    return this.roster.require(participantName).mcpServers;
+  }
+
+  // The levels a participant's model offers; null while no runtime on that
+  // model has said.
+  getOfferedThinkingLevels(participantName?: string): ThinkingLevel[] | null {
+    return this.roster.require(participantName ?? this.roster.default.name).offeredThinkingLevels;
+  }
+
+  // The depth a participant's model runs at when none is chosen, once a
+  // runtime on that model has shown it.
+  getModelThinkingDefault(participantName?: string): string | undefined {
+    return this.roster.require(participantName ?? this.roster.default.name).modelThinkingDefault;
+  }
+
+  // Runs one of a participant's vendor commands that only reports on a
+  // throwaway fork of its runtime: no turn, no checkpoint, nothing in the
+  // record; what it printed comes back to be shown.
+  runCommandAside(participantName: string, text: string, signal: AbortSignal): Promise<AsideOutput> {
+    if (this.disposed) return Promise.reject(new Error('This session has been closed.'));
+    return this.roster.require(participantName).runAside(text, signal);
   }
 
   // What a vendor could not honour about the session's mode, if anything:
@@ -1054,11 +1102,22 @@ export class Session {
     return this.directory;
   }
 
-  // Vendor commands follow the selected agent, like an unaddressed prompt.
+  // The vendors' own commands the user can call by name, each marked with its
+  // vendor. They follow the selected agent, like an unaddressed prompt: its
+  // vendor's come first and keep their bare names, then those of any other
+  // vendor a participant runs on, which `participantOn` routes.
   getNativeCommands(participantName = this.selectedParticipant): NativeCommand[] {
-    const agent = this.roster.require(participantName);
-    const vendor = vendorOf(agent.model);
-    return vendor ? nativeCommands(vendor, agent.directory) : [];
+    const vendors = [...new Set(this.roster.all().flatMap(agent => vendorOf(agent.model) ?? []))];
+    const first = vendorOf(this.roster.require(participantName).model);
+    return vendors.sort((left, right) => Number(right === first) - Number(left === first))
+      .flatMap(vendor => nativeCommands(vendor, this.directory));
+  }
+
+  // The participant a vendor's command goes to: the selected one when it is
+  // on that vendor, else the first one that is; null when none is.
+  participantOn(vendor: Vendor, selected = this.selectedParticipant): string | null {
+    const agents = [this.roster.require(selected), ...this.roster.all()];
+    return agents.find(agent => vendorOf(agent.model) === vendor)?.name ?? null;
   }
 
   getParticipants(): Participant[] {
@@ -1083,11 +1142,12 @@ export class Session {
     this.roster.default.releaseWarmup();
   }
 
-  getThinkingLevel(participantName?: string): ThinkingLevel {
+  // Undefined: the participant runs at its model's default.
+  getThinkingLevel(participantName?: string): ThinkingLevel | undefined {
     return this.roster.thinkingLevel(participantName);
   }
 
-  setThinkingLevel(level: ThinkingLevel, participantName?: string): void {
+  setThinkingLevel(level: ThinkingLevel | undefined, participantName?: string): void {
     this.roster.setThinkingLevel(level, participantName);
   }
 

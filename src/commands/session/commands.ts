@@ -1,10 +1,11 @@
+import { compactCommand, mcpCommand, permissionsCommand, permissionsMenuItems, renameSession, statusCommand } from './behavior';
 import { writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { ASK_MODE_DESCRIPTION, PERMISSION_MODE_NAMES, parsePermissionMode } from '../../agent_runtime/permissions/policy';
+import { isMemoryAccessEnabled } from '../../agent_runtime/memory-access';
+import { textOf } from '../../agent_runtime/types';
 import { generateSessionName } from '../../agent_runtime/session/naming';
-import { DEFAULT_PARTICIPANT, PERMISSION_MODES, textOf, type PermissionMode } from '../../agent_runtime/types';
-import type { Feedback } from '../feedback';
-import type { CommandMenuItem, CommandSession, CommandSpec } from '../types';
+import { notificationMode } from '../../frontend/terminal/notifications';
+import type { CommandSpec } from '../types';
 
 export const clearCommand: CommandSpec = {
   name: 'clear',
@@ -15,26 +16,30 @@ export const clearCommand: CommandSpec = {
   },
 };
 
-// /compact asks the selected participant's runtime to fold its conversation
-// now. Each runtime also compacts on its own when its window fills; that is
-// the vendor's and has no switch.
-async function compactCommand(session: CommandSession, signal?: AbortSignal, participant?: string): Promise<Feedback> {
-  await session.compact(signal, participant);
-  return { kind: 'success', text: `Compacted @${participant ?? DEFAULT_PARTICIPANT}'s context.` };
-}
-
 export const compactCommandSpec: CommandSpec = {
   name: 'compact',
-  description: 'ask the agent to compact its context now',
-  run: (_args, context) => compactCommand(context.session, context.signal, context.participant),
+  args: '[@agent] [instructions]',
+  description: 'ask an agent to compact its context now, saying what to keep',
+  run: (args, context) => compactCommand(args, context.session, context.signal, context.participant),
 };
 
-function renameSession(name: string, session: CommandSession): Feedback {
-  const trimmed = name.replace(/\s+/g, ' ').trim();
-  if (!trimmed) throw new Error('Usage: /rename <name>');
-  session.setName(trimmed);
-  return { kind: 'success', text: `Renamed to ${session.getName()}.` };
-}
+export const statusCommandSpec: CommandSpec = {
+  name: 'status',
+  description: 'the session, and each agent\'s model, context, tokens and login',
+  run: (args, context) => {
+    if (args.length > 0) throw new Error('Usage: /status');
+    return statusCommand(context.session, { memory: isMemoryAccessEnabled(), notifications: notificationMode() });
+  },
+};
+
+export const mcpCommandSpec: CommandSpec = {
+  name: 'mcp',
+  description: 'each agent\'s MCP servers and whether they connected',
+  run: (args, context) => {
+    if (args.length > 0) throw new Error('Usage: /mcp. To manage a server, use /claude:mcp or /codex:mcp.');
+    return mcpCommand(context.session, context.signal, context.notify);
+  },
+};
 
 export const renameCommand: CommandSpec = {
   name: 'rename',
@@ -57,45 +62,21 @@ export const exitCommand: CommandSpec = {
   name: 'exit',
   description: 'quit sirus',
   // Only a caller that owns the app can quit it.
-  run: (_args, context) => {
+  run: (args, context) => {
+    if (args.length > 0) throw new Error('Usage: /exit');
     if (!context.exit) throw new Error('/exit is not available here.');
     context.exit();
   },
 };
 
-// Arguments are turned away by executeCommand, as for every command that
-// declares none.
-export const quitCommand: CommandSpec = { ...exitCommand, name: 'quit' };
-
-const PERMISSION_MODE_DESCRIPTIONS: Record<PermissionMode, string> = {
-  ask: ASK_MODE_DESCRIPTION,
-  auto: 'the agent\'s own reviewer decides and asks only about what it judges unsafe',
-  bypass: 'nothing is asked',
+export const quitCommand: CommandSpec = {
+  ...exitCommand,
+  name: 'quit',
+  run: (args, context) => {
+    if (args.length > 0) throw new Error('Usage: /quit');
+    return exitCommand.run(args, context);
+  },
 };
-
-function permissionsMenuItems(): CommandMenuItem[] {
-  return PERMISSION_MODES.map(mode => ({
-    type: 'item',
-    key: mode,
-    label: PERMISSION_MODE_NAMES[mode],
-    description: PERMISSION_MODE_DESCRIPTIONS[mode],
-    command: `/permissions ${mode}`,
-  }));
-}
-
-// Setting a mode says nothing: the status row shows it.
-function permissionsCommand(mode: string | undefined, session: CommandSession): Feedback | void {
-  if (mode === undefined) {
-    const current = session.getPermissionMode();
-    return {
-      kind: 'info',
-      text: `Permission mode is ${PERMISSION_MODE_NAMES[current]}.${current === 'ask' ? ` ${ASK_MODE_DESCRIPTION}` : ''}`,
-    };
-  }
-  const parsed = parsePermissionMode(mode);
-  if (!parsed) throw new Error('Usage: /permissions [ask|auto|bypass]');
-  session.setPermissionMode(parsed);
-}
 
 export const permissionsCommandSpec: CommandSpec = {
   name: 'permissions',

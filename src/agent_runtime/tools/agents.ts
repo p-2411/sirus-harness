@@ -2,7 +2,7 @@ import path from 'path';
 import { statSync } from 'fs';
 import { listedDescription, modelIds, modelInfo, vendorOf, VENDORS, VENDOR_INFO } from '../providers/catalog';
 import { parseThinkingLevel, THINKING_LEVELS, WORKER_CONTEXTS, type WorkerContext } from '../types';
-import { requiredString } from './arguments';
+import { labelText, requiredString } from './arguments';
 import { agentDefinitions } from './subagents/definitions';
 import { TOOL_WAIT_LIMIT_MS } from './subagents/run';
 import type { SpawnOptions, SubagentHost, Tool, ToolContext } from './types';
@@ -75,13 +75,13 @@ function spawnOptions(args: Record<string, unknown>): SpawnOptions {
 export const agentTools: Tool[] = [
   {
     name: 'SpawnAgent',
-    description: 'Start a subagent for a self-contained task. Pick a model from either vendor that fits the work; a review or second opinion is worth more on the other vendor. The user’s /model subagent pin wins, then your model argument, then the agent definition’s model, then your own model. Thinking follows your thinkingLevel, the definition, then your own level. Workers run in your directory by default; isolation "worktree" creates a branch from HEAD and keeps it only if changed. cwd chooses another absolute directory and cannot accompany worktree isolation. Background runs return immediately and notify you when done, steering your current turn or starting a turn if idle. runInBackground false waits and returns the report in this call. Workers cannot ask questions or delegate. SendMessage continues a worker, including one that has finished.',
+    description: 'Start a subagent for a self-contained task. Pick a model from either vendor that fits the work; a review or second opinion is worth more on the other vendor. The user’s /model subagent pin wins, then your model argument, then the agent definition’s model, then your own model. Thinking follows your thinkingLevel, the definition, then your own level, else the model’s default. Workers run in your directory by default; isolation "worktree" creates a branch from HEAD and keeps it only if changed. cwd chooses another absolute directory and cannot accompany worktree isolation. Background runs return immediately and notify you when done, steering your current turn or starting a turn if idle. runInBackground false waits and returns the report in this call. Workers cannot ask questions or delegate. SendMessage continues a worker, including one that has finished.',
     args: {
       prompt: { type: 'string', description: 'The complete task, context, constraints, file ownership and expected verification.' },
       description: { type: 'string', default: '', description: 'Short description for the worker strip.' },
       name: { type: 'string', default: '', description: 'Unique name to address with SendMessage, CheckAgent or WaitAgent.' },
       model: { type: 'string', default: '', description: 'Any model in the list below, from either vendor.' },
-      thinkingLevel: { type: 'string', enum: THINKING_LEVELS, default: '', description: 'Reasoning depth; otherwise inherited from the definition or owner.' },
+      thinkingLevel: { type: 'string', enum: THINKING_LEVELS, default: '', description: 'Reasoning depth; otherwise inherited from the definition or owner, else the model’s default.' },
       agentType: { type: 'string', default: '', description: 'A named agent definition from the list below.' },
       isolation: { type: 'string', enum: ['none', 'worktree'], default: 'none' },
       cwd: { type: 'string', default: '', description: 'Absolute working directory, exclusive with worktree isolation.' },
@@ -89,6 +89,14 @@ export const agentTools: Tool[] = [
       context: { type: 'string', enum: WORKER_CONTEXTS, default: 'fresh', description: 'Owner carries your conversation. A cross-vendor choice starts fresh with your record as context.' },
     },
     audience: { subagent: false },
+    // "Start subagent scout: review the loader", or without a name,
+    // "Start subagent: review the loader".
+    label: args => {
+      const name = labelText(args, 'name');
+      const task = labelText(args, 'description', 'prompt');
+      if (name) return { verb: 'Start subagent', subject: task ? `${name}: ${task}` : name };
+      return { verb: task ? 'Start subagent:' : 'Start subagent', subject: task };
+    },
     async run(args, ctx) {
       return host(ctx, 'SpawnAgent').spawn(requiredString(args, 'prompt', 'SpawnAgent'), spawnOptions(args),
         { callId: ctx.callId, ...(ctx.vendorCallId ? { vendorCallId: ctx.vendorCallId } : {}) }, ctx.signal);
@@ -99,6 +107,7 @@ export const agentTools: Tool[] = [
     description: 'Return a worker’s status and progress now, or its completed report. Accepts an id or name. Use WaitAgent to wait for completion.',
     args: { id: { type: 'string', description: 'Worker id or name.' } },
     audience: { subagent: false },
+    label: args => ({ verb: 'Check subagent', subject: labelText(args, 'id') }),
     async run(args, ctx) { return host(ctx, 'CheckAgent').check(requiredString(args, 'id', 'CheckAgent')); },
   },
   {
@@ -110,6 +119,7 @@ export const agentTools: Tool[] = [
       interrupt: { type: 'boolean', default: false },
     },
     audience: { subagent: false },
+    label: args => ({ verb: 'Message subagent', subject: labelText(args, 'to') }),
     async run(args, ctx) {
       return host(ctx, 'SendMessage').message(requiredString(args, 'to', 'SendMessage'),
         requiredString(args, 'message', 'SendMessage'), booleanArg(args, 'interrupt', false));
@@ -123,6 +133,10 @@ export const agentTools: Tool[] = [
       timeoutMs: { type: 'integer', minimum: 0, maximum: TOOL_WAIT_LIMIT_MS, default: 30000 },
     },
     audience: { subagent: false },
+    label: args => ({
+      verb: Array.isArray(args.ids) && args.ids.length > 1 ? 'Wait for subagents' : 'Wait for subagent',
+      subject: labelText(args, 'ids'),
+    }),
     async run(args, ctx) {
       if (!Array.isArray(args.ids) || !args.ids.length || args.ids.some(id => typeof id !== 'string' || !id.trim())) {
         throw new TypeError('WaitAgent requires a nonempty array of ids or names');
@@ -140,12 +154,14 @@ export const agentTools: Tool[] = [
     description: 'Stop a worker and wait for its report. A worker that already finished is reported as it is. SendMessage can resume it later.',
     args: { id: { type: 'string', description: 'Worker id or name.' } },
     audience: { subagent: false },
+    label: args => ({ verb: 'Cancel subagent', subject: labelText(args, 'id') }),
     async run(args, ctx) { return host(ctx, 'CancelAgent').cancel(requiredString(args, 'id', 'CancelAgent'), ctx.signal); },
   },
   {
     name: 'ListAgents',
     description: 'List your workers with their ids, names, descriptions, models, thinking levels, statuses, elapsed times, branches and context.',
     args: {}, audience: { subagent: false },
+    label: () => ({ verb: 'List subagents', subject: '' }),
     async run(_args, ctx) { return { subagents: host(ctx, 'ListAgents').list() }; },
   },
 ];

@@ -1,4 +1,5 @@
-import { requireKnownModel, servesModel } from '../providers';
+import { requireKnownModel, servesModel, servableModelIds } from '../providers';
+import { modelNamed } from '../providers/catalog';
 import { SessionAgent, type Participant, type RuntimeHost } from '../agent';
 import { textOf, type Message, type PermissionMode, type ThinkingLevel } from '../types';
 import { rootTextRanges, type RootTextRange } from '../../mentions';
@@ -20,6 +21,9 @@ export interface RosterOptions {
   defaultParticipant: string;
   participants: readonly Participant[];
   host: RuntimeHost;
+  // The level a participant new to the session starts at: the user's
+  // default from /config. Restored participants keep their own.
+  thinkingLevel?: ThinkingLevel;
 }
 
 // The one @name grammar, shared by the mention scanner and by name
@@ -63,42 +67,10 @@ function bareName(name: string): string {
   return name.replace(/^@/, '');
 }
 
-// A model following a newly introduced @name is host routing metadata, not
-// part of the conversation. Strip it before either the UI history or any
-// runtime sees the turn.
-export function stripCreationModels<T extends Pick<Message, 'content'>>(message: T, mentions: readonly Mention[]): T {
-  const spans = mentions
-    .flatMap(mention => mention.modelSpan ? [mention.modelSpan] : [])
-    .sort((left, right) => right.start - left.start);
-  if (spans.length === 0) return message;
-
-  const content = [...message.content];
-  const textBlocks = content
-    .map((block, contentIndex) => ({ block, contentIndex }))
-    .filter((entry): entry is { block: Extract<Message['content'][number], { type: 'text' }>; contentIndex: number } =>
-      entry.block.type === 'text');
-  let globalStart = 0;
-  const ranges = textBlocks.map(entry => {
-    const range = {
-      ...entry,
-      start: globalStart,
-      end: globalStart + entry.block.text.length,
-    };
-    // textOf joins text blocks with exactly one newline.
-    globalStart = range.end + 1;
-    return range;
-  });
-
-  for (const range of ranges) {
-    const localSpans = spans.filter(span => span.start >= range.start && span.end <= range.end);
-    if (localSpans.length === 0) continue;
-    let text = range.block.text;
-    for (const span of localSpans) {
-      text = text.slice(0, span.start - range.start) + text.slice(span.end - range.start);
-    }
-    content[range.contentIndex] = { type: 'text', text };
+function requireParticipantName(name: string): void {
+  if (!NAME_PATTERN.test(name) || RESERVED_NAMES.has(keyOf(name))) {
+    throw new Error(`Invalid participant name: @${name}`);
   }
-  return { ...message, content };
 }
 
 // The session's agents and all @name routing between them.
@@ -108,14 +80,16 @@ export class ParticipantRoster {
   private readonly host: RuntimeHost;
   private readonly agents: SessionAgent[];
   private readonly defaultAgent: SessionAgent;
+  private readonly newLevel?: ThinkingLevel;
 
   constructor(private readonly changes: ChangeFeed, options: RosterOptions) {
     this.sessionId = options.sessionId;
     this.defaultName = options.defaultParticipant;
     this.host = options.host;
+    this.newLevel = options.thinkingLevel;
     const restored = options.participants.map(participant => this.createAgent(participant));
     this.defaultAgent = restored.find(agent => keyOf(agent.name) === keyOf(this.defaultName))
-      ?? this.createAgent({ name: this.defaultName, model: options.model });
+      ?? this.createAgent({ name: this.defaultName, model: options.model, ...(this.newLevel ? { thinkingLevel: this.newLevel } : {}) });
     this.agents = restored.length > 0 ? restored : [this.defaultAgent];
     if (!this.agents.includes(this.defaultAgent)) this.agents.unshift(this.defaultAgent);
   }
@@ -138,14 +112,12 @@ export class ParticipantRoster {
 
   add(name: string, model: string): void {
     const normalizedName = bareName(name);
-    if (!NAME_PATTERN.test(normalizedName) || RESERVED_NAMES.has(keyOf(normalizedName))) {
-      throw new Error(`Invalid participant name: @${normalizedName}`);
-    }
+    requireParticipantName(normalizedName);
     if (this.find(normalizedName)) {
       throw new Error(`Participant @${normalizedName} already exists`);
     }
     requireKnownModel(model);
-    this.agents.push(this.createAgent({ name: normalizedName, model }));
+    this.agents.push(this.createAgent({ name: normalizedName, model, ...(this.newLevel ? { thinkingLevel: this.newLevel } : {}) }));
     this.changes.notify();
   }
 
@@ -155,11 +127,11 @@ export class ParticipantRoster {
     this.changes.notify();
   }
 
-  thinkingLevel(participantName: string = this.defaultAgent.name): ThinkingLevel {
+  thinkingLevel(participantName: string = this.defaultAgent.name): ThinkingLevel | undefined {
     return this.require(participantName).thinkingLevel;
   }
 
-  setThinkingLevel(level: ThinkingLevel, participantName: string = this.defaultAgent.name): void {
+  setThinkingLevel(level: ThinkingLevel | undefined, participantName: string = this.defaultAgent.name): void {
     const participant = this.require(participantName);
     if (participant.thinkingLevel === level) return;
     participant.thinkingLevel = level;
@@ -190,13 +162,17 @@ export class ParticipantRoster {
         continue;
       }
 
+      // The model as `/model` would take it (`opus` for `opus[1m]`), and no
+      // looser, since this is prose. No thinking level follows it: the new
+      // participant runs at its model's default until one is chosen.
       const modelMatch = /^([ \t]+)([^\s,;]+)/.exec(range.text.slice(localEnd));
-      if (!modelMatch || !servesModel(modelMatch[2])) continue;
+      const model = modelMatch ? modelNamed(modelMatch[2], servableModelIds()) : undefined;
+      if (!modelMatch || !model) continue;
       seen.add(key);
       const modelStart = range.start + localEnd;
       mentions.push({
         name,
-        model: modelMatch[2],
+        model,
         modelSpan: { start: modelStart, end: modelStart + modelMatch[0].length },
       });
     }
@@ -210,8 +186,10 @@ export class ParticipantRoster {
     // Validate the complete turn first, then mutate the participant list.
     // This avoids partially creating agents when a later mention is bad.
     for (const mention of mentions) {
-      if (!this.find(mention.name) && !mention.model) {
-        throw new Error(`Model not specified for new participant @${mention.name}`);
+      if (!this.find(mention.name)) {
+        requireParticipantName(mention.name);
+        if (!mention.model) throw new Error(`Model not specified for new participant @${mention.name}`);
+        requireKnownModel(mention.model);
       }
     }
     for (const mention of mentions) {
@@ -220,21 +198,15 @@ export class ParticipantRoster {
     return mentions.map(mention => this.find(mention.name)!);
   }
 
-  // Who an agent's own response hands off to. Agents cannot introduce
-  // participants, and cannot recursively launch themselves by including
-  // their own name in a response.
-  routeAgentMessage(message: Message, speaker: SessionAgent): SessionAgent[] {
-    const mentioned: SessionAgent[] = [];
-    const seen = new Set<string>();
-    for (const { name } of scanMentions(textOf(message))) {
-      const participant = this.find(name);
-      if (!participant || participant === speaker) continue;
-      const key = keyOf(participant.name);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      mentioned.push(participant);
-    }
-    return mentioned;
+  // Agent replies use the same introduction syntax as user messages, but
+  // never invoke the speaker or fall back to the default agent.
+  routeAgentMessage(message: Message, speaker: SessionAgent): { recipients: SessionAgent[]; introduced: Mention[] } {
+    const mentions = this.readMentions(textOf(message))
+      .filter(mention => keyOf(mention.name) !== keyOf(speaker.name));
+    return {
+      recipients: mentions.length > 0 ? this.resolveMentions(mentions) : [],
+      introduced: mentions.filter(mention => mention.model),
+    };
   }
 
   // Every working worker, and every spawn still setting one up.

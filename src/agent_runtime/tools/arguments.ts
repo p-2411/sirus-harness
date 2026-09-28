@@ -23,3 +23,18 @@ export function requiredInteger(
   }
   return value;
 }
+
+// An argument as one line of a label: the first line of a string, the items
+// of a list of strings, nothing for anything else. Labels read arguments
+// before any tool has checked them.
+export function labelText(args: Record<string, unknown>, ...names: string[]): string {
+  for (const name of names) {
+    const value = args[name];
+    const text = typeof value === 'string' ? value
+      : Array.isArray(value) ? value.filter(item => typeof item === 'string').join(', ')
+      : '';
+    const line = text.trim().split('\n')[0]?.trim() ?? '';
+    if (line) return line;
+  }
+  return '';
+}

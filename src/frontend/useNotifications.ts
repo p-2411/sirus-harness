@@ -5,9 +5,11 @@ import { pendingApprovals, subscribePermissions } from '../agent_runtime/permiss
 import { pendingQuestions, subscribeQuestions } from '../agent_runtime/permissions/questions';
 import { listAllSubagents, subscribeSubagents } from '../agent_runtime/tools/subagents';
 import { workerName } from '../agent_runtime/tools/subagents/report';
-import { approvalTitle } from './chat/ApprovalPrompt';
+import { approvalAction } from './chat/ApprovalPrompt';
+import { describeRequester } from '../agent_runtime/permissions/approvals';
 import { titleText } from './chat/FramedCard';
-import { questionText, questionTitle } from './chat/QuestionCard';
+import { questionTitle } from './chat/QuestionCard';
+import { questionText } from './chat/QuestionCard';
 import { notify } from './terminal/notifications';
 import { truncate } from './terminal/text';
 
@@ -62,7 +64,7 @@ export function subscribeApprovalNotifications(getSessions: () => readonly Sessi
       const session = getSessions().find(candidate => candidate.getId() === request.sessionId);
       send(
         `Sirus · ${session?.getName() ?? 'approval needed'}`,
-        firstLine(titleText(approvalTitle(request))),
+        `${describeRequester(request.requester)} wants to ${firstLine(approvalAction(request.toolCall))}`,
       );
     }
     seen = new Set(current.map(request => request.id));

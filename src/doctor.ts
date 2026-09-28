@@ -92,9 +92,9 @@ export async function runDoctor(directory = process.cwd(), signal?: AbortSignal,
       checks.push({
         name: `${info.displayName} login${profiles.length > 1 || source.profile !== 'default' ? ` (${source.profile})` : ''}`,
         status: signedIn ? profiles.length ? 'ok' : 'warning' : 'warning',
-        detail: signedIn ? profiles.length ? 'signed in' : `signed in; select subscription with /login ${vendor}`
-          : readable ? `no subscription login; use /login ${vendor} (API keys work separately)`
-            : `could not read login status; check the vendor CLI or use /login ${vendor}`,
+        detail: signedIn ? profiles.length ? 'signed in' : `signed in; select subscription with /login ${info.command}`
+          : readable ? `no subscription login; use /login ${info.command} (API keys work separately)`
+            : `could not read login status; check the vendor CLI or use /login ${info.command}`,
       });
     }
     return checks;

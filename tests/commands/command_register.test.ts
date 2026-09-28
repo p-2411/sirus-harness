@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync, readFileSync } from 'fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, beforeEach } from 'bun:test';
@@ -9,9 +9,13 @@ import {
   executeCommand,
   matchCommands,
   parseCommandLine,
+  vendorCommandFor,
+  type CommandMenuItem,
+  type CommandSession,
 } from '../../src/commands/registry';
-import type { CommandMenuItem, CommandSession } from '../../src/commands/types';
+import { nativePrompt, rememberNativeCommands, type NativeCommand } from '../../src/agent_runtime/runtime/commands';
 import { nextPermissionMode } from '../../src/agent_runtime/permissions/policy';
+import { THINKING_LEVELS } from '../../src/agent_runtime/types';
 import { loginMenuItems } from '../../src/commands/authentication/behavior';
 import { Session } from '../../src/agent_runtime/session';
 import { providerFor } from '../../src/agent_runtime/providers';
@@ -22,6 +26,8 @@ import type { Feedback } from '../../src/commands/feedback';
 import { openSettings } from '../../src/persistence/settings';
 import { bindScriptedRuntime, textTurn, unbindRuntime } from '../support/runtime';
 import { backgroundTaskFrom, type BackgroundTask } from '../../src/agent_runtime/runtime/runtime';
+import { rememberModelFacts } from '../../src/agent_runtime/providers/catalog';
+import { closeAllMemoryStores, openMemoryStore } from '../../src/memory/store';
 
 function runCommand(
   command: string,
@@ -35,6 +41,12 @@ function runCommand(
     exit: () => {},
     signal: new AbortController().signal,
   });
+}
+
+// Both vendors signed in with API keys, so the model picker offers both.
+function signIn(): void {
+  providerFor('claude').sources.addApiKey('sk-ant-model-menu-1234');
+  providerFor('gpt').sources.addApiKey('sk-proj-model-menu-1234');
 }
 
 function menuItems(command: string, args: readonly string[]): CommandMenuItem[] {
@@ -78,6 +90,79 @@ describe('matchCommands', () => {
   test('closes once args are being typed', () => {
     expect(matchCommands('/model ')).toEqual([]);
     expect(matchCommands('/model gpt')).toEqual([]);
+  });
+
+  test('routes the vendors\' commands by name or vendor prefix, running the ones that only report aside', () => {
+    const commands: NativeCommand[] = [
+      { name: 'context', description: 'Show current context usage', invocation: '/context', vendor: 'claude' },
+      { name: 'mcp', description: 'Manage MCP servers', invocation: '/mcp', vendor: 'claude' },
+      { name: 'agents', description: 'Manage agents', invocation: '/agents', vendor: 'claude' },
+      { name: 'status', description: 'Display session configuration', invocation: '/status', vendor: 'gpt' },
+    ];
+    expect(vendorCommandFor('/context', commands)).toMatchObject({ vendor: 'claude', reporting: true, args: '' });
+    // Sirus's /mcp and /agents win the bare names; the prefix reaches Claude's.
+    expect(vendorCommandFor('/mcp', commands)).toBeNull();
+    expect(vendorCommandFor('/claude:mcp', commands)).toMatchObject({ reporting: true });
+    expect(vendorCommandFor('/claude:mcp reconnect github', commands)).toMatchObject({ reporting: false, args: 'reconnect github' });
+    expect(vendorCommandFor('/claude:agents', commands)).toMatchObject({ vendor: 'claude', reporting: false });
+    expect(vendorCommandFor('/codex:status', commands)).toMatchObject({ vendor: 'gpt', reporting: true });
+    expect(vendorCommandFor('/codex:context', commands)).toBeNull();
+    expect(matchCommands('/age', commands).map(match => [match.name, match.vendor])).toEqual([
+      ['agents', undefined], ['claude:agents', 'claude'],
+    ]);
+  });
+
+  test('sends Sirus\'s /init and /review, and a prefixed vendor command, in the words the participant reads', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'sirus-native-prompt-'));
+    const previousDirectory = process.env.SIRUS_DATA_DIR;
+    process.env.SIRUS_DATA_DIR = directory;
+    try {
+      rememberNativeCommands('gpt', directory, [
+        { name: 'review', description: 'Review changes', invocation: '/review' },
+        { name: 'skill', description: 'A skill', invocation: '$skill' },
+      ]);
+      rememberNativeCommands('claude', directory, [{ name: 'agents', description: 'Manage agents', invocation: '/agents' }]);
+      expect(nativePrompt('/init keep it short', 'claude', directory)).toStartWith('Set up this repository\'s agent instructions');
+      expect(nativePrompt('/init keep it short', 'claude', directory)).toEndWith('The user added: keep it short');
+      // Codex runs its own dedicated review; Claude gets Sirus's prompt.
+      expect(nativePrompt('/review the parser', 'gpt', directory)).toBe('/review the parser');
+      expect(nativePrompt('/review', 'claude', directory)).toStartWith('Review the current code changes');
+      expect(nativePrompt('/claude:agents list them', 'claude', directory)).toBe('/agents list them');
+      expect(nativePrompt('/codex:skill go', 'gpt', directory)).toBe('$skill go');
+      expect(nativePrompt('/claude:init', 'claude', directory)).toBe('/claude:init');
+    } finally {
+      if (previousDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
+      else process.env.SIRUS_DATA_DIR = previousDirectory;
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('/init leaves CLAUDE.md importing the AGENTS.md the agent wrote', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'sirus-init-'));
+    try {
+      const session = new Session({ directory });
+      const sent: string[] = [];
+      const context = {
+        session, signal: new AbortController().signal, notify() {},
+        sendPrompt: async (text: string) => {
+          sent.push(text);
+          writeFileSync(join(directory, 'AGENTS.md'), '# Guide\n');
+        },
+      };
+      expect(await executeCommand('init', ['be', 'brief'], context)).toMatchObject({ kind: 'success' });
+      expect(sent).toEqual(['/init be brief']);
+      expect(readFileSync(join(directory, 'CLAUDE.md'), 'utf8')).toBe('@AGENTS.md\n');
+      // A CLAUDE.md the agent left without the import gets it at the top.
+      writeFileSync(join(directory, 'CLAUDE.md'), 'Claude-only notes.\n');
+      await executeCommand('init', [], context);
+      expect(readFileSync(join(directory, 'CLAUDE.md'), 'utf8')).toBe('@AGENTS.md\n\nClaude-only notes.\n');
+      expect(await executeCommand('init', [], context)).toEqual({ kind: 'success', text: 'AGENTS.md is written, and CLAUDE.md imports it.' });
+      rmSync(join(directory, 'AGENTS.md'));
+      expect(await executeCommand('init', [], { ...context, sendPrompt: async () => {} }))
+        .toMatchObject({ kind: 'warning', text: expect.stringContaining('did not write AGENTS.md') });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });
 
@@ -128,6 +213,7 @@ describe('executeCommand', () => {
   });
 
   test('warns before a cross-vendor model change and in the model picker', () => {
+    signIn();
     const session = new Session();
     session.append({ role: 'user', content: [{ type: 'text', text: 'Keep this context' }] });
     const menu = commandMenu('model', [], session)!;
@@ -213,12 +299,14 @@ describe('executeCommand', () => {
     runCommand('model', ['subagent', 'opus'], session);
     expect(session.getSubagentModel()).toBe('opus[1m]');
     expect(() => resolveModelReference('claude-opus-5')).toThrow(/unknown model/i);
+    signIn();
     expect(menuItems('model', []).filter(item => item.key.includes('opus')).map(item => item.key))
       .toEqual(['opus[1m]']);
   });
 
   test('an empty vendor list never falls back to built-in models', () => {
     for (const vendor of VENDORS) rememberListedModels(vendor, []);
+    signIn();
     expect(menuItems('model', [])).toEqual([]);
     expect(() => runCommand('model', ['opus'])).toThrow('No vendor models available yet');
   });
@@ -231,10 +319,11 @@ describe('executeCommand', () => {
   });
 
   test('model command groups selectable models under provider headings', () => {
+    signIn();
     const menu = commandMenu('model', [], new Session())!;
     expect(menu.filter(entry => entry.type === 'heading').map(entry => entry.label)).toEqual([
-      'Anthropic',
-      'OpenAI',
+      'Claude',
+      'Codex',
     ]);
     expect(menuItems('model', []).map(item => item.command)).toEqual([
       '/model claude-opus-5',
@@ -252,6 +341,29 @@ describe('executeCommand', () => {
     ]);
     expect(menuItems('model', ['@reviewer'])[0].command).toBe('/model @reviewer claude-opus-5');
     expect(commandMenu('model', ['gpt-5.6-sol'], new Session())).toBeNull();
+  });
+
+  test('the model picker offers signed-in vendors only and marks the current model where the vendor lists it or not', () => {
+    expect(() => commandMenu('model', [], new Session())).toThrow(/No vendor is signed in/);
+    providerFor('claude').sources.addApiKey('sk-ant-model-menu-1234');
+    // The vendor's own ids are what is offered. A session from before them,
+    // on a catalog id, still finds its own model under its vendor.
+    rememberListedModels('claude', [
+      { id: 'opus', description: 'Opus 5.5 · Best for everyday, complex tasks' },
+      { id: 'claude-fable-5-1[1m]', description: 'Fable 5.1 with 1M context' },
+      { id: 'haiku', description: 'Haiku 4.5 · Fastest for quick answers' },
+    ]);
+    const session = new Session({ model: 'claude-haiku-4-5' });
+    const menu = commandMenu('model', [], session)!;
+    expect(menu.filter(entry => entry.type === 'heading').map(entry => entry.label)).toEqual(['Claude']);
+    const items = menu.filter((entry): entry is CommandMenuItem => entry.type === 'item');
+    expect(items.map(item => item.key)).toEqual(['claude-haiku-4-5', 'opus', 'claude-fable-5-1[1m]', 'haiku']);
+    expect(items.filter(item => item.current).map(item => item.key)).toEqual(['claude-haiku-4-5']);
+    // On a listed model, that row is the one marked, and nothing is added.
+    session.changeParticipantModel('sirus', 'opus');
+    const onAlias = commandMenu('model', [], session)!.filter((entry): entry is CommandMenuItem => entry.type === 'item');
+    expect(onAlias.map(item => item.key)).toEqual(['opus', 'claude-fable-5-1[1m]', 'haiku']);
+    expect(onAlias.filter(item => item.current).map(item => item.key)).toEqual(['opus']);
   });
 
   test('/clear and /new request a fresh session and preserve the conversation', () => {
@@ -342,11 +454,12 @@ describe('executeCommand', () => {
     expect(() => runCommand('model', ['gpt-2'], session)).toThrow(/unknown model/i);
   });
 
-  test('thinking command defaults to high and sets Sirus or a named participant', () => {
+  test('thinking command starts at the model’s default and sets Sirus or a named participant', () => {
     const session = new Session();
     session.addParticipant('reviewer', 'claude-sonnet-5');
 
-    expect(session.getThinkingLevel()).toBe('high');
+    expect(session.getThinkingLevel()).toBeUndefined();
+    expect(runCommand('thinking', [], session)).toEqual({ kind: 'info', text: '@sirus thinking is default.' });
     expect(runCommand('thinking', ['low'], session)).toEqual({
       kind: 'success',
       text: '@sirus thinking set to low.',
@@ -357,20 +470,60 @@ describe('executeCommand', () => {
     });
     expect(session.getThinkingLevel()).toBe('low');
     expect(session.getThinkingLevel('reviewer')).toBe('max');
+    expect(runCommand('thinking', ['@reviewer', 'default'], session)).toEqual({
+      kind: 'success',
+      text: '@reviewer thinking set to its model\'s default.',
+    });
+    expect(session.getThinkingLevel('reviewer')).toBeUndefined();
+    expect(session.getParticipants().find(participant => participant.name === 'reviewer')).toEqual({ name: 'reviewer', model: 'claude-sonnet-5' });
     expect(() => runCommand('thinking', ['turbo'], session)).toThrow(/unknown thinking level/i);
     expect(() => runCommand('thinking', ['sirus', 'turbo'], session)).toThrow(/unknown thinking level/i);
   });
 
   test('thinking command offers a picker for Sirus or a named participant', () => {
     expect(menuItems('thinking', []).map(item => item.command)).toEqual([
+      '/thinking default',
       '/thinking low',
       '/thinking medium',
       '/thinking high',
       '/thinking xhigh',
       '/thinking max',
     ]);
-    expect(menuItems('thinking', ['@reviewer'])[2].command).toBe('/thinking @reviewer high');
+    expect(menuItems('thinking', []).filter(item => item.current).map(item => item.key)).toEqual(['default']);
+    expect(menuItems('thinking', ['@reviewer'])[3].command).toBe('/thinking @reviewer high');
     expect(commandMenu('thinking', ['low'], new Session())).toBeNull();
+  });
+
+  test('thinking offers only the levels the model offers and records the level it runs at', () => {
+    // What runtimes on these models listed for their effort option.
+    rememberModelFacts('gpt-5.6-terra', { efforts: ['minimal', 'low', 'medium', 'high'], defaultEffort: 'medium' });
+    rememberModelFacts('claude-haiku-4-5', { efforts: [] });
+    const session = new Session({ model: 'gpt-5.6-luna' });
+    session.setThinkingLevel('xhigh');
+    const items = (commandMenu('thinking', [], session) ?? []).filter((entry): entry is CommandMenuItem => entry.type === 'item');
+    expect(items.map(item => item.key)).toEqual(['default', ...THINKING_LEVELS]);
+
+    // A model without xhigh runs at high, and the switch says so.
+    expect(runCommand('model', ['gpt-5.6-terra'], session)).toEqual({
+      kind: 'warning',
+      text: '@sirus model set to gpt-5.6-terra. gpt-5.6-terra does not offer xhigh thinking, so @sirus thinks at high.',
+    });
+    expect(session.getThinkingLevel()).toBe('high');
+    const offered = (commandMenu('thinking', [], session) ?? []).filter((entry): entry is CommandMenuItem => entry.type === 'item');
+    expect(offered.map(item => item.key)).toEqual(['default', 'low', 'medium', 'high']);
+    expect(offered.find(item => item.current)?.key).toBe('high');
+    expect(() => runCommand('thinking', ['max'], session)).toThrow(/does not offer max thinking. Try: low, medium, high/);
+
+    // Back to the model's default, which a runtime on it has shown.
+    expect(runCommand('thinking', ['default'], session)).toEqual({
+      kind: 'success', text: '@sirus thinking set to its model\'s default (medium).',
+    });
+    const reset = (commandMenu('thinking', [], session) ?? []).filter((entry): entry is CommandMenuItem => entry.type === 'item');
+    expect(reset.find(item => item.current)).toMatchObject({ key: 'default', description: 'whatever the model picks, medium' });
+
+    // A model with no effort option has no levels to choose from.
+    runCommand('model', ['claude-haiku-4-5'], session);
+    expect(() => commandMenu('thinking', [], session)).toThrow('claude-haiku-4-5 has no thinking levels to choose from.');
   });
 
   test('memory command reports and persists on/off access', () => {
@@ -394,11 +547,41 @@ describe('executeCommand', () => {
       expect(runCommand('memory', ['on'], session)).toMatchObject({
         kind: 'success',
       });
-      expect(() => runCommand('memory', ['maybe'], session)).toThrow('/memory [on|off]');
+      expect(() => runCommand('memory', ['maybe'], session)).toThrow('/memory [on|off|list|forget');
     } finally {
       if (previousDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
       else process.env.SIRUS_DATA_DIR = previousDirectory;
       rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('memory command lists what this directory can recall and forgets one by name', async () => {
+    const project = join(settingsDirectory, 'project');
+    // Saving embeds, which the command never does; a stand-in embedder seeds
+    // the store the command then opens.
+    const seeding = openMemoryStore({
+      databasePath: join(settingsDirectory, 'sirus.db'),
+      embedder: { model: 'test-embedding', dimensions: 2, embed: async () => new Float32Array([1, 0]) },
+    });
+    await seeding.save({ scope: 'global', directory: '' }, { name: 'tone', content: 'Prefers short answers.\nNo emoji.' });
+    await seeding.save({ scope: 'project', directory: project }, { name: 'tests', content: 'Run bun test with a scratch HOME.' });
+    await seeding.save({ scope: 'project', directory: project }, { name: 'tone', content: 'Project tone differs.' });
+    await seeding.save({ scope: 'project', directory: join(settingsDirectory, 'other') }, { name: 'secret', content: 'Another project.' });
+    seeding.close();
+    try {
+      const session = new Session({ directory: project });
+      const listed = runCommand('memory', ['list'], session) as Feedback;
+      expect(listed.text).toContain('global\n  tone · Prefers short answers. No emoji.');
+      expect(listed.text).toContain('this project\n  tests · Run bun test with a scratch HOME.\n  tone · Project tone differs.');
+      expect(listed.text).not.toContain('secret');
+      expect(() => runCommand('memory', ['forget', 'tone'], session)).toThrow(/Say which: \/memory forget project tone/);
+      expect(() => runCommand('memory', ['forget', 'secret'], session)).toThrow(/No memory named "secret"/);
+      expect(runCommand('memory', ['forget', 'global', 'tone'], session)).toEqual({ kind: 'success', text: 'Forgot the global memory "tone".' });
+      expect(runCommand('memory', ['forget', 'tests'], session)).toEqual({ kind: 'success', text: 'Forgot the project memory "tests".' });
+      expect(commandMenu('memory', ['forget'], session)?.map(entry => entry.label)).toEqual(['project · tone']);
+      expect((runCommand('memory', ['list'], session) as Feedback).text).not.toContain('global');
+    } finally {
+      closeAllMemoryStores();
     }
   });
 
@@ -439,30 +622,33 @@ describe('credential commands', () => {
 
   test('/login asks for the provider first', () => {
     const items = loginMenuItems()!;
-    expect(items.map(item => item.label)).toEqual(['Claude', 'ChatGPT']);
-    expect(items.map(item => item.command)).toEqual(['/login claude', '/login gpt']);
+    expect(items.map(item => item.label)).toEqual(['Claude', 'Codex']);
+    expect(items.map(item => item.command)).toEqual(['/login claude', '/login codex']);
     expect(items.every(item => item.secret === undefined)).toBe(true);
   });
 
   test('/login <provider> offers subscription or API key instead of choosing for the user', () => {
-    const items = loginMenuItems(['gpt'])!;
+    // The stored key still names Codex, for older habits and scripts.
+    expect(loginMenuItems(['gpt'])).toEqual(loginMenuItems(['codex']));
+    const items = loginMenuItems(['codex'])!;
     expect(items.map(item => item.label)).toEqual(['Subscription', 'API key']);
-    expect(items.map(item => item.command)).toEqual(['/login gpt subscription', '/login gpt api']);
+    expect(items.map(item => item.command)).toEqual(['/login codex subscription', '/login codex api']);
+    expect(items[0].description).toBe('sign in with your ChatGPT account in the browser');
     expect(items[0].secret).toBeUndefined();
-    expect(items[1].secret?.prompt).toMatch(/OpenAI API key/);
-    expect(loginMenuItems(['claude'])![1].secret?.prompt).toMatch(/Anthropic API key/);
-    expect(loginMenuItems(['gpt', 'subscription'])).toBeNull();
-    expect(() => loginMenuItems(['bing'])).toThrow(/unknown provider/i);
-    expect(runCommand('login', ['gpt'])).toEqual({
+    expect(items[1].secret?.prompt).toBe('API key for Codex');
+    expect(loginMenuItems(['claude'])![1].secret?.prompt).toBe('API key for Claude');
+    expect(loginMenuItems(['codex', 'subscription'])).toBeNull();
+    expect(() => loginMenuItems(['bing'])).toThrow(/unknown provider.*claude, codex/i);
+    expect(runCommand('login', ['codex'])).toEqual({
       kind: 'info',
-      text: expect.stringMatching(/\/login gpt subscription · \/login gpt api/),
+      text: expect.stringMatching(/\/login codex subscription · \/login codex api/),
     });
   });
 
   test('/login alone points at the menu instead of running a browser flow', () => {
     expect(runCommand('login', [])).toEqual({
       kind: 'info',
-      text: expect.stringMatching(/\/login claude|\/login gpt/),
+      text: expect.stringMatching(/\/login claude · \/login codex/),
     });
   });
 
@@ -470,7 +656,7 @@ describe('credential commands', () => {
     const result = runCommand('login', ['claude', 'api', 'sk-ant-pasted-key-9876']);
     expect(result).toEqual({
       kind: 'success',
-      text: 'Saved Anthropic API key sk-ant-…9876.',
+      text: 'Saved Claude API key sk-ant-…9876.',
     });
     expect((result as { text: string }).text).not.toContain('sk-ant-pasted-key-9876');
     expect((result as { text: string }).text).toContain('9876');
@@ -484,10 +670,10 @@ describe('credential commands', () => {
     // the menu item's command once with parseCommandLine and appends the
     // secret as a single trailing argument — reproduce that composition here
     // rather than calling executeCommand directly with a pre-split array.
-    const item = loginMenuItems(['gpt'])!.find(entry => entry.secret)!;
+    const item = loginMenuItems(['codex'])!.find(entry => entry.secret)!;
     const { name, args } = parseCommandLine(item.command);
     expect(name).toBe('login');
-    expect(args).toEqual(['gpt', 'api']);
+    expect(args).toEqual(['codex', 'api']);
 
     const result = runCommand(name, [...args, 'sk-test with space']);
     expect(result).toMatchObject({ kind: 'success' });
@@ -499,8 +685,8 @@ describe('credential commands', () => {
   });
 
   test('/login <provider> api without a key explains the usage', () => {
-    expect(() => runCommand('login', ['gpt', 'api'])).toThrow(/\/login gpt api <key>/);
-    expect(() => runCommand('login', ['gpt', 'browser'])).toThrow(/\/login gpt subscription/);
+    expect(() => runCommand('login', ['codex', 'api'])).toThrow(/\/login codex api <key>/);
+    expect(() => runCommand('login', ['gpt', 'browser'])).toThrow(/\/login codex subscription/);
   });
 
   test('/usage reports each provider and how it is authenticated', async () => {
@@ -509,8 +695,8 @@ describe('credential commands', () => {
     const result = await runCommand('usage', []);
     expect(result).toMatchObject({ kind: 'info', showIcon: false });
     const text = (result as { text: string }).text;
-    expect(text).toContain('claude · sk-ant-…9876 · API key');
-    expect(text).toContain('gpt · sk-proj-…4321 · API key (env)');
+    expect(text).toContain('Claude · sk-ant-…9876 · API key');
+    expect(text).toContain('Codex · sk-proj-…4321 · API key (env)');
     expect(text).not.toContain('pasted-key');
     expect(text).not.toContain('OPENAI_SECRET');
     expect(() => runCommand('usage', ['now'])).toThrow('Usage: /usage');
@@ -520,10 +706,10 @@ describe('credential commands', () => {
     process.env.OPENAI_SECRET = 'sk-proj-from-env-4321';
     runCommand('login', ['claude', 'api', 'sk-ant-pasted-key-9876']);
     const items = menuItems('logout', []);
-    expect(items.map(item => item.label)).toEqual(['claude · sk-ant-…9876']);
+    expect(items.map(item => item.label)).toEqual(['Claude · sk-ant-…9876']);
     expect(runCommand('logout', items[0].command.split(' ').slice(1))).toEqual({
       kind: 'success',
-      text: 'Removed claude · sk-ant-…9876.',
+      text: 'Removed Claude · sk-ant-…9876.',
     });
     expect(commandMenu('logout', [], new Session())).toBeNull();
     expect(runCommand('logout', [])).toEqual({ kind: 'info', text: 'Nothing to sign out of.' });
@@ -539,18 +725,36 @@ describe('credential commands', () => {
     bindScriptedRuntime(models.sirus, (_input, emit) => {
       emit({ type: 'context', usage: { tokens: 12_000, window: 200_000 } });
       emit({ type: 'text', text: 'First.' });
+      emit({ type: 'usage', usage: { totalTokens: 1_500, inputTokens: 1_000, outputTokens: 500, costUsd: 0.02 } });
     });
+    // A Codex turn of several model calls reports a total and no breakdown.
+    let reviewerTurns = 0;
     bindScriptedRuntime(models.reviewer, (_input, emit) => {
       emit({ type: 'context', usage: { tokens: 8_000, window: 400_000 } });
       emit({ type: 'text', text: 'Second.' });
+      emit({ type: 'usage', usage: ++reviewerTurns === 1
+        ? { totalTokens: 400, inputTokens: 300, outputTokens: 100 }
+        : { totalTokens: 600 } });
     });
     try {
       const session = new Session({ id: 'usage', name: 'Usage', model: models.sirus });
       session.addParticipant('reviewer', models.reviewer);
       await session.sendMessage({ role: 'user', content: [{ type: 'text', text: '@sirus @reviewer hello' }] });
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: '@reviewer again' }] });
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'again' }] });
       const result = await runCommand('usage', [], session);
-      expect((result as Feedback).text)
-        .toContain('session · @sirus ctx 12k (6% of 200k) · @reviewer ctx 8k (2% of 400k)');
+      // Usage is summed over the participant's turns, a figure of the
+      // breakdown only when every turn reported it.
+      expect((result as Feedback).text).toContain(
+        'session · @sirus 3k tokens (2k in, 1k out) · $0.04, ctx 12k (6% of 200k) · @reviewer 1k tokens, ctx 8k (2% of 400k)');
+      expect(session.getTurnUsage('reviewer')).toEqual({ totalTokens: 1_000 });
+      expect(session.getTurnUsage('sirus')).toEqual({ totalTokens: 3_000, inputTokens: 2_000, outputTokens: 1_000, costUsd: 0.04 });
+      const status = (await runCommand('status', [], session) as Feedback).text;
+      expect(status).toContain('@sirus · usage-register-sirus · thinking default');
+      expect(status).toMatch(/context\s+12k of 200k \(6% used, 94% left\)/);
+      expect(status).toMatch(/tokens\s+3k tokens \(2k in, 1k out\) · \$0\.04/);
+      expect(status).toMatch(/@reviewer · usage-register-reviewer · thinking default\n\s+context\s+8k of 400k/);
+      expect(status).toMatch(/permissions\s+auto approve/);
     } finally {
       unbindRuntime(models.sirus);
       unbindRuntime(models.reviewer);
@@ -560,9 +764,9 @@ describe('credential commands', () => {
   test('/usage says when a provider has nothing configured', async () => {
     const result = await runCommand('usage', []);
     const text = (result as { text: string }).text;
-    expect(text).toContain('claude · not configured');
-    expect(text).toContain('gpt · not configured');
-    expect(text).toContain('session · no context reported yet');
+    expect(text).toContain('Claude · not configured');
+    expect(text).toContain('Codex · not configured');
+    expect(text).toContain('session · no usage reported yet');
   });
 
   test('/logout leaves the subscription when that is active', () => {
@@ -572,7 +776,7 @@ describe('credential commands', () => {
     expect(providerFor('gpt').activeSource()).toMatchObject({ kind: 'api', fromEnv: true });
     expect(result).toEqual({
       kind: 'success',
-      text: 'Removed gpt · subscription.',
+      text: 'Removed Codex · subscription.',
     });
   });
 
@@ -582,7 +786,7 @@ describe('credential commands', () => {
     expect(providerFor('claude').sources.list()).toEqual([]);
     expect(result).toEqual({
       kind: 'success',
-      text: 'Removed claude · sk-ant-…9876.',
+      text: 'Removed Claude · sk-ant-…9876.',
     });
   });
 
@@ -590,7 +794,7 @@ describe('credential commands', () => {
     process.env.ANTHROPIC_API = 'sk-ant-from-env-1234';
     expect(runCommand('logout', ['claude'])).toEqual({
       kind: 'info',
-      text: 'Nothing to sign out of for claude.',
+      text: 'Nothing to sign out of for Claude.',
     });
     expect(providerFor('claude').sources.list()).not.toEqual([]);
   });
@@ -618,7 +822,9 @@ describe('compact command', () => {
       expect(binding.runtimes[0].prompts[0].text).toEndWith('/compact');
       expect(session.getMessages().at(-1)?.content).toEqual([{ type: 'compaction', summary: 'Summary.' }]);
 
-      expect(() => runCommand('compact', ['on'], session)).toThrow('Usage: /compact');
+      // What follows /compact tells the vendor what the summary should keep.
+      await runCommand('compact', ['keep', 'the', 'API', 'notes'], session);
+      expect(binding.runtimes[0].prompts[1].text).toEndWith('/compact keep the API notes');
       expect(matchCommands('/comp').map(command => command.name)).toEqual(['compact']);
     } finally {
       unbindRuntime(model);

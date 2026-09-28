@@ -31,7 +31,9 @@ export interface WorkerRecord {
   // The participant that spawned the run.
   owner: string;
   model: string;
-  thinkingLevel: ThinkingLevel;
+  // Absent when neither the caller, the definition nor the owner chose one:
+  // the worker runs at its model's default.
+  thinkingLevel?: ThinkingLevel;
   context: WorkerContext;
   prompt: string;
   // Where the worker runs: the owner's directory, an explicit cwd, or an

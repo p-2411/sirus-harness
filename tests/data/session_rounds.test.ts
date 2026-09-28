@@ -115,6 +115,8 @@ describe('Session rounds', () => {
       participant: 'writer',
       model: streamingModel,
       content: [{ type: 'text', text: 'partial answer' }],
+      startedAt: expect.any(Number),
+      finishedAt: expect.any(Number),
     });
     expect(messages[2]).toMatchObject({ participant: 'breaker', content: [{ type: 'notice', severity: 'error' }] });
   });

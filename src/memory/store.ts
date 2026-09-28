@@ -57,6 +57,9 @@ export interface MemoryInput {
 export interface MemoryStore {
   save(target: MemoryTarget, input: MemoryInput): Promise<Memory>;
   get(target: MemoryTarget, name: string): Memory | undefined;
+  // Every memory a session in the directory can see: the global ones, then
+  // the directory's own, each by name.
+  list(directory: string): Memory[];
   delete(target: MemoryTarget, name: string): boolean;
   search(
     scope: MemorySearchScope,
@@ -173,6 +176,12 @@ class SqliteMemoryStore implements MemoryStore {
       ${SELECT_MEMORIES} WHERE memories.scope_id = ? AND memories.name = ?
     `).get(scopeId, requiredText(name, 'Memory name'));
     return row ? memoryFromRow(row) : undefined;
+  }
+
+  list(directory: string): Memory[] {
+    return this.visibleScopeIds('available', directory).flatMap(scopeId => this.database.query<MemoryRow, [number]>(`
+      ${SELECT_MEMORIES} WHERE memories.scope_id = ? ORDER BY memories.name
+    `).all(scopeId).map(memoryFromRow));
   }
 
   delete(target: MemoryTarget, name: string): boolean {

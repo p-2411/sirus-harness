@@ -59,6 +59,14 @@ export type PromptMode =
     onCancel: () => void;
   };
 
+// A menu opens on what is in effect now, as the vendors' own pickers do;
+// anything else on its first choice.
+function initialSelection(mode: PromptMode): number {
+  if (mode.type !== 'menu') return 0;
+  const index = mode.items.filter((entry): entry is CommandMenuItem => entry.type === 'item').findIndex(item => item.current);
+  return Math.max(0, index);
+}
+
 export function PromptBar({ mode, feedback, participantColors, queuedMessages, workers, status, agentArrows = false }: {
   mode: PromptMode;
   feedback: Feedback | null;
@@ -68,13 +76,13 @@ export function PromptBar({ mode, feedback, participantColors, queuedMessages, w
   status: StatusRowProps;
   agentArrows?: boolean;
 }) {
-  const [selected, setSelected] = useState(0);
+  const [selected, setSelected] = useState(() => initialSelection(mode));
   const [entry, setEntry] = useState('');
   const [approvalFeedback, setApprovalFeedback] = useState<InputState | null>(null);
   const decided = useRef(false);
   const promptIdentity = mode.type === 'approval' || mode.type === 'question' ? mode.request.id : mode;
   useEffect(() => {
-    setSelected(0);
+    setSelected(initialSelection(mode));
     setEntry('');
     setApprovalFeedback(null);
     decided.current = false;

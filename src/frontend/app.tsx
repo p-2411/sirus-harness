@@ -12,7 +12,7 @@ import {
   deleteSessionSnapshot,
   type PersistedSessions,
 } from "../persistence/sessions";
-import { openSettings } from "../persistence/settings";
+import { loadSessionDefaults, openSettings } from "../persistence/settings";
 import { errorMessage } from "../abort";
 import { useTextSelection } from "./interaction/useTextSelection";
 import { useTerminalFocus } from "./interaction/useTerminalFocus";
@@ -51,7 +51,11 @@ function createDraft(
   preference: string | null = openSettings().get('sirusModel'),
 ): Session {
   const model = preference && isKnownModel(preference) ? preference : DEFAULT_MODEL;
-  return new Session({ name: nextSessionName(sessions), directory, model, autoNamePending: true });
+  const { permissionMode, thinkingLevel } = loadSessionDefaults();
+  return new Session({
+    name: nextSessionName(sessions), directory, model, autoNamePending: true,
+    ...(permissionMode ? { permissionMode } : {}), ...(thinkingLevel ? { thinkingLevel } : {}),
+  });
 }
 
 export function startSession(

@@ -8,6 +8,7 @@ import stripAnsi from 'strip-ansi';
 import stringWidth from 'string-width';
 import Chat, { ChatHeader } from '../../src/frontend/chat/Chat';
 import { Session } from '../../src/agent_runtime/session';
+import { rememberListedModels } from '../../src/agent_runtime/providers/catalog';
 import { textOf } from '../../src/agent_runtime/types';
 import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
 import { saveSessionSnapshot, loadSessionSnapshot } from '../../src/persistence/sessions';
@@ -126,14 +127,16 @@ test('an idle selected agent can answer while its peer runs and queued messages 
   } finally { release(); await turn.catch(() => {}); await chat.close(); await session.dispose(); unbindRuntime(builder); unbindRuntime(reviewer); }
 });
 
-test('handoffs are attributed and visible in both participating conversations', async () => {
+test('an agent-created participant appears in the header without taking over the selected conversation', async () => {
   const builder = 'test-tabs-handoff-builder', reviewer = 'test-tabs-handoff-reviewer';
-  bindScriptedRuntime(builder, (_input, emit) => emit({ type: 'text', text: '@reviewer Please check this change.' }));
+  bindScriptedRuntime(builder, (_input, emit) => emit({ type: 'text', text: `@reviewer ${reviewer} Please check this change.` }));
   bindScriptedRuntime(reviewer, (_input, emit) => emit({ type: 'text', text: 'Review complete.' }));
-  const session = new Session({ model: builder }); session.addParticipant('reviewer', reviewer);
+  const session = new Session({ model: builder });
   const chat = screen(session);
   try {
     await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Build it' }] }); await chat.flush();
+    expect(session.getSelectedParticipant()).toBe('sirus');
+    expect(chat.output().split('\n')[0]).toContain('reviewer.');
     expect(chat.output()).toContain('→ @reviewer');
     expect(chat.output()).not.toContain('Review complete.');
     await chat.select('right');
@@ -165,10 +168,10 @@ test('a background approval marks its agent without taking over the selected inp
   try {
     await chat.flush();
     expect(chat.output().split('\n')[0]).toContain('reviewer!');
-    expect(chat.output()).not.toContain('Write reviewed file');
+    expect(chat.output()).not.toContain('write reviewed file');
     await chat.press('Keep my draft');
     await chat.select('right');
-    expect(chat.output()).toContain('Write reviewed file');
+    expect(chat.output()).toContain('wants to write reviewed file');
     await chat.select('left');
     expect(session.getSelectedParticipant()).toBe('sirus');
     expect(session.getInputContent()).toBe('Keep my draft');
@@ -180,6 +183,10 @@ test('a background approval marks its agent without taking over the selected inp
 });
 
 test('model and reasoning commands configure the selected agent', async () => {
+  // `/model` takes only what a vendor listed, so Codex has listed its models.
+  const previousDirectory = process.env.SIRUS_DATA_DIR;
+  process.env.SIRUS_DATA_DIR = mkdtempSync(join(tmpdir(), 'sirus-agent-tabs-models-'));
+  rememberListedModels('gpt', [{ id: 'gpt-5.6-luna', description: '' }]);
   const session = new Session(); session.addParticipant('reviewer', 'claude-sonnet-5');
   const original = session.getModel();
   const chat = screen(session);
@@ -191,7 +198,12 @@ test('model and reasoning commands configure the selected agent', async () => {
     await chat.press('/model gpt-5.6-luna'); await chat.press('\r');
     expect(session.getParticipants().find(participant => participant.name === 'reviewer')!.model).toBe('gpt-5.6-luna');
     expect(session.getModel()).toBe(original);
-  } finally { await chat.close(); await session.dispose(); }
+  } finally {
+    await chat.close(); await session.dispose();
+    rmSync(process.env.SIRUS_DATA_DIR!, { recursive: true, force: true });
+    if (previousDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
+    else process.env.SIRUS_DATA_DIR = previousDirectory;
+  }
 });
 
 test('a queued command keeps explicit recipients when its text mentions other agents', async () => {

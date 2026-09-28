@@ -34,10 +34,14 @@ export interface ImageBlock {
 }
 
 // Reasoning the runtime streamed as thought chunks. Rendered as thinking;
-// never part of what a rebuilt runtime is reseeded with.
+// never part of what a rebuilt runtime is reseeded with. It began when the
+// runtime last said anything else, or when the turn began, and ended when the
+// reply moved on; both are absent in older snapshots.
 export interface ThoughtBlock {
   type: 'thought';
   text: string;
+  startedAt?: number;
+  endedAt?: number;
 }
 
 // The runtime folded its own conversation at this point. The summary is what
@@ -49,6 +53,8 @@ export interface CompactionBlock {
 
 // Advisory information from the vendor, shown to the user but never sent
 // back to a runtime as conversation or used to address another participant.
+// Sirus records its own this way too: a turn's error, and where a turn was
+// interrupted.
 export interface NoticeBlock {
   type: 'notice';
   severity: string;
@@ -72,6 +78,10 @@ export interface ToolCallDiff {
   // Null for a new file.
   oldText: string | null;
   newText: string;
+  // The line of the changed file the texts start at, when the vendor said:
+  // Claude sends each hunk with its line, codex-acp sends whole files. Absent
+  // for an excerpt with no position, such as Claude's edit before it runs.
+  line?: number;
 }
 
 // Text the call produced: content blocks and terminal output alike.
@@ -100,7 +110,15 @@ export interface ToolCallBlock {
   // The call's arguments and result, as the runtime chose to expose them.
   input?: unknown;
   output?: unknown;
+  // Why a call that did not run to its end stopped, when that was not its own
+  // failure: the user declined it at the approval prompt, or the turn it
+  // belonged to was cancelled. Both vendors report either as failed.
+  outcome?: ToolCallOutcome;
 }
+
+export const TOOL_CALL_OUTCOMES = ['declined', 'cancelled'] as const;
+
+export type ToolCallOutcome = typeof TOOL_CALL_OUTCOMES[number];
 
 export type MessageBlock = TextBlock | ImageBlock | ThoughtBlock | CompactionBlock | NoticeBlock | ToolCallBlock;
 
@@ -148,15 +166,32 @@ export function planEntriesOf(call: ToolCallBlock): PlanEntry[] {
 }
 
 // Marks every tool call still pending or running as failed, for a turn that
-// will report nothing more about them. True if any was.
-export function failOpenToolCalls(content: MessageBlock[]): boolean {
+// will report nothing more about them, and says why when the turn was
+// cancelled rather than failed. True if any was.
+export function failOpenToolCalls(content: MessageBlock[], outcome?: 'cancelled'): boolean {
   let changed = false;
   for (const [index, block] of content.entries()) {
     if (block.type !== 'tool_call' || block.status === 'completed' || block.status === 'failed') continue;
-    content[index] = { ...block, status: 'failed' };
+    content[index] = { ...block, status: 'failed', ...(outcome && !block.outcome ? { outcome } : {}) };
     changed = true;
   }
   return changed;
+}
+
+// What one turn used, as the vendor reported it when the turn ended. Claude
+// answers a prompt with the tally of every model call of the turn. codex-acp
+// answers with its last call's alone, so a Codex turn's total is what the
+// usage updates of its calls add up to, and its breakdown is known only when
+// the turn made one call. The cost is Claude's alone: what this turn added to
+// the running cost of its session.
+export interface TurnUsage {
+  totalTokens: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedReadTokens?: number;
+  cachedWriteTokens?: number;
+  thoughtTokens?: number;
+  costUsd?: number;
 }
 
 // One entry of a participant's transcript. The same object sits in every
@@ -184,20 +219,29 @@ export interface Message {
   // Where a steered user message entered a reply that was still streaming.
   // Display metadata only: transcripts retain the complete vendor messages.
   injectedAt?: { seq: number; block: number; offset: number };
+  // Where a user prompt or an agent's reply names the model a new participant
+  // starts on, the `<model>` of `@name <model>`, in `textOf` offsets. The text
+  // is kept as written; the runtimes read it without these (`withoutCreationModels`).
+  creationModels?: { start: number; end: number }[];
+  // Assistant entries: when the turn that wrote it started and ended, and what
+  // it used. Absent while it runs and in older snapshots. A participant's
+  // total, which /status and /usage show, is the sum over its entries.
+  startedAt?: number;
+  finishedAt?: number;
+  usage?: TurnUsage;
 }
 
 // The reasoning depth a user picks per agent. Runtimes translate the shared
-// level into whatever effort option the vendor exposes.
+// level into whatever effort option the vendor exposes. An agent nobody
+// picked a level for runs at its model's own default, which is the vendor's.
 export const THINKING_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 
 export type ThinkingLevel = typeof THINKING_LEVELS[number];
 
-export const DEFAULT_THINKING_LEVEL: ThinkingLevel = 'high';
-
 export const THINKING_LEVEL_DESCRIPTIONS: Record<ThinkingLevel, string> = {
   low: 'fastest, with lighter reasoning',
   medium: 'balanced speed and reasoning depth',
-  high: 'deep reasoning for complex work (default)',
+  high: 'deep reasoning for complex work',
   xhigh: 'extended reasoning for difficult, long-running work',
   max: 'maximum reasoning depth and token use',
 };
@@ -246,6 +290,22 @@ export const PROFILE_NAME_PATTERN = /^[a-zA-Z0-9_-]+$/;
 // The participant every session starts with, and the one a message that names
 // no participant belongs to.
 export const DEFAULT_PARTICIPANT = 'sirus';
+// The levels a model offers, read off the efforts its runtime listed: null
+// while no runtime on it has said, empty when it has no effort to set.
+export function offeredThinkingLevels(efforts: readonly string[] | undefined): ThinkingLevel[] | null {
+  return efforts ? THINKING_LEVELS.filter(level => efforts.includes(level)) : null;
+}
+
+// The level a model runs at when asked for this one: the level itself when
+// offered, else the nearest lower one, else the lowest it offers; null when
+// it offers none. The runtime applies exactly this, so the status row can
+// show it rather than what was asked for.
+export function fitThinkingLevel(level: ThinkingLevel, offered: readonly ThinkingLevel[]): ThinkingLevel | null {
+  const lower = THINKING_LEVELS.slice(0, THINKING_LEVELS.indexOf(level) + 1).reverse();
+  return lower.find(candidate => offered.includes(candidate))
+    ?? THINKING_LEVELS.find(candidate => offered.includes(candidate))
+    ?? null;
+}
 
 // The prose of a message: its text blocks joined with exactly one newline.
 export function textOf(message: Pick<Message, 'content'>): string {
@@ -253,4 +313,26 @@ export function textOf(message: Pick<Message, 'content'>): string {
     .filter((block): block is TextBlock => block.type === 'text')
     .map(block => block.text)
     .join('\n');
+}
+
+// A message as the runtimes read it. The model that follows a newly
+// introduced @name is routing, not conversation, so it is cut out of the text
+// the message was kept with; the user still sees it as it was written.
+export function withoutCreationModels<T extends Pick<Message, 'content' | 'creationModels'>>(message: T): T {
+  const spans = [...(message.creationModels ?? [])].sort((left, right) => right.start - left.start);
+  if (spans.length === 0) return message;
+  const content = [...message.content];
+  // textOf joins text blocks with exactly one newline.
+  let start = 0;
+  for (const [index, block] of content.entries()) {
+    if (block.type !== 'text') continue;
+    const end = start + block.text.length;
+    let text = block.text;
+    for (const span of spans) {
+      if (span.start >= start && span.end <= end) text = text.slice(0, span.start - start) + text.slice(span.end - start);
+    }
+    if (text !== block.text) content[index] = { ...block, text };
+    start = end + 1;
+  }
+  return { ...message, content };
 }

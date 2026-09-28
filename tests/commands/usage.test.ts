@@ -58,7 +58,7 @@ describe('/usage subscription allowance', () => {
     await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Hello' }] });
     const result = await usageCommand(undefined, session);
     // A login recorded before accounts were labelled is identified by asking the provider.
-    expect(result.text).toContain('gpt · plus plan · 5h 70%');
+    expect(result.text).toContain('Codex · plus plan · 5h 70% left');
     expect(result.text).toContain('session · @sirus ctx 12k (6% of 200k)');
     expect(request.mock.calls.map(([method]) => method).sort())
       .toEqual(['account/rateLimits/read', 'account/read']);
@@ -67,8 +67,8 @@ describe('/usage subscription allowance', () => {
   test('a quota read failure displays unavailable without hiding the session', async () => {
     fakeAppServer(() => { throw new Error('Unavailable'); });
     const result = await usageCommand(undefined, new Session());
-    expect(result.text).toContain('gpt · plus plan · 5h unavailable');
-    expect(result.text).toContain('session · no context reported yet');
+    expect(result.text).toContain('Codex · plus plan · 5h unavailable');
+    expect(result.text).toContain('session · no usage reported yet');
     expect(result.text).not.toContain('100% remaining');
   });
 

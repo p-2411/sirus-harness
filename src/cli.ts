@@ -131,16 +131,19 @@ export async function runPrint(
   write: (text: string) => void = text => { process.stdout.write(text); },
 ): Promise<void> {
   if (!prompt.trim()) throw new Error('--print requires a prompt argument or piped input.');
-  const [{ Session }, { DEFAULT_MODEL }, persistence, { openSettings }, permissions, questions, { textOf }] = await Promise.all([
+  const [{ Session }, { DEFAULT_MODEL }, persistence, { openSettings, loadSessionDefaults }, permissions, questions, { textOf }] = await Promise.all([
     import('./agent_runtime/session'), import('./agent_runtime/providers/catalog'), import('./persistence/sessions'),
     import('./persistence/settings'), import('./agent_runtime/permissions/approvals'),
     import('./agent_runtime/permissions/questions'), import('./agent_runtime/types'),
   ]);
   const saved = persistence.loadSessionSnapshots(undefined, options.directory!);
   const snapshot = resolveResumeSelection(saved.snapshots, options);
+  const defaults = loadSessionDefaults();
   const session = snapshot ? Session.fromSnapshot(snapshot) : new Session({
     directory: options.directory!, model: options.model ?? openSettings().get('sirusModel') ?? DEFAULT_MODEL,
     name: prompt.trim().slice(0, 80),
+    ...(defaults.permissionMode ? { permissionMode: defaults.permissionMode } : {}),
+    ...(defaults.thinkingLevel ? { thinkingLevel: defaults.thinkingLevel } : {}),
   });
   session.setArchived(false);
   if (options.model) session.changeParticipantModel(session.toSnapshot().defaultModel.name, options.model);

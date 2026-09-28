@@ -264,6 +264,9 @@ export default function SideBar({ sessions, currSession, selectSession, addSessi
   const [scrollOffset, setScrollOffset] = useState(0);
   const maxOffset = Math.max(0, ordered.length - visibleRows);
   const offset = Math.min(scrollOffset, maxOffset);
+  // While sessions are left below, the last row is an arrow saying so.
+  const rowsAt = (at: number) => at < maxOffset ? visibleRows - 1 : visibleRows;
+  const moreBelow = offset < maxOffset;
   const selectedId = focused ? highlighted?.getId() : currSession?.getId();
   const selectedIndex = ordered.findIndex(session => session.getId() === selectedId);
 
@@ -274,13 +277,10 @@ export default function SideBar({ sessions, currSession, selectSession, addSessi
       const clamped = Math.min(previous, maxOffset);
       if (selectedIndex < 0) return clamped;
       if (selectedIndex < clamped) return selectedIndex;
-      if (selectedIndex >= clamped + visibleRows) return selectedIndex - visibleRows + 1;
+      if (selectedIndex >= clamped + rowsAt(clamped)) return Math.min(maxOffset, selectedIndex - visibleRows + 2);
       return clamped;
     });
   }, [selectedId, selectedIndex, visibleRows, maxOffset]);
-
-  const thumbSize = Math.max(1, Math.floor(visibleRows * visibleRows / Math.max(1, ordered.length)));
-  const thumbTop = maxOffset > 0 ? Math.round(offset / maxOffset * (visibleRows - thumbSize)) : 0;
 
   useInput((input, key) => {
     if (!isActive || key.eventType === 'release') return;
@@ -386,21 +386,15 @@ export default function SideBar({ sessions, currSession, selectSession, addSessi
               showDirectory={session.getDirectory() !== directory}
               now={now}
               collapsed={collapsed}
-              visible={index >= offset && index < offset + visibleRows}
+              visible={index >= offset && index < offset + rowsAt(offset)}
             />
           ))}
+          {moreBelow && visibleRows > 0 && <Box justifyContent="center" flexShrink={0}>
+            <Text color={theme.textSubtle}>↓</Text>
+          </Box>}
         </Box>
-        {!collapsed && maxOffset > 0 && visibleRows > 0 && (
-          <Box width={1} flexShrink={0} flexDirection="column">
-            {Array.from({ length: visibleRows }, (_, index) => (
-              <Text key={index} color={theme.textSubtle}>
-                {index >= thumbTop && index < thumbTop + thumbSize ? '┃' : '│'}
-              </Text>
-            ))}
-          </Box>
-        )}
       </Box>
-      {!collapsed && <Box flexDirection="column" flexShrink={0}>
+      {!collapsed && <Box flexDirection="column" flexShrink={0} marginTop={1}>
         {focused && <Text color={theme.textMuted}>^a archive · esc back</Text>}
         {!focused && <Box ref={manageRef} justifyContent="space-between">
           <Text color={manageHovered ? theme.highlight : theme.textMuted}>manage session</Text>

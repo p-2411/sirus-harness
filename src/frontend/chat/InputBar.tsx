@@ -3,7 +3,7 @@ import { Box, Text, useApp, useBoxMetrics, useInput, usePaste, useStdout, type D
 import stringWidth from 'string-width';
 import { theme } from '../styles/theme';
 import { CommandMenu, useCommandMenu } from './CommandMenu';
-import { isSirusCommand } from '../../commands/registry';
+import { isNativeCommand, isSirusCommand } from '../../commands/registry';
 import { MentionMenu, useFileSuggestions, useMentionMenu } from './MentionMenu';
 import { DraftRow, TrailingImages } from './DraftText';
 import { describeImage, attachImageFile } from '../../images';
@@ -84,7 +84,7 @@ interface InputBarProps {
   onAttachImage?: (image: ImageBlock) => void;
   // backspace over an image in the draft drops it
   onRemoveAttachment?: (image: ImageBlock) => void;
-  // the session's current model, shown under the input bar
+  // the selected agent's model, shown under the input bar
   model?: string;
   thinkingLevel?: string;
   // the session's earlier prompts, oldest first, for ↑/↓ recall
@@ -614,12 +614,12 @@ export function InputBar({
         if (sendImmediately) onSendNow?.();
         return;
       }
-      // A command picked from the menu is sent by its full name; the draft's
-      // content is only the prefix typed to find it.
+      // A command picked from the menu goes as its full name, not as the
+      // prefix typed so far, which the draft's own content still holds.
       const content = selectedCommand ? undefined : draft.content;
       if (sendImmediately && onSendNow) onSendNow(trimmed, draft.images, content);
       else if (send(trimmed, draft.images, content) === false) return;
-      if (directory && trimmed && !isSirusCommand(trimmed, nativeList)) {
+      if (directory && trimmed && (!trimmed.startsWith('/') || isNativeCommand(trimmed, nativeList))) {
         try { appendPromptHistory(directory, trimmed); }
         catch (error) { setLocalFeedback({ kind: 'warning', text: `Could not save prompt history: ${errorMessage(error)}` }); }
         setSavedHistory(current => [...current, trimmed].slice(-1000));

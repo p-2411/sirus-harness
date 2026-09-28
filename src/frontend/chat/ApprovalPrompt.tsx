@@ -3,7 +3,7 @@ import type { PermissionOptionKind } from '@agentclientprotocol/sdk';
 import { theme } from '../styles/theme';
 import type { ToolCallBlock } from '../../agent_runtime/types';
 import { describeRequester, type ApprovalDecision, type ApprovalRequest } from '../../agent_runtime/permissions/approvals';
-import { editPreview, toolLine, type DiffLine } from './ChatMessage';
+import { argumentLines, editPreview, planText, toolLine, type DiffLine } from './toolCalls';
 import type { InputState } from './editor';
 import { FramedCard, type TitlePart } from './FramedCard';
 import { terminalText, truncate } from '../terminal/text';
@@ -44,35 +44,34 @@ export function approvalChoices(request: ApprovalRequest): ApprovalChoice[] {
   return choices;
 }
 
-const INPUT_LENGTH = 200;
-// A plan up for approval is read in full, up to about a screen of it.
-const PLAN_LINES = 30;
+// A plan or a call's arguments up for approval are read in full, up to about
+// a screen of them; a change, the way a row previews one.
+const DETAIL_LINES = 30;
+const DIFF_LINES = 16;
+
+function cut(lines: readonly string[]): string[] {
+  return lines.length > DETAIL_LINES
+    ? [...lines.slice(0, DETAIL_LINES), `… ${lines.length - DETAIL_LINES} more lines, in the transcript`]
+    : [...lines];
+}
 
 // What the user is approving, one item per line: where the call lands, then
 // the change it makes, the command it runs, the plan it would carry out, or
-// failing all of those its input. Each is the vendor's text and is made safe
-// to print before a mark is put in front of it; the input's JSON already is.
-function approvalDetail(call: ToolCallBlock): string[] {
+// failing all of those its arguments, one to a line.
+export function approvalDetail(call: ToolCallBlock): string[] {
   const lines = call.locations.map(location => terminalText(location.path));
-  const diff = editPreview(call);
+  const diff = editPreview(call, DIFF_LINES);
   if (diff.length > 0) return [...lines, ...diff.map(markLine)];
   const input = call.input;
   const command = call.kind === 'execute' && input !== null && typeof input === 'object'
     && 'command' in input && typeof input.command === 'string' ? input.command : null;
-  if (command !== null) return [...lines, ...terminalText(command).split('\n').map(line => `$ ${line}`)];
-  const plan = call.kind === 'switch_mode' && input !== null && typeof input === 'object'
-    && 'plan' in input && typeof input.plan === 'string' ? terminalText(input.plan).trim() : null;
-  if (plan) {
-    const planLines = plan.split('\n');
-    return [...lines, ...planLines.slice(0, PLAN_LINES), ...(planLines.length > PLAN_LINES
-      ? [`… ${planLines.length - PLAN_LINES} more lines, in the transcript`]
-      : [])];
-  }
-  if (input === undefined) return lines;
-  const text = JSON.stringify(input) ?? String(input);
-  return [...lines, truncate(text, INPUT_LENGTH)];
+  if (command !== null) return [...lines, ...command.split('\n').map(line => `$ ${line}`)];
+  const plan = planText(call);
+  if (plan) return [...lines, ...cut(plan.split('\n'))];
+  return [...lines, ...cut(argumentLines(call))];
 }
 
+// The card numbers nothing: an edit up for approval has not landed anywhere.
 function markLine(line: DiffLine): string {
   const text = terminalText(line.text);
   return line.sign === ' ' ? text : `${line.sign} ${text}`;
@@ -83,14 +82,11 @@ function sentenceCase(line: string): string {
   return line.charAt(0).toLowerCase() + line.slice(1);
 }
 
-// Who is asking and for what, as the card's top edge sets it after its mark
-// and the desktop notification says it: "@sirus wants to edit src/app.ts".
-export function approvalTitle(request: ApprovalRequest, requesterName?: string): TitlePart[] {
-  return [
-    { text: requesterName ?? describeRequester(request.requester), color: theme.accent, bold: true },
-    { text: ' wants to ' },
-    { text: sentenceCase(toolLine(request.toolCall)), color: theme.highlight, bold: true },
-  ];
+// What the card says the agent wants to do: the call's line, mid-sentence,
+// or for a plan, to go ahead with it, as Claude Code asks "Would you like to
+// proceed?".
+export function approvalAction(call: ToolCallBlock): string {
+  return planText(call) ? 'proceed with this plan' : sentenceCase(toolLine(call));
 }
 
 // Detail lines carry their own marks: removed and added lines of an edit,
@@ -120,7 +116,12 @@ export function ApprovalPrompt({ request, waiting, selected, requesterName, feed
   return (
     <FramedCard
       tone={theme.pending}
-      title={[{ text: '⚠ ', color: theme.pending }, ...approvalTitle(request, requesterName)]}
+      title={[
+        { text: '⚠ ', color: theme.pending },
+        { text: requesterName ?? describeRequester(request.requester), color: theme.accent, bold: true },
+        { text: ' wants to ' },
+        { text: approvalAction(request.toolCall), color: theme.highlight, bold: true },
+      ]}
       {...(waiting > 0 ? { right: `${waiting} more` } : {})}
       footer={feedback ? 'enter decline and send · esc decline' : '↑↓ move · enter select · tab add feedback · esc decline'}
     >

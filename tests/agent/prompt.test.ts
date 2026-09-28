@@ -108,8 +108,9 @@ describe('system prompt', () => {
     expect(prompt).toContain('the participant @reviewer');
     expect(prompt).toContain('one shared session');
     expect(prompt).toContain('do not impersonate another participant');
-    expect(prompt).toContain('mention an existing participant');
-    expect(prompt).toContain('cannot create participants');
+    expect(prompt).toContain('Mention an existing participant');
+    expect(prompt).toContain('Both you and the user can add a participant');
+    expect(prompt).toContain('@name <supported-model> <task>');
     expect(prompt).toContain('receives your whole message');
   });
 

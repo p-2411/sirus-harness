@@ -4,8 +4,10 @@ import { Box, render } from 'ink';
 import { PassThrough } from 'node:stream';
 import stripAnsi from 'strip-ansi';
 import { Session } from '../../src/agent_runtime/session';
+import { rememberListedModels } from '../../src/agent_runtime/providers/catalog';
 import { planCall, type Message, type PlanEntry, type ToolCallBlock } from '../../src/agent_runtime/types';
-import Chat, { currentPlans, formatElapsed, promptHistory, turnPhase } from '../../src/frontend/chat/Chat';
+import Chat, { currentPlans, promptHistory, turnPhase } from '../../src/frontend/chat/Chat';
+import { formatElapsed } from '../../src/frontend/chat/ChatMessage';
 import { usageCommandSpec } from '../../src/commands/authentication/commands';
 import { pendingApprovals, requestPermission, resolveApproval } from '../../src/agent_runtime/permissions/approvals';
 import {
@@ -101,10 +103,12 @@ test('Escape dismisses help, command suggestions, login stages and secret entry'
     await type('i');
     expect(output).toContain('add a subscription or API key');
     await type('\r');
-    expect(output).toContain('ChatGPT');
+    expect(output).toContain('Codex');
     await type('\u001b');
     expect(output).not.toContain('› Claude');
+    // With no credentials the empty chat keeps its tagline and adds the hint.
     expect(output).toContain('What shall we build?');
+    expect(output).toContain('Use /login to sign in to Claude or Codex, or add an API key.');
 
     await type('/login');
     await type('\r');
@@ -118,10 +122,10 @@ test('Escape dismisses help, command suggestions, login stages and secret entry'
     await type('\r');
     await type('\u001b[B');
     await type('\r');
-    expect(output).toContain('Anthropic API key');
+    expect(output).toContain('API key for Claude');
     await type('not-a-real-key');
     await type('\u001b');
-    expect(output).not.toContain('Anthropic API key');
+    expect(output).not.toContain('API key for Claude');
     expect(session.getMessages()).toEqual([]);
   } finally {
     app.unmount();
@@ -156,7 +160,9 @@ test('the status row shows the default model immediately and updates when change
     expect(output).not.toContain('TypeSafe AI API key');
     session.changeParticipantModel('sirus', 'gpt-5.6-terra');
     await flush();
-    expect(output).toContain('gpt-5.6-terra · high');
+    // No level was chosen, so none is claimed until the model's default is known.
+    expect(output).toContain('gpt-5.6-terra');
+    expect(output).not.toContain('gpt-5.6-terra · high');
   } finally {
     app.unmount();
     await app.waitUntilExit();
@@ -233,8 +239,9 @@ test('help and usage stay scrollable above the editor in an 80 by 24 terminal', 
     await type('\u001b[5~');
     expect(output).toBe(firstPage);
     await type('\u001b[1;5F');
-    expect(output).toContain('ctrl+k / u');
-    expect(output).toContain('kill previous / next word');
+    // The end of /help is its notes on the mouse and the vendors' commands.
+    expect(output).toContain('checkpoint');
+    expect(output).toContain('history.');
     expectEditor();
     await type('\u001b[1;5H');
     expect(output).toBe(firstPage);
@@ -661,6 +668,8 @@ test('the approval prompt keeps the choice the arrows moved to while the chat re
 });
 
 test('escape closes what is open before it cancels the turn', async () => {
+  // The model menu only offers models a vendor has listed.
+  rememberListedModels('gpt', [{ id: 'gpt-5.6-luna', description: 'Luna' }]);
   const model = 'test-chat-escape';
   // A turn that runs until it is cancelled.
   bindScriptedRuntime(model, () => new Promise<void>(() => {}));
@@ -873,6 +882,11 @@ describe('turn status', () => {
     const title = 'bun test --coverage --reporter junit tests/frontend';
     expect(turnPhase([{ seq: 0, role: 'assistant', content: [{ ...running, title }] }]))
       .toBe(`running Run ${title.slice(0, 39)}…`);
+  });
+
+  test('names a running call the way its row does', () => {
+    const reading: Message = { seq: 3, role: 'assistant', content: [{ ...running, kind: 'read', title: "Read file '/project/notes.txt'" }] };
+    expect(turnPhase([reading], '/project')).toBe("running Read file 'notes.txt'");
   });
 
   test('formats elapsed seconds and minutes', () => {

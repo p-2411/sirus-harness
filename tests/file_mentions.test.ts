@@ -178,11 +178,13 @@ describe('file mentions', () => {
     const session = new Session({ id: 'file-session', name: 'Files', directory, model });
     const send = session.sendMessage(prompt(`Read @"./@stranger notes.txt" @reviewer ${model} please`));
     expect(session.getMessages()).toHaveLength(1);
-    expect(session.getMessages()[0]?.content[0]).toEqual({ type: 'text', text: 'Read @"./@stranger notes.txt" @reviewer please' });
+    // Kept as typed; the runtime reads it without the model.
+    expect(session.getMessages()[0]?.content[0]).toEqual({ type: 'text', text: `Read @"./@stranger notes.txt" @reviewer ${model} please` });
     await send;
     expect(session.getParticipants().map(participant => participant.name)).toEqual(['sirus', 'reviewer']);
     expect(binding.starts.map(options => options.mcpServer?.headers[1].value)).toEqual(['reviewer']);
     expect(binding.runtimes[0].prompts[0].text).toContain('@unwanted wrong-model');
+    expect(binding.runtimes[0].prompts[0].text).toStartWith('Read @"./@stranger notes.txt" @reviewer please');
   });
 
   test('reads queued references when their turn starts', async () => {

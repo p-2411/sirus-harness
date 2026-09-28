@@ -39,7 +39,7 @@ export const agentsCommandSpec: CommandSpec = {
 
 export const thinkingCommandSpec: CommandSpec = {
   name: 'thinking',
-  args: '[agent] [low|medium|high|xhigh|max]',
+  args: '[agent] [default|low|medium|high|xhigh|max]',
   description: 'show or set an agent\'s reasoning depth',
   run: (args, context) => {
     if (args.length > 2) throw new Error(`Usage: ${commandUsage(thinkingCommandSpec)}`);

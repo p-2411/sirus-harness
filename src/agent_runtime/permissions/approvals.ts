@@ -118,35 +118,12 @@ export function isAwaitingApproval(callId: string, sessionId?: string): boolean 
   return approvals.pending(sessionId).some(request => request.toolCall.id === callId);
 }
 
-// What the user decided per tool call, so the transcript can say "declined by
-// user" after the vendor has moved on. Per session and capped: a session can
-// run for days, and the vendor never asks about an old call again.
-const DECISIONS_PER_SESSION = 256;
-type Outcome = 'allow' | 'deny';
-const decisions = new Map<string, Map<string, Outcome>>();
-
-function rememberDecision(sessionId: string, callId: string, decision: Outcome): void {
-  let remembered = decisions.get(sessionId);
-  if (!remembered) {
-    remembered = new Map();
-    decisions.set(sessionId, remembered);
-  }
-  remembered.delete(callId);
-  remembered.set(callId, decision);
-  // A Map iterates in insertion order, so the first key is the oldest.
-  if (remembered.size > DECISIONS_PER_SESSION) remembered.delete(remembered.keys().next().value!);
-}
-
-export function lastDecision(callId: string, sessionId: string): Outcome | undefined {
-  return decisions.get(sessionId)?.get(callId);
-}
-
+// What the user decided reaches the transcript as the answer does: the ACP
+// client marks a call they declined (`ToolCallBlock.outcome`), so the record
+// keeps saying so after the vendor has moved on, and after a restart.
 export function resolveApproval(id: string, decision: ApprovalDecision): boolean {
   const request = approvals.pending().find(candidate => candidate.id === id);
   if (!request) return false;
-  const option = chosenOption(decision, request.options);
-  const denied = option ? option.kind.startsWith('reject') : decision === 'deny';
-  rememberDecision(request.sessionId, request.toolCall.id, denied ? 'deny' : 'allow');
   return approvals.resolve(id, decision);
 }
 
