@@ -745,7 +745,10 @@ test('escape closes what is open before it cancels the turn', async () => {
   const model = 'test-chat-escape';
   // A turn that runs until it is cancelled.
   bindScriptedRuntime(model, () => new Promise<void>(() => {}));
-  const session = new Session({ model });
+  // The mention menu lists the session's directory beneath its agents, so an
+  // empty one keeps the checkout's folders from pushing @sirus out of view.
+  const directory = mkdtempSync(join(tmpdir(), 'sirus-chat-escape-directory-'));
+  const session = new Session({ model, directory });
   const chat = mountChat(session);
   const turns: Promise<unknown>[] = [];
   const startTurn = async () => {
@@ -827,6 +830,7 @@ test('escape closes what is open before it cancels the turn', async () => {
     await chat.unmount();
     session.dispose();
     unbindRuntime(model);
+    rmSync(directory, { recursive: true, force: true });
     rmSync(process.env.SIRUS_DATA_DIR!, { recursive: true, force: true });
     if (previousDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
     else process.env.SIRUS_DATA_DIR = previousDirectory;
