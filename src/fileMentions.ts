@@ -94,10 +94,10 @@ function snapshotBlock(filePath: string, heading: string, body: string): TextBlo
 
 // What a directory holds, one level deep; the agent reads on from there.
 function directoryListing(directory: string): string {
-  const entries = listDirectoryEntries(directory);
-  if (entries.length === 0) return '(empty)';
-  const shown = entries.slice(0, MAX_MENTION_DIRECTORY_ENTRIES);
-  if (entries.length > shown.length) shown.push(`… ${entries.length - shown.length} more`);
+  const { entries, count } = listDirectoryEntries(directory, MAX_MENTION_DIRECTORY_ENTRIES);
+  if (count === 0) return '(empty)';
+  const shown = [...entries];
+  if (count > shown.length) shown.push(`… ${count - shown.length} more`);
   return shown.join('\n');
 }
 

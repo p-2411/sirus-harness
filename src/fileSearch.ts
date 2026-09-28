@@ -1,5 +1,5 @@
 import { execFile, execFileSync } from 'node:child_process';
-import { readdirSync, statSync } from 'node:fs';
+import { opendirSync, statSync, type Dirent } from 'node:fs';
 import { readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -8,6 +8,7 @@ import { FILE_PATH_CHARACTER, rootTextRanges } from './mentions';
 const runFile = promisify(execFile);
 const excludedDirectories = new Set(['.git', 'node_modules', 'dist', 'build', '.next', 'coverage']);
 const MAX_FILES = 20_000;
+const DIRECTORY_IGNORE_BATCH = 4_096;
 
 // The file mention being typed at the cursor: where it starts and ends in
 // the input, and the path typed so far.
@@ -223,18 +224,56 @@ function ignoredNames(directory: string, names: readonly string[]): Set<string> 
  * what file search hides. A folder whose every entry is ignored is itself
  * ignored, and was named on purpose, so it is listed in full.
  */
-export function listDirectoryEntries(directory: string): string[] {
-  const entries = readdirSync(directory, { withFileTypes: true }).filter(entry => visibleFile(entry.name));
-  const ignored = ignoredNames(directory, entries.map(entry => entry.name));
-  const visible = entries.filter(entry => !ignored.has(entry.name));
-  return (visible.length > 0 ? visible : entries)
-    .map(entry => {
+export function listDirectoryEntries(directory: string, limit = 100): { entries: string[]; count: number } {
+  const compare = (left: string, right: string) => Number(right.endsWith('/')) - Number(left.endsWith('/'))
+    || (left < right ? -1 : left > right ? 1 : 0);
+  const all: string[] = [];
+  const visible: string[] = [];
+  let allCount = 0;
+  let visibleCount = 0;
+  const retain = (top: string[], name: string) => {
+    if (limit <= 0) return;
+    let low = 0;
+    let high = top.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (compare(top[middle]!, name) < 0) low = middle + 1;
+      else high = middle;
+    }
+    if (low < limit) top.splice(low, 0, name);
+    if (top.length > limit) top.pop();
+  };
+  const processBatch = (batch: Dirent[]) => {
+    const ignored = ignoredNames(directory, batch.map(entry => entry.name));
+    for (const entry of batch) {
       let folder = entry.isDirectory();
       if (entry.isSymbolicLink()) {
         try { folder = statSync(path.join(directory, entry.name)).isDirectory(); } catch { /* a dangling link lists by name */ }
       }
-      return folder ? `${entry.name}/` : entry.name;
-    })
-    .sort((left, right) => Number(right.endsWith('/')) - Number(left.endsWith('/'))
-      || (left < right ? -1 : left > right ? 1 : 0));
+      const name = folder ? `${entry.name}/` : entry.name;
+      allCount++;
+      retain(all, name);
+      if (!ignored.has(entry.name)) {
+        visibleCount++;
+        retain(visible, name);
+      }
+    }
+  };
+  const handle = opendirSync(directory);
+  try {
+    let batch: Dirent[] = [];
+    let entry: Dirent | null;
+    while ((entry = handle.readSync()) !== null) {
+      if (!visibleFile(entry.name)) continue;
+      batch.push(entry);
+      if (batch.length === DIRECTORY_IGNORE_BATCH) {
+        processBatch(batch);
+        batch = [];
+      }
+    }
+    if (batch.length) processBatch(batch);
+  } finally {
+    handle.closeSync();
+  }
+  return visibleCount > 0 ? { entries: visible, count: visibleCount } : { entries: all, count: allCount };
 }

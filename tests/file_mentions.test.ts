@@ -5,6 +5,7 @@ import os from 'os';
 import path from 'path';
 import { formatFileMention, MAX_MENTION_DIRECTORY_ENTRIES, MAX_MENTION_FILE_BYTES, parseFileMentions, resolveFileMentions } from '../src/fileMentions';
 import { rootTextRanges } from '../src/mentions';
+import { listDirectoryEntries } from '../src/fileSearch';
 import { Session } from '../src/agent_runtime/session';
 import type { Draft } from '../src/agent_runtime/session/timeline';
 import { loadSessionSnapshots, saveSessionSnapshots } from '../src/persistence/sessions';
@@ -137,6 +138,30 @@ describe('file mentions', () => {
     expect(lines).toContain('099.txt');
     expect(lines).not.toContain('100.txt');
     expect(lines.at(-2)).toBe('… 5 more');
+  });
+
+  test('streams more than one ignore batch with exact folders-first selection and all-ignored fallback', () => {
+    execFileSync('git', ['init', '-q', directory]);
+    writeFileSync(path.join(directory, '.gitignore'), '*.log\n');
+    const folder = path.join(directory, 'many');
+    mkdirSync(folder);
+    for (let index = 0; index < 2_100; index++) {
+      const name = String(index).padStart(4, '0');
+      writeFileSync(path.join(folder, `${name}.log`), '');
+      writeFileSync(path.join(folder, `${name}.txt`), '');
+    }
+    mkdirSync(path.join(folder, 'z-folder'));
+    const listing = listDirectoryEntries(folder, MAX_MENTION_DIRECTORY_ENTRIES);
+    expect(listing.count).toBe(2_101);
+    expect(listing.entries).toHaveLength(100);
+    expect(listing.entries[0]).toBe('z-folder/');
+    expect(listing.entries.at(-1)).toBe('0098.txt');
+    const ignored = path.join(directory, 'ignored');
+    mkdirSync(ignored);
+    for (let index = 0; index < 150; index++) writeFileSync(path.join(ignored, `${String(index).padStart(3, '0')}.log`), '');
+    const fallback = listDirectoryEntries(ignored, MAX_MENTION_DIRECTORY_ENTRIES);
+    expect(fallback.count).toBe(150);
+    expect(fallback.entries.at(-1)).toBe('099.log');
   });
 
   test('accepts sibling projects, absolute paths and symlinks and deduplicates equivalent references', () => {
