@@ -188,7 +188,7 @@ const workerSchema = z.object({
   callId: z.string().min(1).nullable(),
   owner: z.string().min(1),
   model: z.string().min(1),
-  thinkingLevel: z.enum(THINKING_LEVELS),
+  thinkingLevel: z.enum(THINKING_LEVELS).optional(),
   context: z.enum(['fresh', 'owner']),
   prompt: z.string(),
   directory: z.string().min(1),

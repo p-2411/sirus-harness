@@ -34,7 +34,6 @@ import { describeSubagents, workerName, workerReport } from './tools/subagents/r
 import { awaitForeground, cancelSubagent, checkSubagent, messageSubagent, startSubagent, TOOL_WAIT_LIMIT_MS, waitSubagents } from './tools/subagents/run';
 import type { SpawnOptions, SubagentHost } from './tools/types';
 import {
-  DEFAULT_THINKING_LEVEL,
   failOpenToolCalls,
   fitThinkingLevel,
   INTERRUPTED_SEVERITY,
@@ -56,8 +55,7 @@ import { addTurnUsage, type ContextUsage } from './usage';
 export interface Participant {
   name: string;
   model: string;
-  // Absent in older snapshots and for untouched participants; high is the
-  // default in both cases.
+  // Absent when nobody chose one: the agent runs at its model's default.
   thinkingLevel?: ThinkingLevel;
   nativeSession?: NativeSession;
 }
@@ -209,14 +207,22 @@ export class SessionAgent {
     return this.subagentId ? { subagent: this.subagentId } : { participant: this.name };
   }
 
-  get thinkingLevel(): ThinkingLevel {
-    return this.level ?? DEFAULT_THINKING_LEVEL;
+  // The level chosen for this agent; undefined leaves it at its model's
+  // default, which only the vendor knows until a runtime on it has shown it.
+  get thinkingLevel(): ThinkingLevel | undefined {
+    return this.level;
   }
 
-  set thinkingLevel(level: ThinkingLevel) {
+  set thinkingLevel(level: ThinkingLevel | undefined) {
     this.level = level;
     this.fitThinkingLevel();
-    void this.runtime?.setThinkingLevel(this.thinkingLevel).catch(() => this.releaseRuntime());
+    void this.runtime?.setThinkingLevel(this.level).catch(() => this.releaseRuntime());
+  }
+
+  // The depth the vendor gives this agent's model when nobody sets one, once
+  // a runtime on it has shown it.
+  get modelThinkingDefault(): string | undefined {
+    return modelFacts(this.model).defaultEffort;
   }
 
   // The levels this agent's model offers, once a runtime on it has said:
@@ -230,9 +236,9 @@ export class SessionAgent {
   // lowering lets the status row show what runs instead of what was asked.
   private fitThinkingLevel(): void {
     const offered = this.offeredThinkingLevels;
-    if (!offered || offered.length === 0) return;
-    const fitted = fitThinkingLevel(this.thinkingLevel, offered);
-    if (fitted && fitted !== this.thinkingLevel) this.level = fitted;
+    if (!this.level || !offered || offered.length === 0) return;
+    const fitted = fitThinkingLevel(this.level, offered);
+    if (fitted && fitted !== this.level) this.level = fitted;
   }
 
   // The credential the runtime is on, or the one its next turn would try
@@ -544,7 +550,7 @@ export class SessionAgent {
     void runtime.setModel(model).then(applied => {
       if (!applied && this.runtime === runtime && this.model === model) { this.resetRuntime(); warn(); }
       // The effort option is the new model's, fitted to it on the way in.
-      else if (applied && this.runtime === runtime) void runtime.setThinkingLevel(this.thinkingLevel).catch(() => undefined);
+      else if (applied && this.runtime === runtime && this.level) void runtime.setThinkingLevel(this.level).catch(() => undefined);
     }).catch(() => {
       if (this.runtime === runtime && this.model === model) { this.resetRuntime(); warn(); }
     });
@@ -760,7 +766,7 @@ export class SessionAgent {
     // And what its model offers, which `/thinking` lists; the recorded
     // level follows what the runtime set.
     if (update.type === 'efforts') {
-      rememberModelFacts(this.model, { efforts: update.efforts });
+      rememberModelFacts(this.model, { efforts: update.efforts, ...(update.default ? { defaultEffort: update.default } : {}) });
       this.fitThinkingLevel();
       return;
     }
@@ -1032,7 +1038,7 @@ export class SessionAgent {
 
   // The agent that does one worker's work: its own runtime and record under
   // this agent's session, in its own directory, with the subagent contract.
-  createSubagent(id: string, model: string, thinkingLevel: ThinkingLevel, directory: string, definition?: AgentDefinition): SessionAgent {
+  createSubagent(id: string, model: string, thinkingLevel: ThinkingLevel | undefined, directory: string, definition?: AgentDefinition): SessionAgent {
     return new SessionAgent({
       name: 'sirus',
       model,

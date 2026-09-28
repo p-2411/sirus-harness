@@ -197,7 +197,7 @@ Use `/usage` to see reported subscription allowance and how full each participan
 | `Shift+Enter` or `\` then `Enter` | Insert a new line. |
 | `Esc` | Close a menu, or interrupt the turn and send queued messages. |
 | `/rename <name>` | Give the current session a useful name. |
-| `/thinking` | Show or change reasoning depth. |
+| `/thinking` | Show or change reasoning depth; `default` leaves it to the model. |
 | `/agents` | Watch, message, cancel, or clear the session's subagents. |
 | `/undo` / `/rewind` | Choose what to restore from a checkpoint. |
 | `/notify` | Configure desktop notifications. |

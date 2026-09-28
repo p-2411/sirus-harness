@@ -810,7 +810,8 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         onOverlayChange={setInputOverlay}
         onRemoveAttachment={removeAttachment}
         model={participants.find(participant => participant.name === selected)!.model}
-        thinkingLevel={currSession.getOfferedThinkingLevels(selected)?.length === 0 ? undefined : currSession.getThinkingLevel(selected)}
+        thinkingLevel={currSession.getOfferedThinkingLevels(selected)?.length === 0 ? undefined
+          : currSession.getThinkingLevel(selected) ?? currSession.getModelThinkingDefault(selected)}
         history={history}
         queuedMessages={currSession.getQueuedMessages().filter(message => !message.to?.length || message.to.includes(selected))}
         onSendNow={sendNow}

@@ -233,17 +233,16 @@ export interface Message {
 }
 
 // The reasoning depth a user picks per agent. Runtimes translate the shared
-// level into whatever effort option the vendor exposes.
+// level into whatever effort option the vendor exposes. An agent nobody
+// picked a level for runs at its model's own default, which is the vendor's.
 export const THINKING_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 
 export type ThinkingLevel = typeof THINKING_LEVELS[number];
 
-export const DEFAULT_THINKING_LEVEL: ThinkingLevel = 'high';
-
 export const THINKING_LEVEL_DESCRIPTIONS: Record<ThinkingLevel, string> = {
   low: 'fastest, with lighter reasoning',
   medium: 'balanced speed and reasoning depth',
-  high: 'deep reasoning for complex work (default)',
+  high: 'deep reasoning for complex work',
   xhigh: 'extended reasoning for difficult, long-running work',
   max: 'maximum reasoning depth and token use',
 };

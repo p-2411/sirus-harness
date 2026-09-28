@@ -143,7 +143,7 @@ test.each([
       onPermission: async () => ({ outcome: { outcome: 'cancelled' } }),
       onUpdate: update => { updates.push(update); },
     });
-    expect(updates.find(update => update.type === 'efforts')).toEqual({ type: 'efforts', efforts: ['low', 'medium', 'high'] });
+    expect(updates.find(update => update.type === 'efforts')).toEqual({ type: 'efforts', efforts: ['low', 'medium', 'high'], default: 'high' });
     await runtime.prompt({ text: 'Go', images: [] }, new AbortController().signal);
     expect(updates.find(update => update.type === 'mcp_servers')).toEqual({ type: 'mcp_servers', servers: [
       { name: 'sirus', status: 'connected' }, { name: 'github', status: 'failed' },
@@ -156,6 +156,61 @@ test.each([
       ? { inputTokens: 400, outputTokens: 500, cachedReadTokens: 0, totalTokens: 900, costUsd: 0.75 }
       : calls === 2 ? { totalTokens: 250, costUsd: 0.75 }
         : { inputTokens: 60, outputTokens: 40, totalTokens: 100, costUsd: 0.5 } }]);
+  } finally {
+    runtime?.dispose();
+    spec.mockRestore();
+  }
+});
+
+test('ACP leaves a session with no thinking level at its model’s default, and returns to it', async () => {
+  const adapter = `
+    import { createInterface } from 'node:readline';
+    const send = value => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\\n');
+    const configOptions = [
+      { id: 'model', name: 'Model', type: 'select', currentValue: 'chosen', options: [{ value: 'chosen', name: 'Chosen' }] },
+      { id: 'reasoning_effort', name: 'Effort', type: 'select', currentValue: 'medium', options: ['low', 'medium', 'high'].map(value => ({ value, name: value })) },
+    ];
+    const efforts = [];
+    for await (const line of createInterface({ input: process.stdin })) {
+      const request = JSON.parse(line);
+      const reply = result => send({ id: request.id, result });
+      if (request.method === 'initialize') reply({ protocolVersion: 1, agentCapabilities: {} });
+      else if (request.method === 'session/new') reply({ sessionId: 's', configOptions });
+      else if (request.method === 'session/set_config_option') {
+        if (request.params.configId === 'reasoning_effort') efforts.push(request.params.value);
+        configOptions.find(option => option.id === request.params.configId).currentValue = request.params.value;
+        reply({ configOptions });
+      } else if (request.method === 'session/prompt') {
+        send({ method: 'session/update', params: { sessionId: 's', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: JSON.stringify(efforts) } } } });
+        reply({ stopReason: 'end_turn' });
+      } else if (request.id !== undefined) reply({});
+    }
+  `;
+  const spec = spyOn(launch, 'launchFor').mockImplementation(options => ({
+    command: process.execPath, args: ['-e', adapter], env: { ...options.env }, mode: options.permissionMode,
+    session: () => ({ mcpServers: [] }), forkNeedsResume: false,
+  }));
+  const updates: RuntimeUpdate[] = [];
+  let runtime: Runtime | undefined;
+  const effortsSent = async () => {
+    const before = updates.length;
+    await runtime!.prompt({ text: 'Go', images: [] }, new AbortController().signal);
+    const text = updates.slice(before).find(update => update.type === 'text');
+    return JSON.parse(text?.type === 'text' ? text.text : 'null');
+  };
+  try {
+    runtime = await startAcpRuntime({
+      vendor: 'gpt', model: 'chosen', directory: process.cwd(),
+      systemPrompt: '', env: { ...process.env }, mcpServer: null, permissionMode: 'auto',
+      onPermission: async () => ({ outcome: { outcome: 'cancelled' } }),
+      onUpdate: update => { updates.push(update); },
+    });
+    // Nothing chosen: the effort is never set, and the vendor's pick is the model's default.
+    expect(updates.find(update => update.type === 'efforts')).toEqual({ type: 'efforts', efforts: ['low', 'medium', 'high'], default: 'medium' });
+    expect(await effortsSent()).toEqual([]);
+    await runtime.setThinkingLevel('high');
+    await runtime.setThinkingLevel(undefined);
+    expect(await effortsSent()).toEqual(['high', 'medium']);
   } finally {
     runtime?.dispose();
     spec.mockRestore();
@@ -442,7 +497,8 @@ describe('Session model', () => {
   test('has a default model', () => {
     const session = new Session();
     expect(session.getModel()).toBe('gpt-5.6-luna');
-    expect(session.getThinkingLevel()).toBe('high');
+    // No level until one is chosen: the model runs at its own default.
+    expect(session.getThinkingLevel()).toBeUndefined();
   });
 
   test('tracks thinking levels independently for each participant', () => {
@@ -1251,7 +1307,7 @@ describe('Session model', () => {
   });
 
   test('worker model and thinking follow explicit choices, then owner, with the user pin first', async () => {
-    const started: { model: string; thinkingLevel: string }[] = [];
+    const started: { model: string; thinkingLevel?: string }[] = [];
     for (const model of [testModel, secondTestModel, thirdTestModel]) {
       bindScriptedRuntime(model, (_input, emit, options) => {
         started.push({ model: options.model, thinkingLevel: options.thinkingLevel });
@@ -1731,6 +1787,18 @@ describe('Session model', () => {
       expect(restored.getParticipants()).toEqual(session.getParticipants());
       expect(restored.getMessages('Reviewer')).toEqual(session.getMessages('Reviewer'));
     } finally { await restored?.dispose(); await session.dispose(); }
+  });
+
+  test('a new participant takes a model named as /model takes it, and its model’s thinking', async () => {
+    const aliased = bindScriptedRuntime('test-alias[1m]', textTurn('Looked.'));
+    const session = new Session({ model: testModel });
+    try {
+      await session.sendMessage({ role: 'user', content: [{ type: 'text', text: '@scout Test-Alias Look around.' }] });
+      expect(session.getParticipants().find(agent => agent.name === 'scout')).toEqual({ name: 'scout', model: 'test-alias[1m]' });
+      expect(session.getThinkingLevel('scout')).toBeUndefined();
+      expect(aliased.starts[0].thinkingLevel).toBeUndefined();
+      expect(aliased.runtimes[0].prompts[0].text).toBe('@scout Look around.');
+    } finally { await session.dispose(); unbindRuntime('test-alias[1m]'); }
   });
 
   test('agent introduction examples, bare unknown names, invalid models, and self-mentions stay inert', async () => {

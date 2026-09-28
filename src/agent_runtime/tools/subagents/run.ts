@@ -13,7 +13,7 @@ import { createWorktree, removeUnchangedWorktree, worktreeChanges } from './work
 
 export interface SubagentSpawnOptions extends SpawnOptions {
   model: string;
-  thinkingLevel: ThinkingLevel;
+  thinkingLevel?: ThinkingLevel;
   callId?: string;
   definition?: AgentDefinition;
 }

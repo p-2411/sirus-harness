@@ -495,7 +495,7 @@ function SpawnAgentEntry({ call, sessionId }: { call: ToolCallBlock; sessionId?:
 					<Text color={color}>{'  '}●</Text>
 					<Text color={hovered ? theme.accentSoft : theme.text} bold> {name}</Text>
 					{task && <Text color={hovered ? theme.accentSoft : theme.textMuted}>({task})</Text>}
-					{run && <Text color={theme.textSubtle} dimColor> · {run.model} {run.thinkingLevel} · {run.id}</Text>}
+					{run && <Text color={theme.textSubtle} dimColor> · {run.model}{run.thinkingLevel ? ` ${run.thinkingLevel}` : ''} · {run.id}</Text>}
 					{run?.branch && <Text color={theme.textSubtle} dimColor> · {run.branch}</Text>}
 					{awaiting && <Text color={theme.pending}> · waiting for approval</Text>}
 					{!awaiting && call.outcome && <Text color={stopColors[call.outcome]}> · {call.outcome}</Text>}

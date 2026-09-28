@@ -244,8 +244,10 @@ Reduced to credentials: nothing here knows a wire protocol or runs a turn.
   reads, the one the vendor's harness reads, the credentials a subscription child must not
   inherit, the profile directory variable, the allowance window). Consumers import model
   facts straight from here, including what the vendors listed and what a runtime showed
-  about its model: the efforts it offers, which `/thinking` offers, and the largest window
-  it reported, which keeps the gauge from reading a placeholder.
+  about its model: the efforts it offers, which `/thinking` offers, the one the vendor picks
+  when nobody sets one, and the largest window it reported, which keeps the gauge from
+  reading a placeholder. An agent with no thinking level of its own never sets the vendor's
+  effort, so it runs at its model's default, and `/thinking default` puts it back there.
 - `sources.ts`: a vendor's credentials, API keys and subscription profiles, in priority
   order, persisted through settings. The head of the list is the preferred one.
 - `profiles.ts`: a credential as the environment an agent process gets.

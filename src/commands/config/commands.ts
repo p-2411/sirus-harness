@@ -6,7 +6,6 @@ import {
   parsePermissionMode,
 } from '../../agent_runtime/permissions/policy';
 import {
-  DEFAULT_THINKING_LEVEL,
   THINKING_LEVEL_DESCRIPTIONS,
   THINKING_LEVELS,
   parseThinkingLevel,
@@ -24,7 +23,8 @@ function defaults() {
   const settings = openSettings();
   return {
     permissionMode: settings.get('permissionMode') ?? DEFAULT_PERMISSION_MODE,
-    thinkingLevel: settings.get('thinkingLevel') ?? DEFAULT_THINKING_LEVEL,
+    // Null: each new agent runs at its model's default.
+    thinkingLevel: settings.get('thinkingLevel'),
   };
 }
 
@@ -39,7 +39,7 @@ function configMenu(args: readonly string[]): CommandMenuEntry[] | null {
       },
       {
         type: 'item', key: 'thinking', label: 'thinking',
-        description: current.thinkingLevel, command: '/config thinking',
+        description: current.thinkingLevel ?? 'the model\'s default', command: '/config thinking',
       },
       {
         type: 'heading', key: 'model',
@@ -59,20 +59,26 @@ function configMenu(args: readonly string[]): CommandMenuEntry[] | null {
     }));
   }
   if (args[0] === 'thinking') {
-    return THINKING_LEVELS.map(level => ({
-      type: 'item', key: level, label: level, description: THINKING_LEVEL_DESCRIPTIONS[level],
-      command: `/config thinking ${level}`,
-      ...(level === current.thinkingLevel ? { current: true } : {}),
-    }));
+    return [
+      {
+        type: 'item', key: 'default', label: 'default', description: 'whatever each agent\'s model picks',
+        command: '/config thinking default', ...(current.thinkingLevel ? {} : { current: true }),
+      },
+      ...THINKING_LEVELS.map((level): CommandMenuEntry => ({
+        type: 'item', key: level, label: level, description: THINKING_LEVEL_DESCRIPTIONS[level],
+        command: `/config thinking ${level}`,
+        ...(level === current.thinkingLevel ? { current: true } : {}),
+      })),
+    ];
   }
   return null;
 }
 
 function configCommand(args: readonly string[]): Feedback {
-  const usage = 'Usage: /config [permissions ask|auto|bypass] [thinking low|medium|high|xhigh|max]';
+  const usage = 'Usage: /config [permissions ask|auto|bypass] [thinking default|low|medium|high|xhigh|max]';
   if (args.length === 0) {
     const current = defaults();
-    return { kind: 'info', text: `New sessions start in ${PERMISSION_MODE_NAMES[current.permissionMode]}, thinking ${current.thinkingLevel}.` };
+    return { kind: 'info', text: `New sessions start in ${PERMISSION_MODE_NAMES[current.permissionMode]}, thinking ${current.thinkingLevel ?? 'at the model\'s default'}.` };
   }
   if (args.length !== 2) throw new Error(usage);
   if (args[0] === 'permissions') {
@@ -82,6 +88,10 @@ function configCommand(args: readonly string[]): Feedback {
     return { kind: 'success', text: `New sessions start in ${PERMISSION_MODE_NAMES[mode]}. This one keeps its own; /permissions changes it.` };
   }
   if (args[0] === 'thinking') {
+    if (args[1] === 'default') {
+      if (!openSettings().set({ thinkingLevel: null })) throw new Error('Could not save the setting.');
+      return { kind: 'success', text: 'New agents think at their model\'s default. Existing ones keep theirs; /thinking changes them.' };
+    }
     const level = parseThinkingLevel(args[1]);
     if (!level) throw new Error(usage);
     if (!openSettings().set({ thinkingLevel: level })) throw new Error('Could not save the setting.');

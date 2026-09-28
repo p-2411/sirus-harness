@@ -1020,6 +1020,12 @@ export class Session {
     return this.roster.require(participantName ?? this.roster.default.name).offeredThinkingLevels;
   }
 
+  // The depth a participant's model runs at when none is chosen, once a
+  // runtime on that model has shown it.
+  getModelThinkingDefault(participantName?: string): string | undefined {
+    return this.roster.require(participantName ?? this.roster.default.name).modelThinkingDefault;
+  }
+
   // Runs one of a participant's vendor commands that only reports on a
   // throwaway fork of its runtime: no turn, no checkpoint, nothing in the
   // record; what it printed comes back to be shown.
@@ -1122,11 +1128,12 @@ export class Session {
     this.roster.default.releaseWarmup();
   }
 
-  getThinkingLevel(participantName?: string): ThinkingLevel {
+  // Undefined: the participant runs at its model's default.
+  getThinkingLevel(participantName?: string): ThinkingLevel | undefined {
     return this.roster.thinkingLevel(participantName);
   }
 
-  setThinkingLevel(level: ThinkingLevel, participantName?: string): void {
+  setThinkingLevel(level: ThinkingLevel | undefined, participantName?: string): void {
     this.roster.setThinkingLevel(level, participantName);
   }
 

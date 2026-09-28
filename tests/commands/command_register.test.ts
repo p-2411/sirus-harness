@@ -434,11 +434,12 @@ describe('executeCommand', () => {
     expect(() => runCommand('model', ['gpt-2'], session)).toThrow(/unknown model/i);
   });
 
-  test('thinking command defaults to high and sets Sirus or a named participant', () => {
+  test('thinking command starts at the model’s default and sets Sirus or a named participant', () => {
     const session = new Session();
     session.addParticipant('reviewer', 'claude-sonnet-5');
 
-    expect(session.getThinkingLevel()).toBe('high');
+    expect(session.getThinkingLevel()).toBeUndefined();
+    expect(runCommand('thinking', [], session)).toEqual({ kind: 'info', text: '@sirus thinking is default.' });
     expect(runCommand('thinking', ['low'], session)).toEqual({
       kind: 'success',
       text: '@sirus thinking set to low.',
@@ -449,31 +450,38 @@ describe('executeCommand', () => {
     });
     expect(session.getThinkingLevel()).toBe('low');
     expect(session.getThinkingLevel('reviewer')).toBe('max');
+    expect(runCommand('thinking', ['@reviewer', 'default'], session)).toEqual({
+      kind: 'success',
+      text: '@reviewer thinking set to its model\'s default.',
+    });
+    expect(session.getThinkingLevel('reviewer')).toBeUndefined();
+    expect(session.getParticipants().find(participant => participant.name === 'reviewer')).toEqual({ name: 'reviewer', model: 'claude-sonnet-5' });
     expect(() => runCommand('thinking', ['turbo'], session)).toThrow(/unknown thinking level/i);
     expect(() => runCommand('thinking', ['sirus', 'turbo'], session)).toThrow(/unknown thinking level/i);
   });
 
   test('thinking command offers a picker for Sirus or a named participant', () => {
     expect(menuItems('thinking', []).map(item => item.command)).toEqual([
+      '/thinking default',
       '/thinking low',
       '/thinking medium',
       '/thinking high',
       '/thinking xhigh',
       '/thinking max',
     ]);
-    expect(menuItems('thinking', []).filter(item => item.current).map(item => item.key)).toEqual(['high']);
-    expect(menuItems('thinking', ['@reviewer'])[2].command).toBe('/thinking @reviewer high');
+    expect(menuItems('thinking', []).filter(item => item.current).map(item => item.key)).toEqual(['default']);
+    expect(menuItems('thinking', ['@reviewer'])[3].command).toBe('/thinking @reviewer high');
     expect(commandMenu('thinking', ['low'], new Session())).toBeNull();
   });
 
   test('thinking offers only the levels the model offers and records the level it runs at', () => {
     // What runtimes on these models listed for their effort option.
-    rememberModelFacts('gpt-5.6-terra', { efforts: ['minimal', 'low', 'medium', 'high'] });
+    rememberModelFacts('gpt-5.6-terra', { efforts: ['minimal', 'low', 'medium', 'high'], defaultEffort: 'medium' });
     rememberModelFacts('claude-haiku-4-5', { efforts: [] });
     const session = new Session({ model: 'gpt-5.6-luna' });
     session.setThinkingLevel('xhigh');
     const items = (commandMenu('thinking', [], session) ?? []).filter((entry): entry is CommandMenuItem => entry.type === 'item');
-    expect(items.map(item => item.key)).toEqual([...THINKING_LEVELS]);
+    expect(items.map(item => item.key)).toEqual(['default', ...THINKING_LEVELS]);
 
     // A model without xhigh runs at high, and the switch says so.
     expect(runCommand('model', ['gpt-5.6-terra'], session)).toEqual({
@@ -482,9 +490,16 @@ describe('executeCommand', () => {
     });
     expect(session.getThinkingLevel()).toBe('high');
     const offered = (commandMenu('thinking', [], session) ?? []).filter((entry): entry is CommandMenuItem => entry.type === 'item');
-    expect(offered.map(item => item.key)).toEqual(['low', 'medium', 'high']);
+    expect(offered.map(item => item.key)).toEqual(['default', 'low', 'medium', 'high']);
     expect(offered.find(item => item.current)?.key).toBe('high');
     expect(() => runCommand('thinking', ['max'], session)).toThrow(/does not offer max thinking. Try: low, medium, high/);
+
+    // Back to the model's default, which a runtime on it has shown.
+    expect(runCommand('thinking', ['default'], session)).toEqual({
+      kind: 'success', text: '@sirus thinking set to its model\'s default (medium).',
+    });
+    const reset = (commandMenu('thinking', [], session) ?? []).filter((entry): entry is CommandMenuItem => entry.type === 'item');
+    expect(reset.find(item => item.current)).toMatchObject({ key: 'default', description: 'whatever the model picks, medium' });
 
     // A model with no effort option has no levels to choose from.
     runCommand('model', ['claude-haiku-4-5'], session);
@@ -715,10 +730,10 @@ describe('credential commands', () => {
       expect(session.getTurnUsage('reviewer')).toEqual({ totalTokens: 1_000 });
       expect(session.getTurnUsage('sirus')).toEqual({ totalTokens: 3_000, inputTokens: 2_000, outputTokens: 1_000, costUsd: 0.04 });
       const status = (await runCommand('status', [], session) as Feedback).text;
-      expect(status).toContain('@sirus · usage-register-sirus · thinking high');
+      expect(status).toContain('@sirus · usage-register-sirus · thinking default');
       expect(status).toMatch(/context\s+12k of 200k \(6% used, 94% left\)/);
       expect(status).toMatch(/tokens\s+3k tokens \(2k in, 1k out\) · \$0\.04/);
-      expect(status).toMatch(/@reviewer · usage-register-reviewer · thinking high\n\s+context\s+8k of 400k/);
+      expect(status).toMatch(/@reviewer · usage-register-reviewer · thinking default\n\s+context\s+8k of 400k/);
       expect(status).toMatch(/permissions\s+auto approve/);
     } finally {
       unbindRuntime(models.sirus);

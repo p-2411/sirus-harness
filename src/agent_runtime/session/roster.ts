@@ -1,4 +1,5 @@
 import { servableModelIds, servesModel } from '../providers';
+import { modelNamed } from '../providers/catalog';
 import { SessionAgent, type Participant, type RuntimeHost } from '../agent';
 import type { PermissionMode } from '../permissions/policy';
 import { textOf, type Message, type ThinkingLevel } from '../types';
@@ -135,11 +136,11 @@ export class ParticipantRoster {
     this.changes.notify();
   }
 
-  thinkingLevel(participantName: string = this.defaultAgent.name): ThinkingLevel {
+  thinkingLevel(participantName: string = this.defaultAgent.name): ThinkingLevel | undefined {
     return this.require(participantName).thinkingLevel;
   }
 
-  setThinkingLevel(level: ThinkingLevel, participantName: string = this.defaultAgent.name): void {
+  setThinkingLevel(level: ThinkingLevel | undefined, participantName: string = this.defaultAgent.name): void {
     const participant = this.require(participantName);
     if (participant.thinkingLevel === level) return;
     participant.thinkingLevel = level;
@@ -167,13 +168,17 @@ export class ParticipantRoster {
         continue;
       }
 
+      // The model as `/model` would take it (`opus` for `opus[1m]`), and no
+      // looser, since this is prose. No thinking level follows it: the new
+      // participant runs at its model's default until one is chosen.
       const modelMatch = /^([ \t]+)([^\s,;]+)/.exec(range.text.slice(localEnd));
-      if (!modelMatch || !servesModel(modelMatch[2])) continue;
+      const model = modelMatch ? modelNamed(modelMatch[2], servableModelIds()) : undefined;
+      if (!modelMatch || !model) continue;
       seen.add(key);
       const modelStart = range.start + localEnd;
       mentions.push({
         name,
-        model: modelMatch[2],
+        model,
         modelSpan: { start: modelStart, end: modelStart + modelMatch[0].length },
       });
     }

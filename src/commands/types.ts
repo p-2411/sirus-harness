@@ -56,6 +56,7 @@ export interface CommandSession {
   getCredential(participantName: string): Source | null;
   getMcpServers(participantName: string): McpServerState[] | null;
   getOfferedThinkingLevels(participantName?: string): ThinkingLevel[] | null;
+  getModelThinkingDefault(participantName?: string): string | undefined;
   // A participant's reporting vendor command, run on a throwaway fork of its
   // runtime: no turn, no checkpoint, nothing kept.
   runCommandAside(participantName: string, text: string, signal: AbortSignal): Promise<AsideOutput>;
@@ -64,12 +65,13 @@ export interface CommandSession {
   getDirectory(): string;
   getName(): string;
   getPermissionMode(): PermissionMode;
-  getThinkingLevel(participantName?: string): ThinkingLevel;
+  // Undefined: the participant runs at its model's default.
+  getThinkingLevel(participantName?: string): ThinkingLevel | undefined;
   isEmpty(): boolean;
   rewind(checkpointId: string, options: RewindOptions): Promise<RewindResult>;
   setName(name: string): void;
   setPermissionMode(mode: PermissionMode): void;
-  setThinkingLevel(level: ThinkingLevel, participantName?: string): void;
+  setThinkingLevel(level: ThinkingLevel | undefined, participantName?: string): void;
   // The model spawned subagents run on; null means the spawning
   // participant's own.
   getSubagentModel(): string | null;

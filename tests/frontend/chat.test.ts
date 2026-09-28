@@ -116,7 +116,9 @@ test('the status row shows the default model immediately and updates when change
     expect(output).not.toContain('TypeSafe AI API key');
     session.changeParticipantModel('sirus', 'gpt-5.6-terra');
     await flush();
-    expect(output).toContain('gpt-5.6-terra · high');
+    // No level was chosen, so none is claimed until the model's default is known.
+    expect(output).toContain('gpt-5.6-terra');
+    expect(output).not.toContain('gpt-5.6-terra · high');
   } finally {
     app.unmount();
     await app.waitUntilExit();

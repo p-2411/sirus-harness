@@ -10,6 +10,7 @@ import type { McpServerState } from '../../agent_runtime/runtime/runtime';
 import type { Participant } from '../../agent_runtime/session';
 import { contextPercent, formatTokens, formatTurnUsage, type ContextUsage } from '../../agent_runtime/usage';
 import { SIRUS_VERSION } from '../../version';
+import { describeThinking } from '../agents/behavior';
 import { maskApiKey } from '../../agent_runtime/providers/sources';
 import type { Feedback } from '../feedback';
 import type { CommandMenuItem, CommandSession } from '../types';
@@ -79,7 +80,7 @@ export function statusCommand(session: CommandSession, toggles: { memory: boolea
     const vendor = vendorOf(participant.model);
     const usage = session.getTurnUsage(participant.name);
     const levels = session.getOfferedThinkingLevels(participant.name);
-    const thinking = levels?.length === 0 ? 'no thinking levels' : `thinking ${session.getThinkingLevel(participant.name)}`;
+    const thinking = levels?.length === 0 ? 'no thinking levels' : `thinking ${describeThinking(participant.name, session)}`;
     return [
       `@${participant.name} · ${vendor ? `${VENDOR_INFO[vendor].displayName} · ` : ''}${participant.model} · ${thinking}`,
       ...([

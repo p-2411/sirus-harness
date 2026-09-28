@@ -38,7 +38,7 @@ export const agentsCommandSpec: CommandSpec = {
 
 export const thinkingCommandSpec: CommandSpec = {
   name: 'thinking',
-  args: '[agent] [low|medium|high|xhigh|max]',
+  args: '[agent] [default|low|medium|high|xhigh|max]',
   description: 'show or set an agent\'s reasoning depth',
   run: (args, context) => thinkingCommand(args, context.session),
   menu: thinkingMenuItems,

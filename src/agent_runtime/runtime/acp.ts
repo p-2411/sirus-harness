@@ -216,6 +216,10 @@ interface SessionState {
   // vendor pushed a different mode while answering it.
   modeUpdates: number;
   configOptions: SessionConfigOption[];
+  // The effort the vendor picked for the session's model while Sirus had set
+  // none: that model's default, which an agent with no level runs at.
+  modelEffort?: { model: string; value: string };
+  effortSet?: boolean;
   context: ContextUsage | null;
   // The session's running cost as the vendor last reported it (Claude does;
   // codex-acp does not), from which each turn's own share is read.
@@ -812,26 +816,44 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
   }
 
   function effortsUpdate(state: SessionState): RuntimeUpdate | null {
+    noteModelEffort(state);
     if (!selectOption(state.configOptions, 'model')) return null;
     const option = selectOption(state.configOptions, EFFORT_OPTION_IDS[options.vendor]);
-    return { type: 'efforts', efforts: option ? selectValues(option) : [] };
+    const modelDefault = modelEffortOf(state);
+    return { type: 'efforts', efforts: option ? selectValues(option) : [], ...(modelDefault ? { default: modelDefault } : {}) };
   }
 
-  async function setThinkingLevel(state: SessionState, level: ThinkingLevel): Promise<void> {
+  function noteModelEffort(state: SessionState): void {
+    const option = selectOption(state.configOptions, EFFORT_OPTION_IDS[options.vendor]);
+    if (option && !state.effortSet) state.modelEffort = { model: state.model, value: option.currentValue };
+  }
+
+  function modelEffortOf(state: SessionState): string | undefined {
+    return state.modelEffort?.model === state.model ? state.modelEffort.value : undefined;
+  }
+
+  async function setThinkingLevel(state: SessionState, level: ThinkingLevel | undefined): Promise<void> {
     live(state);
     const option = selectOption(state.configOptions, EFFORT_OPTION_IDS[options.vendor]);
     if (!option) return;
+    if (!level) {
+      // Back to the model's default, when this session has seen what it is.
+      const modelDefault = modelEffortOf(state);
+      if (state.effortSet && modelDefault && await setOption(state, option.id, modelDefault)) state.effortSet = false;
+      return;
+    }
     // Exactly what the participant records as the level it runs at.
     const value = fitThinkingLevel(level, offeredThinkingLevels(selectValues(option)) ?? []);
-    if (value) await setOption(state, option.id, value);
+    if (value && await setOption(state, option.id, value)) state.effortSet = true;
   }
 
   // What every session takes on before its first prompt, in the order the
   // adapters want it: the mode first, since it decides what the model may do,
-  // then the model, then the depth that model offers. A model the vendor
+  // then the model, then the depth, when the agent has one; without one the
+  // model keeps the default the vendor picked for it. A model the vendor
   // refuses fails the session outright — a fresh runtime would fall back to
   // another, but a fork exists only to carry this conversation on.
-  async function configure(state: SessionState, mode: PermissionMode, model: string, level: ThinkingLevel): Promise<void> {
+  async function configure(state: SessionState, mode: PermissionMode, model: string, level: ThinkingLevel | undefined): Promise<void> {
     await setPermissionMode(state, mode);
     const modelOption = selectOption(state.configOptions, 'model');
     if (modelOption && !(await setModel(state, model))) {
@@ -839,6 +861,7 @@ export async function startAcpRuntime(options: RuntimeOptions): Promise<Runtime>
         `${vendorName} does not offer the model ${model}; it offers ${selectValues(modelOption).join(', ')}`,
       );
     }
+    noteModelEffort(state);
     await setThinkingLevel(state, level);
   }
 

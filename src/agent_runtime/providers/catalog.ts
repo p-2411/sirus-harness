@@ -343,6 +343,18 @@ export function modelIds(): string[] {
   return [...new Set(VENDORS.flatMap(modelsOf))];
 }
 
+// The model a short reference names without guessing: an id in any case, or
+// a vendor alias written without its qualifier (`opus` for Claude's
+// `opus[1m]`). A mention is read out of prose, so it goes no further; `/model`
+// also matches part of an id.
+export function modelNamed(reference: string, ids: readonly string[] = modelIds()): string | undefined {
+  const key = reference.toLocaleLowerCase();
+  const exact = ids.find(id => id.toLocaleLowerCase() === key);
+  if (exact) return exact;
+  const aliases = ids.filter(id => id.toLocaleLowerCase().replace(/\[[^\]]+\]$/, '') === key);
+  return aliases.length === 1 ? aliases[0] : undefined;
+}
+
 // Selectable models come only from the vendor. Profiles describe models;
 // they do not establish availability, even before the first discovery.
 export function modelsOf(vendor: Vendor): string[] {
@@ -375,12 +387,14 @@ export interface ListedModel {
 
 // What a runtime showed about the model it runs, beyond the name: the
 // reasoning depths its effort option offers (none when it has no such
-// option), and the context window it reported. Claude's adapter reports a
+// option), the one the vendor picks when nobody sets one, and the context
+// window it reported. Claude's adapter reports a
 // 200k window until its first reply names the real one, so the largest
 // window seen stands, and the gauge does not read 20% and then 4% for the
 // same tokens.
 export interface ModelFacts {
   efforts?: string[];
+  defaultEffort?: string;
   window?: number;
 }
 
@@ -409,6 +423,7 @@ function isModelFacts(value: unknown): value is ModelFacts {
   if (typeof value !== 'object' || value === null) return false;
   const facts = value as Record<string, unknown>;
   return (facts.efforts === undefined || (Array.isArray(facts.efforts) && facts.efforts.every(level => typeof level === 'string')))
+    && (facts.defaultEffort === undefined || typeof facts.defaultEffort === 'string')
     && (facts.window === undefined || (typeof facts.window === 'number' && facts.window > 0));
 }
 
@@ -449,6 +464,7 @@ export function rememberModelFacts(id: string, facts: ModelFacts): void {
   const next: ModelFacts = {
     ...previous,
     ...(facts.efforts ? { efforts: [...facts.efforts] } : {}),
+    ...(facts.defaultEffort ? { defaultEffort: facts.defaultEffort } : {}),
     ...(facts.window && facts.window > (previous.window ?? 0) ? { window: facts.window } : {}),
   };
   if (JSON.stringify(next) === JSON.stringify(previous)) return;

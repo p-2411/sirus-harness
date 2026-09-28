@@ -65,13 +65,13 @@ function spawnOptions(args: Record<string, unknown>): SpawnOptions {
 export const agentTools: Tool[] = [
   {
     name: 'SpawnAgent',
-    description: 'Start a subagent for a self-contained task. Pick a model from either vendor that fits the work; a review or second opinion is worth more on the other vendor. The user’s /model subagent pin wins, then your model argument, then the agent definition’s model, then your own model. Thinking follows your thinkingLevel, the definition, then your own level. Workers run in your directory by default; isolation "worktree" creates a branch from HEAD and keeps it only if changed. cwd chooses another absolute directory and cannot accompany worktree isolation. Background runs return immediately and notify you when done, steering your current turn or starting a turn if idle. runInBackground false waits and returns the report in this call. Workers cannot ask questions or delegate. SendMessage continues a worker, including one that has finished.',
+    description: 'Start a subagent for a self-contained task. Pick a model from either vendor that fits the work; a review or second opinion is worth more on the other vendor. The user’s /model subagent pin wins, then your model argument, then the agent definition’s model, then your own model. Thinking follows your thinkingLevel, the definition, then your own level, else the model’s default. Workers run in your directory by default; isolation "worktree" creates a branch from HEAD and keeps it only if changed. cwd chooses another absolute directory and cannot accompany worktree isolation. Background runs return immediately and notify you when done, steering your current turn or starting a turn if idle. runInBackground false waits and returns the report in this call. Workers cannot ask questions or delegate. SendMessage continues a worker, including one that has finished.',
     args: {
       prompt: { type: 'string', description: 'The complete task, context, constraints, file ownership and expected verification.' },
       description: { type: 'string', default: '', description: 'Short description for the worker strip.' },
       name: { type: 'string', default: '', description: 'Unique name to address with SendMessage, CheckAgent or WaitAgent.' },
       model: { type: 'string', default: '', description: 'Any model in the list below, from either vendor.' },
-      thinkingLevel: { type: 'string', enum: THINKING_LEVELS, default: '', description: 'Reasoning depth; otherwise inherited from the definition or owner.' },
+      thinkingLevel: { type: 'string', enum: THINKING_LEVELS, default: '', description: 'Reasoning depth; otherwise inherited from the definition or owner, else the model’s default.' },
       agentType: { type: 'string', default: '', description: 'A named agent definition from the list below.' },
       isolation: { type: 'string', enum: ['none', 'worktree'], default: 'none' },
       cwd: { type: 'string', default: '', description: 'Absolute working directory, exclusive with worktree isolation.' },

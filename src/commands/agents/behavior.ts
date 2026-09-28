@@ -1,6 +1,6 @@
 import { saveSirusModelPreference } from '../../persistence';
 import { providerFor } from '../../agent_runtime/providers';
-import { listedDescription, modelIds, modelInfo, modelsOf, vendorOf, VENDOR_INFO, VENDORS } from '../../agent_runtime/providers/catalog';
+import { listedDescription, modelIds, modelInfo, modelNamed, modelsOf, vendorOf, VENDOR_INFO, VENDORS } from '../../agent_runtime/providers/catalog';
 import type { SubagentRun } from '../../agent_runtime/tools/subagents';
 import { renderTranscript, workerName, workerTitle } from '../../agent_runtime/tools/subagents/report';
 import {
@@ -45,16 +45,11 @@ export function resolveModelReference(
   if (availableModels.length === 0) {
     throw new Error('No vendor models available yet. Use /login to connect a provider and let its model list load.');
   }
-  const normalized = reference.toLocaleLowerCase();
-  const exact = availableModels.find(model => model.toLocaleLowerCase() === normalized);
-  if (exact) return exact;
-
   // Claude may list a family alias with a context qualifier, e.g. opus[1m].
   // Prefer that vendor alias over matching the same family's pinned versions.
-  const aliases = availableModels.filter(model =>
-    model.toLocaleLowerCase().replace(/\[[^\]]+\]$/, '') === normalized,
-  );
-  if (aliases.length === 1) return aliases[0];
+  const named = modelNamed(reference, availableModels);
+  if (named) return named;
+  const normalized = reference.toLocaleLowerCase();
 
   const matches = availableModels.filter(model =>
     model.toLocaleLowerCase().includes(normalized),
@@ -179,14 +174,30 @@ function thinkingLevelsFor(participantName: string, session: CommandSession): re
   return offered ?? THINKING_LEVELS;
 }
 
+// A participant's depth as the commands name it: the level chosen for it, or
+// its model's default, with what that is once a runtime on the model has shown it.
+export function describeThinking(participantName: string, session: CommandSession): string {
+  const level = session.getThinkingLevel(participantName);
+  if (level) return level;
+  const modelDefault = session.getModelThinkingDefault(participantName);
+  return modelDefault ? `default (${modelDefault})` : 'default';
+}
+
 export function changeThinkingLevel(
   participantName: string = 'sirus',
   value: string,
   session: CommandSession,
 ): Feedback {
-  const level = parseThinkingLevel(value);
-  if (!level) throw new Error(`Unknown thinking level. Try: ${THINKING_LEVELS.join(', ')}`);
   const normalizedParticipantName = participantName.replace(/^@/, '');
+  if (value === 'default') {
+    session.setThinkingLevel(undefined, normalizedParticipantName);
+    return {
+      kind: 'success',
+      text: `@${normalizedParticipantName} thinking set to its model's ${describeThinking(normalizedParticipantName, session)}.`,
+    };
+  }
+  const level = parseThinkingLevel(value);
+  if (!level) throw new Error(`Unknown thinking level. Try: default, ${THINKING_LEVELS.join(', ')}`);
   const offered = thinkingLevelsFor(normalizedParticipantName, session);
   if (!offered.includes(level)) {
     throw new Error(`@${normalizedParticipantName}'s model does not offer ${level} thinking. Try: ${offered.join(', ')}`);
@@ -198,9 +209,10 @@ export function changeThinkingLevel(
   };
 }
 
-// Only the levels the participant's model offers, with its level marked.
+// The model's default first, then only the levels the participant's model
+// offers, with the one it runs at marked.
 export function thinkingMenuItems(args: readonly string[] = [], session?: CommandSession): CommandMenuItem[] | null {
-  if (args.length > 1 || (args.length === 1 && (parseThinkingLevel(args[0]) || !args[0].startsWith('@')))) {
+  if (args.length > 1 || (args.length === 1 && (args[0] === 'default' || parseThinkingLevel(args[0]) || !args[0].startsWith('@')))) {
     return null;
   }
   const participant = args[0]?.replace(/^@/, '');
@@ -209,33 +221,40 @@ export function thinkingMenuItems(args: readonly string[] = [], session?: Comman
     .some(candidate => candidate.name.toLocaleLowerCase() === (participant ?? 'sirus').toLocaleLowerCase());
   const current = known ? session!.getThinkingLevel(participant ?? 'sirus') : undefined;
   const levels = known ? thinkingLevelsFor(participant ?? 'sirus', session!) : THINKING_LEVELS;
-  return levels.map((level: ThinkingLevel) => ({
-    type: 'item',
-    key: level,
-    label: level,
-    description: THINKING_LEVEL_DESCRIPTIONS[level],
-    command: participant ? `/thinking @${participant} ${level}` : `/thinking ${level}`,
-    ...(level === current ? { current: true } : {}),
-  }));
+  const modelDefault = known ? session!.getModelThinkingDefault(participant ?? 'sirus') : undefined;
+  const command = (value: string) => participant ? `/thinking @${participant} ${value}` : `/thinking ${value}`;
+  return [
+    {
+      type: 'item', key: 'default', label: 'default',
+      description: `whatever the model picks${modelDefault ? `, ${modelDefault}` : ''}`,
+      command: command('default'),
+      ...(known && !current ? { current: true } : {}),
+    },
+    ...levels.map((level: ThinkingLevel): CommandMenuItem => ({
+      type: 'item',
+      key: level,
+      label: level,
+      description: THINKING_LEVEL_DESCRIPTIONS[level],
+      command: command(level),
+      ...(level === current ? { current: true } : {}),
+    })),
+  ];
 }
 
 export function thinkingCommand(args: readonly string[], session: CommandSession): Feedback {
   if (args.length === 0) {
-    return { kind: 'info', text: `@sirus thinking is ${session.getThinkingLevel()}.` };
+    return { kind: 'info', text: `@sirus thinking is ${describeThinking('sirus', session)}.` };
   }
   if (args.length === 1) {
-    const level = parseThinkingLevel(args[0]);
-    if (level) return changeThinkingLevel('sirus', level, session);
+    if (args[0] === 'default' || parseThinkingLevel(args[0])) return changeThinkingLevel('sirus', args[0], session);
     if (!args[0].startsWith('@')) {
-      throw new Error(`Unknown thinking level. Try: ${THINKING_LEVELS.join(', ')}`);
+      throw new Error(`Unknown thinking level. Try: default, ${THINKING_LEVELS.join(', ')}`);
     }
-    return {
-      kind: 'info',
-      text: `@${args[0].replace(/^@/, '')} thinking is ${session.getThinkingLevel(args[0])}.`,
-    };
+    const name = args[0].replace(/^@/, '');
+    return { kind: 'info', text: `@${name} thinking is ${describeThinking(name, session)}.` };
   }
   if (args.length === 2) return changeThinkingLevel(args[0], args[1], session);
-  throw new Error('Usage: /thinking [participant] [low|medium|high|xhigh|max]');
+  throw new Error('Usage: /thinking [participant] [default|low|medium|high|xhigh|max]');
 }
 
 // ── Workers ────────────────────────────────────────────────────────────────
@@ -360,7 +379,7 @@ function showWorker(run: SubagentRun): Feedback {
     text: [
       `${workerTitle(run)} · ${run.status} · ${workerAge(run)}`,
       `task: ${run.prompt.trim()}`,
-      `model: ${run.model} · ${run.thinkingLevel}`,
+      `model: ${run.model}${run.thinkingLevel ? ` · ${run.thinkingLevel}` : ''}`,
       `branch: ${run.branch ?? `none · works in ${run.directory}`}`,
       '',
       ...transcript,

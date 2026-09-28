@@ -41,7 +41,8 @@ export interface RuntimeOptions {
   signal?: AbortSignal;
   vendor: Vendor;
   model: string;
-  thinkingLevel: ThinkingLevel;
+  // Unset leaves the model at its own default depth.
+  thinkingLevel?: ThinkingLevel;
   // Where the session runs; relative paths in tool calls resolve here.
   directory: string;
   // Reopen the vendor's conversation in the directory it was created in.
@@ -130,8 +131,9 @@ export type RuntimeUpdate =
   // The models the vendor's harness offers, as its session opened.
   | { type: 'models'; models: ListedModel[] }
   // The reasoning depths the vendor's effort option offers for the model the
-  // session is on now; empty when it has no such option.
-  | { type: 'efforts'; efforts: string[] }
+  // session is on now, empty when it has no such option, and the one the
+  // vendor picks for that model when nobody sets one, once the session has seen it.
+  | { type: 'efforts'; efforts: string[]; default?: string }
   // The MCP servers the vendor's harness has for this session and how each
   // connection stands, as Claude Code reports them at the start of a turn.
   | { type: 'mcp_servers'; servers: McpServerState[] }
@@ -192,7 +194,8 @@ export interface Runtime {
   // `session/set_config_option` for the model. False when the option cannot
   // apply, in which case the caller rebuilds the runtime.
   setModel(model: string): Promise<boolean>;
-  setThinkingLevel(level: ThinkingLevel): Promise<void>;
+  // Undefined puts the session back at its model's default depth.
+  setThinkingLevel(level: ThinkingLevel | undefined): Promise<void>;
   // `session/fork`: a second session on the same adapter process that
   // starts from this one's conversation so far, prompted separately from
   // then on. Works while this runtime is mid-prompt. Rejects when the vendor
