@@ -429,6 +429,17 @@ function sessionPath(id: string, directory: string): string {
   return path.join(directory, 'sessions', `session-${encodeURIComponent(id)}.json`);
 }
 
+// A deletion survives other windows' stale snapshots and legacy migration.
+// Publish it before unlinking the record; saves check it on both sides of
+// their atomic rename, so either ordering leaves the session deleted.
+function deletedPath(id: string, directory: string): string {
+  return `${sessionPath(id, directory)}.deleted`;
+}
+
+function isDeleted(id: string, directory: string): boolean {
+  return existsSync(deletedPath(id, directory));
+}
+
 function quarantine(file: string, directory: string, notices: string[]): void {
   unreadablePaths.add(file);
   const destination = path.join(directory, 'invalid', `${path.basename(file)}.${crypto.randomUUID()}`);
@@ -442,18 +453,20 @@ function quarantine(file: string, directory: string, notices: string[]): void {
 }
 
 function readSnapshot(file: string, directory: string, fallback: string, notices: string[]): SessionSnapshot | null {
-  if (!existsSync(file)) return null;
+  if (!existsSync(file) || existsSync(`${file}.deleted`)) return null;
   const parsed = sessionSchema.safeParse(readJson(file));
   if (!parsed.success || sessionPath(parsed.data.id, directory) !== file) {
     quarantine(file, directory, notices);
     return null;
   }
+  if (isDeleted(parsed.data.id, directory)) return null;
   return toSnapshot(parsed.data, fallback);
 }
 
 // Migration publishes complete files without replacing any session another
 // window has already saved. A hard link is the atomic create-if-absent step.
 function writeMigratedSnapshot(snapshot: SessionSnapshot, directory: string): boolean {
+  if (isDeleted(snapshot.id, directory)) return true;
   const file = sessionPath(snapshot.id, directory);
   const temporary = `${file}.${crypto.randomUUID()}.tmp`;
   try {
@@ -463,6 +476,11 @@ function writeMigratedSnapshot(snapshot: SessionSnapshot, directory: string): bo
       linkSync(temporary, file);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
+    if (isDeleted(snapshot.id, directory)) {
+      try { unlinkSync(file); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
+      }
     }
     return true;
   } catch {
@@ -556,8 +574,9 @@ export function loadSessionSnapshots(
 
 export function loadSessionRevision(id: string, directory: string = dataDirectory()): string | null {
   try {
+    if (isDeleted(id, directory)) return null;
     const stat = statSync(sessionPath(id, directory), { bigint: true });
-    return `${stat.ino}:${stat.mtimeNs}:${stat.size}`;
+    return isDeleted(id, directory) ? null : `${stat.ino}:${stat.mtimeNs}:${stat.size}`;
   } catch {
     return null;
   }
@@ -565,16 +584,20 @@ export function loadSessionRevision(id: string, directory: string = dataDirector
 
 export function saveSessionSnapshot(snapshot: SessionSnapshot, directory: string = dataDirectory()): boolean {
   const file = sessionPath(snapshot.id, directory);
-  if (unreadablePaths.has(file) || !sessionSchema.safeParse(snapshot).success) return false;
+  if (unreadablePaths.has(file) || isDeleted(snapshot.id, directory) || !sessionSchema.safeParse(snapshot).success) return false;
   if (existsSync(file) && !readSnapshot(file, directory, snapshot.directory, [])) return false;
   if (snapshot.messages.length === 0) return true;
-  return writeJson(file, snapshot);
+  if (!writeJson(file, snapshot)) return false;
+  if (!isDeleted(snapshot.id, directory)) return true;
+  try { unlinkSync(file); } catch { /* The tombstone still hides this file. */ }
+  return false;
 }
 
 export function deleteSessionSnapshot(id: string, directory: string = dataDirectory()): boolean {
   const file = sessionPath(id, directory);
   if (unreadablePaths.has(file)) return false;
-  if (existsSync(file) && !readSnapshot(file, directory, process.cwd(), [])) return false;
+  if (!isDeleted(id, directory) && existsSync(file) && !readSnapshot(file, directory, process.cwd(), [])) return false;
+  if (!isDeleted(id, directory) && !writeJson(deletedPath(id, directory), { deletedAt: Date.now() })) return false;
   try {
     unlinkSync(file);
     return true;
@@ -590,11 +613,13 @@ export function saveSessionMetadata(
 ): boolean {
   const file = path.join(directory, 'sessions', 'index.json');
   const previous = metadataSchema.safeParse(readJson(file));
-  const ids = [...new Set([...sessionIds, ...(previous.success ? previous.data.sessionIds : [])])];
+  const ids = [...new Set([...sessionIds, ...(previous.success ? previous.data.sessionIds : [])])]
+    .filter(id => !isDeleted(id, directory));
   return writeJson(file, {
     version: 1,
     sessionIds: ids,
-    selectedSessionId: selectedSessionId && existsSync(sessionPath(selectedSessionId, directory)) ? selectedSessionId : null,
+    selectedSessionId: selectedSessionId && !isDeleted(selectedSessionId, directory)
+      && existsSync(sessionPath(selectedSessionId, directory)) ? selectedSessionId : null,
   });
 }
 

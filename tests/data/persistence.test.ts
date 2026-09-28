@@ -537,6 +537,44 @@ describe('session persistence', () => {
     expect(loadSessionSnapshots(directory).snapshots.map(snapshot => snapshot.id)).toEqual(['second']);
   });
 
+  test('a deleted session rejects stale saves and legacy migration', () => {
+    const snapshot = new Session({ id: 'deleted', model: 'gpt-5.6-luna', messages: [
+      { role: 'user', content: [{ type: 'text', text: 'Original' }] },
+    ] }).toSnapshot();
+    expect(saveSessionSnapshots([snapshot], snapshot.id, directory)).toBe(true);
+    expect(deleteSessionSnapshot(snapshot.id, directory)).toBe(true);
+    expect(saveSessionSnapshot({ ...snapshot, name: 'Stale window' }, directory)).toBe(false);
+    expect(loadSessionSnapshot(snapshot.id, directory)).toBeNull();
+    expect(loadSessionRevision(snapshot.id, directory)).toBeNull();
+    writeFileSync(path.join(directory, 'sessions.json'), JSON.stringify({
+      version: 1, selectedSessionId: snapshot.id, sessions: [snapshot],
+    }));
+    expect(loadSessionSnapshots(directory)).toMatchObject({ snapshots: [], selectedSessionId: null });
+    expect(existsSync(path.join(directory, 'sessions', 'session-deleted.json'))).toBe(false);
+    expect(saveSessionSnapshots([snapshot], snapshot.id, directory)).toBe(false);
+    const metadata = JSON.parse(readFileSync(path.join(directory, 'sessions', 'index.json'), 'utf8'));
+    expect(metadata.sessionIds).not.toContain(snapshot.id);
+    expect(metadata.selectedSessionId).toBeNull();
+  });
+
+  test('another process cannot save a stale session after deletion', async () => {
+    const snapshot = new Session({ id: 'cross-process', model: 'gpt-5.6-luna', messages: [
+      { role: 'user', content: [{ type: 'text', text: 'Original' }] },
+    ] }).toSnapshot();
+    expect(saveSessionSnapshot(snapshot, directory)).toBe(true);
+    expect(deleteSessionSnapshot(snapshot.id, directory)).toBe(true);
+    const module = path.resolve(import.meta.dir, '../../src/persistence/sessions.ts');
+    const child = Bun.spawn([process.execPath, '-e', `
+      import { saveSessionSnapshot } from ${JSON.stringify(module)};
+      if (saveSessionSnapshot(${JSON.stringify(snapshot)}, ${JSON.stringify(directory)})) process.exit(2);
+      process.exit(0);
+    `], { env: process.env, stdout: 'pipe', stderr: 'pipe' });
+    // The process starts from a snapshot it could have loaded earlier.
+    expect(await child.exited).toBe(0);
+    expect(loadSessionSnapshot(snapshot.id, directory)).toBeNull();
+    expect(existsSync(path.join(directory, 'sessions', 'session-cross-process.json'))).toBe(false);
+  });
+
   test('migration never replaces a newer per-session file and reserves the metadata filename', () => {
     const snapshot = new Session({ id: 'index', model: 'gpt-5.6-luna', name: 'Newer edit', messages: [{ role: 'user', content: [{ type: 'text', text: 'Retained' }] }] }).toSnapshot();
     saveSessionSnapshot(snapshot, directory);
