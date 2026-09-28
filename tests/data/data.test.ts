@@ -1872,17 +1872,32 @@ describe('Session model', () => {
       ]);
   });
 
-  test('does not strip a model name following an existing participant mention', async () => {
-    const binding = bindScriptedRuntime(testModel, textTurn('done'));
+  test('switches an existing participant to the model and thinking level written after its mention', async () => {
+    bindScriptedRuntime(testModel, textTurn('done'));
+    const binding = bindScriptedRuntime(secondTestModel, textTurn('done'));
     const session = new Session();
     session.addParticipant('Claude', testModel);
 
     await session.sendMessage({
       role: 'user',
-      content: [{ type: 'text', text: '@Claude claude-opus-5 is still relevant here' }],
+      content: [{ type: 'text', text: `please @Claude ${secondTestModel} low check this` }],
     });
 
-    expect(binding.runtimes[0].prompts[0].text).toBe('@Claude claude-opus-5 is still relevant here');
+    expect(session.getParticipants().find(participant => participant.name === 'Claude')?.model).toBe(secondTestModel);
+    expect(session.getThinkingLevel('Claude')).toBe('low');
+    expect(binding.runtimes[0].prompts[0].text).toBe('please @Claude check this');
+  });
+
+  test('an agent mentioning an existing participant never switches its model', async () => {
+    bindScriptedRuntime(testModel, textTurn(`@Claude ${secondTestModel} over to you`));
+    const claude = bindScriptedRuntime(thirdTestModel, textTurn('done'));
+    const session = new Session({ model: testModel });
+    session.addParticipant('Claude', thirdTestModel);
+
+    await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'start' }] });
+
+    expect(session.getParticipants().find(participant => participant.name === 'Claude')?.model).toBe(thirdTestModel);
+    expect(claude.runtimes[0].prompts[0].text).toContain(`@Claude ${secondTestModel} over to you`);
   });
 
   test('keeps unknown mentions without a model as ordinary prompt text', async () => {

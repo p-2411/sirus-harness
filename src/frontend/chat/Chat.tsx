@@ -448,7 +448,8 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     const needsAttention = [...allApprovals, ...allQuestions].some(({ requester }) =>
       'participant' in requester ? requester.participant === participant.name
         : currSession.getWorkers().find(worker => worker.id === requester.subagent)?.owner === participant.name);
-    return [participant.name, needsAttention ? 'attention' : currSession.isParticipantWorking(participant.name) ? 'working'
+    const working = currSession.isParticipantWorking(participant.name) || currSession.hasWorkingWorkers(participant.name);
+    return [participant.name, needsAttention ? 'attention' : working ? 'working'
       : participant.name !== selected && views.get(participant.name)!.seen !== activityStamp(currSession.getMessages(participant.name)) ? 'unread' : 'idle'];
   }));
   const selectAgent = (name: string) => {
