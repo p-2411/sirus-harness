@@ -21,6 +21,7 @@ struct Composer: View {
     @State private var sending = false
     @State private var sent = 0
     @State private var stopped = 0
+    @Environment(\.dynamicTypeSize) private var typeSize
     #if DEBUG
     // Where the composer is on screen, for the screenshot hook to find its
     // text view by.
@@ -38,8 +39,14 @@ struct Composer: View {
             TextField("", text: $draft, selection: $selection,
                       prompt: Text("Message \(participant)").foregroundStyle(Palette.subtle), axis: .vertical)
                 .font(.body)
+                // The draft grows with the text size up to the first
+                // accessibility size, then stays, and takes fewer lines at
+                // those sizes: at the largest, six lines of it filled all the
+                // room the keyboard left on a small phone, and the
+                // conversation above went. The transcript keeps growing.
+                .dynamicTypeSize(...DynamicTypeSize.accessibility1)
+                .lineLimit(1...(typeSize.isAccessibilitySize ? 3 : 6))
                 .foregroundStyle(Palette.white)
-                .lineLimit(1...6)
                 .focused(focus)
                 .padding(.leading, 18)
                 .padding(.vertical, 11)
