@@ -59,6 +59,9 @@ struct RootView: View {
                 .animation(motion.panel, value: railAside)
             }
         }
+        // Setup gives way to the conversation once a Mac answers, and comes
+        // back after Change Mac, as a cross-fade rather than a cut.
+        .animation(Motion.fade, value: store.host.isEmpty)
         .background(Palette.ground.ignoresSafeArea())
         .tint(Palette.platinum)
         .preferredColorScheme(.dark)
@@ -172,7 +175,9 @@ struct Lobby: View {
         .multilineTextAlignment(.center)
         .padding(.horizontal, 24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .animation(.smooth, value: phase)
+        .animation(Motion.settle, value: phase)
+        // The button's arrow turns to a spinner while it looks, and back.
+        .animation(Motion.fade, value: store.scanning)
         .task {
             // While nothing answers, look again every few seconds, so
             // running /rc on the Mac is enough to bring the app back.
