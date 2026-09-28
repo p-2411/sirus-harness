@@ -21,6 +21,7 @@ struct Composer: View {
     @State private var sending = false
     @State private var sent = 0
     @State private var stopped = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     #if DEBUG
     // Where the composer is on screen, for the screenshot hook to find its
     // text view by.
@@ -49,8 +50,11 @@ struct Composer: View {
             .accessibilityLabel(sending ? "Sending" : stops ? "Stop" : "Send")
             .padding(.trailing, 1)
         }
-        .animation(.spring(duration: 0.3, bounce: 0.2), value: stops)
-        .animation(.easeOut(duration: 0.15), value: empty)
+        // Send turning into stop springs; lighting up, and turning to the
+        // spinner and back once a message has gone, fade.
+        .animation(Motion(reduced: reduceMotion).snap, value: stops)
+        .animation(Motion.fade, value: empty)
+        .animation(Motion.fade, value: sending)
         .sensoryFeedback(.impact(weight: .light), trigger: sent)
         .sensoryFeedback(.impact(weight: .medium), trigger: stopped)
         #if DEBUG

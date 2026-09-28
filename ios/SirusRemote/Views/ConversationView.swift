@@ -265,9 +265,12 @@ private struct Conversation: View {
         .padding(.horizontal, 12)
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { barHeight = $0 }
         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { chromeTop = $0 }
-        .animation(.spring(duration: 0.4, bounce: 0.14), value: client.requests.first?.id)
-        .animation(.smooth(duration: 0.3), value: working || status != nil)
-        .animation(.smooth(duration: 0.3), value: client.link)
+        // A request morphs the glass it takes the place of, so it moves as
+        // the menus do; the status and link only change what is there. The
+        // status's own words change with every update and don't animate.
+        .animation(motion.panel, value: client.requests.first?.id)
+        .animation(Motion.settle, value: working || status != nil)
+        .animation(Motion.settle, value: client.link)
         // What a menu hides fades in step with the menu coming over it.
         .animation(motion.panel, value: showsMenu)
     }
@@ -295,6 +298,7 @@ private struct Conversation: View {
                     Pill(tone: Palette.muted, glass: statusGlass) {
                         Image(systemName: client.link == .offline ? "wifi.slash" : "arrow.triangle.2.circlepath")
                             .symbolEffect(.rotate, isActive: client.link == .connecting)
+                            .contentTransition(.symbolEffect(.replace))
                         Text(client.link == .offline ? "Offline" : "Reconnecting…")
                         if client.link == .offline {
                             Text("Retry").foregroundStyle(Palette.platinum)
@@ -358,7 +362,8 @@ private struct Conversation: View {
                     .padding(noteOnTop ? .top : .bottom, noteOnTop ? headerHeight + 10 : barHeight + 10)
                     .frame(minHeight: 0, maxHeight: .infinity, alignment: noteOnTop ? .top : .bottom)
                     .zIndex(1)
-                    .transition(.opacity.combined(with: .offset(y: 6)))
+                    // Out from the bar it sits on, or down from the header.
+                    .transition(motion.note(from: noteOnTop ? .top : .bottom))
             }
             if let picker {
                 // The card slides up from the bottom edge, through the
@@ -390,7 +395,7 @@ private struct Conversation: View {
         .animation(motion.panel, value: picker == nil)
         .animation(Motion.fade, value: pickerRevision)
         .animation(motion.panel, value: showsCompletions)
-        .animation(.smooth(duration: 0.25), value: note)
+        .animation(motion.snap, value: note)
     }
 
     // Before the socket is up this fails quietly: the client subscribes
@@ -752,6 +757,7 @@ private struct CaptionChip<Content: View>: View {
             .padding(.horizontal, 10)
             .frame(height: 26)
             .background(Capsule().fill(.white.opacity(busy ? 0.11 : 0.06)))
+            .animation(Motion.fade, value: busy)
             .frame(minHeight: height)
             .contentShape(Rectangle())
         }
