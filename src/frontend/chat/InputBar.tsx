@@ -36,7 +36,7 @@ import { clearSelection, getSelectionSnapshot, hasSelection, subscribeSelection 
 import type { Feedback } from '../../commands/feedback';
 import type { Participant } from '../../agent_runtime/agent';
 import type { QueuedMessage } from '../../agent_runtime/session/messageQueue';
-import type { ImageBlock, MessageBlock, PermissionMode } from '../../agent_runtime/types';
+import { DEFAULT_PARTICIPANT, type ImageBlock, type MessageBlock, type PermissionMode } from '../../agent_runtime/types';
 import type { SubagentRun } from '../../agent_runtime/tools/subagents';
 import type { ContextUsage } from '../../agent_runtime/usage';
 import { errorMessage } from '../../abort';
@@ -150,7 +150,7 @@ export function InputBar({
   contextUsage,
   nativeCommands,
   tasksVisible,
-  recipient = 'sirus',
+  recipient = DEFAULT_PARTICIPANT,
   draftState,
   onSelectAgent,
 }: InputBarProps) {

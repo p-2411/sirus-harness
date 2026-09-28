@@ -172,8 +172,8 @@ export function turnPhase(messages: readonly Message[]): string {
   if (tail?.type === 'text' && tail.text) return 'writing';
   const thought = turnThought(messages);
   if (thought) {
-    const { title, body } = thoughtHeading(thought);
-    return title ?? body.replace(/\s+/g, ' ');
+    const { title, body } = thoughtHeading(terminalText(thought));
+    return title ?? singleLine(body);
   }
   return 'thinking';
 }
@@ -229,7 +229,7 @@ export function TurnStatus({ messages, awaitingApproval, awaitingAnswer, compact
         </Box>
       </Box>
       {expanded && thought && (
-        <Box paddingLeft={3}><Text color={theme.textSubtle}>{thoughtHeading(thought).body}</Text></Box>
+        <Box paddingLeft={3}><Text color={theme.textSubtle}>{thoughtHeading(terminalText(thought)).body}</Text></Box>
       )}
       {quiet >= QUIET_NOTICE_MS && (
         <Text color={theme.pending} wrap="truncate-end">  no output for {formatElapsed(quiet)} · esc to cancel</Text>

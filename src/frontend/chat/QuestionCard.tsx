@@ -7,6 +7,7 @@ import { theme } from '../styles/theme';
 import { FramedCard, type TitlePart } from './FramedCard';
 import {
   applyInputEdit,
+  characterCount,
   inputEditForKey,
   isForeignInput,
   isKeyboardProtocolReport,
@@ -100,7 +101,7 @@ function QuestionRow({ label, active, prefix, onChoose, focusRef, children }: {
 }
 
 function Entry({ editor, secret }: { editor: InputState; secret?: boolean }) {
-  const shown = (text: string) => secret ? '•'.repeat([...text].length) : text;
+  const shown = (text: string) => secret ? '•'.repeat(characterCount(text)) : text;
   return (
     <Text wrap="wrap">
       <Text color={theme.text}>{shown(editor.text.slice(0, editor.cursor))}</Text>
