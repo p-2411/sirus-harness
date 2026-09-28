@@ -28,8 +28,8 @@ const isWorker = (options: RuntimeOptions) => options.systemPrompt.includes('You
 
 // Workers finish on their own and the report they set off is a turn nobody
 // awaits, so what follows one is waited for rather than assumed.
-async function until(condition: () => boolean, what: string): Promise<void> {
-  for (let attempt = 0; attempt < 400; attempt++) {
+async function until(condition: () => boolean, what: string, timeoutMs = 2_000): Promise<void> {
+  for (let attempt = 0; attempt * 5 < timeoutMs; attempt++) {
     if (condition()) return;
     await new Promise(resolve => setTimeout(resolve, 5));
   }
@@ -3176,10 +3176,12 @@ test.each(['initialize', 'session/new'])('cancelling ACP startup terminates an a
     pid = Number(readFileSync(pidFile, 'utf8'));
     controller.abort(new Error('Draft closed'));
     expect(await opening).toMatchObject({ message: 'Draft closed' });
+    // The runtime allows two seconds before SIGKILL; leave time for the
+    // forced exit and for the operating system to reap the process.
     await until(() => {
       try { process.kill(pid!, 0); return false; }
       catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
-    }, 'adapter exit after startup cancellation');
+    }, 'adapter exit after startup cancellation', 8_000);
   } finally {
     controller.abort();
     await opening;
@@ -3187,7 +3189,7 @@ test.each(['initialize', 'session/new'])('cancelling ACP startup terminates an a
     spec.mockRestore();
     rmSync(directory, { recursive: true, force: true });
   }
-});
+}, 12_000);
 
 test.each(['caller', 'shutdown'])('a bound runtime resolving after %s cancellation is disposed before it can be adopted', async cancellation => {
   const { boundRuntimes, createRuntime, disposeAllRuntimes } = await import('../../src/agent_runtime/runtime/runtime');
