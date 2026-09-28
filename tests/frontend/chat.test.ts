@@ -221,8 +221,10 @@ test('help and usage stay scrollable above the editor in an 80 by 24 terminal', 
     expect(output).toContain('ctx 120');
     expect(output).toContain('esc closes');
   };
-  // The command layer has separate provider tests. Keep this rendering test
-  // offline while exercising the same asynchronous /usage completion path.
+  // The command layer has separate provider tests, and /usage's own menu has
+  // usage_menu.test.tsx. Keep this rendering test offline, with /usage as a
+  // command whose short output arrives asynchronously.
+  const usageMenu = spyOn(usageCommandSpec, 'menu').mockReturnValue(null);
   const usage = spyOn(usageCommandSpec, 'run').mockImplementation(() => Promise.resolve({
     kind: 'info' as const, showIcon: false,
     text: ['claude · you@example.com · 5h 70% · 7d 45%', 'session · 100 in · 20 out'].join('\n'),
@@ -270,6 +272,7 @@ test('help and usage stay scrollable above the editor in an 80 by 24 terminal', 
     expect(session.getMessages()).toEqual(originalMessages);
   } finally {
     usage.mockRestore();
+    usageMenu.mockRestore();
     app.unmount();
     stdin.destroy();
     stdout.destroy();
