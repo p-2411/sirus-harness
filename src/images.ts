@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import { execFile } from 'child_process';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'fs';
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, unlinkSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { dataDirectory } from './dataDirectory';
@@ -84,24 +84,38 @@ function typedPath(text: string, directory: string): string {
   return resolve(file.replace(/\\(.)/g, '$1'));
 }
 
+function readImageFile(file: string, noFollow: boolean, validate: (size: number) => void): Buffer {
+  const descriptor = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK | (noFollow ? constants.O_NOFOLLOW : 0));
+  try {
+    const stat = fstatSync(descriptor);
+    if (!stat.isFile()) throw new Error('Not a regular file.');
+    validate(stat.size);
+    const buffer = Buffer.alloc(MAX_IMAGE_BYTES + 1);
+    let bytes = 0;
+    while (bytes < buffer.length) {
+      const count = readSync(descriptor, buffer, bytes, buffer.length - bytes, null);
+      if (count === 0) break;
+      bytes += count;
+    }
+    validate(bytes);
+    return buffer.subarray(0, bytes);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
 // Attaches an image file from disk (a saved screenshot, a dragged-in path).
 export function attachImageFile(file: string, directory: string = process.cwd()): ImageBlock {
   const resolved = typedPath(file, directory);
-  let size: number;
-  try {
-    const stat = statSync(resolved);
-    if (!stat.isFile()) throw new Error('not a file');
-    size = stat.size;
-  } catch {
-    throw new Error(`Could not read ${resolved}.`);
-  }
-  if (size > MAX_IMAGE_BYTES) {
-    throw new Error(`${resolved} is ${formatBytes(size)}; images are limited to ${formatBytes(MAX_IMAGE_BYTES)}.`);
-  }
   let bytes: Buffer;
   try {
-    bytes = readFileSync(resolved);
-  } catch {
+    bytes = readImageFile(resolved, false, size => {
+      if (size > MAX_IMAGE_BYTES) {
+        throw new RangeError(`${resolved} is ${formatBytes(size)}; images are limited to ${formatBytes(MAX_IMAGE_BYTES)}.`);
+      }
+    });
+  } catch (error) {
+    if (error instanceof RangeError) throw error;
     throw new Error(`Could not read ${resolved}.`);
   }
   return storeImage(bytes, resolved);
@@ -117,10 +131,11 @@ function readStoredImage(image: ImageBlock): { resolved: string; bytes: Buffer }
   }
   const stat = lstatSync(resolved);
   if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Attached image is not a regular stored file.');
-  if (stat.size > MAX_IMAGE_BYTES || stat.size !== image.bytes) {
-    throw new Error('Attached image no longer matches its stored metadata.');
-  }
-  const bytes = readFileSync(resolved);
+  const bytes = readImageFile(resolved, true, size => {
+    if (size > MAX_IMAGE_BYTES || size !== image.bytes) {
+      throw new Error('Attached image no longer matches its stored metadata.');
+    }
+  });
   if (bytes.length > MAX_IMAGE_BYTES || bytes.length !== image.bytes || detectImageType(bytes) !== image.mediaType) {
     throw new Error('Attached image no longer matches its stored metadata.');
   }

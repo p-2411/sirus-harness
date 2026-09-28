@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { execFileSync } from 'child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, unlinkSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
@@ -81,6 +82,16 @@ describe('image storage', () => {
     truncateSync(invalid, MAX_IMAGE_BYTES + 1);
     expect(() => attachImageFile(invalid)).toThrow(/limited to/);
     expect(existsSync(imagesDirectory())).toBe(false);
+  });
+
+  test.skipIf(process.platform === 'win32')('rejects a named pipe without waiting for a writer', () => {
+    const pipe = path.join(directory, 'pipe.png');
+    execFileSync('mkfifo', [pipe]);
+    expect(() => attachImageFile(pipe)).toThrow(/Could not read/);
+    const image = attach();
+    unlinkSync(image.path);
+    execFileSync('mkfifo', [image.path]);
+    expect(() => imageData(image)).toThrow();
   });
 
   test('reads a path as a terminal pastes a dropped file, and a backslash in a real name as it is', () => {
