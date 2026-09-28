@@ -1,4 +1,10 @@
 import SwiftUI
+#if DEBUG
+import os
+
+// What the screenshot runs read back from the simulator's log.
+private let screensLog = Logger(subsystem: "com.sirus.remote", category: "screens")
+#endif
 
 // One participant's conversation in a session, laid out as the TUI lays it
 // out: agent tabs on top, the transcript, the live status line, and the
@@ -46,12 +52,13 @@ struct ConversationView: View {
 }
 
 // What was said about the last thing sent, a moment over the conversation:
-// long enough to read, then out of the way. A failure stays a little longer.
+// long enough to read, then out of the way. A failure stays a little
+// longer, and a long note longer still.
 struct Note: Equatable {
     let text: String
     let failed: Bool
 
-    var duration: Double { failed ? 6 : 3.5 }
+    var duration: Double { min(12, (failed ? 6 : 3.5) + Double(text.count) / 40) }
 }
 
 private struct Conversation: View {
@@ -175,21 +182,23 @@ private struct Conversation: View {
 
     // The session's name over its agents, centred on the screen.
     private var top: some View {
+        // The same inset on both sides, so the title and tabs centre on the
+        // screen rather than on the space beside the rail; the tabs, a
+        // capsule of their own, only need to keep clear of the rail.
         VStack(spacing: 8) {
             Text(sessionName)
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(Palette.white)
                 .lineLimit(1)
                 .frame(height: 20)
+                .padding(.horizontal, Sidebar.gutter - Sidebar.clearance)
             if let participants = header?.participants, !participants.isEmpty {
                 AgentTabs(participants: participants, selected: participant) { name in
                     store.choose(name, in: sessionId)
                 }
             }
         }
-        // The same inset on both sides, so the title and tabs centre on the
-        // screen rather than on the space beside the rail.
-        .padding(.horizontal, Sidebar.gutter)
+        .padding(.horizontal, Sidebar.clearance)
         .padding(.bottom, 6)
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { headerHeight = $0 }
         .background { Fade(edge: .top) }
@@ -365,6 +374,9 @@ private struct Conversation: View {
         try? await Task.sleep(for: .milliseconds(80))
         guard !Task.isCancelled else { return }
         let items = try? await client.complete(query.text, cursor: query.cursor, sessionId: sessionId, participant: participant)
+        #if DEBUG
+        screensLog.notice("completions for \(query.text, privacy: .public) at \(query.cursor): \(items?.count ?? -1) rows, cancelled \(Task.isCancelled)")
+        #endif
         guard !Task.isCancelled else { return }
         completions = Completions(text: query.text, items: items ?? [])
     }
@@ -585,21 +597,31 @@ private struct ModeCaption: View {
 
     // One line where it all fits. On a narrow screen, two: the permission
     // mode and the context over the model and thinking level, so none is
-    // cut to a letter. The mode keeps its room first, since it says
-    // whether anything is asked; a long model id gives way in the middle.
+    // cut to a letter. The gauge drops its trailing parts before the mode
+    // gives any room, since the mode says whether anything is asked; a
+    // long model id gives way in the middle.
     var body: some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 6) {
                 mode(height: 44)
                 Spacer(minLength: 4)
-                gauge
+                gauge(gaugeForms.first)
                 agent(height: 44)
             }
             VStack(spacing: 0) {
-                HStack(spacing: 6) {
-                    mode(height: 36).layoutPriority(1)
-                    Spacer(minLength: 4)
-                    gauge
+                ViewThatFits(in: .horizontal) {
+                    ForEach(gaugeForms, id: \.self) { form in
+                        HStack(spacing: 6) {
+                            mode(height: 36)
+                            Spacer(minLength: 4)
+                            gauge(form)
+                        }
+                    }
+                    HStack(spacing: 6) {
+                        mode(height: 36).layoutPriority(1)
+                        Spacer(minLength: 4)
+                        gauge(gaugeForms.last).fixedSize()
+                    }
                 }
                 HStack(spacing: 6) {
                     Spacer(minLength: 0)
@@ -624,9 +646,17 @@ private struct ModeCaption: View {
         }
     }
 
-    @ViewBuilder private var gauge: some View {
-        if let context = header?.context {
-            Text(context.text)
+    // The gauge as the TUI words it, then shorter by one " · " part at a
+    // time: "ctx 184k · 8% left · /compact", "ctx 184k · 8% left", "ctx 184k".
+    private var gaugeForms: [String] {
+        guard let text = header?.context?.text, !text.isEmpty else { return [] }
+        let parts = text.components(separatedBy: " · ")
+        return (1...parts.count).reversed().map { parts.prefix($0).joined(separator: " · ") }
+    }
+
+    @ViewBuilder private func gauge(_ text: String?) -> some View {
+        if let text, let context = header?.context {
+            Text(text)
                 .foregroundStyle(tone(context.tone))
                 .padding(.trailing, 2)
         }

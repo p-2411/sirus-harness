@@ -37,7 +37,7 @@ struct AgentTabs: View {
     // beside the +N chip: a longer name is cut in the middle.
     private func tabWidth(_ agent: Participant, room: CGFloat) -> CGFloat {
         let name = ceil((agent.name as NSString).size(withAttributes: [.font: Self.font]).width)
-        let natural = name + 30 + (agent.needsYou || agent.working ? 19 : 0)
+        let natural = name + 25 + (agent.needsYou || agent.working ? 19 : 0)
         return max(44, room > 0 ? min(natural, room - Self.chip) : natural)
     }
 
@@ -77,7 +77,7 @@ struct AgentTabs: View {
                 .truncationMode(.middle)
                 mark(needsYou: agent.needsYou, working: agent.working)
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 12)
             .frame(width: width, height: 36)
             .background {
                 if active { Capsule().fill(.white.opacity(0.14)).matchedGeometryEffect(id: "thumb", in: thumb) }

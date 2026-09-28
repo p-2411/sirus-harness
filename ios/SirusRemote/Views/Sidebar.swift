@@ -16,6 +16,11 @@ struct Sidebar: View {
     // How far in the header sits from each edge: clear of the rail, and
     // centred on the screen.
     static let gutter = inset + railWidth + 12
+    // What the header's agent tabs keep clear of on each side: just the rail.
+    static let clearance = inset + railWidth + 2
+    // From the sidebar's top to where the rail's marks begin: the toggle,
+    // then the rule under it.
+    private static let marksTop: CGFloat = 2 + 48 + 5
 
     let store: RemoteStore
     let selected: String?
@@ -23,7 +28,8 @@ struct Sidebar: View {
     // Where on screen the rail must end: above the conversation's bottom
     // bar, so a request card there is never under it.
     var railEnd: CGFloat = .infinity
-    @State private var railTop: CGFloat = 0
+    // The sidebar's own top on screen, which the rail's height can't move.
+    @State private var top: CGFloat = 0
     @State private var seen: [String: Int] = [:]
     @State private var confirmingForget = false
     @GestureState private var drag: CGFloat = 0
@@ -52,6 +58,7 @@ struct Sidebar: View {
                 .padding(.top, 2)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { top = $0 }
         .sensoryFeedback(.selection, trigger: selected)
         .sensoryFeedback(.impact(weight: .light), trigger: expanded)
         // Forgetting the Mac leaves only setup, and connecting again needs
@@ -154,9 +161,8 @@ struct Sidebar: View {
             .scrollIndicators(.hidden)
             .scrollBounceBehavior(.basedOnSize)
             // Seven marks at most, fewer when the bottom bar comes up to
-            // meet it; the rest scroll.
-            .frame(height: min(min(CGFloat(store.sessions.count), 7) * 44, max(44, railEnd - railTop - 12)))
-            .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { railTop = $0 }
+            // meet it, down to none; the rest scroll.
+            .frame(height: min(min(CGFloat(store.sessions.count), 7) * 44, max(0, railEnd - top - Self.marksTop - 12)))
         }
         .frame(width: Self.railWidth)
         .padding(.bottom, 4)

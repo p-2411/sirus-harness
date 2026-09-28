@@ -21,7 +21,7 @@ enum HostScanner {
             switch self {
             case .invalid: "Enter your Mac's Tailscale name, like mac.tailnet.ts.net."
             case .refused(let host): "\(host) turned this phone away. Sign in to Tailscale on the phone as the same user as the Mac."
-            case .none(let host): "No Sirus is listening on \(host). Run /rc in a Sirus session on your Mac, and check Tailscale is on here."
+            case .none(let host): "No Sirus is listening on \(host). Run /\u{2060}rc in a Sirus session on your Mac, and check Tailscale is on here."
             }
         }
 

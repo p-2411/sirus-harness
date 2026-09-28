@@ -303,6 +303,8 @@ Bun.serve({
     },
     message(socket, raw) {
       const frame = JSON.parse(String(raw)) as Frame;
+      // One line per request, for the screenshot run's log.
+      console.log(JSON.stringify({ type: frame.type, participant: frame.participant, text: frame.text, cursor: frame.cursor }));
       const reply = (extra: Frame) => socket.send(JSON.stringify({ type: 'result', id: frame.id, ...extra }));
       switch (frame.type) {
         case 'subscribe':

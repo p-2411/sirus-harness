@@ -42,6 +42,7 @@ struct ConnectionHelp: View {
                 Text(title)
                     .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(Palette.text)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text(detail)
                     .font(.system(size: 13))
                     .foregroundStyle(Palette.muted)

@@ -67,6 +67,8 @@ struct RequestCard: View {
 // the keyboard away, as a number pad has no key for that.
 private struct Bounded<Content: View>: View {
     let limit: CGFloat
+    // What it keeps however short of room the card is.
+    var minimum: CGFloat = 0
     @ViewBuilder let content: Content
     @State private var height: CGFloat = 0
 
@@ -76,7 +78,7 @@ private struct Bounded<Content: View>: View {
         }
         .scrollBounceBehavior(.basedOnSize)
         .scrollDismissesKeyboard(.interactively)
-        .frame(maxHeight: min(max(height, 1), limit))
+        .frame(minHeight: min(height, minimum), maxHeight: min(max(height, 1), limit))
     }
 }
 
@@ -90,7 +92,9 @@ private struct ApprovalBody: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Bounded(limit: 220) {
+            // What is being approved stays in view: at least its first lines,
+            // with the answers scrolling first when there are many.
+            Bounded(limit: 220, minimum: 96) {
                 VStack(alignment: .leading, spacing: 12) {
                     Text(request.title ?? "Use a tool")
                         .font(.system(size: 18, weight: .medium))

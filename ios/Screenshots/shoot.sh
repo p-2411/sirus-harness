@@ -58,7 +58,7 @@ boot() {
 }
 
 start_mock() {
-  SCENE=$1 bun "$here/mock-sirus.ts" >/dev/null 2>&1 &
+  SCENE=$1 bun "$here/mock-sirus.ts" >>"$out/../mock.log" 2>&1 &
   mock=$!
   for _ in $(seq 50); do
     curl -sf http://127.0.0.1:47470/v1/hello >/dev/null && return 0
@@ -89,6 +89,13 @@ launch() {
 shot() {
   limit 60 xcrun simctl io "$1" screenshot "$out/$2.png" >/dev/null || echo "screenshot $2 timed out" >&2
   echo "$(date +%T) shot $2"
+  # What the app asked the stand-in Sirus, and what it logged: layout
+  # loops, crashes and the debug build's own notes.
+  sed 's/^/  mock: /' "$out/../mock.log" 2>/dev/null | tail -n 8 || true
+  limit 30 xcrun simctl spawn "$1" log show --last 25s --style compact \
+    --predicate 'process == "SirusRemote" AND (subsystem == "com.sirus.remote" OR messageType == error OR eventMessage CONTAINS[c] "per frame" OR eventMessage CONTAINS[c] "cycle")' \
+    2>/dev/null | tail -n 12 | sed 's/^/  app: /' || true
+  : >"$out/../mock.log"
 }
 
 # One scene against the stand-in Sirus: udid, device label, name, SCENE,
@@ -130,8 +137,8 @@ run() {
   scene "$udid" "$label" menu-mention conversation 8 -composerDraft "Review @ios/Sir" -composerFocused YES
   scene "$udid" "$label" picker-model conversation 8 -openPicker /model
   scene "$udid" "$label" picker-permissions conversation 8 -openPicker /permissions
-  scene "$udid" "$label" note conversation 7 -sendOnLaunch "/model claude-sonnet-4-5"
-  scene "$udid" "$label" note-failed conversation 7 -sendOnLaunch "/model claude-opus-9"
+  scene "$udid" "$label" note conversation 4 -sendOnLaunch "/model claude-sonnet-4-5"
+  scene "$udid" "$label" note-failed conversation 4 -sendOnLaunch "/model claude-opus-9"
   scene "$udid" "$label" approval approval 6
   scene "$udid" "$label" question question 6
   scene "$udid" "$label" crowded crowded 6
@@ -141,7 +148,7 @@ run() {
   scene "$udid" "$label" gone gone 8
   scene "$udid" "$label" stress stress 7
   scene "$udid" "$label" question-keyboard question 8 -composerFocused YES
-  scene "$udid" "$label" note-long conversation 7 -sendOnLaunch /long-note
+  scene "$udid" "$label" note-long conversation 5 -sendOnLaunch /long-note
 
   # Offline: the Mac goes away while the conversation is on screen.
   start_mock offline
@@ -163,8 +170,9 @@ boot "$small"
 run "$small" small
 # The largest standard text size, on the smallest screen.
 xcrun simctl ui "$small" content_size extra-extra-extra-large
-scene "$small" small conversation-largest-text conversation 6
-scene "$small" small question-largest-text question 6
+sleep 3
+scene "$small" small conversation-largest-text conversation 10
+scene "$small" small question-largest-text question 10
 xcrun simctl ui "$small" content_size large
 limit 120 xcrun simctl shutdown "$small" || echo "shutdown timed out" >&2
 
