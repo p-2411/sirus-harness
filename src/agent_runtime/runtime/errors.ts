@@ -1,4 +1,4 @@
-import { VENDOR_INFO, type Vendor } from '../providers/catalog';
+import { modelsOf, VENDOR_INFO, type Vendor } from '../providers/catalog';
 
 // Transport failures can be retried once. Vendor refusals must keep their
 // meaning even when the adapter wraps them in JSON-RPC's Internal error.
@@ -38,9 +38,15 @@ export function turnFailure(error: unknown, vendor: Vendor, participant: string,
       ?? /\b(?:resets?\b(?: at| on| in)?|try again (?:at|in|after)|retry[- ]after[: ]+)\s*[^\n|"}.]+/i.exec(detail)?.[0]
         .split(/\b(?:request|authorization|bearer|token|api.?key)\b/i)[0].trim().slice(0, 160)
       ?? resetDescription({ resetsAt });
+    // A model the other vendor listed, which is all `/model` takes; none
+    // until that vendor is signed in and has said.
+    const other: Vendor = vendor === 'gpt' ? 'claude' : 'gpt';
+    const model = modelsOf(other)[0];
     const command = participant === 'sirus' ? '/model' : `/model @${participant}`;
-    const model = vendor === 'gpt' ? 'claude-sonnet-5' : 'gpt-5.6-luna';
-    return { kind: 'limit', message: `${name} ${spent ? 'allowance is exhausted' : 'is rate limiting this request'}.${reset ? ` ${reset.replace(/[.\s]+$/, '')}.` : ''} To use the other vendor, type ${command} ${model}.` };
+    const instead = model
+      ? `To use ${VENDOR_INFO[other].displayName} instead, type ${command} ${model}.`
+      : `To use ${VENDOR_INFO[other].displayName} instead, sign in with /login.`;
+    return { kind: 'limit', message: `${name} ${spent ? 'allowance is exhausted' : 'is rate limiting this request'}.${reset ? ` ${reset.replace(/[.\s]+$/, '')}.` : ''} ${instead}` };
   }
   if (/unauthori[sz]ed|authentication|auth_required|invalid.?api.?key|invalid.?token|expired|\b401\b|not logged in|sign in|log in/i.test(evidence)) {
     return { kind: 'login', message: `${name} login expired or was rejected. Run /login to sign in again.` };

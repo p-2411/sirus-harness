@@ -2432,7 +2432,7 @@ test.each([
   const failure = turnFailure(new Error(raw), 'claude', 'reviewer');
   expect(failure.kind).toBe(kind);
   expect(failure.message).toContain(expected);
-  if (kind === 'limit') expect(failure.message).toContain('/model @reviewer gpt-5.6-luna');
+  if (kind === 'limit') expect(failure.message).toMatch(/To use Codex instead, (?:type \/model @reviewer \S+|sign in with \/login)\.$/);
   let attempts = 0;
   bindScriptedRuntime(testModel, () => { attempts++; throw new Error(raw); });
   const session = new Session({ model: testModel });
@@ -2775,9 +2775,21 @@ test('limit errors preserve structured reset times without copying debug credent
   const { turnFailure } = await import('../../src/agent_runtime/runtime/errors');
   const resetsAt = Math.floor(Date.now() / 1000) + 3600;
   const cause = Object.assign(new Error('Internal error'), { data: { details: 'rate_limit_exceeded', resetsAt } });
-  const failure = turnFailure(new Error('Internal error', { cause }), 'gpt', 'sirus');
-  expect(failure.message).toContain(new Date(resetsAt * 1000).toLocaleString());
-  expect(failure.message).toContain('/model claude-sonnet-5');
+  const { rememberListedModels } = await import('../../src/agent_runtime/providers/catalog');
+  const previousDirectory = process.env.SIRUS_DATA_DIR;
+  process.env.SIRUS_DATA_DIR = mkdtempSync(path.join(os.tmpdir(), 'sirus-limit-'));
+  try {
+    // Only a model the other vendor listed is offered, since that is all /model takes.
+    expect(turnFailure(new Error('Rate limit exceeded'), 'gpt', 'sirus').message).toContain('To use Claude instead, sign in with /login.');
+    rememberListedModels('claude', [{ id: 'sonnet', description: '' }]);
+    const failure = turnFailure(new Error('Internal error', { cause }), 'gpt', 'reviewer');
+    expect(failure.message).toContain(new Date(resetsAt * 1000).toLocaleString());
+    expect(failure.message).toContain('To use Claude instead, type /model @reviewer sonnet.');
+  } finally {
+    rmSync(process.env.SIRUS_DATA_DIR!, { recursive: true, force: true });
+    if (previousDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
+    else process.env.SIRUS_DATA_DIR = previousDirectory;
+  }
   const debug = turnFailure(new Error('Rate limit exceeded. Resets at 18:30 UTC. Request Authorization: Bearer test-secret-key'), 'gpt', 'sirus');
   expect(debug.message).toContain('Resets at 18:30 UTC');
   expect(debug.message).not.toContain('test-secret-key');

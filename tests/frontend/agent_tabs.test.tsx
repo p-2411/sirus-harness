@@ -8,6 +8,7 @@ import stripAnsi from 'strip-ansi';
 import stringWidth from 'string-width';
 import Chat, { ChatHeader } from '../../src/frontend/chat/Chat';
 import { Session } from '../../src/agent_runtime/session';
+import { rememberListedModels } from '../../src/agent_runtime/providers/catalog';
 import { textOf } from '../../src/agent_runtime/types';
 import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
 import { saveSessionSnapshot, loadSessionSnapshot } from '../../src/persistence/sessions';
@@ -182,6 +183,10 @@ test('a background approval marks its agent without taking over the selected inp
 });
 
 test('model and reasoning commands configure the selected agent', async () => {
+  // `/model` takes only what a vendor listed, so Codex has listed its models.
+  const previousDirectory = process.env.SIRUS_DATA_DIR;
+  process.env.SIRUS_DATA_DIR = mkdtempSync(join(tmpdir(), 'sirus-agent-tabs-models-'));
+  rememberListedModels('gpt', [{ id: 'gpt-5.6-luna', description: '' }]);
   const session = new Session(); session.addParticipant('reviewer', 'claude-sonnet-5');
   const original = session.getModel();
   const chat = screen(session);
@@ -193,7 +198,12 @@ test('model and reasoning commands configure the selected agent', async () => {
     await chat.press('/model gpt-5.6-luna'); await chat.press('\r');
     expect(session.getParticipants().find(participant => participant.name === 'reviewer')!.model).toBe('gpt-5.6-luna');
     expect(session.getModel()).toBe(original);
-  } finally { await chat.close(); await session.dispose(); }
+  } finally {
+    await chat.close(); await session.dispose();
+    rmSync(process.env.SIRUS_DATA_DIR!, { recursive: true, force: true });
+    if (previousDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
+    else process.env.SIRUS_DATA_DIR = previousDirectory;
+  }
 });
 
 test('a queued command keeps explicit recipients when its text mentions other agents', async () => {
