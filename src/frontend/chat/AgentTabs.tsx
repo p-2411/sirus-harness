@@ -8,8 +8,9 @@ import type { ParticipantColors } from '../MentionText';
 
 export type AgentActivity = 'working' | 'unread' | 'attention' | 'idle';
 
-// The same full-height dot pattern moves through one character at a time.
-const DOT_COLUMN = '⣿';
+// A full block fills the whole cell, so the moving bar spans the pill's height;
+// braille dots leave a gap above and below.
+const BAR_COLUMN = '█';
 
 function ThinkingName({ name, width, color }: {
   name: string;
@@ -28,7 +29,7 @@ function ThinkingName({ name, width, color }: {
 
   return (
     <Text color={color} wrap="truncate-end" aria-label={name}>
-      {Array.from(label, (character, index) => index === frame % cycle - 1 ? DOT_COLUMN : character).join('')}
+      {Array.from(label, (character, index) => index === frame % cycle - 1 ? BAR_COLUMN : character).join('')}
     </Text>
   );
 }
