@@ -247,7 +247,12 @@ export function InputBar({
   // Which one ↑ has brought back, and the draft it replaced so ↓ past the
   // newest one restores it. Editing leaves the recall.
   const recallHistory = [...savedHistory];
-  for (const prompt of history) if (!recallHistory.includes(prompt)) recallHistory.push(prompt);
+  const recalled = new Set(recallHistory);
+  for (const prompt of history) {
+    if (recalled.has(prompt)) continue;
+    recallHistory.push(prompt);
+    recalled.add(prompt);
+  }
   for (const [offset, prompt] of clearedPrompts.current.entries()) {
     recallHistory.splice(Math.min(prompt.after + offset, recallHistory.length), 0, prompt.text);
   }
