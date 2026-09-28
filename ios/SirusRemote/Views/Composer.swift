@@ -47,7 +47,12 @@ struct Composer: View {
         .animation(.easeOut(duration: 0.15), value: empty)
         .sensoryFeedback(.impact(weight: .light), trigger: sent)
         .sensoryFeedback(.impact(weight: .medium), trigger: stopped)
-        .onChange(of: focused) { _, now in onFocus(now) }
+        .onChange(of: focused) { _, now in
+            #if DEBUG
+            NSLog("composer focused %@", now ? "yes" : "no")
+            #endif
+            onFocus(now)
+        }
         #if DEBUG
         .task {
             // Screenshot hooks: -composerDraft <text> and -composerFocused YES.

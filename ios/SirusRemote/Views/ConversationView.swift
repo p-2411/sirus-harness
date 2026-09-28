@@ -150,7 +150,20 @@ private struct Conversation: View {
             .safeAreaBar(edge: .bottom) { bottom.background { Fade(edge: .bottom) } }
             .overlay { floating }
             .task(id: "\(client.endpoint.port)/\(sessionId)/\(participant)") { await subscribe() }
-            .task(id: completionQuery) { await complete(completionQuery) }
+            .task(id: completionQuery) {
+                #if DEBUG
+                let caret: String
+                switch selection?.indices {
+                case .selection(let range)?: caret = "selection \(range.lowerBound.utf16Offset(in: draft))"
+                case .none: caret = "no selection"
+                default: caret = "multiple selections"
+                }
+                let query = completionQuery.map { "\($0.text)@\($0.cursor)" } ?? "none"
+                let line = "menu query \(query): focused \(composerFocused), picker \(picker != nil), approval \(waitingApproval != nil), live \(client.link == .live), draft \(draft), \(caret)"
+                screensLog.notice("\(line, privacy: .public)")
+                #endif
+                await complete(completionQuery)
+            }
             .onChange(of: client.requests.first?.id) { _, id in
                 guard id != nil, let request = client.requests.first else { return }
                 // A request needs the user more than a menu does, and

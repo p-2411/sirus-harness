@@ -93,7 +93,7 @@ shot() {
   # loops, crashes and the debug build's own notes.
   sed 's/^/  mock: /' "$out/../mock.log" 2>/dev/null | tail -n 8 || true
   limit 30 xcrun simctl spawn "$1" log show --last 25s --style compact \
-    --predicate 'process == "SirusRemote" AND (subsystem == "com.sirus.remote" OR messageType == error OR eventMessage CONTAINS[c] "per frame" OR eventMessage CONTAINS[c] "cycle")' \
+    --predicate 'process == "SirusRemote" AND (subsystem == "com.sirus.remote" OR eventMessage CONTAINS "composer focused" OR messageType == error OR eventMessage CONTAINS[c] "per frame" OR eventMessage CONTAINS[c] "cycle")' \
     2>/dev/null | tail -n 12 | sed 's/^/  app: /' || true
   : >"$out/../mock.log"
 }
@@ -103,6 +103,7 @@ shot() {
 scene() {
   local udid=$1 label=$2 name=$3 mock_scene=$4 wait=$5
   shift 5
+  wanted "$name" || return 0
   start_mock "$mock_scene"
   launch "$udid" -host 127.0.0.1 "$@"
   sleep "$wait"
@@ -114,21 +115,27 @@ run() {
   local udid=$1 label=$2
 
   # Setup: a fresh install knows no Mac.
-  launch "$udid"
-  sleep 4
-  shot "$udid" "$label-setup"
+  if wanted setup; then
+    launch "$udid"
+    sleep 4
+    shot "$udid" "$label-setup"
+  fi
 
   # Setup after a failed connect to a Mac that isn't there. (A sirus://
   # link would do the same, but the system asks before opening it and the
   # question stays up over every later scene.)
-  launch "$udid" -connectTo nope.invalid
-  sleep 9
-  shot "$udid" "$label-setup-failed"
+  if wanted setup-failed; then
+    launch "$udid" -connectTo nope.invalid
+    sleep 9
+    shot "$udid" "$label-setup-failed"
+  fi
 
   # The lobby for a known Mac that can't be reached.
-  launch "$udid" -host nope.invalid
-  sleep 9
-  shot "$udid" "$label-lobby-offline"
+  if wanted lobby-offline; then
+    launch "$udid" -host nope.invalid
+    sleep 9
+    shot "$udid" "$label-lobby-offline"
+  fi
 
   scene "$udid" "$label" lobby-empty nosessions 6
   scene "$udid" "$label" loading loading 6
@@ -151,12 +158,21 @@ run() {
   scene "$udid" "$label" note-long conversation 5 -sendOnLaunch /long-note
 
   # Offline: the Mac goes away while the conversation is on screen.
-  start_mock offline
-  launch "$udid" -host 127.0.0.1
-  sleep 6
-  stop_mock
-  sleep 6
-  shot "$udid" "$label-offline"
+  if wanted offline; then
+    start_mock offline
+    launch "$udid" -host 127.0.0.1
+    sleep 6
+    stop_mock
+    sleep 6
+    shot "$udid" "$label-offline"
+  fi
+}
+
+# Scenes to shoot, by name: all of them, unless ONLY or a file named `only`
+# beside this script lists some, to look again at a few quickly.
+only=${ONLY:-$(cat "$here/only" 2>/dev/null || true)}
+wanted() {
+  [ -z "$only" ] || [[ " $only " == *" $1 "* ]]
 }
 
 # The software keyboard, as on a phone, rather than the Mac's.
@@ -169,12 +185,16 @@ trap 'stop_mock; xcrun simctl shutdown all >/dev/null 2>&1 || true' EXIT
 boot "$small"
 run "$small" small
 # The largest standard text size, on the smallest screen.
-xcrun simctl ui "$small" content_size extra-extra-extra-large
-sleep 3
-scene "$small" small conversation-largest-text conversation 10
-scene "$small" small question-largest-text question 10
-xcrun simctl ui "$small" content_size large
+if wanted conversation-largest-text || wanted question-largest-text; then
+  xcrun simctl ui "$small" content_size extra-extra-extra-large
+  sleep 3
+  scene "$small" small conversation-largest-text conversation 10
+  scene "$small" small question-largest-text question 10
+  xcrun simctl ui "$small" content_size large
+fi
 limit 120 xcrun simctl shutdown "$small" || echo "shutdown timed out" >&2
 
+# A quick look at a few scenes needs one screen only.
+[ -z "$only" ] || exit 0
 boot "$large"
 run "$large" large
