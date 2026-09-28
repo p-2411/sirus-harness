@@ -10,6 +10,8 @@ struct RootView: View {
     // reaches the view outside the animation it was made in, so the sidebar
     // would snap instead of springing.
     @State private var sidebarExpanded = UserDefaults.standard.bool(forKey: "sidebarExpanded")
+    // The open conversation's floating bottom bar; none in the lobby.
+    @State private var bottomBar: CGFloat = 0
 
     var body: some View {
         Group {
@@ -18,14 +20,14 @@ struct RootView: View {
             } else {
                 ZStack {
                     if let id = store.openSession {
-                        ConversationView(store: store, sessionId: id)
+                        ConversationView(store: store, sessionId: id, bottomBar: $bottomBar)
                             .id(id)
                             .transition(.opacity)
                     } else {
                         Lobby(store: store)
                     }
-                    Sidebar(store: store, selected: store.openSession, expanded: $sidebarExpanded)
-                        .ignoresSafeArea(.keyboard)
+                    Sidebar(store: store, selected: store.openSession, expanded: $sidebarExpanded,
+                            bottomInset: store.openSession == nil ? 0 : bottomBar)
                 }
                 .animation(.smooth(duration: 0.25), value: store.openSession)
             }
