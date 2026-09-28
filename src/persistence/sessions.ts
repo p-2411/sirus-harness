@@ -15,6 +15,7 @@ import {
   TOOL_CALL_STATUSES,
   TOOL_KINDS,
   WORKER_CONTEXTS,
+  WORKER_ISOLATIONS,
   type Message,
   type MessageBlock,
   type ToolCallBlock,
@@ -183,7 +184,7 @@ const workerSchema = z.object({
   name: z.string().optional(),
   description: z.string().optional(),
   runInBackground: z.boolean().optional(),
-  isolation: z.enum(['none', 'worktree']).optional(),
+  isolation: z.enum(WORKER_ISOLATIONS).optional(),
   baseDirectory: z.string().optional(),
   startHead: z.string().optional(),
   definition: z.object({

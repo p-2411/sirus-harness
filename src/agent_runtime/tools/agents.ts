@@ -1,7 +1,7 @@
 import path from 'path';
 import { statSync } from 'fs';
 import { listedDescription, modelIds, modelInfo, vendorOf, VENDORS, VENDOR_INFO } from '../providers/catalog';
-import { parseThinkingLevel, THINKING_LEVELS, WORKER_CONTEXTS, type WorkerContext } from '../types';
+import { parseThinkingLevel, THINKING_LEVELS, WORKER_CONTEXTS, WORKER_ISOLATIONS, type WorkerContext, type WorkerIsolation } from '../types';
 import { labelText, requiredString } from './arguments';
 import { agentDefinitions } from './subagents/definitions';
 import { TOOL_WAIT_LIMIT_MS } from './subagents/run';
@@ -56,8 +56,8 @@ function booleanArg(args: Record<string, unknown>, key: string, fallback: boolea
 function spawnOptions(args: Record<string, unknown>): SpawnOptions {
   const context = (args.context ?? 'fresh') as WorkerContext;
   if (!WORKER_CONTEXTS.includes(context)) throw new TypeError(`SpawnAgent requires context to be ${WORKER_CONTEXTS.join(' or ')}`);
-  const isolation = args.isolation ?? 'none';
-  if (isolation !== 'none' && isolation !== 'worktree') throw new TypeError('SpawnAgent requires isolation to be none or worktree');
+  const isolation = (args.isolation ?? 'none') as WorkerIsolation;
+  if (!WORKER_ISOLATIONS.includes(isolation)) throw new TypeError(`SpawnAgent requires isolation to be ${WORKER_ISOLATIONS.join(' or ')}`);
   const cwd = optionalString(args, 'cwd');
   if (cwd && isolation === 'worktree') throw new TypeError('cwd and worktree isolation are exclusive');
   if (cwd && (!path.isAbsolute(cwd) || !statSync(cwd).isDirectory())) throw new TypeError('cwd must be an absolute directory');
@@ -83,7 +83,7 @@ export const agentTools: Tool[] = [
       model: { type: 'string', default: '', description: 'Any model in the list below, from either vendor.' },
       thinkingLevel: { type: 'string', enum: THINKING_LEVELS, default: '', description: 'Reasoning depth; otherwise inherited from the definition or owner, else the model’s default.' },
       agentType: { type: 'string', default: '', description: 'A named agent definition from the list below.' },
-      isolation: { type: 'string', enum: ['none', 'worktree'], default: 'none' },
+      isolation: { type: 'string', enum: WORKER_ISOLATIONS, default: 'none' },
       cwd: { type: 'string', default: '', description: 'Absolute working directory, exclusive with worktree isolation.' },
       runInBackground: { type: 'boolean', default: true },
       context: { type: 'string', enum: WORKER_CONTEXTS, default: 'fresh', description: 'Owner carries your conversation. A cross-vendor choice starts fresh with your record as context.' },

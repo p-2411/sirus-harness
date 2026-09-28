@@ -1,7 +1,7 @@
 import path from 'path';
 import { realpathSync } from 'fs';
 import type { SessionAgent } from '../../agent';
-import type { Message, MessageBlock, NativeSession, SubagentStatus, ThinkingLevel, WorkerContext } from '../../types';
+import type { Message, MessageBlock, NativeSession, SubagentStatus, ThinkingLevel, WorkerContext, WorkerIsolation } from '../../types';
 import type { AgentDefinition } from './definitions';
 
 // Subagents: one detached runtime per delegated task, a worker like a
@@ -23,7 +23,7 @@ export interface WorkerRecord {
   name?: string;
   description?: string;
   runInBackground?: boolean;
-  isolation?: 'none' | 'worktree';
+  isolation?: WorkerIsolation;
   baseDirectory?: string;
   startHead?: string;
   definition?: AgentDefinition;

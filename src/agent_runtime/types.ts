@@ -270,6 +270,11 @@ export const WORKER_CONTEXTS = ['fresh', 'owner'] as const;
 
 export type WorkerContext = typeof WORKER_CONTEXTS[number];
 
+// A worker uses the owner's directory or a Git worktree cut from HEAD.
+export const WORKER_ISOLATIONS = ['none', 'worktree'] as const;
+
+export type WorkerIsolation = typeof WORKER_ISOLATIONS[number];
+
 // Where a delegated run stands. `interrupted` is a run that was still working
 // when the process it lived in ended: its record survives in the session
 // file, nothing restarts it.

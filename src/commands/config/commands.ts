@@ -75,7 +75,7 @@ function configMenu(args: readonly string[]): CommandMenuEntry[] | null {
 }
 
 function configCommand(args: readonly string[]): Feedback {
-  const usage = 'Usage: /config [permissions ask|auto|bypass] [thinking default|low|medium|high|xhigh|max]';
+  const usage = `Usage: /config [permissions ${PERMISSION_MODES.join('|')}] [thinking default|${THINKING_LEVELS.join('|')}]`;
   if (args.length === 0) {
     const current = defaults();
     return { kind: 'info', text: `New sessions start in ${PERMISSION_MODE_NAMES[current.permissionMode]}, thinking ${current.thinkingLevel ?? 'at the model\'s default'}.` };

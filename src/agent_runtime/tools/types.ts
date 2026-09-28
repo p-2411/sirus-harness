@@ -1,4 +1,4 @@
-import type { ThinkingLevel, WorkerContext } from '../types';
+import type { ThinkingLevel, WorkerContext, WorkerIsolation } from '../types';
 
 // The tool layer's vocabulary. It depends on nothing above itself: no agent,
 // no session, no permission context. Everything a tool needs at call time
@@ -33,7 +33,7 @@ export interface SpawnOptions {
   model?: string;
   thinkingLevel?: ThinkingLevel;
   agentType?: string;
-  isolation?: 'none' | 'worktree';
+  isolation?: WorkerIsolation;
   cwd?: string;
   runInBackground?: boolean;
 }
