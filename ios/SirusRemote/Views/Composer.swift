@@ -21,6 +21,11 @@ struct Composer: View {
     @State private var sending = false
     @State private var sent = 0
     @State private var stopped = 0
+    #if DEBUG
+    // Where the composer is on screen, for the screenshot hook to find its
+    // text view by.
+    @State private var place: CGRect = .zero
+    #endif
 
     private var text: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var empty: Bool { text.isEmpty }
@@ -36,7 +41,6 @@ struct Composer: View {
                 .foregroundStyle(Palette.white)
                 .lineLimit(1...6)
                 .focused(focus)
-                .accessibilityIdentifier("composer")
                 .padding(.leading, 18)
                 .padding(.vertical, 11)
             Button { if stops { stop() } else { submit() } } label: { trailing }
@@ -50,6 +54,7 @@ struct Composer: View {
         .sensoryFeedback(.impact(weight: .light), trigger: sent)
         .sensoryFeedback(.impact(weight: .medium), trigger: stopped)
         #if DEBUG
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { place = $0 }
         .task {
             // Screenshot hooks: -composerDraft <text> and -composerFocused YES.
             // The field takes the keyboard as a tap gives it: its own text
@@ -63,7 +68,7 @@ struct Composer: View {
                 for _ in 0..<6 {
                     try? await Task.sleep(for: .milliseconds(700))
                     if focus.wrappedValue { break }
-                    let field = composerTextInput()
+                    let field = textInput(within: place)
                     field?.resignFirstResponder()
                     field?.becomeFirstResponder()
                 }
@@ -129,9 +134,9 @@ struct Composer: View {
 }
 
 #if DEBUG
-// The composer's own text view, found by its accessibility identifier, or
-// failing that the text input lowest on screen.
-@MainActor private func composerTextInput() -> UIView? {
+// The text view whose middle lies within a place on screen: the composer's
+// own, given the composer's place, whatever other fields the screen has.
+@MainActor private func textInput(within place: CGRect) -> UIView? {
     let window = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.keyWindow }.first
     var inputs: [UIView] = []
     func collect(_ view: UIView) {
@@ -139,7 +144,9 @@ struct Composer: View {
         view.subviews.forEach(collect)
     }
     if let window { collect(window) }
-    if let tagged = inputs.first(where: { $0.accessibilityIdentifier == "composer" }) { return tagged }
-    return inputs.max { $0.convert($0.bounds, to: nil).maxY < $1.convert($1.bounds, to: nil).maxY }
+    return inputs.first {
+        let frame = $0.convert($0.bounds, to: nil)
+        return place.contains(CGPoint(x: frame.midX, y: frame.midY))
+    }
 }
 #endif
