@@ -16,12 +16,11 @@ import type { Source } from './sources';
 export function sourceProfileHome(vendor: Vendor, source: Source | null): string {
   const info = VENDOR_INFO[vendor];
   if (source?.kind === 'subscription' && source.profile !== 'default') {
-    if (!/^[a-zA-Z0-9_-]+$/.test(source.profile)) throw new Error('Invalid subscription profile');
+    if (!PROFILE_NAME_PATTERN.test(source.profile)) throw new Error('Invalid subscription profile');
     return path.resolve(dataDirectory(), 'subscriptions', vendor, source.profile);
   }
   if (source?.kind === 'api' && info.apiKeyLogin) {
-    const fingerprint = crypto.createHash('sha256').update(source.key).digest('hex').slice(0, 16);
-    return path.resolve(dataDirectory(), 'api', vendor, fingerprint);
+    return path.resolve(dataDirectory(), 'api', vendor, apiKeyFingerprint(source.key));
   }
   return path.resolve(process.env[info.profileDirEnv] || path.join(os.homedir(), vendor === 'gpt' ? '.codex' : '.claude'));
 }
@@ -47,10 +46,13 @@ export function sourceEnvironment(vendor: Vendor, source: Source): NodeJS.Proces
   const env = scrubbedEnvironment(vendor);
   env[info.credentialEnv] = source.key;
   if (info.apiKeyLogin) {
-    const fingerprint = crypto.createHash('sha256').update(source.key).digest('hex').slice(0, 16);
-    useProfileDirectory(env, vendor, 'api', fingerprint);
+    useProfileDirectory(env, vendor, 'api', apiKeyFingerprint(source.key));
   }
   return env;
+}
+
+function apiKeyFingerprint(key: string): string {
+  return crypto.createHash('sha256').update(key).digest('hex').slice(0, 16);
 }
 
 function scrubbedEnvironment(vendor: Vendor): NodeJS.ProcessEnv {
