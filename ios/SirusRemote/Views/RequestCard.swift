@@ -101,10 +101,15 @@ private struct ApprovalBody: View {
                 Text(failure).font(.system(size: 13)).foregroundStyle(Palette.red)
                     .padding(.horizontal, 20).padding(.bottom, 8)
             }
-            // The first option that allows is the prominent one.
+            // Allowing once is the prominent answer, else the first that
+            // allows. Vendors can list a broader grant first, such as leaving
+            // plan mode with permissions bypassed, and that should never be
+            // the easy tap.
+            let prominent = (request.options.first(where: { $0.kind == "allow_once" })
+                ?? request.options.first(where: { !$0.rejects }))?.id
             VStack(spacing: 8) {
                 ForEach(request.options) { option in
-                    let primary = option.id == request.options.first(where: { !$0.rejects })?.id
+                    let primary = option.id == prominent
                     Button { choose(option) } label: {
                         HStack(spacing: 10) {
                             if busy == option.id {
