@@ -17,10 +17,12 @@ function ThinkingName({ name, width, color }: {
   width: number;
   color: string;
 }) {
-  // Participant names are ASCII. Animate only the visible label, keeping the
-  // same truncation as a resting name and leaving the pill's padding alone.
-  const label = name.length > width ? `${name.slice(0, width - 1)}…` : name;
-  const cycle = label.length + 2;
+  // Participant names are ASCII. Keep the resting name's truncation, then
+  // sweep across both padding cells as well as the visible label.
+  const labelWidth = width - 2;
+  const label = name.length > labelWidth ? `${name.slice(0, labelWidth - 1)}…` : name;
+  const pill = ` ${label.padEnd(labelWidth)} `;
+  const cycle = width;
   const [frame, setFrame] = useState(0);
   useEffect(() => {
     const timer = setInterval(() => setFrame(value => (value + 1) % cycle), 270);
@@ -29,7 +31,7 @@ function ThinkingName({ name, width, color }: {
 
   return (
     <Text color={color} wrap="truncate-end" aria-label={name}>
-      {Array.from(label, (character, index) => index === frame % cycle - 1 ? BAR_COLUMN : character).join('')}
+      {Array.from(pill, (character, index) => index === frame ? BAR_COLUMN : character).join('')}
     </Text>
   );
 }
@@ -59,14 +61,16 @@ function AgentName({ participant, selected, activity, width, color, onSelect }: 
   const working = activity === 'working';
   const marker = activity === 'attention' ? '!' : activity === 'unread' ? '.' : ' ';
   return (
-    <Box ref={onSelect ? ref : undefined} width={width} height={1} flexShrink={0} paddingLeft={1}
+    <Box ref={onSelect ? ref : undefined} width={width} height={1} flexShrink={0} paddingLeft={working ? 0 : 1}
       backgroundColor={selected ? color : undefined}>
-      <Box flexGrow={1} minWidth={0}>
-        {working
-          ? <ThinkingName name={participant.name} width={width - 2} color={selected ? '#151515' : color} />
-          : <Text color={selected ? '#151515' : color} wrap="truncate-end">{participant.name}</Text>}
-      </Box>
-      <Text color={selected ? '#151515' : activity === 'attention' ? theme.pending : color}>{marker}</Text>
+      {working
+        ? <ThinkingName name={participant.name} width={width} color={selected ? '#151515' : color} />
+        : <>
+            <Box flexGrow={1} minWidth={0}>
+              <Text color={selected ? '#151515' : color} wrap="truncate-end">{participant.name}</Text>
+            </Box>
+            <Text color={selected ? '#151515' : activity === 'attention' ? theme.pending : color}>{marker}</Text>
+          </>}
     </Box>
   );
 }
