@@ -259,11 +259,22 @@ describe('app workspace startup', () => {
       debug: true, patchConsole: false, exitOnCtrlC: false,
     });
     const flush = async () => { await new Promise(resolve => setImmediate(resolve)); await app.waitUntilRenderFlush(); };
+    const untilOutput = (check: () => boolean, description: string) => new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => { stdout.off('data', onData); reject(new Error(`Timed out waiting for ${description}`)); }, 6_000);
+      const onData = () => {
+        if (!check()) return;
+        clearTimeout(timeout);
+        stdout.off('data', onData);
+        resolve();
+      };
+      stdout.on('data', onData);
+      onData();
+    });
     try {
       await flush();
       expect(loadSessionRevision(second.id)).toBe(revision);
       saveSessionSnapshot({ ...first, name: 'External title', inputContent: 'External draft' });
-      await new Promise(resolve => setTimeout(resolve, 1650));
+      await untilOutput(() => output.includes('External title'), 'external session title to render');
       await flush();
       expect(output).toContain('External title');
       expect(output).not.toContain('Original title');
@@ -279,7 +290,8 @@ describe('app workspace startup', () => {
       expect(loadSessionSnapshot(first.id)).toBeNull();
       stdin.write('\u000e');
       await flush();
-      await new Promise(resolve => setTimeout(resolve, 1650));
+      await untilOutput(() => !output.split('\n').some(line => line.split('│')[0]?.includes('Newest title')),
+        'deleted session to leave the sidebar');
       await flush();
       expect(loadSessionSnapshots().snapshots.map(snapshot => snapshot.id)).toEqual([second.id]);
       expect(loadSessionRevision(second.id)).toBe(revision);
@@ -287,7 +299,7 @@ describe('app workspace startup', () => {
       app.unmount(); stdin.destroy(); stdout.destroy(); update.mockRestore();
     }
     expect(loadSessionSnapshot(first.id)).toBeNull();
-  });
+  }, 12_000);
 
   test.each(['exit', 'cleanup'])('%s saves a final stream chunk before its throttled notification', async finalSave => {
     const first = new Session({ id: 'streaming-final', name: 'Streaming', directory: settingsDirectory,

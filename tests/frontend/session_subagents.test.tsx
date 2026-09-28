@@ -85,6 +85,17 @@ test('the worker strip follows only the displayed session’s workers', async ()
     const box = lines.map(line => line.includes('╰')).lastIndexOf(true);
     return lines.slice(box + 1, -1).join('\n');
   };
+  const untilOutput = (check: () => boolean, description: string) => new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => { stdout.off('data', onData); reject(new Error(`Timed out waiting for ${description}`)); }, 3_000);
+    const onData = () => {
+      if (!check()) return;
+      clearTimeout(timeout);
+      stdout.off('data', onData);
+      resolve();
+    };
+    stdout.on('data', onData);
+    onData();
+  });
   try {
     await flush();
     expect(output).not.toContain('sub-');
@@ -133,7 +144,7 @@ test('the worker strip follows only the displayed session’s workers', async ()
     expect(output).not.toContain('Task: Work');
     // A second on, the line is gone and the strip belongs to the run still
     // working. The record stays: `/agents` lists it until it is dismissed.
-    await new Promise(resolve => setTimeout(resolve, 1_200));
+    await untilOutput(() => !strip().includes(mine.id) && strip().includes(alsoMine.id), 'finished worker to leave the strip');
     await flush();
     expect(strip()).not.toContain(mine.id);
     expect(strip()).toContain(alsoMine.id);
