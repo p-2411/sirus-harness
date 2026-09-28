@@ -1,8 +1,9 @@
 import SwiftUI
 
 // A waiting approval or question, standing where the input bar stands, as
-// the TUI's framed cards do: who is asking in the top edge, what for, and
-// the answers. Amber for an approval, platinum for a question.
+// the TUI's framed cards do: who is asking at the top, what for, and the
+// answers. The conversation draws it on glass that morphs out of the
+// composer's. Amber for an approval, platinum for a question.
 struct RequestCard: View {
     let request: Request
     let waiting: Int
@@ -11,9 +12,9 @@ struct RequestCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Hairline(color: tone.opacity(0.55))
-            HStack(spacing: 6) {
-                Text(request.kind == .approval ? "⚠" : request.kind == .question ? "?" : "·")
+            HStack(spacing: 7) {
+                Image(systemName: symbol)
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(tone)
                 Text(request.requester).fontWeight(.semibold).foregroundStyle(Palette.platinum)
                 Text(verb).foregroundStyle(Palette.muted)
@@ -21,8 +22,8 @@ struct RequestCard: View {
                 if waiting > 0 { Text("\(waiting) more").foregroundStyle(Palette.subtle) }
             }
             .font(.mono(12))
-            .padding(.horizontal, 22)
-            .padding(.top, 14)
+            .padding(.horizontal, 20)
+            .padding(.top, 18)
             switch request.kind {
             case .approval: ApprovalBody(request: request, client: client, names: names)
             case .question: QuestionBody(request: request, client: client)
@@ -33,14 +34,20 @@ struct RequestCard: View {
                     }
                     Text("Answer this in Sirus on your Mac.").font(.system(size: 14)).foregroundStyle(Palette.muted)
                 }
-                .padding(.horizontal, 22)
-                .padding(.vertical, 14)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 16)
             }
         }
-        .background(Palette.ground)
     }
 
     private var tone: Color { request.kind == .approval ? Palette.amber : Palette.platinum }
+    private var symbol: String {
+        switch request.kind {
+        case .approval: "exclamationmark.triangle.fill"
+        case .question: "questionmark.bubble.fill"
+        case .other: "ellipsis.bubble.fill"
+        }
+    }
     private var verb: String {
         switch request.kind {
         case .approval: "wants to"
@@ -87,39 +94,43 @@ private struct ApprovalBody: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 22)
+                .padding(.horizontal, 20)
                 .padding(.vertical, 12)
             }
             if let failure {
                 Text(failure).font(.system(size: 13)).foregroundStyle(Palette.red)
-                    .padding(.horizontal, 22).padding(.bottom, 8)
+                    .padding(.horizontal, 20).padding(.bottom, 8)
             }
-            ForEach(request.options) { option in
-                Hairline().padding(.leading, 22)
-                Button { choose(option) } label: {
-                    HStack(spacing: 12) {
-                        Text(option.label)
-                            .font(.system(size: 16, weight: option.kind == "allow_once" ? .medium : .regular))
-                            .foregroundStyle(option.rejects ? Palette.red : Palette.white)
-                            .multilineTextAlignment(.leading)
-                        Spacer(minLength: 8)
-                        if busy == option.id {
-                            ProgressView().controlSize(.small).tint(Palette.muted)
-                        } else {
-                            Image(systemName: glyph(option.kind))
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundStyle(option.rejects ? Palette.red.opacity(0.8) : Palette.muted)
+            // The first option that allows is the prominent one.
+            VStack(spacing: 8) {
+                ForEach(request.options) { option in
+                    let primary = option.id == request.options.first(where: { !$0.rejects })?.id
+                    Button { choose(option) } label: {
+                        HStack(spacing: 10) {
+                            if busy == option.id {
+                                ProgressView().controlSize(.small).tint(primary ? Palette.ground : Palette.muted)
+                            } else {
+                                Image(systemName: glyph(option.kind)).font(.system(size: 14, weight: .semibold))
+                            }
+                            Text(option.label)
+                                .font(.system(size: 16, weight: primary ? .semibold : .medium))
+                                .multilineTextAlignment(.leading)
                         }
+                        .foregroundStyle(primary ? Palette.ground : option.rejects ? Palette.red : Palette.white)
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity, minHeight: 48)
+                        .background(Capsule().fill(primary ? AnyShapeStyle(Palette.platinum) : AnyShapeStyle(.white.opacity(0.08))))
+                        .contentShape(Capsule())
                     }
-                    .padding(.horizontal, 22)
-                    .padding(.vertical, 14)
-                    .contentShape(Rectangle())
+                    .buttonStyle(RowPress())
+                    .disabled(busy != nil)
                 }
-                .buttonStyle(RowPress())
-                .disabled(busy != nil)
             }
+            .padding(.horizontal, 12)
+            .padding(.top, 4)
         }
-        .padding(.bottom, 4)
+        .padding(.bottom, 12)
         .sensoryFeedback(.impact(weight: .medium), trigger: answered)
     }
 
@@ -172,33 +183,42 @@ private struct QuestionBody: View {
                     ForEach(request.fields) { field in fieldView(field) }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 22)
+                .padding(.horizontal, 20)
                 .padding(.vertical, 12)
             }
             if let failure {
                 Text(failure).font(.system(size: 13)).foregroundStyle(Palette.red)
-                    .padding(.horizontal, 22).padding(.bottom, 8)
+                    .padding(.horizontal, 20).padding(.bottom, 8)
             }
-            HStack {
-                Button("Decline") { send(.decline) }
-                    .foregroundStyle(Palette.muted)
+            HStack(spacing: 8) {
+                Button { send(.decline) } label: {
+                    Text("Decline")
+                        .foregroundStyle(Palette.muted)
+                        .padding(.horizontal, 20)
+                        .frame(minHeight: 44)
+                        .background(Capsule().fill(.white.opacity(0.08)))
+                        .contentShape(Capsule())
+                }
                 Spacer()
                 if busy { ProgressView().controlSize(.small).tint(Palette.muted) }
                 if !instant || otherOn.contains(request.fields.first?.key ?? "") {
                     Button(action: submit) {
                         Text("Send")
                             .foregroundStyle(Palette.ground)
-                            .padding(.horizontal, 18)
-                            .padding(.vertical, 8)
+                            .padding(.horizontal, 26)
+                            .frame(minHeight: 44)
                             .background(Capsule().fill(Palette.platinum))
+                            .contentShape(Capsule())
                     }
                     .disabled(busy || !answerable)
                 }
             }
-            .font(.mono(13, .medium))
+            .buttonStyle(RowPress())
+            .font(.system(size: 16, weight: .semibold))
             .disabled(busy)
-            .padding(.horizontal, 22)
-            .padding(.vertical, 10)
+            .padding(.horizontal, 12)
+            .padding(.top, 4)
+            .padding(.bottom, 12)
         }
         .sensoryFeedback(.impact(weight: .medium), trigger: answered)
     }
@@ -268,16 +288,16 @@ private struct QuestionBody: View {
 
     private func entry(_ key: String, prompt: String, secret: Bool = false, keyboard: UIKeyboardType = .default) -> some View {
         let binding = Binding(get: { typed[key] ?? "" }, set: { typed[key] = $0; failure = nil })
-        return VStack(spacing: 8) {
-            Group {
-                if secret { SecureField("", text: binding, prompt: Text(prompt).foregroundStyle(Palette.subtle)) }
-                else { TextField("", text: binding, prompt: Text(prompt).foregroundStyle(Palette.subtle), axis: .vertical) }
-            }
-            .font(.system(size: 16))
-            .foregroundStyle(Palette.white)
-            .keyboardType(keyboard)
-            Hairline()
+        return Group {
+            if secret { SecureField("", text: binding, prompt: Text(prompt).foregroundStyle(Palette.subtle)) }
+            else { TextField("", text: binding, prompt: Text(prompt).foregroundStyle(Palette.subtle), axis: .vertical) }
         }
+        .font(.system(size: 16))
+        .foregroundStyle(Palette.white)
+        .keyboardType(keyboard)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(.white.opacity(0.07)))
         .padding(.top, 4)
     }
 

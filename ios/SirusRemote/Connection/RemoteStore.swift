@@ -12,7 +12,8 @@ import Observation
     private(set) var problem: String?
     var openSession: String?
 
-    @ObservationIgnored private var participants: [String: String] = [:]
+    // Observed, so a tab chosen in the conversation switches it at once.
+    private var participants: [String: String] = [:]
     @ObservationIgnored private var openedAtLaunch = false
     @ObservationIgnored private var device: (token: String, environment: String)?
     @ObservationIgnored private var monitor: NWPathMonitor?

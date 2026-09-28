@@ -60,6 +60,15 @@ struct Pulse: View {
     }
 }
 
+// Rows darken a touch under the finger instead of flashing grey.
+struct RowPress: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.55 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
 // The permission mode in the TUI's words ("ask for approval", "auto
 // approve", "bypass permissions"), coloured as its status row colours it:
 // muted when Sirus asks, amber when the vendor's reviewer decides, red when

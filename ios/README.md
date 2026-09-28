@@ -6,7 +6,8 @@ protocol is in `docs/superpowers/specs/2026-09-28-remote-control-design.md`.
 
 ## Setup
 
-1. Open `SirusRemote.xcodeproj` in Xcode 16 or later (iOS 18 target).
+1. Open `SirusRemote.xcodeproj` in Xcode 26 or later (iOS 26 target: the
+   interface is Liquid Glass throughout).
 2. Under Signing & Capabilities, choose your team and change the bundle id
    from `com.sirus.remote` to one of yours. Keep the Push Notifications
    capability.
@@ -31,3 +32,7 @@ Face ID first; the answer goes straight to Sirus without opening the app.
 
 The simulator reaches the Mac's loopback. Start Sirus with
 `SIRUS_REMOTE_LOOPBACK=1`, enter `/rc`, and connect the app to `127.0.0.1`.
+
+Launch arguments set the interface up for screenshots without tapping:
+`-host <name>` (an empty name shows setup), `-sidebarExpanded YES`, and in
+debug builds `-composerDraft <text>` and `-composerFocused YES`.

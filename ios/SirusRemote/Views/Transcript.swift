@@ -2,11 +2,13 @@ import SwiftUI
 
 // The rows, kept to the bottom while the reader is at the bottom and left
 // alone once they scroll up to read. Rows are replaced in place as they
-// stream, so nothing above the reader moves.
+// stream, so nothing above the reader moves. `leading` keeps them clear of
+// the sidebar rail.
 struct Transcript: View {
     let rows: [Row]
     let names: Set<String>
     let loading: Bool
+    let leading: CGFloat
     @State private var position = ScrollPosition(edge: .bottom)
     @State private var pinned = true
 
@@ -24,11 +26,13 @@ struct Transcript: View {
                         .equatable()
                 }
             }
-            .padding(.horizontal, 22)
+            .padding(.leading, leading)
+            .padding(.trailing, 20)
             .padding(.top, 4)
-            .padding(.bottom, 20)
+            .padding(.bottom, 16)
         }
         .scrollPosition($position)
+        .scrollEdgeEffectStyle(.soft, for: .vertical)
         .defaultScrollAnchor(.bottom)
         .scrollDismissesKeyboard(.interactively)
         .onScrollGeometryChange(for: Metrics.self) { geometry in
@@ -44,11 +48,14 @@ struct Transcript: View {
             }
         }
         .overlay {
-            if loading {
-                Pulse(color: Palette.subtle, size: 7)
-            } else if rows.isEmpty {
-                Text("Nothing here yet.").font(.system(size: 15)).foregroundStyle(Palette.subtle)
+            Group {
+                if loading {
+                    Pulse(color: Palette.subtle, size: 7)
+                } else if rows.isEmpty {
+                    Text("Nothing here yet.").font(.system(size: 15)).foregroundStyle(Palette.subtle)
+                }
             }
+            .padding(.leading, leading - 20)
         }
         .overlay(alignment: .bottomTrailing) {
             if !pinned {
@@ -57,14 +64,16 @@ struct Transcript: View {
                     withAnimation(.smooth(duration: 0.3)) { position.scrollTo(edge: .bottom) }
                 } label: {
                     Image(systemName: "arrow.down")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(Palette.platinum)
-                        .frame(width: 34, height: 34)
-                        .background(Circle().fill(Palette.ground))
-                        .overlay(Circle().strokeBorder(Palette.line, lineWidth: 1))
+                        .frame(width: 44, height: 44)
+                        .contentShape(Circle())
                 }
+                .buttonStyle(.plain)
+                .glassEffect(.regular.interactive(), in: .circle)
                 .accessibilityLabel("Jump to latest")
-                .padding(16)
+                .padding(.trailing, 14)
+                .padding(.bottom, 10)
                 .transition(.opacity.combined(with: .scale(scale: 0.85)))
             }
         }
@@ -148,8 +157,7 @@ private struct ToolLine: View {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Pulse(color: dot, active: tool.state == .running, size: 6)
                         .alignmentGuide(.firstTextBaseline) { $0[.bottom] + 1 }
-                    (Text(tool.title).foregroundStyle(tool.state == .running ? Palette.text : Palette.muted)
-                        + Text(ending.map { " · \($0)" } ?? "").foregroundStyle(endingColor))
+                    Text("\(Text(tool.title).foregroundStyle(tool.state == .running ? Palette.text : Palette.muted))\(Text(ending.map { " · \($0)" } ?? "").foregroundStyle(endingColor))")
                         .font(.mono(12.5))
                         .lineLimit(open ? nil : 2)
                         .multilineTextAlignment(.leading)
@@ -243,12 +251,14 @@ struct BlockView: View {
     let names: Set<String>
     let color: Color
     var compact = false
+    // Prose follows Dynamic Type; compact detail and chrome stay put.
+    @ScaledMetric(relativeTo: .body) private var prose: CGFloat = 16
 
     var body: some View {
         switch block.kind {
         case .heading:
             Text(inline(block.text))
-                .font(.system(size: block.level <= 1 ? 20 : block.level == 2 ? 18 : 16, weight: .semibold))
+                .font(.system(size: prose + (block.level <= 1 ? 4 : block.level == 2 ? 2 : 0), weight: .semibold))
                 .foregroundStyle(Palette.white)
                 .padding(.top, 4)
         case .code:
@@ -263,7 +273,7 @@ struct BlockView: View {
                 ForEach(Array(block.items.enumerated()), id: \.offset) { index, item in
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
                         Text(block.ordered ? "\(index + 1)." : "•")
-                            .font(block.ordered ? .mono(compact ? 12 : 14) : .system(size: compact ? 12 : 15))
+                            .font(block.ordered ? .mono(compact ? 12 : prose - 2) : .system(size: compact ? 12 : prose - 1))
                             .foregroundStyle(Palette.subtle)
                             .frame(minWidth: 12, alignment: .leading)
                         prose(item)
@@ -281,7 +291,7 @@ struct BlockView: View {
         let rendered = inline(text)
         let protectedCode = String(rendered.characters).contains("\u{2060}")
         let label = Text(rendered)
-            .font(compact ? .mono(12) : .system(size: 16))
+            .font(compact ? .mono(12) : .system(size: prose))
             .lineSpacing(compact ? 2 : 4)
             .foregroundStyle(color)
         if protectedCode {
@@ -319,7 +329,7 @@ struct BlockView: View {
         }
         for run in text.runs where run.inlinePresentationIntent?.contains(.code) == true {
             text[run.range].foregroundColor = Palette.platinum
-            text[run.range].font = .mono(compact ? 12 : 14.5)
+            text[run.range].font = .mono(compact ? 12 : prose - 1.5)
         }
         guard source.contains("@") else { return text }
         let characters = Array(text.characters)

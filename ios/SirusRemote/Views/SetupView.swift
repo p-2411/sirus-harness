@@ -35,7 +35,9 @@ struct SetupView: View {
                 .font(.mono(10, .medium))
                 .tracking(1.5)
                 .foregroundStyle(Palette.subtle)
-            HStack(spacing: 12) {
+                .padding(.leading, 20)
+                .padding(.bottom, 10)
+            HStack(spacing: 8) {
                 TextField("", text: $host, prompt: Text("mac.tailnet.ts.net").foregroundStyle(Palette.subtle))
                     .font(.mono(16))
                     .foregroundStyle(Palette.white)
@@ -47,20 +49,26 @@ struct SetupView: View {
                     .onSubmit(connect)
                 Button(action: connect) {
                     Image(systemName: "arrow.right")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.system(size: 16, weight: .bold))
                         .foregroundStyle(canConnect ? Palette.ground : Palette.subtle)
-                        .frame(width: 36, height: 36)
-                        .background(Circle().fill(canConnect ? Palette.platinum : Palette.line.opacity(0.6)))
+                        .frame(width: 40, height: 40)
+                        .background(Circle().fill(canConnect ? Palette.platinum : .white.opacity(0.08)))
+                        .frame(width: 44, height: 44)
+                        .contentShape(Circle())
                 }
+                .buttonStyle(.plain)
                 .disabled(!canConnect)
                 .accessibilityLabel("Connect")
             }
-            .padding(.vertical, 12)
-            Hairline(color: typing ? Palette.muted : Palette.line)
+            .padding(.leading, 20)
+            .padding(.trailing, 4)
+            .padding(.vertical, 4)
+            .glassEffect(.regular.interactive(), in: .capsule)
+            .animation(.easeOut(duration: 0.15), value: canConnect)
             Group {
                 if store.scanning {
                     HStack(spacing: 8) {
-                        Pulse(color: Palette.amber)
+                        ProgressView().controlSize(.small).tint(Palette.amber)
                         Text("Looking for Sirus…").foregroundStyle(Palette.muted)
                     }
                     .font(.mono(12))
@@ -70,12 +78,11 @@ struct SetupView: View {
             }
             .frame(minHeight: 44, alignment: .topLeading)
             .padding(.top, 14)
+            .padding(.horizontal, 20)
         }
-        .padding(.horizontal, 32)
+        .padding(.horizontal, 24)
         .padding(.bottom, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .sirusScreen()
-        .toolbar(.hidden, for: .navigationBar)
         .animation(.easeOut(duration: 0.2), value: store.scanning)
     }
 
