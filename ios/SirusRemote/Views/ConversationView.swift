@@ -647,10 +647,13 @@ private struct ModeCaption: View {
     // stay where they are.
     var body: some View {
         ViewThatFits(in: .horizontal) {
+            // The controls take their whole width first, the gauge what is
+            // left: it would otherwise take a share of the line as a spacer
+            // does, and cut the mode short beside empty room.
             HStack(spacing: 6) {
-                mode(height: 44)
+                mode(height: 44).layoutPriority(1)
                 gaugeSlot
-                agent(height: 44)
+                agent(height: 44).layoutPriority(1)
             }
             VStack(spacing: 0) {
                 ViewThatFits(in: .horizontal) {
