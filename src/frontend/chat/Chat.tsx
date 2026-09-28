@@ -23,6 +23,7 @@ import { Spinner } from './Spinner';
 import { InputBar, createInputDraftState, type InputDraftState, type InputMode } from './InputBar';
 import { AgentTabs, type AgentActivity } from './AgentTabs';
 import { AgentHistory, type HistoryPosition } from './AgentHistory';
+import { historyParts } from './history';
 import { InputFeedback } from './InputRows';
 import {
   commandMenu,
@@ -155,8 +156,19 @@ export function currentPlans(
 // Room for a tool title in the status line before it is cut.
 const PHASE_TITLE_LENGTH = 40;
 
-function turnThought(messages: readonly Message[]): string | null {
+function turnMessage(messages: readonly Message[]): Message | undefined {
   const last = messages.at(-1);
+  if (last?.role === 'assistant') return last;
+  // A steered prompt follows the assistant entry in the stored timeline;
+  // its continuing reply follows the prompt in the displayed history.
+  if (last?.injectedAt) {
+    const continuation = historyParts(messages).at(-1)?.message;
+    if (continuation?.role === 'assistant') return messages.find(message => message.seq === continuation.seq);
+  }
+  return undefined;
+}
+
+function turnThought(last: Message | undefined): string | null {
   if (last?.role !== 'assistant') return null;
   const tail = last.content.at(-1);
   if (tail?.type !== 'thought' || !tail.text.trim()) return null;
@@ -168,20 +180,20 @@ function turnThought(messages: readonly Message[]): string | null {
 // the turn is waiting on, text arriving, or nothing visible yet. A call is
 // named the way its row names it.
 export function turnPhase(messages: readonly Message[], directory?: string): string {
-  const last = messages[messages.length - 1];
+  const last = turnMessage(messages);
   if (!last || last.role !== 'assistant') return 'thinking';
   const content = visibleContent(last.content);
   const running = [...content]
     .reverse()
     .find((block): block is ToolCallBlock => block.type === 'tool_call' && !finished(block));
   if (running) return `running ${toolLine(running, PHASE_TITLE_LENGTH, directory)}`;
-  const tail = content[content.length - 1];
-  if (tail?.type === 'text' && tail.text) return 'writing';
-  const thought = turnThought(messages);
+  const thought = turnThought(last);
   if (thought) {
     const { title, body } = thoughtHeading(terminalText(thought));
     return title ?? singleLine(body);
   }
+  const tail = content[content.length - 1];
+  if (tail?.type === 'text' && tail.text && last.content.at(-1)?.type !== 'thought') return 'writing';
   return 'thinking';
 }
 
@@ -208,8 +220,8 @@ export function TurnStatus({ messages, directory, awaitingApproval, awaitingAnsw
     return () => clearInterval(timer);
   }, []);
   const waitingOnUser = awaitingApproval || awaitingAnswer;
-  const thought = waitingOnUser || compacting ? null : turnThought(messages);
-  const last = messages.at(-1);
+  const last = turnMessage(messages);
+  const thought = waitingOnUser || compacting ? null : turnThought(last);
   const thoughtKey = thought && last ? `${last.seq}:${last.content.length}` : null;
   const [expandedThought, setExpandedThought] = useState<string | null>(null);
   const expanded = thoughtKey !== null && expandedThought === thoughtKey;
@@ -748,7 +760,6 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         directory={currSession.getDirectory()}
         participantColors={participantColors}
         isMessageLive={message => currSession.isMessageLive(message)}
-        hideThoughtFor={isWorking ? messages.at(-1)?.seq : undefined}
       />
       {isWorking && (
         <TurnStatus

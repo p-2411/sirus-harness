@@ -10,7 +10,6 @@ import {
 	type NoticeBlock,
 	type PlanEntry,
 	type TextBlock,
-	type ThoughtBlock,
 	type ToolCallBlock,
 	type ToolCallStatus,
 } from '../../agent_runtime/types';
@@ -142,13 +141,11 @@ function groupable(block: MessageBlock): block is ToolCallBlock {
 	return block.type === 'tool_call' && !isSpawnAgent(block) && !isPlanCall(block);
 }
 
-// What of a reply the chat shows: everything, in the order it came, except a
-// thought with nothing in it, which would be a blank row, and a routine review
-// by Codex's reviewer, whose approved action shows as a row of its own.
+// Thoughts belong to the live turn status, never the message history.
+// Routine reviews are also hidden: their approved action has its own row.
 export function visibleContent(content: readonly MessageBlock[]): MessageBlock[] {
-	return content.filter(block => block.type === 'thought'
-		? block.text.trim() !== ''
-		: block.type !== 'tool_call' || !isRoutineReview(block));
+	return content.filter(block => block.type !== 'thought'
+		&& (block.type !== 'tool_call' || !isRoutineReview(block)));
 }
 
 /** Collapse only adjacent tool calls, and only two or more of them. */
@@ -207,7 +204,7 @@ export function PlanChecklist({ entries }: { entries: readonly PlanEntry[] }) {
 }
 
 function isActivity(segment: MessageSegment | undefined): boolean {
-	return segment !== undefined && ['tool_call', 'tool_run', 'plan', 'notice', 'thought'].includes(segment.type);
+	return segment !== undefined && ['tool_call', 'tool_run', 'plan', 'notice'].includes(segment.type);
 }
 
 // Keep a message's opened rows with its original entry. Offscreen copy
@@ -562,40 +559,6 @@ export function thoughtHeading(text: string): { title: string | null; body: stri
 	return { title: null, body: trimmed };
 }
 
-// How long a finished thought took, as Claude Code says it. A thought from
-// before thoughts were timed just says it happened.
-function thoughtLength(block: ThoughtBlock): string {
-	if (block.startedAt === undefined || block.endedAt === undefined) return 'Thought';
-	return `Thought for ${formatElapsed(Math.max(1000, block.endedAt - block.startedAt))}`;
-}
-
-// Reasoning the runtime streamed: "Thinking" while it is being written, then
-// "Thought for 3s", on one line that opens to the whole thought. It stays
-// where it happened, among the rows of the calls around it.
-function ThoughtRow({ block, live, row }: { block: ThoughtBlock; live: boolean; row: string }) {
-	const [expanded, toggle] = useRowExpansion(row, false);
-	const ref = useRef<DOMElement>(null);
-	useClickable(ref, toggle);
-	const { title, body } = thoughtHeading(terminalText(block.text));
-	// Live, it names what the model is working through, as the turn status
-	// row does: the thought's title, or failing that its opening words.
-	const label = live && block.endedAt === undefined ? `Thinking · ${title ?? singleLine(body)}` : thoughtLength(block);
-	return (
-		<Box flexDirection="column" paddingX={1}>
-			<Box ref={ref}>
-				<Text color={theme.textSubtle} wrap="truncate-end">
-					{'  '}∴ {label}
-				</Text>
-			</Box>
-			{expanded && body && (
-				<Box marginLeft={4}>
-					<WrappedText color={theme.textSubtle}>{body}</WrappedText>
-				</Box>
-			)}
-		</Box>
-	);
-}
-
 // The runtime folded its own conversation here: one rule across the message,
 // and on a click the summary it reported, since that is all the participant
 // now knows of the conversation above it.
@@ -721,8 +684,6 @@ interface ChatMessageProps {
 	participantColors?: ParticipantColors;
 	// The reply is still being written.
 	live?: boolean;
-	// The current thought is already shown in the turn status row.
-	hideThought?: boolean;
 	// The last part of a reply a steered message split; the whole turn's
 	// footer goes under it.
 	final?: boolean;
@@ -764,11 +725,10 @@ export function ChatMessage(props: ChatMessageProps) {
 	return <MessageBody {...props} entry={props.message} message={messageSnapshot(props.message)} />;
 }
 
-export function ChatHistory({ messages, participants, isMessageLive, hideThoughtFor, ...props }: {
+export function ChatHistory({ messages, participants, isMessageLive, ...props }: {
 	messages: readonly Message[];
 	participants: readonly { name: string; model: string }[];
 	isMessageLive: (message: Message) => boolean;
-	hideThoughtFor?: number;
 	sessionId: string;
 	directory?: string;
 	participantColors: ParticipantColors;
@@ -782,7 +742,6 @@ export function ChatHistory({ messages, participants, isMessageLive, hideThought
 		message: messageSnapshot(message),
 		model: message.model ?? (message.role === 'assistant' ? models.get((message.participant ?? DEFAULT_PARTICIPANT).toLocaleLowerCase()) : undefined),
 		live: final && liveMessages.has(message.seq),
-		hideThought: message.seq === hideThoughtFor,
 		final,
 	}));
 	return <HistoryBody {...props} entries={entries} />;
@@ -791,7 +750,7 @@ export function ChatHistory({ messages, participants, isMessageLive, hideThought
 // A draft edit leaves the entire history subtree alone; streaming only
 // passes the changed entries through the message-level boundary below.
 const HistoryBody = memo(function HistoryBody({ entries, ...props }: {
-	entries: readonly (Pick<MessageBodyProps, 'entry' | 'message' | 'model' | 'live' | 'hideThought' | 'final'> & { key: string })[];
+	entries: readonly (Pick<MessageBodyProps, 'entry' | 'message' | 'model' | 'live' | 'final'> & { key: string })[];
 	sessionId: string;
 	directory?: string;
 	participantColors: ParticipantColors;
@@ -804,17 +763,16 @@ const HistoryBody = memo(function HistoryBody({ entries, ...props }: {
 	&& previous.entries.every((entry, index) => {
 		const other = next.entries[index]!;
 		return entry.key === other.key && entry.entry === other.entry && entry.model === other.model && entry.live === other.live
-			&& entry.hideThought === other.hideThought && entry.final === other.final && sameMessage(entry.message, other.message);
+			&& entry.final === other.final && sameMessage(entry.message, other.message);
 	}));
 
-function SegmentView({ block, previous, participantColors, sessionId, directory, live, row }: {
+function SegmentView({ block, previous, participantColors, sessionId, directory, row }: {
 	row: string;
 	block: MessageSegment;
 	previous?: MessageSegment;
 	participantColors?: ParticipantColors;
 	sessionId?: string;
 	directory?: string;
-	live: boolean;
 }) {
 	switch (block.type) {
 		case 'text':
@@ -827,8 +785,6 @@ function SegmentView({ block, previous, participantColors, sessionId, directory,
 			);
 		case 'image':
 			return <ImageLine image={block} />;
-		case 'thought':
-			return <ThoughtRow block={block} live={live} row={row} />;
 		case 'plan':
 			return <PlanRow call={block.call} />;
 		case 'notice':
@@ -850,17 +806,11 @@ const MessageBody = memo(function MessageBody({
 	sessionId,
 	directory,
 	live = false,
-	hideThought = false,
 	final = true,
 }: MessageBodyProps) {
 	const isUser = message.role === "user";
 	const participantName = message.participant ?? DEFAULT_PARTICIPANT;
-	// While the turn status row shows the thought in hand, the history leaves
-	// it out; the thoughts before it stay where they happened.
-	const content = hideThought && live
-		? message.content.filter((block, index) => !(block.type === 'thought' && index === message.content.length - 1 && block.endedAt === undefined))
-		: message.content;
-	const segments = isUser ? [] : messageSegments(visibleContent(content));
+	const segments = isUser ? [] : messageSegments(visibleContent(message.content));
 	if (!isUser && message.content.length > 0 && segments.length === 0) return null;
 	return (
 		<RowScope.Provider value={entry}>
@@ -885,7 +835,7 @@ const MessageBody = memo(function MessageBody({
 			{isUser && <UserPrompt message={message} participantColors={participantColors} />}
 			{segments.map((block, index) => {
 				const row = <SegmentView key={index} row={`${block.type}:${index}`} block={block} previous={segments[index - 1]} participantColors={participantColors}
-					sessionId={sessionId} directory={directory} live={live} />;
+					sessionId={sessionId} directory={directory} />;
 				if (!isActivity(block)) return row;
 				const previous = segments[index - 1];
 				const next = segments[index + 1];
@@ -902,7 +852,6 @@ const MessageBody = memo(function MessageBody({
 	&& previous.directory === next.directory
 	&& previous.model === next.model
 	&& previous.live === next.live
-	&& previous.hideThought === next.hideThought
 	&& previous.final === next.final
 	&& sameColors(previous.participantColors, next.participantColors)
 	&& sameMessage(previous.message, next.message));

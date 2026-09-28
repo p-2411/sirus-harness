@@ -155,6 +155,12 @@ wrote (`Message.usage`), whose output count its footer shows; a participant's to
 `/usage` show, is the sum over its entries (`getTurnUsage`), a figure of the breakdown only
 when every turn reported one.
 
+While a turn runs, `TurnStatus` shows the current thought beside its spinner and
+elapsed time; clicking the line reveals its prose. Thoughts stay in the stored
+transcript, but `ChatMessage` excludes them from history, including completed
+thought durations and restored sessions. After steering, the status follows the
+assistant's continuation in the displayed history.
+
 ## Participants and runtimes
 
 `agent.ts` is one agent in a session: its name and model, its transcript, the credential its

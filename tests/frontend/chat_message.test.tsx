@@ -83,12 +83,12 @@ describe('chat message', () => {
       message.content.push({ type: 'thought', text: '**Still thinking**' });
       app.rerender(view(true));
       await app.waitUntilRenderFlush();
-      expect(frames.at(-1)).toContain('Thinking · Still thinking');
+      expect(frames.at(-1)).not.toContain('Still thinking');
       (message.content.at(-1) as { endedAt?: number }).endedAt = Date.now();
       app.rerender(view());
       await app.waitUntilRenderFlush();
       expect(frames.at(-1)).not.toContain('Thinking');
-      expect(frames.at(-1)).toContain('∴ Thought');
+      expect(frames.at(-1)).not.toContain('∴ Thought');
 
       call.output = 'Worker finished the review';
       app.rerender(view());
@@ -626,16 +626,17 @@ describe('thinking', () => {
     content: [{ type: 'thought' as const, text: 'Weighing\nthe options carefully.' }],
   };
 
-  test('keeps a finished thought as one line that says how long it took', () => {
+  test('keeps timed and untimed thoughts out of live and restored message history', () => {
     const timed = { ...message, content: [{ ...message.content[0], startedAt: 1_000, endedAt: 4_400 }] };
-    const output = stripAnsi(renderToString(<ChatMessage message={timed} />, { columns: 120 }));
-    expect(output).toContain('∴ Thought for 3s');
-    expect(output).not.toContain('Weighing');
-    // A thought saved before thoughts were timed says only that it happened.
-    expect(stripAnsi(renderToString(<ChatMessage message={message} />))).toContain('∴ Thought\n');
+    for (const entry of [message, timed]) {
+      for (const live of [true, false]) {
+        const output = stripAnsi(renderToString(<ChatMessage message={entry} live={live} />, { columns: 120 }));
+        expect(output.trim()).toBe('');
+      }
+    }
   });
 
-  test('says what the model is thinking about while it does, and keeps every thought in its place', () => {
+  test('shows tools and replies without inline reasoning or thought durations', () => {
     const content: MessageBlock[] = [
       { type: 'thought', text: 'Earlier step', startedAt: 0, endedAt: 2_000 },
       calls[0]!,
@@ -644,20 +645,22 @@ describe('thinking', () => {
     const output = () => stripAnsi(renderToString(
       <ChatMessage message={{ ...message, content }} live />, { columns: 120 },
     ));
-    expect(output()).toContain('Thinking · Checking the result');
-    expect(output()).toContain('∴ Thought for 2s');
+    expect(output()).toContain('one.ts');
+    expect(output()).not.toContain('Thinking');
+    expect(output()).not.toContain('Thought');
+    expect(output()).not.toContain('Earlier step');
     expect(output()).not.toContain('Details of the check');
-    expect(output().indexOf('Thought for 2s')).toBeLessThan(output().indexOf('one.ts'));
     (content[2] as { endedAt?: number }).endedAt = 5_000;
     content.push({ type: 'text', text: 'The final answer.' });
-    expect(output()).toContain('∴ Thought for 3s');
+    expect(output()).not.toContain('Thought');
+    expect(output()).not.toContain('Checking the result');
     expect(output()).toContain('The final answer.');
   });
 
-  test('never draws an empty thought', () => {
+  test.each(['\n\n', 'Checking the next step'])('groups tool calls across hidden thoughts: %j', text => {
     const content: MessageBlock[] = [
       calls[0]!,
-      { type: 'thought', text: '\n\n' },
+      { type: 'thought', text },
       calls[1]!,
     ];
     const output = stripAnsi(renderToString(
@@ -666,32 +669,6 @@ describe('thinking', () => {
     expect(output).not.toContain('∴');
     // The calls around it group as though it was never there.
     expect(output).toContain('Read 1 file, ran 1 command');
-  });
-
-  test('opens a thought on a click', async () => {
-    const stdout = Object.assign(new PassThrough(), { columns: 120 }) as unknown as NodeJS.WriteStream;
-    const frames: string[] = [];
-    stdout.on('data', data => frames.push(stripAnsi(data.toString())));
-    const app = render(<ChatMessage message={message} live />, {
-      stdout, debug: true, patchConsole: false, exitOnCtrlC: false,
-    });
-    try {
-      await app.waitUntilRenderFlush();
-      // One line, named by its opening words, until it is opened.
-      expect(frames.at(-1)).toContain('Thinking · Weighing the options carefully.');
-      expect(frames.at(-1)).not.toMatch(/^\s+the options carefully\.$/m);
-      await new Promise<void>(resolve => setImmediate(resolve));
-      const row = cellOf(frames.at(-1)!, 'Thinking');
-      expect(pressAt(row)).toBe(true);
-      expect(releaseAt(row)).toBe(true);
-      await new Promise<void>(resolve => setImmediate(resolve));
-      await app.waitUntilRenderFlush();
-      expect(frames.at(-1)).toMatch(/^\s+Weighing$/m);
-      expect(frames.at(-1)).toMatch(/^\s+the options carefully\.$/m);
-    } finally {
-      app.unmount();
-      await app.waitUntilExit();
-    }
   });
 });
 
@@ -873,15 +850,13 @@ describe('text from outside Sirus', () => {
     expect(stripAnsi(output)).not.toContain('50%');
     expect(stripAnsi(output)).not.toContain('elsewhere.example');
   };
-  // A thought shows only while it is the reply's current step.
   const rendered = (content: MessageBlock[]) => renderToString(
     <ChatMessage message={{ seq: 0, role: 'assistant', content }} sessionId="session" live />,
     { columns: 140 },
   );
 
-  test('reaches the terminal as plain text in replies, thoughts, tool rows, plans and reports', () => {
+  test('reaches the terminal as plain text in replies, tool rows, plans and reports', () => {
     expectInert(rendered([{ type: 'text', text: hostile }]));
-    expectInert(rendered([{ type: 'thought', text: hostile }]));
     expectInert(rendered([toolCall({ id: 'hostile-title', kind: 'execute', title: hostile })]));
     expectInert(renderToString(<PlanChecklist entries={[{ content: hostile, status: 'pending' }]} />, { columns: 140 }));
     const run = workerRun({ id: 'sub-hostile', callId: 'hostile-report', status: 'done' });

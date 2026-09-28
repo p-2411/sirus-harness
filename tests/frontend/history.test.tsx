@@ -1,9 +1,10 @@
 import { expect, test } from 'bun:test';
-import { renderToString } from 'ink';
+import { Box, renderToString } from 'ink';
 import stripAnsi from 'strip-ansi';
 import { ChatHistory } from '../../src/frontend/chat/ChatMessage';
+import { TurnStatus, turnPhase } from '../../src/frontend/chat/Chat';
 import { historyParts } from '../../src/frontend/chat/history';
-import { textOf, type Message } from '../../src/agent_runtime/types';
+import { textOf, type Message, type ToolCallBlock } from '../../src/agent_runtime/types';
 
 test('steering stays between streamed text fragments and later tool output', () => {
   const reply: Message = { seq: 1, role: 'assistant', content: [{ type: 'text', text: 'Before. ' }] };
@@ -24,12 +25,23 @@ test('an injection at the end stays ahead of new blocks, with a live continuatio
   const reply: Message = { seq: 1, role: 'assistant', content: [{ type: 'text', text: 'Original response' }] };
   const user: Message = { seq: 2, role: 'user', content: [{ type: 'text', text: 'Steered instruction' }], injectedAt: { seq: 1, block: 1, offset: 0 } };
   expect(historyParts([reply, user]).map(part => part.message.role)).toEqual(['assistant', 'user']);
+  expect(turnPhase([reply, user])).toBe('thinking');
   reply.content.push({ type: 'thought', text: 'Considering the new instruction' });
-  const output = stripAnsi(renderToString(<ChatHistory messages={[reply, user]} participants={[]}
-    isMessageLive={message => message === reply} sessionId="history-test" participantColors={new Map()} />, { columns: 120 }));
-  expect(output).toContain('Considering the new instruction');
+  const history = <ChatHistory messages={[reply, user]} participants={[]}
+    isMessageLive={message => message === reply} sessionId="history-test" participantColors={new Map()} />;
+  expect(stripAnsi(renderToString(history))).not.toContain('Considering the new instruction');
+  const output = stripAnsi(renderToString(<Box flexDirection="column">
+    {history}
+    <TurnStatus messages={[reply, user]} awaitingApproval={false} awaitingAnswer={false}
+      compacting={false} startedAt={Date.now()} quietFor={() => 0} />
+  </Box>, { columns: 120 }));
+  expect(output.match(/Considering the new instruction/g)).toHaveLength(1);
+  expect(output).not.toContain('∴');
   expect(output.indexOf('Original response')).toBeLessThan(output.indexOf('Steered instruction'));
   expect(output.indexOf('Steered instruction')).toBeLessThan(output.indexOf('Considering the new instruction'));
+  reply.content.push({ type: 'text', text: 'Updated response' });
+  expect(turnPhase([reply, user])).toBe('writing');
+  expect(turnPhase([reply, user, { seq: 3, role: 'user', content: [{ type: 'text', text: 'New turn' }] }])).toBe('thinking');
 });
 
 test('same-position injections keep delivery order, while orphaned anchors stay in place', () => {
@@ -37,4 +49,13 @@ test('same-position injections keep delivery order, while orphaned anchors stay 
   const user = (seq: number, anchor = 1): Message => ({ seq, role: 'user', content: [{ type: 'text', text: `Follow-up ${seq}` }], injectedAt: { seq: anchor, block: 0, offset: 6 } });
   expect(historyParts([reply, user(2), user(3), user(4, 999)]).map(part => textOf(part.message)))
     .toEqual(['Before', 'Follow-up 2', 'Follow-up 3', 'After', 'Follow-up 4']);
+});
+
+test('pending tools still take priority over thoughts after a steered prompt', () => {
+  const tool: ToolCallBlock = { type: 'tool_call', id: 'call', title: 'bun test', kind: 'execute', status: 'in_progress', locations: [], content: [] };
+  const reply: Message = { seq: 1, role: 'assistant', content: [tool, { type: 'thought', text: 'Considering the new instruction' }] };
+  const user: Message = { seq: 2, role: 'user', content: [{ type: 'text', text: 'Steered instruction' }], injectedAt: { seq: 1, block: 1, offset: 0 } };
+  expect(turnPhase([reply, user])).toBe('running Run bun test');
+  tool.status = 'completed';
+  expect(turnPhase([reply, user])).toBe('Considering the new instruction');
 });
