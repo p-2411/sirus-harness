@@ -8,11 +8,12 @@ struct SetupView: View {
     @State private var host = ""
     @FocusState private var typing: Bool
 
-    // The checklist stands in for the introduction while it is needed, and
-    // steps aside while a new name is typed. Typing folds the introduction
-    // away too, so the field has room above the keyboard.
+    // The checklist stands in for the introduction while it is needed,
+    // staying put through a retry, and steps aside while a new name is
+    // typed. Typing folds the introduction away too, so the field has room
+    // above the keyboard.
     private var helps: Bool {
-        !typing && !store.scanning && store.problem?.concernsTailscale == true
+        !typing && store.problem?.concernsTailscale == true
     }
     private var compact: Bool { typing || helps }
 

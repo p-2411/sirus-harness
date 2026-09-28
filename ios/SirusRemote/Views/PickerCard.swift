@@ -3,15 +3,17 @@ import SwiftUI
 // A command's menu, floating over the conversation in the input's place.
 // Entries and follow-up prompts come from the server, in the same order as
 // the terminal's picker. An entry runs as soon as it is tapped, showing it
-// is on its way until Sirus answers; one that needs a value first opens a
-// field under the list for it.
+// is on its way until Sirus answers, and why it failed if it did; one that
+// needs a value first opens a field under the list for it.
 struct PickerCard: View {
     let picker: CommandPicker
     let dismiss: () -> Void
-    let send: (String) async -> Void
+    // Sends a command, returning why it failed.
+    let send: (String) async -> String?
     @State private var prompted: CommandPicker.Entry?
     @State private var value = ""
     @State private var busy: String?
+    @State private var failure: String?
     @State private var contentHeight: CGFloat = 0
     @FocusState private var entryFocused: Bool
 
@@ -25,6 +27,19 @@ struct PickerCard: View {
         VStack(alignment: .leading, spacing: 0) {
             header
             list
+            if let failure {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text(failure)
+                        .font(.system(size: 13))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .foregroundStyle(Palette.red)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 8)
+                .transition(.opacity)
+            }
             if let prompted, let prompt = prompted.prompt {
                 field(prompt, for: prompted)
             }
@@ -32,6 +47,7 @@ struct PickerCard: View {
         .padding(.bottom, 8)
         .glassEffect(.regular, in: .rect(cornerRadius: 30, style: .continuous))
         .animation(.smooth(duration: 0.2), value: prompted?.id)
+        .animation(.smooth(duration: 0.2), value: failure)
         .accessibilityAction(.escape, dismiss)
     }
 
@@ -235,8 +251,9 @@ struct PickerCard: View {
     // until then the entry says it is working.
     private func run(_ command: String, _ id: String) {
         busy = id
+        failure = nil
         Task {
-            await send(command)
+            failure = await send(command)
             busy = nil
         }
     }

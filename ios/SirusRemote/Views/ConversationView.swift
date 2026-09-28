@@ -58,6 +58,9 @@ private struct Conversation: View {
     @State private var chosenCompletion = 0
     // The caption's command whose picker is on its way.
     @State private var opening: String?
+    // Counts pickers put away, so an answer that comes back after its
+    // picker was closed, or after another agent was chosen, is dropped.
+    @State private var pickerEpoch = 0
     // Where the chrome ends, so the menus can float just above the input
     // and clear of the header without being laid out in either bar: a menu
     // in a bar would grow it and push the transcript up.
@@ -102,13 +105,13 @@ private struct Conversation: View {
             .onChange(of: composerFocused) { _, _ in updateCompletions() }
             .onChange(of: client.requests.first?.id) { _, request in
                 // A request needs the user more than a menu does.
-                if request != nil { picker = nil }
+                if request != nil { closePicker() }
                 updateCompletions()
             }
             .onChange(of: picker?.title) { _, _ in updateCompletions() }
             .onChange(of: participant) { _, _ in
                 // A picker belongs to the agent it was opened for.
-                picker = nil
+                closePicker()
                 updateCompletions()
             }
             .onChange(of: session.id) { _, _ in updateCompletions() }
@@ -151,7 +154,8 @@ private struct Conversation: View {
                     statusLine
                         // A menu floats where the status stands. Hidden rather
                         // than removed, so the bar keeps its height and the
-                        // transcript stays where it is.
+                        // transcript stays where it is; its glass is turned
+                        // off too, as the container draws glass itself.
                         .opacity(showsMenu ? 0 : 1)
                         .allowsHitTesting(!showsMenu)
                 }
@@ -174,17 +178,21 @@ private struct Conversation: View {
         .animation(.smooth(duration: 0.2), value: showsMenu)
     }
 
+    // Glass for what a menu hides: none while it is hidden.
+    private var statusGlass: Glass { showsMenu ? .identity : .regular }
+    private var inputGlass: Glass { picker == nil ? .regular : .identity }
+
     // A question grows out of the status line; otherwise it says whether
     // Sirus can be reached, and what the agent is doing.
     @ViewBuilder private var statusLine: some View {
         if let question = waitingQuestion {
             RequestCard(request: question, waiting: client.requests.count - 1, client: client, names: names)
                 .id(question.id)
-                .glassEffect(.regular, in: .rect(cornerRadius: 30, style: .continuous))
+                .glassEffect(statusGlass, in: .rect(cornerRadius: 30, style: .continuous))
                 .glassEffectID("status", in: glass)
         } else if client.link != .live {
             Button { if client.link == .offline { client.start() } } label: {
-                Pill(tone: Palette.muted) {
+                Pill(tone: Palette.muted, glass: statusGlass) {
                     Image(systemName: client.link == .offline ? "wifi.slash" : "arrow.triangle.2.circlepath")
                         .symbolEffect(.rotate, isActive: client.link == .connecting)
                     Text(client.link == .offline ? "Offline" : "Reconnecting…")
@@ -198,7 +206,7 @@ private struct Conversation: View {
             .accessibilityHint("Reconnects to Sirus")
             .glassEffectID("status", in: glass)
         } else {
-            StatusPill(status: status, queued: header?.queued ?? 0)
+            StatusPill(status: status, queued: header?.queued ?? 0, glass: statusGlass)
                 .glassEffectID("status", in: glass)
         }
     }
@@ -207,13 +215,13 @@ private struct Conversation: View {
         if let request = client.requests.first, request.kind != .question {
             RequestCard(request: request, waiting: client.requests.count - 1, client: client, names: names)
                 .id(request.id)
-                .glassEffect(.regular, in: .rect(cornerRadius: 30, style: .continuous))
+                .glassEffect(inputGlass, in: .rect(cornerRadius: 30, style: .continuous))
                 .glassEffectID("input", in: glass)
         } else {
             Composer(client: client, sessionId: session.id, participant: participant, working: working,
                      draft: $draft, note: $note, selection: $selection,
                      onFocus: { composerFocused = $0 }, onResult: receive)
-                .glassEffect(.regular, in: .rect(cornerRadius: 23, style: .continuous))
+                .glassEffect(inputGlass, in: .rect(cornerRadius: 23, style: .continuous))
                 .glassEffectID("input", in: glass)
         }
     }
@@ -221,7 +229,8 @@ private struct Conversation: View {
     // What floats over the conversation without being laid out in it: a
     // command's picker in the input's place, over a scrim that closes it;
     // the `/` and `@` completions just above the input; and a note on the
-    // last command above the whole bar.
+    // last command above the whole bar, or under the header while a picker
+    // takes the bottom.
     private var floating: some View {
         ZStack(alignment: .bottom) {
             if picker != nil {
@@ -233,10 +242,13 @@ private struct Conversation: View {
                     .accessibilityAddTraits(.isButton)
                     .transition(.opacity)
             }
-            if let note, !showsMenu {
+            if let note, !showsCompletions {
                 NoteToast(note: note) { self.note = nil }
                     .padding(.horizontal, 24)
+                    .padding(.top, headerHeight + 10)
                     .padding(.bottom, barHeight + 10)
+                    .frame(maxHeight: .infinity, alignment: picker == nil ? .bottom : .top)
+                    .zIndex(1)
                     .transition(.opacity.combined(with: .offset(y: 6)))
             }
             if let picker {
@@ -294,22 +306,40 @@ private struct Conversation: View {
     }
 
     // A tap on the caption: its command opens a picker rather than running.
+    // The chip lets go after a while even if Sirus never answers, so the
+    // caption can't stay stuck.
     private func openPicker(_ command: String) {
         guard opening == nil else { return }
         opening = command
         Task {
-            await run(command)
-            opening = nil
+            if let failure = await run(command) { show(failure, failed: true) }
+            if opening == command { opening = nil }
+        }
+        Task {
+            try? await Task.sleep(for: .seconds(10))
+            if opening == command { opening = nil }
         }
     }
 
     private func closePicker() {
+        pickerEpoch += 1
         picker = nil
     }
 
-    private func run(_ command: String) async {
-        do { receive(try await client.send(command, sessionId: session.id, participant: participant)) }
-        catch { show(error.localizedDescription, failed: true) }
+    // Runs a command from the caption or a picker, returning why it failed;
+    // the caller says so where the user is looking. What comes back is
+    // applied only if no picker was put away meanwhile: then only its
+    // feedback is shown.
+    private func run(_ command: String) async -> String? {
+        let epoch = pickerEpoch
+        do {
+            let result = try await client.send(command, sessionId: session.id, participant: participant)
+            if epoch == pickerEpoch { receive(result) }
+            else if let feedback = result.feedback, !feedback.isEmpty { show(feedback, failed: false) }
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
     }
 
     private func receive(_ result: ResultFrame) {
@@ -362,6 +392,7 @@ private struct Fade: View {
 // A small glass capsule of mono text above the composer.
 private struct Pill<Content: View>: View {
     let tone: Color
+    var glass: Glass = .regular
     @ViewBuilder let content: Content
 
     var body: some View {
@@ -370,7 +401,7 @@ private struct Pill<Content: View>: View {
             .foregroundStyle(tone)
             .padding(.horizontal, 14)
             .frame(minHeight: 34)
-            .glassEffect(.regular, in: .capsule)
+            .glassEffect(glass, in: .capsule)
     }
 }
 
@@ -406,10 +437,11 @@ private struct NoteToast: View {
 private struct StatusPill: View {
     let status: Status?
     let queued: Int
+    var glass: Glass = .regular
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
-            Pill(tone: Palette.silver) {
+            Pill(tone: Palette.silver, glass: glass) {
                 Image(systemName: "progress.indicator")
                     .font(.system(size: 13, weight: .semibold))
                     .symbolEffect(.variableColor.iterative, options: .repeating)
