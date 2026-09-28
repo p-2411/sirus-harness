@@ -379,11 +379,17 @@ export class Session {
 
   // Resolve the input's destination at submission time. Explicit mentions
   // retain their routing (including creating agents); plain text uses the tab.
+  // A prompt that opens by addressing a participant, past any command
+  // leading it, is followed in that participant's conversation; one that
+  // names participants later on, in the tab it was written in.
   messageForParticipant(message: Draft, participantName: string): Draft {
+    if (message.to?.length) return message;
     const text = this.withoutFileMentions(textOf(message));
-    return message.to?.length || this.roster.readMentions(text).length
-      ? message
-      : { ...message, to: [this.roster.require(participantName).name] };
+    const tab = this.roster.require(participantName).name;
+    const [first] = this.roster.readMentions(text);
+    if (!first) return { ...message, to: [tab] };
+    const opening = /^(?:\s*\/\S+(?=\s))*\s*/.exec(text)![0].length;
+    return { ...message, shownIn: first.span.start === opening ? first.name : tab };
   }
 
   async sendMessage(message: Draft, queuedMessage?: QueuedMessage): Promise<Message[]> {
@@ -1076,6 +1082,31 @@ export class Session {
 
   getMessages(participantName?: string): Message[] {
     return participantName ? [...this.roster.require(participantName).transcript.entries()] : this.timeline.entries();
+  }
+
+  // What a participant's conversation shows: its own record, and each prompt
+  // followed there (Message.shownIn) with its other targets' replies to it,
+  // up to the next prompt that reaches them. Display only: the runtimes
+  // read their transcripts, which this leaves alone.
+  getConversation(participantName: string): Message[] {
+    const agent = this.roster.require(participantName);
+    const own = agent.transcript.entries();
+    const shown = new Set(own);
+    for (const prompt of this.timeline.entries()) {
+      if (prompt.role !== 'user' || !prompt.shownIn || keyOf(prompt.shownIn) !== keyOf(agent.name)) continue;
+      shown.add(prompt);
+      for (const name of prompt.to ?? []) {
+        const peer = this.roster.find(name);
+        const entries = peer && peer !== agent ? peer.transcript.entries() : [];
+        const at = entries.indexOf(prompt);
+        if (at === -1) continue;
+        for (const entry of entries.slice(at + 1)) {
+          if (entry.role === 'user') break;
+          if (entry.participant === peer!.name) shown.add(entry);
+        }
+      }
+    }
+    return shown.size === own.length ? [...own] : [...shown].sort((left, right) => left.seq - right.seq);
   }
 
   isParticipantWorking(participantName: string): boolean {

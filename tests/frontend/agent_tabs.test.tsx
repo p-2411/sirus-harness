@@ -237,3 +237,38 @@ test('selected agent and independent drafts survive saving and reopening', async
     await restored.dispose();
   } finally { await session.dispose(); rmSync(directory, { recursive: true, force: true }); }
 });
+
+test('a prompt that opens with a mention moves to that agent and shows its co-targets\' replies for that turn', async () => {
+  const builder = 'test-tabs-follow-builder', reviewer = 'test-tabs-follow-reviewer', critic = 'test-tabs-follow-critic';
+  let criticTurns = 0;
+  bindScriptedRuntime(builder, (_input, emit) => emit({ type: 'text', text: 'Builder answer' }));
+  bindScriptedRuntime(reviewer, (_input, emit) => emit({ type: 'text', text: 'Reviewer answer' }));
+  bindScriptedRuntime(critic, (_input, emit) => emit({ type: 'text', text: `Critic answer ${++criticTurns}` }));
+  const session = new Session({ model: builder });
+  session.addParticipant('reviewer', reviewer); session.addParticipant('critic', critic);
+  const chat = screen(session);
+  const submit = async (text: string) => {
+    for (const character of text) await chat.press(character);
+    await chat.press('\r');
+    await chat.waitFor(() => session.getStatus() === 'idle');
+  };
+  try {
+    await chat.flush();
+    await submit('@reviewer and @critic check this');
+    expect(session.getSelectedParticipant()).toBe('reviewer');
+    expect(chat.output()).toContain('Reviewer answer');
+    expect(chat.output()).toContain('Critic answer 1');
+    expect(session.getMessages('reviewer').some(message => textOf(message) === 'Critic answer 1')).toBe(false);
+    await submit('@critic again');
+    expect(session.getSelectedParticipant()).toBe('critic');
+    await chat.select('left');
+    expect(session.getSelectedParticipant()).toBe('reviewer');
+    expect(chat.output()).toContain('Critic answer 1');
+    expect(chat.output()).not.toContain('Critic answer 2');
+    await chat.select('left');
+    await submit('now ask @critic please');
+    expect(session.getSelectedParticipant()).toBe('sirus');
+    expect(chat.output()).toContain('Critic answer 3');
+    expect(chat.output()).not.toContain('Builder answer');
+  } finally { await chat.close(); await session.dispose(); unbindRuntime(builder); unbindRuntime(reviewer); unbindRuntime(critic); }
+});

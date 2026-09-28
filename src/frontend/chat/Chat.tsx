@@ -341,10 +341,12 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   const selected = currSession.getSelectedParticipant();
   const views = viewsFor(currSession);
   const view = views.get(selected)!;
-  const messages = currSession.getMessages(selected).filter(message => !message.hidden);
+  const messages = currSession.getConversation(selected).filter(message => !message.hidden);
   const [, refreshView] = useState(0);
   const repaintView = () => refreshView(version => version + 1);
-  useEffect(() => { view.seen = activityStamp(messages); }, [selected, currSession.getVersion()]);
+  // Unread marks follow each agent's own record, not the replies of others
+  // its conversation shows.
+  useEffect(() => { view.seen = activityStamp(currSession.getMessages(selected)); }, [selected, currSession.getVersion()]);
   const participants = currSession.getParticipants();
   const participantColors = participantColorMap(participants);
 
@@ -745,8 +747,17 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     const routed = currSession.messageForParticipant({ role: 'user', ...(addressed ? { to: addressed } : {}),
       content: content ?? [...images, { type: 'text', text }] }, recipient);
     const targetsBusy = routed.to?.some(name => currSession.isParticipantWorking(name)) ?? false;
+    // The user follows a prompt they sent in the conversation it opens by
+    // addressing (see messageForParticipant) once it is accepted or queued.
+    // A queued prompt going out later moves nobody.
+    const previousQueued = currSession.getQueuedMessageCount();
+    const follow = (accepted: boolean) => {
+      if (!queuedMessage && accepted && routed.shownIn && currSession.getParticipants()
+        .some(participant => participant.name === routed.shownIn)) currSession.selectParticipant(routed.shownIn);
+    };
     if ((targetsBusy || commandAbort.current) && !immediate) {
       if (!queuedMessage) queue(text, images, content, recipient);
+      follow(true);
       return true;
     }
     const previousLength = currSession.getMessages().length;
@@ -760,6 +771,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
           ? null
           : { kind: 'error', text: caught instanceof Error ? caught.message : 'Something went wrong.' });
       });
+    follow(currSession.getMessages().length > previousLength || currSession.getQueuedMessageCount() > previousQueued);
     return true;
   };
 
@@ -856,7 +868,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       />
       {isWorking && (
         <TurnStatus
-          messages={messages}
+          messages={currSession.getMessages(selected).filter(message => !message.hidden)}
           directory={currSession.getDirectory()}
           awaitingApproval={approvals.length > 0}
           awaitingAnswer={questions.length > 0}
