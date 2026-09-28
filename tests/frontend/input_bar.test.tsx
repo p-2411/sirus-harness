@@ -1361,6 +1361,23 @@ function renderQueueInput(session: Session, history: readonly string[] = []) {
 }
 
 describe('input queue and interrupt precedence', () => {
+  test('history search backspace removes one displayed grapheme', async () => {
+    const session = new Session({ name: 'Search graphemes' });
+    const bar = renderQueueInput(session, ['earlier prompt']);
+    try {
+      await bar.flush();
+      await bar.press('\u0012');
+      await bar.press('👩‍💻');
+      expect(bar.output).toContain('History search: 👩‍💻');
+      await bar.press('\u007f');
+      expect(bar.output).toContain('History search:');
+      expect(bar.output).not.toContain('👩‍');
+    } finally {
+      bar.unmount();
+      await session.dispose();
+    }
+  });
+
   test('taking back queued images keeps their position among text', async () => {
     const session = new Session({ name: 'Queue images' });
     const first: ImageBlock = { type: 'image', path: '/tmp/queued-first.png', mediaType: 'image/png', bytes: 1 };

@@ -16,6 +16,7 @@ import { stripWorkers, WorkerStrip, type WorkerSelection } from './WorkerStrip';
 import { PromptBar, type PromptMode } from './PromptBar';
 import {
   applyInputEdit,
+  backspaceAtEnd,
   createInputHistory,
   draftCursorRow,
   draftRows,
@@ -439,7 +440,7 @@ export function InputBar({
       else if (key.return) { if (searchResult !== undefined) setEditor({ text: searchResult, cursor: searchResult.length }); setSearch(null); }
       else if (key.ctrl && enteredInput === 'r') setSearch({ ...search, index: Math.min(search.index + 1, Math.max(0, searchMatches.length - 1)) });
       else if (key.ctrl && enteredInput === 's') setSearch({ ...search, index: Math.max(0, search.index - 1) });
-      else if (key.backspace) setSearch({ ...search, query: [...search.query].slice(0, -1).join(''), index: 0 });
+      else if (key.backspace) setSearch({ ...search, query: backspaceAtEnd(search.query), index: 0 });
       else if (!key.ctrl && !key.meta && !key.pageUp && !key.pageDown && !key.tab && !key.upArrow && !key.downArrow && !key.leftArrow && !key.rightArrow && enteredInput) setSearch({ ...search, query: search.query + enteredInput, index: 0 });
       return;
     }
