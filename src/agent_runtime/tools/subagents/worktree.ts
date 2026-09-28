@@ -20,7 +20,7 @@ function git(directory: string, args: readonly string[], signal?: AbortSignal): 
   return projectGit(directory, args, GIT_TIMEOUT_MS, signal);
 }
 
-export function worktreePath(sessionId: string, runId: string): string {
+function worktreePath(sessionId: string, runId: string): string {
   return path.join(dataDirectory(), 'worktrees', sessionId, runId);
 }
 

@@ -35,7 +35,7 @@ function ThinkingName({ name, width, color }: {
 
 // Preserve roster order and scroll the names only when selection leaves the
 // available width. Background activity never changes the layout.
-export function visibleAgentTabs(participants: readonly Participant[], selected: string, width: number) {
+function visibleAgentTabs(participants: readonly Participant[], selected: string, width: number) {
   const current = Math.max(0, participants.findIndex(agent => agent.name === selected));
   const tabWidth = (index: number) => Math.min(24, stringWidth(participants[index].name) + 2);
   let start = current, end = current + 1, used = tabWidth(current);

@@ -5,7 +5,7 @@ import { boundRuntimes, createRuntime, PERMISSION_CANCELLED } from '../runtime/r
 
 export const SESSION_NAME_LIMIT = 40;
 // A bare runtime is a whole agent process: startup is most of this.
-export const SESSION_NAME_TIMEOUT_MS = 30_000;
+const SESSION_NAME_TIMEOUT_MS = 30_000;
 
 // The session's own model when its vendor has a credential; otherwise any
 // vendor that does, so naming works whenever anything can answer.

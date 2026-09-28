@@ -67,7 +67,7 @@ export function QueuedRow({ messages, participantColors }: {
 // What has been typed into a prompt. A secret echoes one dot per character,
 // so the user can see the paste landed without the value ever reaching the
 // screen (or a copied selection); ordinary text is shown as it is typed.
-export function EntryText({ value, masked }: { value: string; masked: boolean }) {
+function EntryText({ value, masked }: { value: string; masked: boolean }) {
   return <Text color={theme.text}>{masked ? '•'.repeat(characterCount(value)) : value}</Text>;
 }
 
