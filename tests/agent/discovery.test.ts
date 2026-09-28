@@ -5,6 +5,7 @@ import { join } from 'path';
 import * as launch from '../../src/agent_runtime/runtime/launch';
 import { discoverMissingModels } from '../../src/agent_runtime/providers/discovery';
 import { modelIds, rememberListedModels } from '../../src/agent_runtime/providers/catalog';
+import { providerFor } from '../../src/agent_runtime/providers';
 
 let directory: string;
 let previous: Record<string, string | undefined>;
@@ -78,14 +79,78 @@ test('disconnected and failing vendors never contribute built-in choices', async
   expect(modelIds()).toEqual([]);
   process.env.ANTHROPIC_API = 'test-claude';
   const spec = spyOn(launch, 'launchFor').mockImplementation(() => { throw new Error('offline'); });
+  const now = spyOn(Date, 'now').mockReturnValue(10_000);
   try {
     expect(await discoverMissingModels(directory)).toBe(false);
     expect(await discoverMissingModels(directory)).toBe(false);
     expect(spec).toHaveBeenCalledTimes(1);
+    now.mockReturnValue(11_001);
+    expect(await discoverMissingModels(directory)).toBe(false);
+    expect(spec).toHaveBeenCalledTimes(2);
     expect(modelIds()).toEqual([]);
     rememberListedModels('claude', [{ id: 'opus[1m]', description: 'Cached' }]);
     expect(await discoverMissingModels(directory)).toBe(false);
     expect(modelIds()).toEqual(['opus[1m]']);
+  } finally {
+    now.mockRestore();
+    spec.mockRestore();
+  }
+});
+
+test('an empty model list lets discovery try the next credential', async () => {
+  providerFor('claude').sources.addApiKey('first-key');
+  process.env.ANTHROPIC_API = 'second-key';
+  const spec = spyOn(launch, 'launchFor').mockImplementation(options => ({
+    command: process.execPath,
+    args: ['-e', `
+      import { createInterface } from 'node:readline';
+      for await (const line of createInterface({ input: process.stdin })) {
+        const request = JSON.parse(line);
+        const reply = result => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\\n');
+        if (request.method === 'initialize') reply({ protocolVersion: 1, agentCapabilities: {} });
+        else if (request.method === 'session/new') reply({ sessionId: 'discovery', configOptions: [{
+          id: 'model', type: 'select', name: 'Model', currentValue: 'default',
+          options: ${JSON.stringify(options.env.ANTHROPIC_API_KEY === 'first-key' ? [] : [{ value: 'second-model', name: 'Second model' }])},
+        }] });
+      }
+    `],
+    env: options.env, mode: 'ask', session: () => ({ mcpServers: [] }), forkNeedsResume: false,
+  }));
+  try {
+    expect(await discoverMissingModels(directory)).toBe(true);
+    expect(modelIds()).toEqual(['second-model']);
+    expect(spec).toHaveBeenCalledTimes(2);
+  } finally {
+    spec.mockRestore();
+  }
+});
+
+test('concurrent discovery shares an in-flight credential probe', async () => {
+  process.env.ANTHROPIC_API = 'one-key';
+  const spec = spyOn(launch, 'launchFor').mockImplementation(options => ({
+    command: process.execPath,
+    args: ['-e', `
+      import { createInterface } from 'node:readline';
+      for await (const line of createInterface({ input: process.stdin })) {
+        const request = JSON.parse(line);
+        const reply = result => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\\n');
+        if (request.method === 'initialize') reply({ protocolVersion: 1, agentCapabilities: {} });
+        else if (request.method === 'session/new') {
+          await new Promise(resolve => setTimeout(resolve, 25));
+          reply({ sessionId: 'discovery', configOptions: [{ id: 'model', type: 'select', name: 'Model',
+            currentValue: 'found-model', options: [{ value: 'found-model', name: 'Found model' }] }] });
+        }
+      }
+    `],
+    env: options.env, mode: 'ask', session: () => ({ mcpServers: [] }), forkNeedsResume: false,
+  }));
+  try {
+    const first = discoverMissingModels(directory);
+    const second = discoverMissingModels(directory);
+    expect(await second).toBe(false);
+    expect(await first).toBe(true);
+    expect(spec).toHaveBeenCalledTimes(1);
+    expect(modelIds()).toEqual(['found-model']);
   } finally {
     spec.mockRestore();
   }
