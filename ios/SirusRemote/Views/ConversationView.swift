@@ -144,15 +144,21 @@ private struct Conversation: View {
     }
 
     // The caret's place in the draft in UTF-16 units, as Sirus counts: the
-    // selection's start when it lies in this draft, else the end. A
-    // selection can briefly belong to the text before the last change, and
-    // measuring the draft with its index would trap.
+    // selection's start, or the end without one. The field reports it as an
+    // index into its own copy of the text, which can run ahead of the draft
+    // (a tap into an empty field does) or be stored in another encoding
+    // than the draft's, and converting such an index against the draft
+    // traps. Comparing indices never does, so the draft's own positions are
+    // counted up to it.
     private var caret: Int {
-        let end = draft.utf16.count
-        guard case .selection(let range)? = selection?.indices,
-              range.lowerBound >= draft.startIndex, range.lowerBound <= draft.endIndex,
-              let position = range.lowerBound.samePosition(in: draft.utf16) else { return end }
-        return min(end, draft.utf16.distance(from: draft.utf16.startIndex, to: position))
+        let text = draft
+        guard case .selection(let range)? = selection?.indices else { return text.utf16.count }
+        var count = 0
+        for position in text.utf16.indices {
+            if position >= range.lowerBound { break }
+            count += 1
+        }
+        return count
     }
 
     var body: some View {
@@ -185,7 +191,9 @@ private struct Conversation: View {
             .onChange(of: showsMenu, initial: true) { _, shown in menuOpen = shown }
             .onDisappear {
                 menuOpen = false
-                chromeTop = .infinity
+                // Leaving for another session, the one coming in has already
+                // said where its bar starts; this one leaves after it.
+                if store.openSession == nil || store.openSession == sessionId { chromeTop = .infinity }
             }
             // Typed text outlives the screen: back in this session, it waits.
             .onAppear { if draft.isEmpty { draft = store.draft(for: sessionId) } }

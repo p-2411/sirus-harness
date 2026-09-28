@@ -166,7 +166,8 @@ struct Lobby: View {
             // While nothing answers, look again every few seconds, so
             // running /rc on the Mac is enough to bring the app back.
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(5))
+                // Gone from the screen, it looks no more.
+                do { try await Task.sleep(for: .seconds(5)) } catch { return }
                 if phase == .offline { await store.rescan() }
             }
         }

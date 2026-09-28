@@ -55,6 +55,14 @@ boot() {
   limit 300 xcrun simctl boot "$1" || echo "boot timed out" >&2
   limit 600 xcrun simctl bootstatus "$1" -b >/dev/null
   xcrun simctl status_bar "$1" override --time 9:41 --batteryState charged --batteryLevel 100 --wifiBars 3 --cellularBars 4
+  # The keyboard's one-time tip on sliding to type would cover it.
+  xcrun simctl spawn "$1" defaults write com.apple.keyboard.preferences DidShowContinuousPathIntroduction -bool true || true
+  # The first launch after a boot can be sent to the background while the
+  # system is still settling, so a throwaway launch takes it.
+  limit 120 xcrun simctl install "$1" "$app" || echo "install timed out" >&2
+  limit 60 xcrun simctl launch "$1" "$bundle" -notificationsAsked YES >/dev/null 2>&1 || true
+  sleep 10
+  limit 30 xcrun simctl terminate "$1" "$bundle" >/dev/null 2>&1 || true
 }
 
 start_mock() {

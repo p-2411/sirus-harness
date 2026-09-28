@@ -93,14 +93,19 @@ struct Composer: View {
         guard !message.isEmpty, !sending else { return }
         sending = true
         sent += 1
+        // A selection kept from the sent text would point past the new one.
         draft = ""
+        selection = nil
         notify(nil)
         Task {
             defer { sending = false }
             do {
                 try await send(message)
             } catch {
-                if draft.isEmpty { draft = message }
+                if draft.isEmpty {
+                    draft = message
+                    selection = TextSelection(range: draft.endIndex..<draft.endIndex)
+                }
                 notify(Note(text: error.localizedDescription, failed: true))
             }
         }
