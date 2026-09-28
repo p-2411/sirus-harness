@@ -178,7 +178,7 @@ export function SessionItem({ session, isSelected, onSelect, onDelete, onRename,
             {session.getStatus() === 'working' && !needsYou ? <Spinner /> : <Text color={status.color}>{status.symbol}</Text>}
           </Box>
           {!collapsed && (confirmingDelete ? <Text color={theme.danger}> Delete session?</Text> : rename ? <Text wrap="truncate-start"> <Text inverse={rename.selected}>
-            {rename.text.slice(0, rename.cursor)}{!rename.selected && <Text inverse>{rename.text[rename.cursor] ?? ' '}</Text>}{rename.text.slice(rename.cursor + (rename.selected ? 0 : 1))}
+            {terminalText(rename.text.slice(0, rename.cursor))}{!rename.selected && <Text inverse>{terminalText(rename.text[rename.cursor] ?? ' ')}</Text>}{terminalText(rename.text.slice(rename.cursor + (rename.selected ? 0 : 1)))}
           </Text></Text> : <Text color={hovered ? theme.highlight : isSelected ? theme.text : theme.textMuted} bold={isSelected} wrap="truncate-end"> {showDirectory ? `${terminalText(path.basename(session.getDirectory()) || session.getDirectory())} · ` : ''}{terminalText(session.getName())}</Text>)}
         </Box>
         {!collapsed && needsYou && !rename && !confirmingDelete && <Text color={theme.pending}> needs you</Text>}
@@ -365,7 +365,7 @@ export default function SideBar({ sessions, currSession, selectSession, addSessi
         <Box height={2} flexShrink={0} flexDirection="column" justifyContent="flex-end">
           {!collapsed && focused && <Box ref={filterRef} height={1}>
             <Text color={theme.textMuted}>search: </Text>
-            <Text wrap="truncate-start">{query.slice(-14)}{!editing ? '▌' : ''}</Text>
+            <Text wrap="truncate-start">{terminalText(query.slice(-14))}{!editing ? '▌' : ''}</Text>
             <Text color={theme.textSubtle} dimColor>{'_'.repeat(Math.max(0, 15 - stringWidth(query.slice(-14)) - (!editing ? 1 : 0)))}</Text>
           </Box>}
         </Box>

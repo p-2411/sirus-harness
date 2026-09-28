@@ -6,6 +6,7 @@ import { useClickable } from './interaction/clickable';
 import { isMouseInput } from './interaction/mouse';
 import { isFocusInput } from './terminal/window-focus';
 import { theme } from './styles/theme';
+import { terminalText } from './terminal/text';
 
 function ResumeRow({ session, selected, onSelect }: {
   session: Session; selected: boolean; onSelect: (session: Session) => void;
@@ -14,9 +15,9 @@ function ResumeRow({ session, selected, onSelect }: {
   const hovered = useClickable(ref, () => onSelect(session));
   return <Box ref={ref} flexDirection="column" flexShrink={0}>
     <Text color={selected || hovered ? theme.highlight : theme.text} bold={selected} wrap="truncate-end">
-      {selected ? '› ' : '  '}{session.getName()}{session.isArchived() ? ' [archived]' : ''} · {formatRelativeTime(session.getLastActivity())}
+      {selected ? '› ' : '  '}{terminalText(session.getName())}{session.isArchived() ? ' [archived]' : ''} · {formatRelativeTime(session.getLastActivity())}
     </Text>
-    <Text color={theme.textSubtle} wrap="truncate-middle">  {session.getDirectory()}</Text>
+    <Text color={theme.textSubtle} wrap="truncate-middle">  {terminalText(session.getDirectory())}</Text>
   </Box>;
 }
 
@@ -67,10 +68,10 @@ export default function ResumePicker({ sessions, directory, initialQuery = '', o
     <Text bold color={theme.accent}>Resume session</Text>
     <Box ref={toggleRef} marginTop={1}>
       <Text color={toggleHovered ? theme.highlight : theme.textMuted} wrap="truncate-middle">
-        {allProjects ? 'All projects' : `This project: ${directory}`} · tab to toggle
+        {allProjects ? 'All projects' : `This project: ${terminalText(directory)}`} · tab to toggle
       </Text>
     </Box>
-    <Box marginBottom={1}><Text color={theme.text}>Search name, id or directory: {query}▌</Text></Box>
+    <Box marginBottom={1}><Text color={theme.text}>Search name, id or directory: {terminalText(query)}▌</Text></Box>
     {matches.length === 0 ? <Text color={theme.textMuted}>No matching sessions. Try another search or show all projects.</Text> :
       matches.slice(offset, offset + visibleRows).map((session, row) => <ResumeRow
         key={session.getId()} session={session} selected={offset + row === index} onSelect={onSelect} />)}

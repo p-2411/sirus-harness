@@ -340,6 +340,16 @@ describe('sidebar session metadata', () => {
     expect(output).not.toMatch(/\x07|\x1b\]/);
     expect(stripAnsi(output)).toContain('Fix the loader');
   });
+
+  test('sanitizes a rename draft without changing its stored value', () => {
+    const session = new Session({ id: 'rename-control' });
+    const text = 'Fix\x07 loader';
+    const output = renderToString(<SessionItem session={session} isSelected onSelect={noOp} onDelete={noOp}
+      rename={{ text, cursor: text.length, selected: true }} />, { columns: 40 });
+    expect(output).not.toContain('\x07');
+    expect(stripAnsi(output)).toContain('Fix loader');
+    expect(text).toBe('Fix\x07 loader');
+  });
 });
 
 describe('sidebar session status', () => {
@@ -494,7 +504,7 @@ describe('sidebar management', () => {
 
 describe('resume picker', () => {
   test('defaults to this project and searches by name or id, with an all-project toggle', async () => {
-    const local = new Session({ id: 'local-id', name: 'Local history', directory: '/project' });
+    const local = new Session({ id: 'local-id', name: 'Local \x07history', directory: '/project' });
     const other = new Session({ id: 'remote-id', name: 'Other history', directory: '/other', archived: true });
     let selected: Session | undefined;
     let closed = false;
@@ -512,6 +522,7 @@ describe('resume picker', () => {
     try {
       await flush();
       expect(frame).toContain('Local history');
+      expect(frame).not.toContain('\x07');
       expect(frame).not.toContain('Other history');
       await type('\t');
       expect(frame).toContain('Other history [archived]');
