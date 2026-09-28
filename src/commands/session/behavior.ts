@@ -106,8 +106,8 @@ export function statusCommand(session: CommandSession, toggles: { memory: boolea
 // /mcp: each participant's MCP servers and how each connection stands, as
 // its vendor reports them. Both are asked with the vendor's own /mcp, run
 // aside. Codex answers with its list; Claude Code answers with a count, so
-// its list is read from the servers its session reported, the fork's when
-// the participant's own runtime has not reported yet.
+// prefer the connections the participant reported. A reporting session
+// excludes Sirus tools, so label that fallback when the live list is unknown.
 export async function mcpCommand(session: CommandSession, signal: AbortSignal, notify: (text: string) => void): Promise<Feedback> {
   const participants = session.getParticipants();
   notify(`Asking ${participants.map(participant => `@${participant.name}`).join(' and ')} for their MCP servers…`);
@@ -116,10 +116,15 @@ export async function mcpCommand(session: CommandSession, signal: AbortSignal, n
     const heading = `**@${participant.name}** · ${vendor ? VENDOR_INFO[vendor].displayName : 'scripted'} · ${participant.model}`;
     try {
       const output = await session.runCommandAside(participant.name, '/mcp', signal);
-      const servers = session.getMcpServers(participant.name) ?? output.mcpServers;
-      const body = servers
+      const participantServers = session.getMcpServers(participant.name);
+      const servers = participantServers ?? output.mcpServers;
+      let body = servers
         ? servers.map(server => `- ${server.name} · ${server.status === 'pending' ? 'connecting' : server.status}`).join('\n') || 'No MCP servers.'
         : output.text || 'No MCP servers reported.';
+      if (participantServers === null) {
+        body += '\n\nThe agent has not reported its MCP connections yet.';
+        if (servers !== null) body += ' Sirus tools are disabled in this reporting session.';
+      }
       return `${heading}\n\n${body}`;
     } catch (error) {
       if (signal.aborted) throw error;

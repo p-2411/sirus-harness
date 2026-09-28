@@ -26,7 +26,7 @@ import {
   type RuntimeOptions,
   type RuntimeUpdate,
 } from './runtime/runtime';
-import { rememberNativeCommands } from './runtime/commands';
+import { isReportingCommand, rememberNativeCommands } from './runtime/commands';
 import { Transcript, transcriptText } from './session/transcript';
 import { isSpawnAgentTitle } from './tools/agents';
 import { notifySubagents, type SubagentRun } from './tools/subagents';
@@ -438,6 +438,11 @@ export class SessionAgent {
   // the first turn), so the command runs in a fresh session of its own, which
   // is what the agent's would be.
   async runAside(text: string, signal: AbortSignal): Promise<AsideOutput> {
+    const command = /^\/(\S+)$/.exec(text.trim());
+    if (!command || !isReportingCommand(this.vendor, command[1]!, '')) {
+      throw new Error('Only reporting commands without arguments can run outside a turn.');
+    }
+    text = text.trim();
     const source = this.candidateSources()[0];
     if (source === undefined) throw new Error(`No ${VENDOR_INFO[this.vendor].displayName} credentials. Run /login to sign in to Claude or Codex, or add an API key.`);
     const output: AsideOutput = { text: '', mcpServers: null };
@@ -456,10 +461,10 @@ export class SessionAgent {
       model: this.model,
       thinkingLevel: this.thinkingLevel,
       systemPrompt: this.systemPrompt(),
-      tools: this.definition?.tools,
+      tools: [],
       readOnly: true,
       permissionMode: 'ask' as const,
-      mcpServer: await this.host.mcpServer(this),
+      mcpServer: null,
       ...hooks,
     };
     // A warmed runtime has a vendor session but no conversation in it yet.
@@ -468,7 +473,7 @@ export class SessionAgent {
     let opening: Promise<Runtime>;
     if (conversation) {
       const runtime = this.busy && this.runtime ? this.runtime : (await this.ensureRuntime(source, signal)).runtime;
-      opening = runtime.fork(aside);
+      opening = runtime.fork({ ...aside, setupSignal: signal });
     } else {
       const vendor = this.vendor;
       opening = createRuntime({
@@ -488,7 +493,8 @@ export class SessionAgent {
     } finally {
       runtime.dispose();
     }
-    return { ...output, text: output.text.trim() };
+    const note = text === '/mcp' ? '\n\nSirus tools are disabled in this reporting session.' : '';
+    return { ...output, text: output.text.trim() + note };
   }
 
   // The runtime's window, or a larger one already seen for the model: the

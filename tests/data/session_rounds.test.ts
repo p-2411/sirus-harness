@@ -20,6 +20,20 @@ afterEach(() => {
 });
 
 describe('Session rounds', () => {
+  test('reporting rejects instructions and command arguments before opening a runtime', async () => {
+    const binding = bindScriptedRuntime(streamingModel, () => {});
+    const session = new Session({ model: streamingModel });
+    try {
+      for (const text of ['/review', '/mcp reconnect', 'edit a file', '/status\nthen edit']) {
+        await expect(session.runCommandAside('sirus', text, new AbortController().signal)).rejects.toThrow('Only reporting commands');
+      }
+      expect(binding.starts).toHaveLength(0);
+      expect(session.isEmpty()).toBe(true);
+    } finally {
+      await session.dispose();
+    }
+  });
+
   test('only the exact streaming reply is live, and peers finish independently', async () => {
     let releaseWriter!: () => void;
     let releasePeer!: () => void;

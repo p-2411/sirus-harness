@@ -614,14 +614,14 @@ describe('Session model', () => {
   test('a reporting command runs on a throwaway runtime and leaves no turn, checkpoint or record', async () => {
     const directory = mkdtempSync(path.join(os.tmpdir(), 'sirus-aside-'));
     const binding = bindScriptedRuntime(testModel, (input, emit) => {
-      emit({ type: 'text', text: input.text === '/context' ? 'Context: 12k of 200k' : 'Answer' });
+      emit({ type: 'text', text: input.text === '/status' ? 'Status: ready' : 'Answer' });
     });
     try {
       // Before any turn there is no conversation to fork: a fresh runtime of
       // its own answers, and the participant's is left alone.
       const session = new Session({ model: testModel, directory });
-      const cold = await session.runCommandAside('sirus', '/context', new AbortController().signal);
-      expect(cold.text).toBe('Context: 12k of 200k');
+      const cold = await session.runCommandAside('sirus', '/status', new AbortController().signal);
+      expect(cold.text).toBe('Status: ready');
       expect(binding.starts).toHaveLength(1);
       expect(binding.runtimes[0].disposed).toBe(true);
       expect(session.isEmpty()).toBe(true);
@@ -629,11 +629,11 @@ describe('Session model', () => {
       await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Hello' }] });
       const messages = session.getMessages().length;
       const checkpoints = session.getCheckpoints().length;
-      const output = await session.runCommandAside('sirus', '/context', new AbortController().signal);
-      expect(output.text).toBe('Context: 12k of 200k');
+      const output = await session.runCommandAside('sirus', '/status', new AbortController().signal);
+      expect(output.text).toBe('Status: ready');
       // A fork of the participant's runtime, closed once it has answered.
       expect(binding.forks).toHaveLength(1);
-      expect(binding.runtimes.at(-1)!.prompts.map(prompt => prompt.text)).toEqual(['/context']);
+      expect(binding.runtimes.at(-1)!.prompts.map(prompt => prompt.text)).toEqual(['/status']);
       expect(binding.runtimes.at(-1)!.disposed).toBe(true);
       expect(binding.runtimes[1].disposed).toBe(false);
       expect(session.getMessages()).toHaveLength(messages);
