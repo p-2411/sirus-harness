@@ -1,4 +1,5 @@
 import path from 'path';
+import { realpathSync } from 'fs';
 import type { SessionAgent } from '../../agent';
 import type { Message, MessageBlock, NativeSession, SubagentStatus, ThinkingLevel, WorkerContext } from '../../types';
 import type { AgentDefinition } from './definitions';
@@ -145,12 +146,17 @@ export function listAllSubagents(): SubagentRun[] {
 }
 
 export function activeSubagentCount(directory?: string): number {
-  const target = directory ? path.resolve(directory) : null;
+  const target = directory ? directoryKey(directory) : null;
   let count = 0;
   for (const run of runs.values()) {
-    if (run.status === 'working' && (!target || path.resolve(run.directory) === target)) count++;
+    if (run.status === 'working' && (!target || directoryKey(run.directory) === target)) count++;
   }
   return count;
+}
+
+function directoryKey(directory: string): string {
+  try { return realpathSync(directory); }
+  catch { return path.resolve(directory); }
 }
 
 // What the session file keeps of one run. The live parts stay behind: the

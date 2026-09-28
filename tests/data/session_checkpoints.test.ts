@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { execFileSync } from 'child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { Session } from '../../src/agent_runtime/session';
 import type { Draft } from '../../src/agent_runtime/session/timeline';
 import type { RuntimeOptions } from '../../src/agent_runtime/runtime/runtime';
 import { subagentDone } from '../../src/agent_runtime/tools/subagents/run';
+import { defaultDirectoryActivity } from '../../src/agent_runtime/session/checkpointLog';
+import { activeSubagentCount, registerSubagent, unregisterSubagent, type SubagentRun } from '../../src/agent_runtime/tools/subagents';
 import * as checkpointStore from '../../src/checkpoints';
 import { enableCheckpoints } from '../../src/checkpoints';
 import { TurnCancelledError } from '../../src/abort';
@@ -49,6 +51,25 @@ afterEach(() => {
   if (originalDataDirectory === undefined) delete process.env.SIRUS_DATA_DIR;
   else process.env.SIRUS_DATA_DIR = originalDataDirectory;
   rmSync(root, { recursive: true, force: true });
+});
+
+test('directory activity and worker counts use the physical directory across symlink aliases', () => {
+  const alias = path.join(root, 'alias');
+  symlinkSync(project, alias, 'dir');
+  defaultDirectoryActivity.beginTurn(alias);
+  try {
+    expect(defaultDirectoryActivity.isBusy(project)).toBe(true);
+  } finally {
+    defaultDirectoryActivity.endTurn(alias);
+  }
+  const run = { id: 'alias-worker', directory: alias, status: 'working' } as SubagentRun;
+  registerSubagent(run);
+  try {
+    expect(activeSubagentCount(project)).toBe(1);
+    expect(defaultDirectoryActivity.subagentCount(project)).toBe(1);
+  } finally {
+    unregisterSubagent(run.id);
+  }
 });
 
 // The vendor runs its own tools now: the scripted turn edits the file itself

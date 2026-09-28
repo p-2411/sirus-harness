@@ -106,7 +106,8 @@ class ProcessDirectoryActivity implements DirectoryActivity {
 }
 
 function keyFor(directory: string): string {
-  return path.resolve(directory);
+  try { return realpathSync(directory); }
+  catch { return path.resolve(directory); }
 }
 
 // One process-wide instance, so two sessions sharing a directory see each
