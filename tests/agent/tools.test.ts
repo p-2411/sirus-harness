@@ -37,6 +37,7 @@ const {
 const { closeAllMemoryStores } = await import('../../src/memory/store');
 const { openSettings } = await import('../../src/persistence/settings');
 const { createWorktree, removeUnchangedWorktree } = await import('../../src/agent_runtime/tools/subagents/worktree');
+const { awaitForeground } = await import('../../src/agent_runtime/tools/subagents/run');
 const checkpointStore = await import('../../src/checkpoints');
 
 type SubagentHost = import('../../src/agent_runtime/tools/types').SubagentHost;
@@ -145,6 +146,17 @@ test('worktree cleanup preserves a branch that advances after the checkout is re
   } finally {
     remove.mockRestore();
   }
+});
+
+test('aborted foreground delivery requeues a result that already completed', async () => {
+  const run = { id: 'completed-foreground', status: 'done', runInBackground: false, reported: true } as import('../../src/agent_runtime/tools/subagents').SubagentRun;
+  let reports = 0;
+  const owner = { workerFinished() { reports++; run.reported = true; } } as unknown as import('../../src/agent_runtime/agent').SessionAgent;
+  const controller = new AbortController();
+  controller.abort();
+  await expect(awaitForeground(run, owner, 100, controller.signal)).rejects.toThrow();
+  expect(run.runInBackground).toBe(true);
+  expect(reports).toBe(1);
 });
 
 // The MCP client as a runtime would be configured: the entry's URL and

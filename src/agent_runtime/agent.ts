@@ -32,7 +32,7 @@ import { isSpawnAgentTitle } from './tools/agents';
 import { notifySubagents, type SubagentRun } from './tools/subagents';
 import { agentDefinitions, definitionModel, readOnlyTools, type AgentDefinition } from './tools/subagents/definitions';
 import { describeSubagents, workerName, workerReport } from './tools/subagents/report';
-import { awaitForeground, cancelSubagent, checkSubagent, messageSubagent, startSubagent, TOOL_WAIT_LIMIT_MS, waitSubagents } from './tools/subagents/run';
+import { awaitForeground, cancelSubagent, checkSubagent, messageSubagent, releaseForegroundResult, startSubagent, TOOL_WAIT_LIMIT_MS, waitSubagents } from './tools/subagents/run';
 import type { SpawnOptions, SubagentHost } from './tools/types';
 import {
   DEFAULT_PARTICIPANT,
@@ -1042,14 +1042,18 @@ export class SessionAgent {
         const callId = this.spawnCallId(call.vendorCallId);
         const setupSignal = turn && signal ? AbortSignal.any([turn, signal]) : turn ?? signal;
         const run = await this.spawnSubagent(prompt, options, callId ?? call.callId, setupSignal);
-        if (options.runInBackground === false) {
-          await awaitForeground(run, deadline - Date.now(), setupSignal);
+        try {
+          if (options.runInBackground === false) await awaitForeground(run, this, deadline - Date.now(), setupSignal);
+          throwIfAborted(setupSignal);
+          const note = run.status !== 'working' ? null
+            : options.runInBackground === false
+              ? 'Still working when this call had to return, so it carries on in the background and reports to you when it ends. WaitAgent waits for it; SendMessage sends it instructions.'
+              : 'Working in the background. WaitAgent waits; SendMessage sends instructions or resumes it later.';
+          return { ...checkSubagent(run), context: run.context, branch: run.branch, ...(note ? { note } : {}) };
+        } catch (error) {
+          if (options.runInBackground === false) releaseForegroundResult(run, this);
+          throw error;
         }
-        const note = run.status !== 'working' ? null
-          : options.runInBackground === false
-            ? 'Still working when this call had to return, so it carries on in the background and reports to you when it ends. WaitAgent waits for it; SendMessage sends it instructions.'
-            : 'Working in the background. WaitAgent waits; SendMessage sends instructions or resumes it later.';
-        return { ...checkSubagent(run), context: run.context, branch: run.branch, ...(note ? { note } : {}) };
       },
       check: id => checkSubagent(this.requireSubagent(id)),
       cancel: (id, signal) => cancelSubagent(this.requireSubagent(id), signal),

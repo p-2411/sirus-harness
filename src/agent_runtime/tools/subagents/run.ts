@@ -122,11 +122,26 @@ export async function waitSubagents(runs: SubagentRun[], timeoutMs: number, sign
 // that ends first, cancelled with the owner's turn or out of time, leaves the
 // run working as a background one, so its report still reaches the owner when
 // it ends rather than going to a call nobody is waiting on.
-export async function awaitForeground(run: SubagentRun, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+export async function awaitForeground(run: SubagentRun, owner: SessionAgent, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+  let delivered = false;
   try {
     await waitSubagents([run], timeoutMs, signal);
+    throwIfAborted(signal);
+    delivered = true;
   } finally {
-    if (run.status === 'working') run.runInBackground = true;
+    if (!delivered || run.status === 'working') releaseForegroundResult(run, owner);
+  }
+}
+
+// A foreground call that will not deliver its result must hand ownership of
+// the report to the normal background path. The status tells whether that
+// path will run on completion or needs to be invoked now.
+export function releaseForegroundResult(run: SubagentRun, owner: SessionAgent): void {
+  if (run.runInBackground) return;
+  run.runInBackground = true;
+  if (run.status !== 'working') {
+    run.reported = false;
+    owner.workerFinished(run);
   }
 }
 
