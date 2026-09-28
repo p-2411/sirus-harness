@@ -49,6 +49,28 @@ function cellOf(frame: string, marker: string): { col: number; line: number } {
   return { col: lines[line].indexOf(marker) + 1, line };
 }
 
+// Rows start closed; this renders one, clicks the row carrying the marker and
+// returns the frame the user then sees.
+async function afterClick(element: Parameters<typeof render>[0], marker: string, columns = 140): Promise<string> {
+  const stdout = Object.assign(new PassThrough(), { columns }) as unknown as NodeJS.WriteStream;
+  const frames: string[] = [];
+  stdout.on('data', data => frames.push(data.toString()));
+  const app = render(element, { stdout, debug: true, patchConsole: false, exitOnCtrlC: false });
+  try {
+    await app.waitUntilRenderFlush();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    const cell = cellOf(stripAnsi(frames.at(-1)!), marker);
+    expect(pressAt(cell)).toBe(true);
+    expect(releaseAt(cell)).toBe(true);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    await app.waitUntilRenderFlush();
+    return frames.at(-1)!;
+  } finally {
+    app.unmount();
+    await app.waitUntilExit();
+  }
+}
+
 describe('chat message', () => {
   test('memoises finished content without hiding streamed edits or late worker reports', async () => {
     const text = { type: 'text' as const, text: 'Initial reply' };
@@ -90,6 +112,10 @@ describe('chat message', () => {
       expect(frames.at(-1)).not.toContain('Thinking');
       expect(frames.at(-1)).not.toContain('∴ Thought');
 
+      await new Promise<void>(resolve => setImmediate(resolve));
+      const spawnRow = cellOf(frames.at(-1)!, '● Agent');
+      expect(pressAt(spawnRow)).toBe(true);
+      expect(releaseAt(spawnRow)).toBe(true);
       call.output = 'Worker finished the review';
       app.rerender(view());
       await app.waitUntilRenderFlush();
@@ -252,21 +278,22 @@ describe('chat message', () => {
     })).toBe('Auto-review denied: shell rm -rf build');
   });
 
-  test('shows a change it made as a line diff, open without a click', () => {
-    const output = stripAnsi(renderToString(
-      <ChatMessage message={{
-        seq: 0,
-        role: 'assistant',
-        content: [toolCall({
-          id: 'call-1',
-          kind: 'edit',
-          title: 'src/app.ts',
-          locations: [{ path: 'src/app.ts' }],
-          content: [{ type: 'diff', path: 'src/app.ts', oldText: 'a\nb', newText: 'a\nb\nc\nd' }],
-        })],
-      }} />,
-      { columns: 120 },
-    ));
+  test('shows a change it made as a line diff once clicked open', async () => {
+    const message: Message = {
+      seq: 0,
+      role: 'assistant',
+      content: [toolCall({
+        id: 'call-1',
+        kind: 'edit',
+        title: 'src/app.ts',
+        locations: [{ path: 'src/app.ts' }],
+        content: [{ type: 'diff', path: 'src/app.ts', oldText: 'a\nb', newText: 'a\nb\nc\nd' }],
+      })],
+    };
+    const closed = stripAnsi(renderToString(<ChatMessage message={message} />, { columns: 120 }));
+    expect(closed).toContain('● Edit src/app.ts +2 −0');
+    expect(closed).not.toContain('+ c');
+    const output = stripAnsi(await afterClick(<ChatMessage message={message} />, '● Edit src/app.ts', 120));
 
     // Two lines were added; the two before them are context, not removals.
     expect(output).toContain('● Edit src/app.ts +2 −0');
@@ -276,20 +303,27 @@ describe('chat message', () => {
     expect(output).not.toContain('- a');
   });
 
-  test('opens a group for the change made inside it', () => {
+  test('keeps a group with a change in it closed until clicked', async () => {
     const edit = toolCall({
       id: 'edit-1',
       kind: 'edit',
       title: 'src/new.ts',
       content: [{ type: 'diff', path: 'src/new.ts', oldText: null, newText: 'first\nsecond\n', line: 1 }],
     });
-    const output = stripAnsi(renderToString(
+    const closed = stripAnsi(renderToString(
       <ToolRunGroup calls={[calls[0], edit]} />,
       { columns: 120 },
     ));
+    expect(closed).toContain('Read 1 file, edited 1 file');
+    expect(closed).not.toContain('src/new.ts');
 
-    expect(output).toContain('Read 1 file, edited 1 file');
-    expect(output).toContain('● Edit src/new.ts +2 −0');
+    // Opening the group lists its calls; each stays closed until clicked.
+    const opened = stripAnsi(await afterClick(<ToolRunGroup calls={[calls[0], edit]} />, 'Read 1 file', 120));
+    expect(opened).toContain('● Edit src/new.ts +2 −0');
+    expect(opened).not.toContain('1 + first');
+    const output = stripAnsi(await afterClick(
+      <ToolRunGroup calls={[calls[0], edit]} defaultExpanded />, '● Edit src/new.ts', 120,
+    ));
     expect(output).toContain('1 + first');
     expect(output).toContain('2 + second');
   });
@@ -338,7 +372,7 @@ describe('chat message', () => {
     expect(editPreview(hunks)).toContainEqual({ sign: '+', text: 'y', line: 12 });
   });
 
-  test('says how a call ended when it did not end well, and opens a failure', () => {
+  test('says how a call ended when it did not end well, and why once opened', async () => {
     const declined = toolCall({
       id: 'declined', kind: 'edit', title: 'Write greet.txt', status: 'failed', outcome: 'declined',
       content: [{ type: 'diff', path: 'greet.txt', oldText: null, newText: 'hi\nbye\n' }],
@@ -357,10 +391,14 @@ describe('chat message', () => {
     expect(output).not.toContain('+2');
     expect(output).toContain('● Run sleep 60 · cancelled');
     expect(output).toContain('● Run bun test · failed');
-    expect(output).toContain('Exit code 2');
-    expect(output).toContain('4 earlier lines');
-    expect(output).toContain('out 12');
-    expect(output).not.toContain('out 4\n');
+    expect(output).not.toContain('Exit code 2');
+    const opened = stripAnsi(await afterClick(
+      <ChatMessage message={{ seq: 0, role: 'assistant', content: [failed] }} />, '● Run bun test', 120,
+    ));
+    expect(opened).toContain('Exit code 2');
+    expect(opened).toContain('4 earlier lines');
+    expect(opened).toContain('out 12');
+    expect(opened).not.toContain('out 4\n');
     // Claude's error is fenced; the fence goes.
     expect(callDetail(toolCall({
       id: 'error', kind: 'read', title: 'Read x', status: 'failed',
@@ -372,7 +410,7 @@ describe('chat message', () => {
     }))).toEqual([{ sign: ' ', text: 'String to replace not found in file.' }]);
   });
 
-  test('reveals file rows when a running group completes, diffs on click, and respects manual collapse', async () => {
+  test('keeps a group closed as it completes, opens rows and diffs on click, and respects manual collapse', async () => {
     const edit = toolCall({
       id: 'live-edit',
       kind: 'edit',
@@ -395,12 +433,26 @@ describe('chat message', () => {
       app.rerender(<ToolRunGroup calls={completed} />);
       await app.waitUntilRenderFlush();
       expect(frames.at(-1)).toContain('Read 1 file, edited 1 file');
-      expect(frames.at(-1)).toContain('● Edit new.ts +1 −0');
+      expect(frames.at(-1)).not.toContain('new.ts');
       expect(frames.at(-1)).not.toMatch(/[›⌄]/);
-      expect(frames.at(-1)).toContain('+ new content');
+
+      await new Promise<void>(resolve => setImmediate(resolve));
+      const opening = cellOf(frames.at(-1)!, 'Read 1 file, edited 1 file');
+      expect(pressAt(opening)).toBe(true);
+      expect(releaseAt(opening)).toBe(true);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      await app.waitUntilRenderFlush();
+      expect(frames.at(-1)).toContain('● Edit new.ts +1 −0');
+      expect(frames.at(-1)).not.toContain('+ new content');
 
       await new Promise<void>(resolve => setImmediate(resolve));
       const row = cellOf(frames.at(-1)!, '● Edit new.ts');
+      expect(pressAt(row)).toBe(true);
+      expect(releaseAt(row)).toBe(true);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      await app.waitUntilRenderFlush();
+      expect(frames.at(-1)).toContain('+ new content');
+      await new Promise<void>(resolve => setImmediate(resolve));
       expect(pressAt(row)).toBe(true);
       expect(releaseAt(row)).toBe(true);
       await new Promise<void>(resolve => setImmediate(resolve));
@@ -444,8 +496,8 @@ describe('chat message', () => {
 
   test('keeps every SpawnAgent row out of the group around it', () => {
     // A turn that delegates twice leaves two rows, each following its own run
-    // and carrying its report, rather than one "Ran N commands" summary with
-    // the reports folded away inside it.
+    // and opening on its own report, rather than one "Ran N commands" summary
+    // with the reports folded away inside it.
     const spawn = (id: string, worker: string) => toolCall({
       id,
       kind: 'other',
@@ -467,11 +519,12 @@ describe('chat message', () => {
       { columns: 140 },
     ));
     expect(output).toContain('Read 1 file, ran 1 command');
-    expect(output).toContain('Subagent sub-1234 done after 45s.');
-    expect(output).toContain('Subagent sub-5678 done after 45s.');
+    expect(output.split('\n').filter(line => line.includes('● Agent'))).toHaveLength(2);
+    expect(output).not.toContain('Subagent sub-1234 done after 45s.');
+    expect(output).not.toContain('Subagent sub-5678 done after 45s.');
   });
 
-  test('recognizes Codex’s execute-kind MCP SpawnAgent title', () => {
+  test('recognizes Codex’s execute-kind MCP SpawnAgent title', async () => {
     // Codex records an MCP call's arguments under `arguments`.
     const spawn = toolCall({
       id: 'mcp-spawn-call',
@@ -489,8 +542,12 @@ describe('chat message', () => {
       { columns: 140 },
     ));
     expect(output).toContain('● loader(Loader rewrite)');
-    expect(output).toContain('Subagent loader (sub-1234) done.');
-    expect(output).not.toContain('{"id":"sub-1234"}');
+    expect(output).not.toContain('Subagent loader (sub-1234) done.');
+    const opened = stripAnsi(await afterClick(
+      <ChatMessage message={{ seq: 0, role: 'assistant', content: [spawn] }} sessionId="session" />, '● loader',
+    ));
+    expect(opened).toContain('Subagent loader (sub-1234) done.');
+    expect(opened).not.toContain('{"id":"sub-1234"}');
   });
 
   test('summarizes completed and running tool groups while collapsed', () => {
@@ -515,15 +572,15 @@ describe('chat message', () => {
     ])).toBe('Used 1 tool, searched for 2 patterns');
   });
 
-  test('counts a failed call as finished, says so, and opens on it', () => {
-    const output = stripAnsi(renderToString(
-      <ToolRunGroup calls={[calls[0], { ...calls[1], status: 'failed', output: 'error: boom' }]} />,
-      { columns: 120 },
-    ));
-
+  test('counts a failed call as finished and says so, closed until clicked', () => {
+    const group = [calls[0], { ...calls[1], status: 'failed' as const, output: 'error: boom' }];
+    const output = stripAnsi(renderToString(<ToolRunGroup calls={group} />, { columns: 120 }));
     expect(output).toContain('Read 1 file, ran 1 command · 1 failed');
-    expect(output).toContain('● Run bun test · failed');
-    expect(output).toContain('error: boom');
+    expect(output).not.toContain('● Run bun test');
+
+    const opened = stripAnsi(renderToString(<ToolRunGroup calls={group} defaultExpanded />, { columns: 120 }));
+    expect(opened).toContain('● Run bun test · failed');
+    expect(opened).not.toContain('error: boom');
   });
 
   test('expands a tool group into compact indented one-line calls', () => {
@@ -855,14 +912,17 @@ describe('text from outside Sirus', () => {
     { columns: 140 },
   );
 
-  test('reaches the terminal as plain text in replies, tool rows, plans and reports', () => {
+  test('reaches the terminal as plain text in replies, tool rows, plans and reports', async () => {
     expectInert(rendered([{ type: 'text', text: hostile }]));
     expectInert(rendered([toolCall({ id: 'hostile-title', kind: 'execute', title: hostile })]));
     expectInert(renderToString(<PlanChecklist entries={[{ content: hostile, status: 'pending' }]} />, { columns: 140 }));
     const run = workerRun({ id: 'sub-hostile', callId: 'hostile-report', status: 'done' });
     registerSubagent(run);
     try {
-      expectInert(rendered([toolCall({ id: 'hostile-report', title: 'sirus - SpawnAgent', output: hostile })]));
+      expectInert(await afterClick(
+        <ChatMessage message={{ seq: 0, role: 'assistant', content: [toolCall({ id: 'hostile-report', title: 'sirus - SpawnAgent', output: hostile })] }} sessionId="session" live />,
+        '● Agent',
+      ));
     } finally {
       unregisterSubagent(run.id);
     }
@@ -1051,17 +1111,22 @@ describe('a worker report', () => {
     content: [{ type: 'text', text: '{"id":"sub-1234","status":"working"}' }],
     output,
   });
-  const row = (call: ToolCallBlock) => stripAnsi(renderToString(
+  const row = async (call: ToolCallBlock) => stripAnsi(await afterClick(
     <ChatMessage message={{ seq: 0, role: 'assistant', content: [call] }} sessionId="session" />,
-    { columns: 140 },
+    '● Agent',
   ));
 
-  test('shows under the row of the call that started the worker, not as a message', () => {
+  test('shows under the row of the call that started the worker, not as a message', async () => {
     const run = workerRun({ id: 'sub-1234', callId: 'reported-call', status: 'done' });
     registerSubagent(run);
     try {
-      const output = row(reported(report.join('\n')));
-      // Open without asking: the run has ended and this is what was waited for.
+      const closed = stripAnsi(renderToString(
+        <ChatMessage message={{ seq: 0, role: 'assistant', content: [reported(report.join('\n'))] }} sessionId="session" />,
+        { columns: 140 },
+      ));
+      // Closed until clicked, like every other row.
+      expect(closed).not.toContain(report[1]);
+      const output = await row(reported(report.join('\n')));
       for (const line of report) expect(output).toContain(line);
       expect(output).not.toContain('"status":"working"');
       // Its author is a run id, never a name on the roster, so no message of
@@ -1072,12 +1137,12 @@ describe('a worker report', () => {
     }
   });
 
-  test('is shown whole, as Markdown', () => {
+  test('is shown whole, as Markdown', async () => {
     const run = workerRun({ id: 'sub-1234', callId: 'reported-call', status: 'done' });
     registerSubagent(run);
     try {
       const lines = Array.from({ length: 11 }, (_, index) => `- line ${index}`).join('\n');
-      const output = row(reported(`Final message:\n\n**Rewrote** the loader.\n\n${lines}`));
+      const output = await row(reported(`Final message:\n\n**Rewrote** the loader.\n\n${lines}`));
       expect(output).toContain('line 10');
       expect(output).not.toContain('more lines');
       expect(output).toContain('Rewrote the loader.');
