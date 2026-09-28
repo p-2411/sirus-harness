@@ -68,21 +68,21 @@ describe('/usage subscription allowance', () => {
   test('a quota read failure displays unavailable without hiding the session', async () => {
     fakeAppServer(() => { throw new Error('Unavailable'); });
     const result = await usageCommand(undefined, new Session());
-    expect(result.text).toContain('Codex · plus plan · 5h unavailable');
+    expect(result.text).toContain('Codex · plus plan · limits unavailable');
     expect(result.text).toContain('session · no usage reported yet');
     expect(result.text).not.toContain('100% remaining');
   });
 
   test('/usage builds informational menu rows and a refresh action', async () => {
+    // Codex reports only a weekly window; no 5-hour row is shown for it.
     fakeAppServer(() => ({ rateLimits: {
-      primary: { usedPercent: 30, windowDurationMins: 300 },
-      secondary: { usedPercent: 10, windowDurationMins: 10080 },
+      primary: { usedPercent: 10, windowDurationMins: 10080 },
     } }));
     const menu = await commandMenu('usage', [], new Session());
     expect(menu).toContainEqual({ type: 'heading', key: 'usage', label: 'Usage' });
     expect(menu?.filter(entry => entry.type === 'info').map(entry => entry.label))
       .toEqual(expect.arrayContaining([
-        'Codex · plus plan · 5h 70% left · 7d 90% left',
+        'Codex · plus plan · 7d 90% left',
         'session · no usage reported yet',
       ]));
     expect(menu?.filter(entry => entry.type === 'item'))
