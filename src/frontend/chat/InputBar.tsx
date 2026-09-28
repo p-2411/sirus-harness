@@ -28,7 +28,7 @@ import {
   type InputEdit,
   type InputState,
 } from './editor';
-import { composeContent, removedPlaceholders, stripPlaceholders, useDraftImages, createDraftImageState, type DraftImageState } from './draft';
+import { composeContent, removedPlaceholders, reserveImagePlaceholder, stripPlaceholders, useDraftImages, createDraftImageState, type DraftImageState } from './draft';
 import { MentionText, participantColorMap } from '../MentionText';
 import { isMouseInput } from '../interaction/mouse';
 import { isFocusInput } from '../terminal/window-focus';
@@ -280,11 +280,23 @@ export function InputBar({
     if (!onTakeQueued || queuedMessages.length === 0) return false;
     const taken = onTakeQueued(queuedMessages.map(message => message.id));
     if (taken.length === 0) return false;
-    const text = taken.map(message => message.text).filter(Boolean).join('\n');
+    const images: ImageBlock[] = [];
+    let text = '';
+    for (const message of taken) {
+      const content = message.content ?? [{ type: 'text' as const, text: message.text }, ...(message.images ?? [])];
+      let line = '';
+      for (const block of content) {
+        if (block.type === 'image' && onAttachImage) {
+          line += reserveImagePlaceholder(memory.images, block, text + line + input);
+          images.push(block);
+        } else if (block.type === 'text') line += block.text;
+      }
+      if (line) text += `${text ? '\n' : ''}${line}`;
+    }
     editHistory.current.undo = [];
     setEditor({ text: text && input ? `${text}\n${input}` : text + input, cursor: text.length });
-    // Their images rejoin the draft's attachments, which land at the cursor.
-    for (const image of taken.flatMap(message => message.images ?? [])) onAttachImage?.(image);
+    // Attach the images for the reserved positions in the restored draft.
+    for (const image of images) onAttachImage?.(image);
     return true;
   };
 

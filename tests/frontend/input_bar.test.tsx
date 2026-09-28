@@ -29,7 +29,7 @@ import { pendingApprovals, requestPermission, resolveApproval, type ApprovalDeci
 import type { QuestionAnswer, QuestionField, QuestionRequest } from '../../src/agent_runtime/permissions/questions';
 import type { PermissionOption } from '@agentclientprotocol/sdk';
 import { notifySubagents, type SubagentRun } from '../../src/agent_runtime/tools/subagents';
-import type { MessageBlock, ToolCallBlock } from '../../src/agent_runtime/types';
+import type { ImageBlock, MessageBlock, ToolCallBlock } from '../../src/agent_runtime/types';
 import { pressAt, releaseAt } from '../../src/frontend/interaction/clickable';
 import stringWidth from 'string-width';
 import { bindScriptedRuntime, unbindRuntime } from '../support/runtime';
@@ -1312,6 +1312,7 @@ describe('walking the worker strip from the input bar', () => {
 
 function renderQueueInput(session: Session, history: readonly string[] = []) {
   const events: string[] = [];
+  const sentContent: (readonly MessageBlock[] | undefined)[] = [];
   let interrupt = false;
   let output = '';
   const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {}, ref() {}, unref() {} });
@@ -1319,15 +1320,18 @@ function renderQueueInput(session: Session, history: readonly string[] = []) {
   stdout.on('data', chunk => { const frame = stripAnsi(chunk.toString()); if (frame.trim()) output = frame; });
   function Harness() {
     useSyncExternalStore(listener => session.subscribe(listener), () => session.getVersion());
+    const [attachments, setAttachments] = useState<ImageBlock[]>([]);
     return <InputBar
       inputContent={session.getInputContent()}
       setInputContent={text => session.setInputContent(text)}
-      send={text => events.push(`send:${text}`)}
+      send={(text, _images, content) => { events.push(`send:${text}`); sentContent.push(content); }}
       disabled={session.getStatus() === 'working'}
       feedback={null}
       participants={[]}
       history={history}
       queuedMessages={session.getQueuedMessages()}
+      attachments={attachments}
+      onAttachImage={image => setAttachments(current => [...current, image])}
       onTakeQueued={ids => session.takeQueuedMessages(ids)}
       onEscape={() => events.push('escape')}
       onRewind={() => events.push('rewind')}
@@ -1343,6 +1347,7 @@ function renderQueueInput(session: Session, history: readonly string[] = []) {
   const flush = async () => { await new Promise(resolve => setImmediate(resolve)); await app.waitUntilRenderFlush(); };
   return {
     events,
+    sentContent,
     get output() { return output; },
     set interrupt(value: boolean) { interrupt = value; },
     flush,
@@ -1356,6 +1361,31 @@ function renderQueueInput(session: Session, history: readonly string[] = []) {
 }
 
 describe('input queue and interrupt precedence', () => {
+  test('taking back queued images keeps their position among text', async () => {
+    const session = new Session({ name: 'Queue images' });
+    const first: ImageBlock = { type: 'image', path: '/tmp/queued-first.png', mediaType: 'image/png', bytes: 1 };
+    const second: ImageBlock = { type: 'image', path: '/tmp/queued-second.png', mediaType: 'image/png', bytes: 1 };
+    session.setInputContent('draft');
+    session.queueMessage('before after', [first], [
+      { type: 'text', text: 'before ' }, first, { type: 'text', text: ' after' },
+    ]);
+    session.queueMessage('next', [second], [{ type: 'text', text: 'next' }, second]);
+    const bar = renderQueueInput(session);
+    try {
+      await bar.flush();
+      await bar.press('\u001b[A');
+      await bar.press('\r');
+      expect(bar.sentContent[0]).toEqual([
+        { type: 'text', text: 'before ' }, first,
+        { type: 'text', text: ' after\nnext' }, second,
+        { type: 'text', text: '\ndraft' },
+      ]);
+    } finally {
+      bar.unmount();
+      await session.dispose();
+    }
+  });
+
   test('↑ takes the queue back into the draft, one per line ahead of it, and Escape leaves it queued', async () => {
     const session = new Session({ name: 'Queue input' });
     session.setInputContent('saved draft');

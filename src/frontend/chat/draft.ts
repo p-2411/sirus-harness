@@ -85,6 +85,17 @@ export function createDraftImageState(): DraftImageState {
   return { paths: new Map(), allocated: 0, seen: null };
 }
 
+// Reserve a draft position before a queued image is reattached. Its later
+// attachment update can then reuse this position instead of appending it.
+export function reserveImagePlaceholder(state: DraftImageState, image: ImageBlock, text: string): string {
+  let placeholder = imagePlaceholder(state.allocated++);
+  while (state.paths.has(placeholder) || text.includes(placeholder)) {
+    placeholder = imagePlaceholder(state.allocated++);
+  }
+  state.paths.set(placeholder, image.path);
+  return placeholder;
+}
+
 export function useDraftImages({ attachments, text, getDraft, setDraft, state }: {
   attachments: readonly ImageBlock[];
   text: string;
@@ -107,16 +118,11 @@ export function useDraftImages({ attachments, text, getDraft, setDraft, state }:
     memory.seen = attachments;
     const draft = getDraft();
     let next = stripPlaceholders(draft, placeholder => !placeholderPaths.current.has(placeholder) || imageFor(placeholder) !== undefined);
-    const added = previous === null ? [] : attachments.filter(image => !previous.some(item => item.path === image.path));
+    const added = previous === null ? [] : attachments.filter(image =>
+      !previous.some(item => item.path === image.path)
+      && ![...placeholderPaths.current].some(([placeholder, path]) => path === image.path && next.text.includes(placeholder)));
     if (added.length > 0) {
-      const placeholders = added.map(image => {
-        let placeholder = imagePlaceholder(memory.allocated++);
-        while (placeholderPaths.current.has(placeholder) || next.text.includes(placeholder)) {
-          placeholder = imagePlaceholder(memory.allocated++);
-        }
-        placeholderPaths.current.set(placeholder, image.path);
-        return placeholder;
-      });
+      const placeholders = added.map(image => reserveImagePlaceholder(memory, image, next.text));
       next = applyInputEdit(next, { type: 'insert', text: placeholders.join('') });
     }
     if (next.text !== draft.text || next.cursor !== draft.cursor) setDraft(next);
