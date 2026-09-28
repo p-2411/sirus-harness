@@ -487,14 +487,15 @@ describe('sidebar management', () => {
       options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
     }, approvalController.signal);
     expect(render(session)).toContain('! Waiting');
-    expect(render(session)).toContain('needs you');
+    expect(render(session)).not.toContain('needs you');
     approvalController.abort();
     await approval;
     const questionController = new AbortController();
     const question = requestAnswers(context, {
       sessionId: session.getId(), mode: 'form', message: 'Which?', requestedSchema: { type: 'object', properties: { answer: { type: 'string' } } },
     }, questionController.signal);
-    expect(render(session)).toContain('needs you');
+    expect(render(session)).toContain('! Waiting');
+    expect(render(session)).not.toContain('needs you');
     questionController.abort();
     await question;
     expect(render(session)).toContain('○ Waiting');
