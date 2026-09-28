@@ -6,16 +6,33 @@ import UserNotifications
 // opens a socket of its own, sends `approve` with the option id Sirus put in
 // the payload for that kind, and waits for the result.
 enum Push {
+    // One category for every set of buttons an approval can offer, so each
+    // shows a button for just the kinds of option it has: one with nothing
+    // to answer with could only fail.
     static func categories() -> Set<UNNotificationCategory> {
         // Allowing runs something on the Mac, so it needs the phone unlocked;
-        // denying never needs to.
-        let allow = UNNotificationAction(identifier: "allow_once", title: "Allow", options: [.authenticationRequired])
-        let always = UNNotificationAction(identifier: "allow_always", title: "Always Allow", options: [.authenticationRequired])
-        let deny = UNNotificationAction(identifier: "reject_once", title: "Deny", options: [.destructive])
-        return [
-            UNNotificationCategory(identifier: "APPROVAL", actions: [allow, deny], intentIdentifiers: []),
-            UNNotificationCategory(identifier: "APPROVAL_ALWAYS", actions: [allow, always, deny], intentIdentifiers: []),
+        // denying never needs to. The identifiers are the kinds they answer.
+        let buttons = [
+            UNNotificationAction(identifier: "allow_once", title: "Allow", options: [.authenticationRequired]),
+            UNNotificationAction(identifier: "allow_always", title: "Always Allow", options: [.authenticationRequired]),
+            UNNotificationAction(identifier: "reject_once", title: "Deny", options: [.destructive]),
         ]
+        return Set((1..<(1 << buttons.count)).map { set -> UNNotificationCategory in
+            let chosen = buttons.indices.filter { set & (1 << $0) != 0 }.map { buttons[$0] }
+            return UNNotificationCategory(identifier: category(for: chosen.map(\.identifier)),
+                                          actions: chosen, intentIdentifiers: [])
+        })
+    }
+
+    // A set of buttons' category, named as Sirus names it (approvalFields in
+    // src/remote/push.ts). The two sets nearly every approval offers keep
+    // the names they always had.
+    static func category(for kinds: [String]) -> String {
+        switch kinds {
+        case ["allow_once", "reject_once"]: "APPROVAL"
+        case ["allow_once", "allow_always", "reject_once"]: "APPROVAL_ALWAYS"
+        default: "APPROVAL:" + kinds.joined(separator: ",")
+        }
     }
 
     // Asks once, after the first Mac is found; after that it only registers
