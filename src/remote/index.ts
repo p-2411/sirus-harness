@@ -4,8 +4,8 @@ import type { ServerWebSocket } from 'bun';
 import type { Session } from '../agent_runtime/session';
 import { pendingApprovals, resolveApproval, subscribePermissions } from '../agent_runtime/permissions/approvals';
 import { pendingQuestions, resolveQuestion, subscribeQuestions, type QuestionAnswer } from '../agent_runtime/permissions/questions';
-import { commandMenu, executeCommand } from '../commands/registry';
-import { commandArgs, queueInput, routeInput } from '../frontend/chat/send';
+import { commandMenu, executeCommand, type PromptCommand } from '../commands/registry';
+import { commandArgs, commandsWait, queueDraft, queueInput, routeInput, splitDraft } from '../frontend/chat/send';
 import { APNS_ENVIRONMENTS, openSettings } from '../persistence/settings';
 import { SIRUS_VERSION } from '../version';
 import { sessionEntry, viewOf } from './view';
@@ -19,11 +19,22 @@ import { sessionEntry, viewOf } from './view';
 // the rest. `SIRUS_REMOTE_LOOPBACK=1` binds 127.0.0.1 instead, skips
 // Tailscale, and lets in loopback peers only: the smoke runs and the
 // simulator use it.
+//
+// Tailscale vouches for devices, not for what runs on them: a web page open
+// in a browser on one of the owner's devices reaches the listener from a
+// trusted address. Browsers mark such requests with an Origin, and the app
+// sends none, so any request with one is refused; the Host must name this
+// Mac, which stops a page rebinding its own name to the listener.
 
 const PORTS = { first: 47470, last: 47479 };
 const LIST_THROTTLE_MS = 250;
 const VIEW_THROTTLE_MS = 100;
 const TAILSCALE_TIMEOUT_MS = 5_000;
+// How long Tailscale's verdict on a peer holds, so a device probing the
+// ports cannot make Sirus run `tailscale whois` for every request.
+const VERDICT_MS = 60_000;
+// The most phones kept for pushes.
+const MAX_DEVICES = 10;
 const TAILSCALE_APP = '/Applications/Tailscale.app/Contents/MacOS/Tailscale';
 const loopback = () => process.env.SIRUS_REMOTE_LOOPBACK === '1';
 
@@ -40,6 +51,9 @@ interface Subscription {
 interface SocketData {
   ip: string;
   subscription: Subscription | null;
+  // Commands the phone started on this socket, by session, so Stop on the
+  // phone and a dropped connection can end them.
+  running: Set<{ sessionId: string; controller: AbortController }>;
 }
 
 type Socket = ServerWebSocket<SocketData>;
@@ -57,8 +71,9 @@ interface Listener {
 // without the listener having to be told about it again.
 const sessions = new Map<string, Session>();
 const sockets = new Set<Socket>();
-// Tailscale's verdict on each peer, kept while it has a socket open.
-const peers = new Map<string, Promise<boolean>>();
+// Tailscale's verdict on each peer, for a minute; one with a socket open is
+// let in without asking again.
+const verdicts = new Map<string, { verdict: Promise<boolean>; at: number }>();
 let listener: Listener | null = null;
 let starting: Promise<Listener> | null = null;
 let focus: { sessionId: string; participant: string; at: number } | null = null;
@@ -114,7 +129,25 @@ async function trusted(ip: string, user: string): Promise<boolean> {
 }
 
 function allowed(ip: string, user: string): Promise<boolean> {
-  return peers.get(ip) ?? trusted(ip, user);
+  if ([...sockets].some(socket => socket.data.ip === ip)) return Promise.resolve(true);
+  const now = Date.now();
+  const cached = verdicts.get(ip);
+  if (cached && now - cached.at < VERDICT_MS) return cached.verdict;
+  for (const [address, { at }] of verdicts) if (now - at >= VERDICT_MS) verdicts.delete(address);
+  const verdict = trusted(ip, user);
+  verdicts.set(ip, { verdict, at: now });
+  return verdict;
+}
+
+// A request a browser made, or one for a name other than this Mac's.
+function fromBrowser(request: Request, self: { ip: string; host: string }): boolean {
+  if (request.headers.has('origin')) return true;
+  const authority = request.headers.get('host')?.toLowerCase() ?? '';
+  const name = (authority.startsWith('[') ? authority.slice(1, authority.indexOf(']')) : authority.replace(/:\d+$/, '')).replace(/\.$/, '');
+  const host = self.host.toLowerCase();
+  // The MagicDNS name, and the short name MagicDNS also answers to.
+  const names = [self.ip, host, ...(host === self.ip ? [] : [host.split('.')[0]]), ...(loopback() ? ['localhost'] : [])];
+  return !names.includes(name);
 }
 
 // ── What the phone is sent ───────────────────────────────────────────────
@@ -202,33 +235,66 @@ subscribeQuestions(() => {
 type Frame = Record<string, unknown>;
 
 // Text from the phone, taken as if typed into that participant's
-// conversation in the terminal: the same routing, queueing and commands
-// (`frontend/chat/send.ts`). What a command reports comes back as feedback.
-async function sendText(session: Session, participant: string, text: string): Promise<string | undefined> {
+// conversation in the terminal: the same commands, wherever they are
+// written, and the same routing and queueing (`frontend/chat/send.ts`). What
+// the commands and a reporting vendor command say comes back as feedback.
+async function sendText(socket: Socket, session: Session, participant: string, text: string): Promise<string | undefined> {
+  const draft = splitDraft(session, text, participant);
+  if (commandsWait(session, draft)) {
+    queueDraft(draft, [], (queued, images, content) => queueInput(session, queued, participant, images, content));
+    return undefined;
+  }
+  const said: string[] = [];
+  for (const command of draft.commands) {
+    const output = await runCommand(socket, session, participant, command);
+    if (output) said.push(output);
+  }
+  if (draft.prompt) {
+    const output = await sendPrompt(socket, session, participant, draft.prompt);
+    if (output) said.push(output);
+  }
+  return said.join('\n') || undefined;
+}
+
+// A controller for work the phone started, ended by Stop on the phone or by
+// its socket closing.
+async function tracked<T>(socket: Socket, session: Session, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const entry = { sessionId: session.getId(), controller: new AbortController() };
+  socket.data.running.add(entry);
+  try {
+    return await work(entry.controller.signal);
+  } finally {
+    socket.data.running.delete(entry);
+  }
+}
+
+async function runCommand(socket: Socket, session: Session, participant: string, command: PromptCommand): Promise<string | undefined> {
+  const args = commandArgs(command.name, command.args, participant);
+  const probe = new AbortController();
+  const menu = commandMenu(command.name, args, session, probe.signal);
+  probe.abort();
+  if (menu) throw new Error(`/${command.name} ${args.length ? 'with these arguments ' : ''}opens a menu, which only the terminal can show.`);
+  let progress: string | undefined;
+  const outcome = await tracked(socket, session, signal => Promise.resolve(executeCommand(command.name, args, {
+    session, participant, signal, argumentText: command.argumentText,
+    notify: text => { progress = text; },
+    sendPrompt: text => session.sendMessage(session.messageForParticipant({ role: 'user', to: [participant], content: [{ type: 'text', text }] }, participant)).then(() => undefined),
+  })));
+  if (outcome?.kind === 'error') throw new Error(outcome.text);
+  return outcome ? outcome.text : progress;
+}
+
+// Text with no command of Sirus's left in it.
+async function sendPrompt(socket: Socket, session: Session, participant: string, text: string): Promise<string | undefined> {
   const route = routeInput(session, text, participant);
-  const controller = new AbortController();
   if (route.aside) {
-    const output = await session.runCommandAside(route.aside.participant, route.aside.text, controller.signal);
-    return output.text || `@${route.aside.participant} printed nothing for ${route.aside.text}.`;
+    const { participant: target, text: invocation } = route.aside;
+    const output = await tracked(socket, session, signal => session.runCommandAside(target, invocation, signal));
+    return output.text || `@${target} printed nothing for ${invocation}.`;
   }
   if (route.busy && !route.immediate) {
     queueInput(session, text, participant);
     return undefined;
-  }
-  if (route.command) {
-    const { name, rest } = route.command;
-    const args = commandArgs(name, route.command.args, participant);
-    const menu = commandMenu(name, args, session, controller.signal);
-    controller.abort();
-    if (menu) throw new Error(`/${name} ${args.length ? 'with these arguments ' : ''}opens a menu, which only the terminal can show.`);
-    let progress: string | undefined;
-    const outcome = await executeCommand(name, args, {
-      session, participant, signal: new AbortController().signal, argumentText: rest,
-      notify: text => { progress = text; },
-      sendPrompt: text => session.sendMessage(session.messageForParticipant({ role: 'user', to: [participant], content: [{ type: 'text', text }] }, participant)).then(() => undefined),
-    });
-    if (outcome?.kind === 'error') throw new Error(outcome.text);
-    return outcome ? outcome.text : progress;
   }
   // The result says whether the message was taken, not how its turn went:
   // a refusal comes before the entry is added, synchronously, so it is the
@@ -275,12 +341,17 @@ async function handle(socket: Socket, frame: Frame): Promise<void> {
       case 'send': {
         const session = remoteSession(frame.sessionId);
         if (typeof frame.text !== 'string' || !frame.text.trim()) throw new Error('There is nothing to send.');
-        feedback = await sendText(session, participantOf(session, frame.participant), frame.text);
+        feedback = await sendText(socket, session, participantOf(session, frame.participant), frame.text);
         break;
       }
-      case 'cancel':
-        remoteSession(frame.sessionId).cancel();
+      case 'cancel': {
+        const session = remoteSession(frame.sessionId);
+        session.cancel();
+        for (const { sessionId, controller } of socket.data.running) {
+          if (sessionId === session.getId()) controller.abort();
+        }
         break;
+      }
       case 'approve': {
         const request = pendingApprovals().find(candidate => candidate.id === frame.requestId);
         if (!request || !sessions.get(request.sessionId)?.isRemote()
@@ -304,7 +375,10 @@ async function handle(socket: Socket, frame: Frame): Promise<void> {
         const others = (remote.devices ?? []).filter(device => device.token !== apnsToken);
         const known = remote.devices?.find(device => device.token === apnsToken);
         const device = { token: apnsToken, environment: environment as typeof APNS_ENVIRONMENTS[number], firstSeen: known?.firstSeen ?? Date.now() };
-        if (!settings.set({ remote: { ...remote, devices: [...others, device] } })) throw new Error('Sirus could not save this device to its settings.');
+        // A phone registers on every connection, so the list's end is the
+        // phones in use; the oldest registrations beyond it are dropped.
+        const devices = [...others, device].slice(-MAX_DEVICES);
+        if (!settings.set({ remote: { ...remote, devices } })) throw new Error('Sirus could not save this device to its settings.');
         break;
       }
       default:
@@ -334,11 +408,11 @@ function listen(self: { ip: string; host: string; user: string }): Listener {
         port,
         async fetch(request, server) {
           const ip = server.requestIP(request)?.address ?? '';
-          if (!await allowed(ip, self.user)) return new Response('Forbidden', { status: 403 });
+          if (fromBrowser(request, self) || !await allowed(ip, self.user)) return new Response('Forbidden', { status: 403 });
           const { pathname } = new URL(request.url);
           if (request.method === 'GET' && pathname === '/v1/hello') return Response.json({ protocol: 1, sirus: SIRUS_VERSION, pid: process.pid });
           if (request.method === 'GET' && pathname === '/v1/socket') {
-            if (server.upgrade(request, { data: { ip, subscription: null } })) return undefined;
+            if (server.upgrade(request, { data: { ip, subscription: null, running: new Set() } })) return undefined;
             return new Response('Expected a WebSocket', { status: 400 });
           }
           return new Response('Not found', { status: 404 });
@@ -346,7 +420,6 @@ function listen(self: { ip: string; host: string; user: string }): Listener {
         websocket: {
           open(socket) {
             sockets.add(socket);
-            peers.set(socket.data.ip, Promise.resolve(true));
             recordFirstConnection();
             lastList = listFrame();
             socket.send(lastList);
@@ -358,8 +431,8 @@ function listen(self: { ip: string; host: string; user: string }): Listener {
           },
           close(socket) {
             unsubscribe(socket);
+            for (const { controller } of socket.data.running) controller.abort();
             sockets.delete(socket);
-            if (![...sockets].some(other => other.data.ip === socket.data.ip)) peers.delete(socket.data.ip);
           },
         },
       });
@@ -388,7 +461,7 @@ export function stopRemoteControl(): void {
     socket.close();
   }
   sockets.clear();
-  peers.clear();
+  verdicts.clear();
   listener?.server.stop(true);
   listener = null;
   lastList = '';

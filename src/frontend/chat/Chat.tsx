@@ -28,11 +28,7 @@ import { InputFeedback } from './InputRows';
 import {
   commandMenu,
   executeCommand,
-  isImmediateCommand,
   parseCommandLine,
-  promptContent,
-  splitPrompt,
-  vendorCommandFor,
   type CommandMenuEntry,
   type CommandMenuItem,
   type CommandMenuResult,
@@ -42,7 +38,7 @@ import { parseMouseWheel } from '../interaction/mouse';
 import { SIDEBAR_WIDTH } from '../Sidebar';
 import { useSelectionRegion } from '../interaction/useTextSelection';
 import type { Feedback } from '../../commands/feedback';
-import { isThinkingArgument } from '../../commands/agents/behavior';
+import { commandArgs, commandsWait, queueDraft, queueInput, routeInput, splitDraft } from './send';
 import { participantColorMap, type ParticipantColors } from '../MentionText';
 import { isAbortError, TurnCancelledError } from '../../abort';
 import {
@@ -574,13 +570,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   // arguments as they were typed. What it came to tells a prompt the command
   // was written in whether it can go on.
   const runCommand = (command: string, args: readonly string[], recipient = selected, argumentText?: string): CommandOutcome => {
-    // Agent-specific pickers bake their destination into the resulting
-    // command, as does a model, with or without a level, named alone.
-    const unnamed = args.length === 1 || (command === 'model' && args.length === 2 && isThinkingArgument(args[1]));
-    if (['model', 'thinking', 'effort', 'fast'].includes(command)
-      && (args.length === 0 || (unnamed && !args[0].startsWith('@') && args[0] !== 'subagent'))) {
-      args = [`@${recipient}`, ...args];
-    }
+    args = commandArgs(command, args, recipient);
     setFeedback(null);
     const controller = new AbortController();
     let menu: CommandMenuResult;
@@ -694,29 +684,15 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   // prompt there until the choice is made. A command leaves any attachments
   // waiting for the next real message. Commands are exactly what the
   // background queue leaves for a mounted Chat.
-  const splitDraft = (text: string, content: MessageBlock[] | undefined, recipient: string) => {
-    const typed = content ? content.flatMap(block => block.type === 'text' ? [block.text] : []).join('') : text;
-    const parts = splitPrompt(typed, currSession.getNativeCommands(recipient), currSession);
-    const prompt = parts.cuts.length > 0 ? parts.prompt : text;
-    const promptBlocks = content && parts.cuts.length > 0 ? promptContent(content, parts) : content;
-    return { commands: parts.commands, prompt, promptBlocks };
-  };
-  // A prompt held back goes into the queue as send would run it: each
-  // command an item of its own, so none is read again with another's words
-  // or sent to the agents unrun, then what is left for the agents.
-  const queueDraft = ({ commands, prompt, promptBlocks }: ReturnType<typeof splitDraft>, images: readonly ImageBlock[], recipient: string) => {
-    for (const command of commands) queue(command.text, [], undefined, recipient);
-    if (prompt || images.length) queue(prompt, images, promptBlocks, recipient);
-  };
+  const queueFor = (recipient: string) => (text: string, images: readonly ImageBlock[], content: MessageBlock[] | undefined) =>
+    queue(text, images, content, recipient);
   const send = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[], recipient = selected, to?: readonly string[], queuedMessage?: QueuedMessage): boolean => {
-    const draft = splitDraft(text, content, recipient);
+    const draft = splitDraft(currSession, text, recipient, content);
     const { commands, prompt, promptBlocks } = draft;
     if (commands.length === 0) return sendToAgents(prompt, images, promptBlocks, recipient, to, queuedMessage);
 
-    const waits = (commandAbort.current !== null || currSession.getStatus() === 'working')
-      && !commands.every(command => isImmediateCommand(command.text));
-    if (waits) {
-      if (!queuedMessage) queueDraft(draft, images, recipient);
+    if (commandsWait(currSession, draft, commandAbort.current !== null)) {
+      if (!queuedMessage) queueDraft(draft, images, queueFor(recipient));
       return true;
     }
     if (queuedMessage) currSession.takeQueuedMessages([queuedMessage.id]);
@@ -742,22 +718,14 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   // name nobody knows, goes out as a message and the agent's harness makes of
   // it what it will.
   const sendToAgents = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[], recipient = selected, to?: readonly string[], queuedMessage?: QueuedMessage): boolean => {
-    const immediate = isImmediateCommand(text);
-    // An agent's own command goes to the agent on that command's vendor: the
-    // selected one when it is, else another. One that only reports runs aside
-    // at once, whatever the agents are doing, and is kept nowhere.
-    const vendorCommand = vendorCommandFor(text, currSession.getNativeCommands(recipient));
-    const vendorTarget = vendorCommand?.vendor ? currSession.participantOn(vendorCommand.vendor, recipient) : null;
-    if (vendorCommand?.reporting && vendorTarget) {
-      // In the vendor's own words: `/codex:status` is Codex's `/status`.
+    const { message: routed, aside, busy: targetsBusy, immediate } = routeInput(currSession, text, recipient, images, content, to);
+    // A vendor command that only reports runs aside at once, whatever the
+    // agents are doing, and is kept nowhere.
+    if (aside) {
       if (queuedMessage) currSession.takeQueuedMessages([queuedMessage.id]);
-      runAside(vendorTarget, vendorCommand.command.invocation);
+      runAside(aside.participant, aside.text);
       return true;
     }
-    const addressed = to?.length ? [...to] : vendorTarget && vendorTarget !== recipient ? [vendorTarget] : undefined;
-    const routed = currSession.messageForParticipant({ role: 'user', ...(addressed ? { to: addressed } : {}),
-      content: content ?? [...images, { type: 'text', text }] }, recipient);
-    const targetsBusy = routed.to?.some(name => currSession.isParticipantWorking(name)) ?? false;
     // The user follows a prompt they sent in the conversation it opens by
     // addressing (see messageForParticipant) once it is accepted or queued.
     // A queued prompt going out later moves nobody.
@@ -811,8 +779,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   };
 
   const queue = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[], recipient = selected) => {
-    const message = currSession.messageForParticipant({ role: 'user', content: content ?? [{ type: 'text', text }] }, recipient);
-    currSession.queueMessage(text, images, content, message.to);
+    queueInput(currSession, text, recipient, images, content);
     const paths = new Set(images.map(image => image.path));
     replaceAttachments(view.attachments.filter(image => !paths.has(image.path)));
   };
@@ -836,7 +803,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       if (text || images.length) send(text, images, content);
       return;
     }
-    if (text || images.length) queueDraft(splitDraft(text, content, selected), images, selected);
+    if (text || images.length) queueDraft(splitDraft(currSession, text, selected, content), images, queueFor(selected));
     commandAbort.current?.abort(new TurnCancelledError());
     void currSession.deliverQueuedMessages();
   };
