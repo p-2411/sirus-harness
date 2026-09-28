@@ -35,8 +35,11 @@ struct RootView: View {
                     } else {
                         Lobby(store: store)
                     }
+                    // Laid out above the keyboard like the conversation: one
+                    // that ignored it slid down over the composer. Opening it
+                    // puts the keyboard away, so the panel still runs full
+                    // height.
                     Sidebar(store: store, selected: store.openSession, expanded: $sidebarExpanded, railEnd: chromeTop)
-                        .ignoresSafeArea(.keyboard)
                         .opacity(railAside ? 0 : 1)
                         .allowsHitTesting(!railAside)
                         .symbolEffectsRemoved(railAside)

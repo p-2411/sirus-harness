@@ -192,6 +192,7 @@ private struct Conversation: View {
             .onChange(of: draft) { _, text in store.keep(draft: text, for: sessionId) }
             #if DEBUG
             .task { await screenshotHooks() }
+            .onChange(of: composerFocused) { _, now in screensLog.notice("composer focused \(now)") }
             #endif
             .sensoryFeedback(.impact(weight: .medium), trigger: client.requests.first?.id) { _, new in new != nil }
             .sensoryFeedback(.impact(weight: .light), trigger: chosenCompletion)
