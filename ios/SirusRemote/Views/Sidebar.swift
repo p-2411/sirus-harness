@@ -30,6 +30,11 @@ struct Sidebar: View {
     var railEnd: CGFloat = .infinity
     // The sidebar's own top on screen, which the rail's height can't move.
     @State private var top: CGFloat = 0
+    // The marks the rail shows. They follow `fittingMarks` once the bar has
+    // come to rest, in one animated step: the bar springs in many small
+    // steps, and the pane's glass, resized at each of them, was drawn apart
+    // from its content, or not at all.
+    @State private var marks = 0
     @State private var seen: [String: Int] = [:]
     @State private var confirmingForget = false
     @GestureState private var drag: CGFloat = 0
@@ -59,6 +64,10 @@ struct Sidebar: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { top = $0 }
+        .task(id: fittingMarks) {
+            do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+            withAnimation(.smooth(duration: 0.25)) { marks = fittingMarks }
+        }
         .sensoryFeedback(.selection, trigger: selected)
         .sensoryFeedback(.impact(weight: .light), trigger: expanded)
         // Forgetting the Mac leaves only setup, and connecting again needs
@@ -110,7 +119,7 @@ struct Sidebar: View {
             .padding([.top, .horizontal], expanded ? Self.cornerInset : 0)
             if expanded {
                 panel.transition(.opacity)
-            } else if railMarks > 0 {
+            } else if marks > 0 {
                 rail.transition(.opacity)
             }
         }
@@ -134,12 +143,12 @@ struct Sidebar: View {
             })
     }
 
-    // How many marks the rail shows: one per session, seven at most, and
-    // only whole ones above the conversation's bottom bar. It steps down a
-    // mark at a time as the bar comes up, and goes when none fit, leaving
-    // the toggle: squeezed to a sliver, it took the pane's glass and the
-    // toggle with it.
-    private var railMarks: Int {
+    // How many marks fit: one per session, seven at most, and only whole
+    // ones above the conversation's bottom bar. The rail steps down a mark
+    // at a time as the bar comes up, and goes when none fit, leaving the
+    // toggle: squeezed to a sliver, it took the pane's glass and the toggle
+    // with it.
+    private var fittingMarks: Int {
         let fit = min(store.sessions.count, 7)
         let room = (railEnd - top - Self.marksTop - 12) / 44
         guard room.isFinite else { return fit }
@@ -173,7 +182,7 @@ struct Sidebar: View {
             .scrollIndicators(.hidden)
             .scrollBounceBehavior(.basedOnSize)
             // The rest scroll.
-            .frame(height: CGFloat(railMarks) * 44)
+            .frame(height: CGFloat(marks) * 44)
         }
         .frame(width: Self.railWidth)
         .padding(.bottom, 4)
