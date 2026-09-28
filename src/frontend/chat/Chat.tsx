@@ -17,7 +17,7 @@ import { theme } from '../styles/theme';
 import { singleLine, terminalText } from '../terminal/text';
 import { HORSE } from '../branding/horse';
 import { ChatHistory, formatElapsed, PlanChecklist, thoughtHeading, visibleContent } from './ChatMessage';
-import { finished, toolLine } from './toolCalls';
+import { finished, runningToolLine } from './toolCalls';
 import { useClickable } from '../interaction/clickable';
 import { Spinner } from './Spinner';
 import { InputBar, createInputDraftState, type InputDraftState, type InputMode } from './InputBar';
@@ -28,7 +28,11 @@ import { InputFeedback } from './InputRows';
 import {
   commandMenu,
   executeCommand,
+  isImmediateCommand,
   parseCommandLine,
+  promptContent,
+  splitPrompt,
+  vendorCommandFor,
   type CommandMenuEntry,
   type CommandMenuItem,
   type CommandMenuResult,
@@ -38,6 +42,7 @@ import { parseMouseWheel } from '../interaction/mouse';
 import { SIDEBAR_WIDTH } from '../Sidebar';
 import { useSelectionRegion } from '../interaction/useTextSelection';
 import type { Feedback } from '../../commands/feedback';
+import { isThinkingArgument } from '../../commands/agents/behavior';
 import { participantColorMap, type ParticipantColors } from '../MentionText';
 import { isAbortError, TurnCancelledError } from '../../abort';
 import {
@@ -57,7 +62,6 @@ import { onProviderChange } from '../../agent_runtime/providers/sources';
 import { copyToClipboard } from '../terminal/clipboard';
 import { nextPermissionMode } from '../../agent_runtime/permissions/policy';
 import { getSubagentsVersion, subscribeSubagents } from '../../agent_runtime/tools/subagents';
-import { commandArgs, queueInput, routeInput } from './send';
 
 export function ChatHeader({ session, activity = new Map(), width = 100, onSelect }: {
   session: Session;
@@ -83,6 +87,10 @@ export function ChatHeader({ session, activity = new Map(), width = 100, onSelec
   );
 }
 
+// What running a command came to: it failed, opened its menu, or ran, with
+// what it said once it had.
+type CommandOutcome = { status: 'failed' } | { status: 'menu' } | { status: 'ran'; feedback?: Feedback };
+
 interface AgentView {
   history: HistoryPosition;
   draft: InputDraftState;
@@ -91,6 +99,7 @@ interface AgentView {
   reset: number;
   seen: string;
 }
+const SUCCESS_FEEDBACK_MS = 2500;
 const agentViews = new WeakMap<Session, Map<string, AgentView>>();
 function viewsFor(session: Session): Map<string, AgentView> {
   let views = agentViews.get(session);
@@ -185,7 +194,7 @@ export function turnPhase(messages: readonly Message[], directory?: string): str
   const running = [...content]
     .reverse()
     .find((block): block is ToolCallBlock => block.type === 'tool_call' && !finished(block));
-  if (running) return `running ${toolLine(running, PHASE_TITLE_LENGTH, directory)}`;
+  if (running) return runningToolLine(running, PHASE_TITLE_LENGTH, directory);
   const thought = turnThought(last);
   if (thought) {
     const { title, body } = thoughtHeading(terminalText(thought));
@@ -333,10 +342,12 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   const selected = currSession.getSelectedParticipant();
   const views = viewsFor(currSession);
   const view = views.get(selected)!;
-  const messages = currSession.getMessages(selected).filter(message => !message.hidden);
+  const messages = currSession.getConversation(selected).filter(message => !message.hidden);
   const [, refreshView] = useState(0);
   const repaintView = () => refreshView(version => version + 1);
-  useEffect(() => { view.seen = activityStamp(messages); }, [selected, currSession.getVersion()]);
+  // Unread marks follow each agent's own record, not the replies of others
+  // its conversation shows.
+  useEffect(() => { view.seen = activityStamp(currSession.getMessages(selected)); }, [selected, currSession.getVersion()]);
   const participants = currSession.getParticipants();
   const participantColors = participantColorMap(participants);
 
@@ -349,7 +360,24 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   const isWorking = currSession.isParticipantWorking(selected);
   const inputIsBusy = commandIsLoading || isWorking;
   const feedback = view.feedback;
-  const setFeedback = (feedback: Feedback | null) => { view.feedback = feedback; repaintView(); };
+  const feedbackTimers = useRef(new Map<AgentView, ReturnType<typeof setTimeout>>());
+  const setFeedback = (feedback: Feedback | null) => {
+    const previous = feedbackTimers.current.get(view);
+    if (previous) clearTimeout(previous);
+    feedbackTimers.current.delete(view);
+    view.feedback = feedback;
+    if (feedback?.kind === 'success' && !feedback.panel && !feedback.markdown && !feedback.text.includes('\n')) {
+      const timedView = view;
+      feedbackTimers.current.set(timedView, setTimeout(() => {
+        feedbackTimers.current.delete(timedView);
+        if (timedView.feedback === feedback) {
+          timedView.feedback = null;
+          repaintView();
+        }
+      }, SUCCESS_FEEDBACK_MS));
+    }
+    repaintView();
+  };
   const notice = currSession.getNotice();
   useEffect(() => {
     if (!notice || notice.participant !== selected) return;
@@ -371,6 +399,8 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
     mounted.current = true;
     return () => {
       mounted.current = false;
+      for (const timer of feedbackTimers.current.values()) clearTimeout(timer);
+      feedbackTimers.current.clear();
       for (const [name, saved] of views) {
         for (const image of saved.attachments) removeStoredImage(image);
         if (saved.attachments.length) {
@@ -541,9 +571,16 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   // command (e.g. shift+tab's /permissions, fired while /login is still
   // awaiting the browser) must never touch, let alone clear, another
   // command's still-live abort handle. A typed command also hands over its
-  // arguments as they were typed.
-  const runCommand = (command: string, args: readonly string[], recipient = selected, argumentText?: string) => {
-    args = commandArgs(command, args, recipient);
+  // arguments as they were typed. What it came to tells a prompt the command
+  // was written in whether it can go on.
+  const runCommand = (command: string, args: readonly string[], recipient = selected, argumentText?: string): CommandOutcome => {
+    // Agent-specific pickers bake their destination into the resulting
+    // command, as does a model, with or without a level, named alone.
+    const unnamed = args.length === 1 || (command === 'model' && args.length === 2 && isThinkingArgument(args[1]));
+    if (['model', 'thinking', 'effort', 'fast'].includes(command)
+      && (args.length === 0 || (unnamed && !args[0].startsWith('@') && args[0] !== 'subagent'))) {
+      args = [`@${recipient}`, ...args];
+    }
     setFeedback(null);
     const controller = new AbortController();
     let menu: CommandMenuResult;
@@ -552,11 +589,11 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       menu = commandMenu(command, args, currSession, controller.signal);
     } catch (e) {
       setFeedback({ kind: 'error', text: e instanceof Error ? e.message : 'Something went wrong.' });
-      return;
+      return { status: 'failed' };
     }
     if (menu) {
       openMenu(menu, controller);
-      return;
+      return { status: 'menu' };
     }
     let result;
     try {
@@ -598,7 +635,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       });
     } catch (e) {
       setFeedback({ kind: 'error', text: e instanceof Error ? e.message : 'Something went wrong.' });
-      return;
+      return { status: 'failed' };
     }
     if (result instanceof Promise) {
       // a long-running command (browser login) holds the input like a turn
@@ -620,7 +657,9 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
         });
     } else if (result) {
       setFeedback(result);
+      return { status: 'ran', feedback: result };
     }
+    return { status: 'ran' };
   };
 
   // A vendor command that only reports runs on a throwaway fork of the
@@ -647,40 +686,105 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       });
   };
 
-  // A command leaves any attachments waiting for the next real message.
-  // Commands are exactly what the background queue leaves for a mounted Chat.
+  // A prompt's own commands run first, in the order written (see
+  // splitPrompt), and what is left of it then goes to the agents. Commands
+  // that must wait for the turn hold the prompt back with them, each queued
+  // as an item of its own so none is read again with another's words. A
+  // command that fails keeps the draft; one that opens its menu leaves the
+  // prompt there until the choice is made. A command leaves any attachments
+  // waiting for the next real message. Commands are exactly what the
+  // background queue leaves for a mounted Chat.
+  const splitDraft = (text: string, content: MessageBlock[] | undefined, recipient: string) => {
+    const typed = content ? content.flatMap(block => block.type === 'text' ? [block.text] : []).join('') : text;
+    const parts = splitPrompt(typed, currSession.getNativeCommands(recipient), currSession);
+    const prompt = parts.cuts.length > 0 ? parts.prompt : text;
+    const promptBlocks = content && parts.cuts.length > 0 ? promptContent(content, parts) : content;
+    return { commands: parts.commands, prompt, promptBlocks };
+  };
+  // A prompt held back goes into the queue as send would run it: each
+  // command an item of its own, so none is read again with another's words
+  // or sent to the agents unrun, then what is left for the agents.
+  const queueDraft = ({ commands, prompt, promptBlocks }: ReturnType<typeof splitDraft>, images: readonly ImageBlock[], recipient: string) => {
+    for (const command of commands) queue(command.text, [], undefined, recipient);
+    if (prompt || images.length) queue(prompt, images, promptBlocks, recipient);
+  };
   const send = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[], recipient = selected, to?: readonly string[], queuedMessage?: QueuedMessage): boolean => {
-    // A vendor command that only reports runs aside at once, whatever the
-    // agents are doing, and is kept nowhere.
-    const route = routeInput(currSession, text, recipient, images, content, to);
-    if (route.aside) {
-      if (queuedMessage) currSession.takeQueuedMessages([queuedMessage.id]);
-      runAside(route.aside.participant, route.aside.text);
+    const draft = splitDraft(text, content, recipient);
+    const { commands, prompt, promptBlocks } = draft;
+    if (commands.length === 0) return sendToAgents(prompt, images, promptBlocks, recipient, to, queuedMessage);
+
+    const waits = (commandAbort.current !== null || currSession.getStatus() === 'working')
+      && !commands.every(command => isImmediateCommand(command.text));
+    if (waits) {
+      if (!queuedMessage) queueDraft(draft, images, recipient);
       return true;
     }
-    if ((route.busy || commandAbort.current) && !route.immediate) {
+    if (queuedMessage) currSession.takeQueuedMessages([queuedMessage.id]);
+    let said: Feedback | undefined;
+    for (const command of commands) {
+      const outcome = runCommand(command.name, command.args, recipient, command.argumentText);
+      if (outcome.status === 'failed') return !prompt;
+      if (outcome.status === 'menu') {
+        if (!prompt) return true;
+        currSession.setInputContent(prompt, recipient);
+        return false;
+      }
+      said = outcome.feedback ?? said;
+    }
+    if (!prompt) return true;
+    const sent = sendToAgents(prompt, images, promptBlocks, recipient, to);
+    // Sending clears the feedback line; what the commands said stays on it.
+    if (said) setFeedback(said);
+    return sent;
+  };
+
+  // Text with no command of Sirus's in it. An agent's own command, or a
+  // name nobody knows, goes out as a message and the agent's harness makes of
+  // it what it will.
+  const sendToAgents = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[], recipient = selected, to?: readonly string[], queuedMessage?: QueuedMessage): boolean => {
+    const immediate = isImmediateCommand(text);
+    // An agent's own command goes to the agent on that command's vendor: the
+    // selected one when it is, else another. One that only reports runs aside
+    // at once, whatever the agents are doing, and is kept nowhere.
+    const vendorCommand = vendorCommandFor(text, currSession.getNativeCommands(recipient));
+    const vendorTarget = vendorCommand?.vendor ? currSession.participantOn(vendorCommand.vendor, recipient) : null;
+    if (vendorCommand?.reporting && vendorTarget) {
+      // In the vendor's own words: `/codex:status` is Codex's `/status`.
+      if (queuedMessage) currSession.takeQueuedMessages([queuedMessage.id]);
+      runAside(vendorTarget, vendorCommand.command.invocation);
+      return true;
+    }
+    const addressed = to?.length ? [...to] : vendorTarget && vendorTarget !== recipient ? [vendorTarget] : undefined;
+    const routed = currSession.messageForParticipant({ role: 'user', ...(addressed ? { to: addressed } : {}),
+      content: content ?? [...images, { type: 'text', text }] }, recipient);
+    const targetsBusy = routed.to?.some(name => currSession.isParticipantWorking(name)) ?? false;
+    // The user follows a prompt they sent in the conversation it opens by
+    // addressing (see messageForParticipant) once it is accepted or queued.
+    // A queued prompt going out later moves nobody.
+    const previousQueued = currSession.getQueuedMessageCount();
+    const follow = (accepted: boolean) => {
+      if (!queuedMessage && accepted && routed.shownIn && currSession.getParticipants()
+        .some(participant => participant.name === routed.shownIn)) currSession.selectParticipant(routed.shownIn);
+    };
+    if ((targetsBusy || commandAbort.current) && !immediate) {
       if (!queuedMessage) queue(text, images, content, recipient);
+      follow(true);
       return true;
     }
-    const command = route.command;
-    if (command) {
-      if (queuedMessage) currSession.takeQueuedMessages([queuedMessage.id]);
-      runCommand(command.name, command.args, recipient, command.rest);
-    } else {
-      const previousLength = currSession.getMessages().length;
-      const previousDraft = currSession.getInputContent(recipient);
-      deliver(route.message, images, queuedMessage)
-        .catch((caught: unknown) => {
-          if (currSession.getMessages().length === previousLength && !currSession.getInputContent(recipient)) {
-            currSession.setInputContent(previousDraft, recipient);
-          }
-          setFeedback(isAbortError(caught)
-            ? null
-            : { kind: 'error', text: caught instanceof Error ? caught.message : 'Something went wrong.' });
-        });
-    }
+    const previousLength = currSession.getMessages().length;
+    const previousDraft = currSession.getInputContent(recipient);
+    deliver(routed, images, queuedMessage)
+      .catch((caught: unknown) => {
+        if (currSession.getMessages().length === previousLength && !currSession.getInputContent(recipient)) {
+          currSession.setInputContent(previousDraft, recipient);
+        }
+        setFeedback(isAbortError(caught)
+          ? null
+          : { kind: 'error', text: caught instanceof Error ? caught.message : 'Something went wrong.' });
+      });
+    follow(currSession.getMessages().length > previousLength || currSession.getQueuedMessageCount() > previousQueued);
     return true;
-  }
+  };
 
   // The user's message to the agents, however it was started: typed, or sent
   // by a command such as /init. Settles when the turn it starts is over.
@@ -707,7 +811,8 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
   };
 
   const queue = (text: string, images: readonly ImageBlock[] = [], content?: MessageBlock[], recipient = selected) => {
-    queueInput(currSession, text, recipient, images, content);
+    const message = currSession.messageForParticipant({ role: 'user', content: content ?? [{ type: 'text', text }] }, recipient);
+    currSession.queueMessage(text, images, content, message.to);
     const paths = new Set(images.map(image => image.path));
     replaceAttachments(view.attachments.filter(image => !paths.has(image.path)));
   };
@@ -731,7 +836,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       if (text || images.length) send(text, images, content);
       return;
     }
-    if (text || images.length) queue(text, images, content);
+    if (text || images.length) queueDraft(splitDraft(text, content, selected), images, selected);
     commandAbort.current?.abort(new TurnCancelledError());
     void currSession.deliverQueuedMessages();
   };
@@ -774,7 +879,7 @@ export default function Chat({ currSession, onStartSession, sidebarWidth = SIDEB
       />
       {isWorking && (
         <TurnStatus
-          messages={messages}
+          messages={currSession.getMessages(selected).filter(message => !message.hidden)}
           directory={currSession.getDirectory()}
           awaitingApproval={approvals.length > 0}
           awaitingAnswer={questions.length > 0}

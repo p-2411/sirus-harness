@@ -136,6 +136,7 @@ const messageSchema = z.object({
     offset: z.number().int().nonnegative(),
   }).optional(),
   creationModels: z.array(z.object({ start: z.number().int().nonnegative(), end: z.number().int().nonnegative() })).optional(),
+  shownIn: z.string().min(1).optional(),
   startedAt: z.number().optional(),
   finishedAt: z.number().optional(),
   // A compaction summary written by Sirus itself, before the runtimes
@@ -366,6 +367,7 @@ function toMessage(stored: StoredMessage, index: number, defaultParticipant: str
     ...(stored.hidden ? { hidden: true as const } : {}),
     ...(stored.injectedAt ? { injectedAt: stored.injectedAt } : {}),
     ...(stored.creationModels?.length ? { creationModels: stored.creationModels } : {}),
+    ...(stored.shownIn ? { shownIn: stored.shownIn } : {}),
     ...(stored.startedAt !== undefined ? { startedAt: stored.startedAt } : {}),
     ...(stored.finishedAt !== undefined ? { finishedAt: stored.finishedAt } : {}),
     ...(usage.success ? { usage: usage.data } : {}),

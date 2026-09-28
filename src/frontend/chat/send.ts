@@ -1,6 +1,7 @@
 import type { Session } from '../../agent_runtime/session';
 import type { ImageBlock, MessageBlock } from '../../agent_runtime/types';
 import { commandRegistry, isImmediateCommand, isSirusCommand, parseCommandLine, vendorCommandFor } from '../../commands/registry';
+import { isThinkingArgument } from '../../commands/agents/behavior';
 
 // What a line of input to one agent's conversation does, decided the same way
 // whether it was typed in the terminal (Chat.tsx `send`) or sent from the
@@ -51,9 +52,12 @@ export function queueInput(session: Session, text: string, recipient: string, im
   session.queueMessage(text, images, content, message.to);
 }
 
-// Agent-specific pickers bake their destination into the resulting command.
+// Agent-specific pickers bake their destination into the resulting command,
+// as does a model, with or without a level, named alone. Chat.tsx's
+// runCommand applies the same rule.
 export function commandArgs(command: string, args: readonly string[], recipient: string): readonly string[] {
+  const unnamed = args.length === 1 || (command === 'model' && args.length === 2 && isThinkingArgument(args[1]));
   return ['model', 'thinking', 'effort', 'fast'].includes(command)
-    && (args.length === 0 || (args.length === 1 && !args[0].startsWith('@') && args[0] !== 'subagent'))
+    && (args.length === 0 || (unnamed && !args[0].startsWith('@') && args[0] !== 'subagent'))
     ? [`@${recipient}`, ...args] : args;
 }

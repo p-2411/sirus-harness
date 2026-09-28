@@ -5,7 +5,8 @@ import { contextPercent, formatTokens, formatTurnUsage } from '../../agent_runti
 import type { Feedback } from '../feedback';
 import type { Notify } from '../../agent_runtime/providers/login';
 import type { CommandMenuEntry, CommandMenuItem, CommandSession } from '../types';
-import { readSubscriptionUsage, remainingAllowance, formatRemaining, type SubscriptionUsage } from '../../agent_runtime/providers/usage';
+import { allowanceWindow, readSubscriptionUsage, remainingAllowance, formatRemaining, type SubscriptionUsage } from '../../agent_runtime/providers/usage';
+import { LIMIT_PERIODS, type LimitPeriod } from '../../agent_runtime/types';
 
 // `/login` asks which provider first; `/login <provider>` then offers that
 // provider's two ways in. Picking a provider sends `/login <provider>`, which
@@ -119,11 +120,17 @@ async function describeVendor(vendor: Vendor, signal?: AbortSignal): Promise<str
   return rows.join('\n');
 }
 
-// What is left of each allowance window, as both vendors' own terminals say
-// it: "5h 58% left · 7d 90% left".
+// What is left of each allowance window the vendor reports, as both vendors'
+// own terminals say it: "5h 58% left · 7d 90% left". Codex has no 5-hour
+// window, so it shows only "7d".
 export function describeSubscriptionUsage(usage: SubscriptionUsage): string {
-  return `5h ${formatRemaining(remainingAllowance(usage, '5-hour'))} · 7d ${formatRemaining(remainingAllowance(usage, '7-day'))}`;
+  const parts = LIMIT_PERIODS
+    .filter(period => allowanceWindow(usage, period))
+    .map(period => `${PERIOD_SHORT_NAMES[period]} ${formatRemaining(remainingAllowance(usage, period))}`);
+  return parts.length ? parts.join(' · ') : 'limits unavailable';
 }
+
+const PERIOD_SHORT_NAMES: Record<LimitPeriod, string> = { '5-hour': '5h', '7-day': '7d' };
 
 // What each participant has spent in this session and how full its window
 // is, from what its runtime reported. A participant with nothing reported

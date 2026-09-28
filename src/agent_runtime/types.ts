@@ -223,6 +223,10 @@ export interface Message {
   // starts on, the `<model>` of `@name <model>`, in `textOf` offsets. The text
   // is kept as written; the runtimes read it without these (`withoutCreationModels`).
   creationModels?: { start: number; end: number }[];
+  // User prompts routed by @name: the participant whose conversation the
+  // user follows the prompt in, which shows it and its other targets'
+  // replies too. Display metadata only: no runtime reads it.
+  shownIn?: string;
   // Assistant entries: when the turn that wrote it started and ended, and what
   // it used. Absent while it runs and in older snapshots. A participant's
   // total, which /status and /usage show, is the sum over its entries.

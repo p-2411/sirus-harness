@@ -55,7 +55,7 @@ test('pending tools still take priority over thoughts after a steered prompt', (
   const tool: ToolCallBlock = { type: 'tool_call', id: 'call', title: 'bun test', kind: 'execute', status: 'in_progress', locations: [], content: [] };
   const reply: Message = { seq: 1, role: 'assistant', content: [tool, { type: 'thought', text: 'Considering the new instruction' }] };
   const user: Message = { seq: 2, role: 'user', content: [{ type: 'text', text: 'Steered instruction' }], injectedAt: { seq: 1, block: 1, offset: 0 } };
-  expect(turnPhase([reply, user])).toBe('running Run bun test');
+  expect(turnPhase([reply, user])).toBe('running bun test');
   tool.status = 'completed';
   expect(turnPhase([reply, user])).toBe('Considering the new instruction');
 });

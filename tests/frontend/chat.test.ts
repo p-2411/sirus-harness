@@ -413,6 +413,43 @@ test('thinking runs immediately while other commands queue and can be taken back
   }
 });
 
+test('brief command confirmations expire without clearing newer feedback', async () => {
+  const session = new Session();
+  const chat = renderChat(session);
+  try {
+    await chat.type('/thinking high');
+    await chat.type('\r');
+    expect(chat.output()).toContain('@sirus thinking set to high.');
+    await new Promise(resolve => setTimeout(resolve, 1400));
+    await chat.type('/notify off');
+    await chat.type('\r');
+    expect(chat.output()).toContain('Notifications set to off.');
+    await new Promise(resolve => setTimeout(resolve, 1300));
+    await chat.flush();
+    expect(chat.output()).toContain('Notifications set to off.');
+    await new Promise(resolve => setTimeout(resolve, 1300));
+    await chat.flush();
+    expect(chat.output()).not.toContain('Notifications set to off.');
+
+    await chat.type('/thinking invalid');
+    await chat.type('\r');
+    expect(chat.output()).toContain('Unknown thinking level.');
+    await new Promise(resolve => setTimeout(resolve, 2600));
+    await chat.flush();
+    expect(chat.output()).toContain('Unknown thinking level.');
+
+    await chat.type('/help');
+    await chat.type('\r');
+    expect(chat.output()).toContain('list commands and keys');
+    await new Promise(resolve => setTimeout(resolve, 2600));
+    await chat.flush();
+    expect(chat.output()).toContain('list commands and keys');
+  } finally {
+    await chat.close();
+    await session.dispose();
+  }
+}, 12000);
+
 test('/review keeps its selected recipient when instructions mention another agent', async () => {
   bindScriptedRuntime('test-reviewer', async () => {});
   const session = new Session();
@@ -842,14 +879,14 @@ test('copying from the history copies the lines on screen after a row was opened
   };
   try {
     await chat.flush();
-    // A finished edit opens itself; a click closes it, and the lines below
-    // move up by the diff's height.
-    expect(chat.frame()).toContain('+ new line');
+    // A finished edit stays closed; a click opens it, and the lines below
+    // move down by the diff's height.
+    expect(chat.frame()).not.toContain('+ new line');
     const row = cellOf('● Edit notes.md');
     expect(pressAt(row)).toBe(true);
     expect(releaseAt(row)).toBe(true);
     await chat.flush();
-    expect(chat.frame()).not.toContain('+ new line');
+    expect(chat.frame()).toContain('+ new line');
 
     const reply = cellOf('The edit is done.');
     beginSelection(reply);
@@ -863,7 +900,7 @@ test('copying from the history copies the lines on screen after a row was opened
   }
 });
 
-test('a message steered into a reply leaves the rows closed in it alone', async () => {
+test('a message steered into a reply leaves the rows opened in it alone', async () => {
   const model = 'test-chat-steered-row';
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
@@ -886,15 +923,15 @@ test('a message steered into a reply leaves the rows closed in it alone', async 
       await new Promise(resolve => setTimeout(resolve, 10));
       await chat.flush();
     }
-    // A finished edit opens itself; the user closes the first one.
-    expect(chat.frame()).toContain('+ first line');
+    // A finished edit stays closed; the user opens the first one.
+    expect(chat.frame()).not.toContain('+ first line');
     const lines = chat.frame().split('\n');
     const line = lines.findIndex(text => text.includes('● Edit first.md'));
     const row = { line, col: lines[line]!.indexOf('● Edit first.md') };
     expect(pressAt(row)).toBe(true);
     expect(releaseAt(row)).toBe(true);
     await chat.flush();
-    expect(chat.frame()).not.toContain('+ first line');
+    expect(chat.frame()).toContain('+ first line');
 
     await session.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Also the second file.' }] });
     release();
@@ -904,9 +941,9 @@ test('a message steered into a reply leaves the rows closed in it alone', async 
     const frame = chat.frame();
     expect(frame.indexOf('● Edit first.md')).toBeLessThan(frame.indexOf('Also the second file.'));
     expect(frame.indexOf('Also the second file.')).toBeLessThan(frame.indexOf('● Edit second.md'));
-    // The first stays as the user left it, and the second opened itself.
-    expect(frame).not.toContain('+ first line');
-    expect(frame).toContain('+ second line');
+    // The first stays as the user left it, and the second stays closed.
+    expect(frame).toContain('+ first line');
+    expect(frame).not.toContain('+ second line');
   } finally {
     release();
     await turn.catch(() => undefined);
@@ -936,7 +973,7 @@ describe('turn status', () => {
 
   test('distinguishes thinking, tool activity, and writing', () => {
     expect(turnPhase([])).toBe('thinking');
-    expect(turnPhase([{ seq: 0, role: 'assistant', content: [running] }])).toBe('running Run bun test');
+    expect(turnPhase([{ seq: 0, role: 'assistant', content: [running] }])).toBe('running bun test');
     expect(turnPhase([{
       seq: 0,
       role: 'assistant',
@@ -950,12 +987,24 @@ describe('turn status', () => {
   test('cuts a long tool title down to the status line', () => {
     const title = 'bun test --coverage --reporter junit tests/frontend';
     expect(turnPhase([{ seq: 0, role: 'assistant', content: [{ ...running, title }] }]))
-      .toBe(`running Run ${title.slice(0, 39)}…`);
+      .toBe(`running ${title.slice(0, 39)}…`);
   });
 
-  test('names a running call the way its row does', () => {
+  test('describes running calls from their row labels', () => {
     const reading: Message = { seq: 3, role: 'assistant', content: [{ ...running, kind: 'read', title: "Read file '/project/notes.txt'" }] };
-    expect(turnPhase([reading], '/project')).toBe("running Read file 'notes.txt'");
+    expect(turnPhase([reading], '/project')).toBe("reading file 'notes.txt'");
+    const phase = (kind: ToolCallBlock['kind'], title: string) => turnPhase([
+      { seq: 3, role: 'assistant', content: [{ ...running, kind, title }] },
+    ]);
+    expect(phase('other', 'Start subagent opt-3: Sirus')).toBe('starting subagent opt-3: Sirus');
+    expect(turnPhase([{ seq: 3, role: 'assistant', content: [{
+      ...running, kind: 'other', title: 'mcp__sirus__SpawnAgent',
+      input: { name: 'opt-3', description: 'Sirus' },
+    }] }])).toBe('starting subagent opt-3: Sirus');
+    expect(phase('edit', 'Write notes.txt')).toBe('writing notes.txt');
+    expect(phase('search', 'Search for todo')).toBe('searching for todo');
+    expect(phase('search', 'Web search: Sirus')).toBe('searching the web: Sirus');
+    expect(phase('other', 'Docker build')).toBe('running Docker build');
   });
 
   test('formats elapsed seconds and minutes', () => {

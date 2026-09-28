@@ -19,7 +19,7 @@ test('uses current thought prose, with a fallback only when no thought is availa
   expect(turnPhase([{ ...thought, content: [{ type: 'text', text: 'I will check.' }, { type: 'thought', text: '  ' }] }])).toBe('thinking');
   expect(turnPhase([{ ...thought, content: [...thought.content, { type: 'text', text: 'Result' }] }])).toBe('writing');
   const tool: ToolCallBlock = { type: 'tool_call', id: 'call', title: 'bun test', kind: 'execute', status: 'in_progress', locations: [], content: [] };
-  expect(turnPhase([{ ...thought, content: [tool, ...thought.content] }])).toBe('running Run bun test');
+  expect(turnPhase([{ ...thought, content: [tool, ...thought.content] }])).toBe('running bun test');
   expect(turnPhase([{ ...thought, content: [...thought.content, { ...tool, status: 'completed' }] }])).toBe('thinking');
 });
 
@@ -77,7 +77,7 @@ test('thinking stays in the status line through tools, completion, and restored 
     message.content.push(tool);
     app.rerender(view(true));
     await app.waitUntilRenderFlush();
-    expect(frame).toContain('running Run bun test');
+    expect(frame).toContain('running bun test');
     expect(frame).not.toContain('First step');
     checkThoughts();
 

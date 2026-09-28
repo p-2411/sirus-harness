@@ -181,7 +181,6 @@ export function SessionItem({ session, isSelected, onSelect, onDelete, onRename,
             {terminalText(rename.text.slice(0, rename.cursor))}{!rename.selected && <Text inverse>{terminalText(rename.text[rename.cursor] ?? ' ')}</Text>}{terminalText(rename.text.slice(rename.cursor + (rename.selected ? 0 : 1)))}
           </Text></Text> : <Text color={hovered ? theme.highlight : isSelected ? theme.text : theme.textMuted} bold={isSelected} wrap="truncate-end"> {showDirectory ? `${terminalText(path.basename(session.getDirectory()) || session.getDirectory())} · ` : ''}{terminalText(session.getName())}</Text>)}
         </Box>
-        {!collapsed && needsYou && !rename && !confirmingDelete && <Text color={theme.pending}> needs you</Text>}
         {!collapsed && !needsYou && !(managing && hovered) && !rename && !confirmingDelete && activity && (
           <Box marginLeft={1} flexShrink={0}>
             <Text color={theme.textSubtle} dimColor>{activity}</Text>

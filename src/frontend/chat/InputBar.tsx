@@ -3,7 +3,7 @@ import { Box, Text, useApp, useBoxMetrics, useInput, usePaste, useStdout, type D
 import stringWidth from 'string-width';
 import { theme } from '../styles/theme';
 import { CommandMenu, useCommandMenu } from './CommandMenu';
-import { isNativeCommand, isSirusCommand } from '../../commands/registry';
+import { commandTokenAt, isNativeCommand, isSirusCommand } from '../../commands/registry';
 import { MentionMenu, useFileSuggestions, useMentionMenu } from './MentionMenu';
 import { DraftRow, TrailingImages } from './DraftText';
 import { describeImage, attachImageFile } from '../../images';
@@ -34,6 +34,7 @@ import { MentionText, participantColorMap } from '../MentionText';
 import { isMouseInput } from '../interaction/mouse';
 import { isFocusInput } from '../terminal/window-focus';
 import { clearSelection, getSelectionSnapshot, hasSelection, subscribeSelection } from '../interaction/selection';
+import { useSelectionRegion } from '../interaction/useTextSelection';
 import type { Feedback } from '../../commands/feedback';
 import type { Participant } from '../../agent_runtime/agent';
 import type { QueuedMessage } from '../../agent_runtime/session/messageQueue';
@@ -181,6 +182,11 @@ export function InputBar({
   const shortcutPageSize = Math.max(1, Math.min(12, Math.floor(((stdout.rows || 24) - 12) / 3)));
   const inputBox = useRef<DOMElement>(null);
   const { width: boxWidth } = useBoxMetrics(inputBox);
+  // A drag in the bar stays in the bar, and one that starts on the draft
+  // stays on the draft: the prompt mark, hint and border are not text.
+  const draftColumn = useRef<DOMElement>(null);
+  useSelectionRegion(inputBox);
+  useSelectionRegion(draftColumn);
   const participantColors = participantColorMap(participants);
   const status: StatusRowProps = { permissionMode, modeNotice, model, thinkingLevel, contextUsage, tasksVisible };
 
@@ -212,8 +218,8 @@ export function InputBar({
     getDraft: () => editor,
     setDraft: setEditor,
   });
-  const draftMessage = () => {
-    const content = composeContent(expandPastes(input).trim(), imageFor, trailingImages);
+  const draftMessage = (typed = input) => {
+    const content = composeContent(expandPastes(typed).trim(), imageFor, trailingImages);
     const text = content.flatMap(block => block.type === 'text' ? [block.text] : []).join('');
     return { text, images: [...placedImages, ...trailingImages], content };
   };
@@ -224,8 +230,17 @@ export function InputBar({
   useEffect(() => {
     setMenusDismissed(false);
   }, [input]);
-  const nativeList = input.startsWith('/') ? nativeCommands?.() ?? NO_NATIVE_COMMANDS : NO_NATIVE_COMMANDS;
-  const commands = useCommandMenu(input, mode.type === 'text' && !menusDismissed, nativeList);
+  const nativeList = input.includes('/') ? nativeCommands?.() ?? NO_NATIVE_COMMANDS : NO_NATIVE_COMMANDS;
+  const commands = useCommandMenu(input, mode.type === 'text' && !menusDismissed, nativeList, editor.cursor);
+  // The draft with the `/name` being typed completed to the highlighted
+  // command, wherever in the prompt it is typed.
+  const completeCommand = (): InputState | null => {
+    const token = commandTokenAt(input, editor.cursor);
+    const match = commands.matches[commands.selected];
+    if (!token || !match) return null;
+    const completed = `/${match.name} `;
+    return { text: input.slice(0, token.start) + completed + input.slice(token.end), cursor: token.start + completed.length };
+  };
   // A Sirus command takes no @mentions; a vendor command's arguments are a
   // prompt and do, once its name is complete.
   const sirusCommand = isSirusCommand(input, nativeList);
@@ -349,7 +364,7 @@ export function InputBar({
   // What Enter does, or with messages queued how to reach them, sits at the
   // right of the draft's first line, and the draft wraps short of it; a long
   // draft's position shows on its last line.
-  const enterHint = queuedMessages.length > 0 ? '↑ edit queued · ctrl+enter sends now' : disabled ? '' : 'enter ↵';
+  const enterHint = queuedMessages.length > 0 ? '↑ · ctrl+enter' : disabled ? '' : 'enter ↵';
   const hintWidth = Math.max(stringWidth(enterHint), stringWidth('copied ✓'), 11) + 1;
   const rows = draftRows(input, Math.max(1, (boxWidth || stdout.columns || 80) - 6 - hintWidth), character => {
     const image = imageFor(character);
@@ -358,6 +373,7 @@ export function InputBar({
   const cursorRow = draftCursorRow(rows, editor.cursor);
   const maxRows = Math.max(2, Math.min(8, Math.floor((stdout.rows || 24) / 3)));
   const rowOffset = Math.max(0, cursorRow - maxRows + 1);
+  const shownRows = rows.slice(rowOffset, rowOffset + maxRows);
   const searchMatches = search ? recallHistory.filter(text => text.toLowerCase().includes(search.query.toLowerCase())).reverse() : [];
   const searchResult = searchMatches[search?.index ?? 0];
   const openEditor = async () => {
@@ -566,10 +582,10 @@ export function InputBar({
       }
     }
     // tab completes the highlighted command, so its arguments can follow
-    if (key.tab && !key.shift && commands.matches.length > 0) {
-      const completed = `/${commands.matches[commands.selected].name} `;
+    const completion = key.tab && !key.shift ? completeCommand() : null;
+    if (completion) {
       setRecall(null);
-      setEditor({ text: completed, cursor: completed.length });
+      setEditor(completion);
       return;
     }
     // Cmd+V / Ctrl+V use the same clipboard handler when forwarded; native
@@ -625,18 +641,17 @@ export function InputBar({
         setEditor({ text: `${input.slice(0, -1)}\n`, cursor: input.length });
         return;
       }
-      const selectedCommand = !sendImmediately && commands.matches[commands.selected];
-      const draft = draftMessage();
-      const trimmed = selectedCommand ? `/${selectedCommand.name}` : draft.text.trim();
+      // A command picked from the menu goes as its full name, not as the
+      // prefix typed so far.
+      const completion = sendImmediately ? null : completeCommand();
+      const draft = draftMessage(completion?.text);
+      const trimmed = draft.text.trim();
       if (!trimmed && draft.images.length === 0) {
         if (sendImmediately) onSendNow?.();
         return;
       }
-      // A command picked from the menu goes as its full name, not as the
-      // prefix typed so far, which the draft's own content still holds.
-      const content = selectedCommand ? undefined : draft.content;
-      if (sendImmediately && onSendNow) onSendNow(trimmed, draft.images, content);
-      else if (send(trimmed, draft.images, content) === false) return;
+      if (sendImmediately && onSendNow) onSendNow(trimmed, draft.images, draft.content);
+      else if (send(trimmed, draft.images, draft.content) === false) return;
       if (directory && trimmed && (!trimmed.startsWith('/') || isNativeCommand(trimmed, nativeList))) {
         try { appendPromptHistory(directory, trimmed); }
         catch (error) { setLocalFeedback({ kind: 'warning', text: `Could not save prompt history: ${errorMessage(error)}` }); }
@@ -693,21 +708,26 @@ export function InputBar({
         <Text color={theme.textSubtle}>ctrl+r older · ctrl+s newer · enter selects · esc restores</Text>
       </Box>}
       <Box ref={inputBox} borderStyle="round" borderColor={theme.accent} paddingX={1} marginX={1} flexShrink={0} flexDirection="column">
-        {rows.slice(rowOffset, rowOffset + maxRows).map((cells, index, shown) => <Box key={rowOffset + index}>
-          <Box width={2} flexShrink={0}><Text color={theme.accentSoft}>{rowOffset + index === 0 ? '› ' : '  '}</Text></Box>
-          <Box flexGrow={1} minWidth={0}>
+        {/* columns rather than rows, so the draft is one box a selection can be held to */}
+        <Box>
+          <Box width={2} flexShrink={0} flexDirection="column">
+            {shownRows.map((_, index) => <Text key={rowOffset + index} color={theme.accentSoft}>{rowOffset + index === 0 ? '› ' : '  '}</Text>)}
+          </Box>
+          <Box ref={draftColumn} flexGrow={1} minWidth={0} flexDirection="column">
             {input
-              ? <DraftRow cells={cells} cursor={editor.cursor} participantColors={participantColors} />
+              ? shownRows.map((cells, index) => <DraftRow key={rowOffset + index} cells={cells} cursor={editor.cursor} participantColors={participantColors} />)
               : <Text wrap="truncate-end"><Text inverse> </Text><Text color={theme.textSubtle}> message {recipient} or <MentionText colors={participantColors}>@mention</MentionText> an agent…</Text></Text>}
           </Box>
-          <Box width={hintWidth} flexShrink={0} justifyContent="flex-end">
-            {index === 0
-              ? <Text color={showCopied ? theme.success : theme.textSubtle} wrap="truncate-end">{showCopied ? 'copied ✓' : enterHint}</Text>
-              : index === shown.length - 1 && rows.length > maxRows
-                ? <Text color={theme.textSubtle}>{rowOffset + 1}–{Math.min(rows.length, rowOffset + maxRows)}/{rows.length}</Text>
-                : null}
+          <Box width={hintWidth} flexShrink={0} flexDirection="column">
+            {shownRows.map((_, index) => <Box key={rowOffset + index} height={1} justifyContent="flex-end">
+              {index === 0
+                ? <Text color={showCopied ? theme.success : theme.textSubtle} wrap="truncate-end">{showCopied ? 'copied ✓' : enterHint}</Text>
+                : index === shownRows.length - 1 && rows.length > maxRows
+                  ? <Text color={theme.textSubtle}>{rowOffset + 1}–{Math.min(rows.length, rowOffset + maxRows)}/{rows.length}</Text>
+                  : null}
+            </Box>)}
           </Box>
-        </Box>)}
+        </Box>
         {trailingImages.length > 0 && <TrailingImages images={trailingImages} after={false} />}
       </Box>
       <WorkerStrip workers={workers} selection={workerSelection} />

@@ -20,6 +20,8 @@ import { isAutoSendable } from '../agent_runtime/session/messageQueue';
 import { commandUsage } from './types';
 import { VENDOR_INFO, type Vendor } from '../agent_runtime/providers/catalog';
 import { isReportingCommand, vendorPrefixed, type NativeCommand } from '../agent_runtime/runtime/commands';
+import type { MessageBlock } from '../agent_runtime/types';
+import { rootTextRanges } from '../mentions';
 import type {
   CommandCapabilities,
   CommandContext,
@@ -95,6 +97,126 @@ export function parseCommandLine(text: string): { name: string; args: string[]; 
     args: words.slice(1).filter(Boolean),
     rest: space === -1 ? '' : trimmed.slice(space + 1),
   };
+}
+
+// A command of Sirus's written in a prompt, with the arguments it took.
+export interface PromptCommand {
+  name: string;
+  args: string[];
+  // What it took after its name, as typed (see CommandContext.argumentText).
+  argumentText: string;
+  // `/name args` as typed, and where it sits in the prompt.
+  text: string;
+  start: number;
+  end: number;
+}
+
+export interface PromptParts {
+  // Sirus's commands, in the order they were written.
+  commands: PromptCommand[];
+  // What goes to the agents: the prompt without those commands, and with a
+  // vendor command called after its start moved to its front.
+  prompt: string;
+  // What was taken out of the text, in order, and the vendor command put
+  // before the rest, so promptContent can make the same cut in a draft's
+  // blocks.
+  cuts: { start: number; end: number }[];
+  lead: string;
+}
+
+// `/name` at the start of the text or after whitespace, and followed by
+// whitespace or the end, so /tmp/x, and/or and `/usage.` stay prose.
+const COMMAND_WORD = /(?<!\S)\/([^\s/]+)(?=\s|$)/g;
+
+// The one reading of a prompt's commands, wherever they are written. A Sirus
+// command takes the words its grammar reads (CommandSpec.takes) and is
+// applied; the rest is the prompt. Past the prompt's start a command counts
+// only in prose, not in code, quotes or other markdown examples, the places
+// @mentions do not route from either, and a standalone command not at all.
+// Claude Code and Codex read a command only at a prompt's start, so the
+// prompt's first vendor command, written later, is moved there, the rest
+// becoming its arguments: `tidy the parser /simplify` is sent as
+// `/simplify tidy the parser`. Unknown names are prose.
+export function splitPrompt(
+  text: string,
+  nativeCommands: readonly NativeCommand[],
+  session: CommandSession,
+): PromptParts {
+  const ranges = rootTextRanges(text);
+  const inProse = (index: number) => ranges.some(range => index >= range.start && index < range.end);
+  const commands: PromptCommand[] = [];
+  let vendor: { start: number; end: number } | undefined;
+  let vendorSeen = false;
+  let scanned = 0;
+  for (const match of text.matchAll(COMMAND_WORD)) {
+    const start = match.index;
+    const leading = text.slice(0, start).trim() === '';
+    if (start < scanned || (!leading && !inProse(start))) continue;
+    const spec = commandRegistry.find(candidate => candidate.name === match[1]);
+    if (!spec) {
+      // Only the prompt's first vendor command is one; one at the start
+      // stays where it is.
+      if (!vendorSeen && vendorCommandFor(match[0], nativeCommands)) {
+        vendorSeen = true;
+        if (!leading) vendor = { start, end: start + match[0].length };
+      }
+      continue;
+    }
+    if (spec.standalone && !leading) continue;
+    const nameEnd = start + match[0].length;
+    // The words on the command's line, for its grammar to read.
+    const line = text.slice(nameEnd).split('\n')[0];
+    const words = [...line.matchAll(/\S+/g)].map(word => ({ text: word[0], end: nameEnd + word.index + word[0].length }));
+    const taken = spec.takes ? spec.takes(words.map(word => word.text), session) : spec.args ? undefined : 0;
+    const end = taken === undefined ? text.trimEnd().length : taken === 0 ? nameEnd : words[taken - 1].end;
+    const { args, rest } = parseCommandLine(text.slice(start, end));
+    commands.push({ name: spec.name, args, argumentText: rest, text: text.slice(start, end), start, end });
+    scanned = end;
+  }
+  // Sirus's commands inside the vendor command's arguments are still Sirus's.
+  const cuts = [...commands, ...(vendor ? [vendor] : [])]
+    .map(({ start, end }) => ({ start, end }))
+    .sort((left, right) => left.start - right.start);
+  const parts = { commands, prompt: '', cuts, lead: vendor ? text.slice(vendor.start, vendor.end) : '' };
+  const [block] = promptContent([{ type: 'text', text }], parts);
+  return { ...parts, prompt: block?.type === 'text' ? block.text : '' };
+}
+
+// A draft's blocks with the cut splitPrompt made in their text, the text
+// blocks read as one string: the commands go, each with the spaces after it,
+// and the moved vendor command leads.
+export function promptContent(content: readonly MessageBlock[], parts: Pick<PromptParts, 'cuts' | 'lead'>): MessageBlock[] {
+  let offset = 0;
+  const blocks = content.flatMap((block): MessageBlock[] => {
+    if (block.type !== 'text') return [block];
+    const start = offset;
+    offset += block.text.length;
+    let text = '';
+    let from = 0;
+    for (const cut of parts.cuts) {
+      if (cut.end <= start || cut.start >= offset) continue;
+      text += block.text.slice(from, Math.max(cut.start - start, from));
+      from = Math.max(cut.end - start, from);
+      // The spaces after a command go with it, unless it ended a word.
+      if (text === '' || /\s$/.test(text)) while (block.text[from] === ' ' || block.text[from] === '\t') from++;
+    }
+    text += block.text.slice(from);
+    return text ? [{ ...block, text }] : [];
+  });
+  // A cut at either end of the prompt leaves the space before or after it.
+  const texts = blocks.flatMap((block, index) => block.type === 'text' ? [index] : []);
+  const trimText = (index: number | undefined, trim: (text: string) => string) => {
+    const block = index === undefined ? undefined : blocks[index];
+    if (block?.type === 'text') blocks[index!] = { ...block, text: trim(block.text) };
+  };
+  trimText(texts[0], text => text.trimStart());
+  trimText(texts.at(-1), text => text.trimEnd());
+  const trimmed = blocks.filter(block => block.type !== 'text' || block.text);
+  if (!parts.lead) return trimmed;
+  const head = trimmed[0];
+  return head?.type === 'text'
+    ? [{ ...head, text: `${parts.lead} ${head.text}` }, ...trimmed.slice(1)]
+    : [{ type: 'text', text: parts.lead }, ...trimmed];
 }
 
 // One line of the `/` menu: a Sirus command, or one of the vendors' own
@@ -173,15 +295,26 @@ export function isImmediateCommand(text: string): boolean {
   return name !== undefined && IMMEDIATE_COMMAND_NAMES.has(name);
 }
 
+// The `/name` being typed where the cursor is: at the start of the draft or
+// after whitespace, as splitPrompt reads a command, and running up to the
+// cursor. Null anywhere else.
+export function commandTokenAt(input: string, cursor: number = input.length): { start: number; end: number; typed: string } | null {
+  if (/\S/.test(input[cursor] ?? ' ')) return null;
+  const match = /(?<!\S)\/([^\s/]*)$/.exec(input.slice(0, cursor));
+  return match ? { start: match.index, end: cursor, typed: match[1] } : null;
+}
+
 // Prefix matches while a command name is being typed ('/' alone matches
 // everything); none once args have begun or the text isn't a command at all.
 // Sirus's commands come first, then the vendors'.
-export function matchCommands(input: string, commands: readonly NativeCommand[] = []): CommandMatch[] {
-  if (!input.startsWith('/')) return [];
-  const typed = input.slice(1);
-  if (typed.includes(' ')) return [];
+export function matchCommands(input: string, commands: readonly NativeCommand[] = [], cursor: number = input.length): CommandMatch[] {
+  const token = commandTokenAt(input, cursor);
+  if (!token) return [];
+  const typed = token.typed;
+  // Past the start of a prompt a standalone command is prose.
+  const offered = token.start === 0 ? commandRegistry : commandRegistry.filter(spec => !spec.standalone);
   return [
-    ...commandRegistry.filter(spec => spec.name.startsWith(typed)),
+    ...offered.filter(spec => spec.name.startsWith(typed)),
     ...vendorCommandNames(commands)
       .filter(({ name, command }) => name.startsWith(typed) || command.name.startsWith(typed))
       .map(({ name, command }) => ({

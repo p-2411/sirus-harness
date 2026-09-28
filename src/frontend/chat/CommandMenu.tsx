@@ -9,12 +9,12 @@ import { moveInWindow } from './SelectMenu';
 const COMMAND_MENU_VISIBLE_ITEMS = 6;
 const LABEL_COLUMN_MAX = 36;
 
-// The commands `/…` currently matches, and where the menu sits in them. The
-// selection belongs to the input that produced it: typing anything moves it
-// back to the first match.
-export function useCommandMenu(input: string, active: boolean, nativeCommands: readonly NativeCommand[] = []) {
+// The commands the `/…` at the cursor matches, and where the menu sits in
+// them. The selection belongs to the input that produced it: typing anything
+// moves it back to the first match.
+export function useCommandMenu(input: string, active: boolean, nativeCommands: readonly NativeCommand[] = [], cursor: number = input.length) {
   const [navigation, setNavigation] = useState({ input: '', selected: 0, offset: 0 });
-  const matches = active ? matchCommands(input, nativeCommands) : [];
+  const matches = active ? matchCommands(input, nativeCommands, cursor) : [];
   const current = navigation.input === input ? navigation : { input, selected: 0, offset: 0 };
   useEffect(() => {
     setNavigation({ input, selected: 0, offset: 0 });

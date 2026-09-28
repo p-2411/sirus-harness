@@ -148,6 +148,22 @@ export interface CommandSpec {
   // command would run in, for menus that list its state. Async menus open
   // while loading; closing the menu aborts their signal.
   menu?: (args: readonly string[], session: CommandSession, signal?: AbortSignal) => CommandMenuResult;
+  // How many of the words after its name, on its line, the command takes
+  // when it is written in a prompt: `/model opus fix the parser` gives
+  // /model one word and the agents the rest (see splitPrompt). Undefined
+  // when the first word is none of its arguments; the command then takes
+  // every word after it, as it does without a grammar when it has
+  // arguments. A command without arguments takes none.
+  takes?: (words: readonly string[], session: CommandSession) => number | undefined;
+  // It leaves the session or the app, so a prompt written with it would be
+  // stranded: it is a command only at the start of a prompt, and anywhere
+  // else its name is prose.
+  standalone?: true;
+}
+
+// The grammar of a command whose one argument is a word it can parse.
+export function takesOne(parses: (word: string) => unknown): NonNullable<CommandSpec['takes']> {
+  return words => words.length === 0 ? 0 : parses(words[0]) ? 1 : undefined;
 }
 
 // A command written out with the arguments it takes: `/undo [all|files|chat]`.

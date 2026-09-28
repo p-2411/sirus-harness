@@ -2,14 +2,16 @@ import { compactCommand, mcpCommand, permissionsCommand, permissionsMenuItems, r
 import { writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { isMemoryAccessEnabled } from '../../agent_runtime/memory-access';
+import { parsePermissionMode } from '../../agent_runtime/permissions/policy';
 import { textOf } from '../../agent_runtime/types';
 import { generateSessionName } from '../../agent_runtime/session/naming';
 import { notificationMode } from '../../frontend/terminal/notifications';
-import type { CommandSpec } from '../types';
+import { takesOne, type CommandSpec } from '../types';
 
 export const clearCommand: CommandSpec = {
   name: 'clear',
   description: 'start a new session, keeping this conversation',
+  standalone: true,
   run: (_args, context) => {
     if (!context.newSession) throw new Error('/clear is not available here.');
     context.newSession();
@@ -61,6 +63,7 @@ export const renameCommand: CommandSpec = {
 export const exitCommand: CommandSpec = {
   name: 'exit',
   description: 'quit sirus',
+  standalone: true,
   // Only a caller that owns the app can quit it.
   run: (args, context) => {
     if (args.length > 0) throw new Error('Usage: /exit');
@@ -83,13 +86,14 @@ export const permissionsCommandSpec: CommandSpec = {
   args: '[ask|auto|bypass]',
   description: 'show or set how tool calls are approved',
   run: (args, context) => permissionsCommand(args[0], context.session),
+  takes: takesOne(parsePermissionMode),
   menu: args => args.length === 0 ? permissionsMenuItems() : null,
 };
 
 export const newCommand: CommandSpec = { ...clearCommand, name: 'new' };
 
 export const resumeCommand: CommandSpec = {
-  name: 'resume', args: '[query]', description: 'search and resume a saved session',
+  name: 'resume', args: '[query]', description: 'search and resume a saved session', standalone: true,
   run: (args, context) => {
     if (!context.resumeSession) throw new Error('/resume is not available here.');
     context.resumeSession(args.join(' '));
@@ -97,7 +101,7 @@ export const resumeCommand: CommandSpec = {
 };
 
 export const archiveCommand: CommandSpec = {
-  name: 'archive', description: 'hide this session from the sidebar; recover with /resume',
+  name: 'archive', description: 'hide this session from the sidebar; recover with /resume', standalone: true,
   run: (_args, context) => {
     if (!context.archiveSession) throw new Error('/archive is not available here.');
     context.archiveSession();
@@ -105,7 +109,7 @@ export const archiveCommand: CommandSpec = {
 };
 
 export const deleteCommand: CommandSpec = {
-  name: 'delete', description: 'delete this session after confirmation',
+  name: 'delete', description: 'delete this session after confirmation', standalone: true,
   run: async (_args, context) => {
     if (!context.deleteSession || !context.confirm) throw new Error('/delete is not available here.');
     if (await context.confirm(`Delete “${context.session.getName()}”? This cannot be undone.`)) context.deleteSession();
@@ -113,7 +117,7 @@ export const deleteCommand: CommandSpec = {
 };
 
 export const forkCommand: CommandSpec = {
-  name: 'fork', description: 'continue a copy of this conversation',
+  name: 'fork', description: 'continue a copy of this conversation', standalone: true,
   run: (_args, context) => {
     if (!context.openSession) throw new Error('/fork is not available here.');
     context.openSession(context.session.fork());
