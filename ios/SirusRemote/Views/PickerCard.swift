@@ -48,8 +48,10 @@ struct PickerCard: View {
         }
         .padding(.bottom, 8)
         .glassEffect(.regular, in: .rect(cornerRadius: 30, style: .continuous))
-        .animation(.smooth(duration: 0.2), value: prompted?.id)
-        .animation(.smooth(duration: 0.2), value: failure)
+        .animation(Motion.settle, value: prompted?.id)
+        .animation(Motion.settle, value: failure)
+        // An entry on its way turns to a spinner, and back, without a jump.
+        .animation(Motion.fade, value: busy)
         .accessibilityAction(.escape, dismiss)
         // Over a scrim that closes it: VoiceOver stays inside until then.
         .accessibilityAddTraits(.isModal)

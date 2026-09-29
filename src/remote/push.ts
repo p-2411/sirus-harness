@@ -87,18 +87,29 @@ function participantOf(session: Session, event: RemoteEvent): string {
   return last?.participant ?? DEFAULT_PARTICIPANT;
 }
 
-// An approval's category picks the lock-screen buttons, by the kinds of
-// option it offers; `sirus.options` maps each kind to the option to answer
+// The option kinds a lock-screen button can answer with, in button order.
+const BUTTON_KINDS = ['allow_once', 'allow_always', 'reject_once'] as const;
+
+// An approval's category picks the lock-screen buttons: one for each kind
+// of option it offers, and none when it offers none, as a button with
+// nothing to answer with could only fail. The app registers a category for
+// every set, named as here (ios/SirusRemote/Push/Notifications.swift); the
+// two sets nearly every approval offers keep the names earlier builds of
+// the app know. `sirus.options` maps each kind to the option to answer
 // with, so the app answers by kind. That is the first option of the kind,
 // as `chosenOption` picks it in the terminal: a vendor can list a broader
 // grant under the same kind later, and a fixed button must not reach it.
 export function approvalFields(request: Pick<ApprovalRequest, 'options'>) {
   const options: Record<string, string> = {};
   for (const option of request.options) {
-    if (option.kind !== 'allow_once' && option.kind !== 'allow_always' && option.kind !== 'reject_once') continue;
+    if (!(BUTTON_KINDS as readonly string[]).includes(option.kind)) continue;
     options[option.kind] ??= option.optionId;
   }
-  return { category: 'allow_always' in options ? 'APPROVAL_ALWAYS' : 'APPROVAL', options };
+  const kinds = BUTTON_KINDS.filter(kind => kind in options).join(',');
+  const category = kinds === 'allow_once,reject_once' ? 'APPROVAL'
+    : kinds === 'allow_once,allow_always,reject_once' ? 'APPROVAL_ALWAYS'
+    : kinds ? `APPROVAL:${kinds}` : undefined;
+  return { category, options };
 }
 
 export function pushRemote(session: Session, title: string, body: string, event: RemoteEvent): void {
@@ -108,7 +119,7 @@ export function pushRemote(session: Session, title: string, body: string, event:
   if (!address || !apns || !devices?.length) return;
   const approval = event.kind === 'approval' ? approvalFields(event.request) : null;
   const payload = {
-    aps: { alert: { title, body }, 'thread-id': session.getId(), sound: 'default', ...(approval ? { category: approval.category } : {}) },
+    aps: { alert: { title, body }, 'thread-id': session.getId(), sound: 'default', ...(approval?.category ? { category: approval.category } : {}) },
     sirus: {
       sessionId: session.getId(), participant: participantOf(session, event),
       ...(event.kind !== 'finished' ? { requestId: event.request.id } : {}),

@@ -12,6 +12,9 @@ struct Transcript: View {
     let names: Set<String>
     @State private var position = ScrollPosition(edge: .bottom)
     @State private var pinned = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var motion: Motion { Motion(reduced: reduceMotion) }
 
     private struct Metrics: Equatable {
         let content: CGFloat
@@ -44,7 +47,9 @@ struct Transcript: View {
                     belowView: geometry.contentSize.height - geometry.visibleRect.maxY)
         } action: { old, new in
             // Growth follows the reader only if they were at the bottom;
-            // a scroll of their own decides whether they still are.
+            // a scroll of their own decides whether they still are. The
+            // follow doesn't animate: rows stream in many small steps, and
+            // an animation for each would lag behind and pile up.
             if new.content != old.content || new.container != old.container {
                 if pinned { position.scrollTo(edge: .bottom) }
             } else {
@@ -73,7 +78,8 @@ struct Transcript: View {
             if !pinned {
                 Button {
                     pinned = true
-                    withAnimation(.smooth(duration: 0.3)) { position.scrollTo(edge: .bottom) }
+                    // Eased, never springing, so it can't overshoot the end.
+                    withAnimation(Motion.settle) { position.scrollTo(edge: .bottom) }
                 } label: {
                     Image(systemName: "arrow.down")
                         .font(.system(size: 15, weight: .semibold))
@@ -86,10 +92,10 @@ struct Transcript: View {
                 .accessibilityLabel("Jump to latest")
                 .padding(.trailing, 14)
                 .padding(.bottom, 10)
-                .transition(.opacity.combined(with: .scale(scale: 0.85)))
+                .transition(motion.pop)
             }
         }
-        .animation(.easeOut(duration: 0.18), value: pinned)
+        .animation(motion.snap, value: pinned)
         // Agents write links, and a sirus: one would ask to move the app to
         // another Mac; one in a conversation is never the user's own.
         .environment(\.openURL, OpenURLAction { url in
@@ -176,7 +182,7 @@ private struct ToolLine: View {
         VStack(alignment: .leading, spacing: 8) {
             // A tap opens the detail, or with none, the whole of a long title.
             Button {
-                withAnimation(.smooth(duration: 0.22)) { open.toggle() }
+                withAnimation(Motion.settle) { open.toggle() }
             } label: {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Pulse(color: dot, active: tool.state == .running, size: 6)
@@ -242,7 +248,7 @@ private struct Compaction: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Button { withAnimation(.smooth(duration: 0.22)) { open.toggle() } } label: {
+            Button { withAnimation(Motion.settle) { open.toggle() } } label: {
                 HStack(spacing: 12) {
                     Hairline()
                     Text(open ? "context compacted · hide" : "context compacted")
@@ -416,6 +422,9 @@ private struct Code: View {
                         }
                         .font(.mono(10))
                         .foregroundStyle(copied ? Palette.platinum : Palette.subtle)
+                        // The copy mark turns into a tick and back, rather
+                        // than swapping at once.
+                        .animation(Motion.fade, value: copied)
                         .padding(.leading, 16)
                         .frame(minHeight: 28)
                         .contentShape(Rectangle())
