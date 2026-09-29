@@ -694,11 +694,17 @@ private struct ModeCaption: View {
     }
 
     // The gauge as the TUI words it, then shorter by one " · " part at a
-    // time: "ctx 184k · 8% left · /compact", "ctx 184k · 8% left", "ctx 184k".
+    // time: "ctx 184k · 8% left · /compact", "ctx 184k · 8% left", "ctx 184k";
+    // or "ctx 184k (18%)", then "ctx 184k". The last is what the one-line
+    // caption keeps room for, so it always fits there.
     private var gaugeForms: [String] {
         guard let text = header?.context?.text, !text.isEmpty else { return [] }
         let parts = text.components(separatedBy: " · ")
-        return (1...parts.count).reversed().map { parts.prefix($0).joined(separator: " · ") }
+        var forms = (1...parts.count).reversed().map { parts.prefix($0).joined(separator: " · ") }
+        if let shortest = forms.last, let aside = shortest.range(of: " ("), aside.lowerBound > shortest.startIndex {
+            forms.append(String(shortest[..<aside.lowerBound]))
+        }
+        return forms
     }
 
     // The gauge's place on the one-line caption: room for its shortest
