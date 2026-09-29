@@ -48,7 +48,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "update-harnesses": "bun run scripts/update-harnesses.ts",
     "release:check": "bun test && bun run typecheck && npm pack --dry-run",
-    "release": "bun run release:check && bun pm version patch && bun publish",
+    "release": "bun run release:check && bun pm version patch && npm login && bun publish",
     "prepublishOnly": "bun test && bun run typecheck"
   },
   "devDependencies": {
