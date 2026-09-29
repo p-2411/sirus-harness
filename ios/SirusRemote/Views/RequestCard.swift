@@ -154,6 +154,10 @@ private struct ApprovalBody: View {
             .layoutPriority(1)
         }
         .padding(.bottom, 12)
+        // Why an answer failed opens up in the card rather than jumping in,
+        // and the answer on its way turns to a spinner.
+        .animation(Motion.settle, value: failure)
+        .animation(Motion.fade, value: busy)
         .sensoryFeedback(.impact(weight: .medium), trigger: answered)
     }
 
@@ -243,6 +247,12 @@ private struct QuestionBody: View {
             .padding(.top, 4)
             .padding(.bottom, 12)
         }
+        // As the approval's: a failure or an answer of the user's own opens
+        // up in the card. Every keystroke clears the failure, but only the
+        // first changes it, so typing itself never animates.
+        .animation(Motion.settle, value: failure)
+        .animation(Motion.settle, value: otherOn)
+        .animation(Motion.fade, value: busy)
         .sensoryFeedback(.impact(weight: .medium), trigger: answered)
     }
 

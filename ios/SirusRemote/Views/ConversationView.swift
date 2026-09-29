@@ -95,6 +95,9 @@ private struct Conversation: View {
     @State private var barHeight: CGFloat = 0
     @State private var floatingHeight: CGFloat = 0
     @Namespace private var glass
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var motion: Motion { Motion(reduced: reduceMotion) }
 
     // The `/` and `@` menu's rows, with the draft they were worked out for:
     // their offsets only fit that text.
@@ -262,10 +265,14 @@ private struct Conversation: View {
         .padding(.horizontal, 12)
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { barHeight = $0 }
         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { chromeTop = $0 }
-        .animation(.spring(duration: 0.4, bounce: 0.14), value: client.requests.first?.id)
-        .animation(.smooth(duration: 0.3), value: working || status != nil)
-        .animation(.smooth(duration: 0.3), value: client.link)
-        .animation(.smooth(duration: 0.2), value: showsMenu)
+        // A request morphs the glass it takes the place of, so it moves as
+        // the menus do; the status and link only change what is there. The
+        // status's own words change with every update and don't animate.
+        .animation(motion.panel, value: client.requests.first?.id)
+        .animation(Motion.settle, value: working || status != nil)
+        .animation(Motion.settle, value: client.link)
+        // What a menu hides fades in step with the menu coming over it.
+        .animation(motion.panel, value: showsMenu)
     }
 
     // A note goes above the bar, unless a picker takes the bottom or the
@@ -291,6 +298,7 @@ private struct Conversation: View {
                     Pill(tone: Palette.muted, glass: statusGlass) {
                         Image(systemName: client.link == .offline ? "wifi.slash" : "arrow.triangle.2.circlepath")
                             .symbolEffect(.rotate, isActive: client.link == .connecting)
+                            .contentTransition(.symbolEffect(.replace))
                         Text(client.link == .offline ? "Offline" : "Reconnecting…")
                         if client.link == .offline {
                             Text("Retry").foregroundStyle(Palette.platinum)
@@ -335,6 +343,8 @@ private struct Conversation: View {
     // command's picker in the input's place, over a scrim that closes it;
     // the `/` and `@` completions just above the input; and a note above the
     // whole bar, or under the header while a picker takes the bottom.
+    // The menus rise from the input's place and sink back into it; the
+    // scrim behind a picker only fades.
     private var floating: some View {
         ZStack(alignment: .bottom) {
             if picker != nil {
@@ -352,28 +362,40 @@ private struct Conversation: View {
                     .padding(noteOnTop ? .top : .bottom, noteOnTop ? headerHeight + 10 : barHeight + 10)
                     .frame(minHeight: 0, maxHeight: .infinity, alignment: noteOnTop ? .top : .bottom)
                     .zIndex(1)
-                    .transition(.opacity.combined(with: .offset(y: 6)))
+                    // Out from the bar it sits on, or down from the header.
+                    .transition(motion.note(from: noteOnTop ? .top : .bottom))
             }
             if let picker {
-                PickerCard(picker: picker, dismiss: closePicker, run: { try await send($0, from: .picker) })
-                    .id(pickerRevision)
-                    .padding(.horizontal, 12)
-                    .padding(.top, headerHeight + 12)
-                    .transition(.menu)
+                // The card slides up from the bottom edge, through the
+                // input's place, and back down when put away. A picker that
+                // opens the next one stays put and cross-fades to it, as
+                // only the card inside this place is new, not the place.
+                ZStack(alignment: .bottom) {
+                    PickerCard(picker: picker, dismiss: closePicker, run: { try await send($0, from: .picker) })
+                        .id(pickerRevision)
+                        .transition(.opacity)
+                }
+                .padding(.horizontal, 12)
+                .padding(.top, headerHeight + 12)
+                .transition(motion.sheet)
             } else if showsCompletions {
+                // Up from the foot of the input to just above it.
                 CompletionMenu(items: completions.items, choose: chooseCompletion)
                     .padding(.horizontal, 12)
                     .padding(.top, headerHeight + 12)
                     .padding(.bottom, inputHeight + 8)
-                    .transition(.menu)
+                    .transition(motion.menu(rising: inputHeight + 8))
             }
         }
         .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .bottom)
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { floatingHeight = $0 }
-        .animation(.spring(duration: 0.35, bounce: 0.1), value: picker == nil)
-        .animation(.spring(duration: 0.35, bounce: 0.1), value: pickerRevision)
-        .animation(.smooth(duration: 0.2), value: showsCompletions)
-        .animation(.smooth(duration: 0.25), value: note)
+        // A picker opening or closing moves on the panel spring, which wins
+        // over the cross-fade when both change at once. The menu's rows
+        // follow the draft without animating, so typing never waits on them.
+        .animation(motion.panel, value: picker == nil)
+        .animation(Motion.fade, value: pickerRevision)
+        .animation(motion.panel, value: showsCompletions)
+        .animation(motion.snap, value: note)
     }
 
     // Before the socket is up this fails quietly: the client subscribes
@@ -511,13 +533,6 @@ private struct Conversation: View {
     }
 }
 
-private extension AnyTransition {
-    // A menu grows out of what it belongs to, below it.
-    static var menu: AnyTransition {
-        .scale(scale: 0.94, anchor: .bottom).combined(with: .opacity)
-    }
-}
-
 // The ground drawn in behind floating chrome, so the transcript fades out
 // under it rather than running into the text on it.
 private struct Fade: View {
@@ -626,14 +641,19 @@ private struct ModeCaption: View {
     // mode and the context over the model and thinking level, so none is
     // cut to a letter. The gauge drops its trailing parts before the mode
     // gives any room, since the mode says whether anything is asked; a
-    // long model id gives way in the middle.
+    // long model id gives way in the middle. Whether it takes one line or
+    // two doesn't hang on the gauge, which arrives only once the agent has
+    // run and grows as the context fills: the model and thinking level
+    // stay where they are.
     var body: some View {
         ViewThatFits(in: .horizontal) {
+            // The controls take their whole width first, the gauge what is
+            // left: it would otherwise take a share of the line as a spacer
+            // does, and cut the mode short beside empty room.
             HStack(spacing: 6) {
-                mode(height: 44)
-                Spacer(minLength: 4)
-                gauge(gaugeForms.first)
-                agent(height: 44)
+                mode(height: 44).layoutPriority(1)
+                gaugeSlot
+                agent(height: 44).layoutPriority(1)
             }
             VStack(spacing: 0) {
                 ViewThatFits(in: .horizontal) {
@@ -674,12 +694,40 @@ private struct ModeCaption: View {
     }
 
     // The gauge as the TUI words it, then shorter by one " · " part at a
-    // time: "ctx 184k · 8% left · /compact", "ctx 184k · 8% left", "ctx 184k".
+    // time: "ctx 184k · 8% left · /compact", "ctx 184k · 8% left", "ctx 184k";
+    // or "ctx 184k (18%)", then "ctx 184k". The last is what the one-line
+    // caption keeps room for, so it always fits there.
     private var gaugeForms: [String] {
         guard let text = header?.context?.text, !text.isEmpty else { return [] }
         let parts = text.components(separatedBy: " · ")
-        return (1...parts.count).reversed().map { parts.prefix($0).joined(separator: " · ") }
+        var forms = (1...parts.count).reversed().map { parts.prefix($0).joined(separator: " · ") }
+        if let shortest = forms.last, let aside = shortest.range(of: " ("), aside.lowerBound > shortest.startIndex {
+            forms.append(String(shortest[..<aside.lowerBound]))
+        }
+        return forms
     }
+
+    // The gauge's place on the one-line caption: room for its shortest
+    // wording counts towards whether the line fits, with a gauge or without
+    // one yet, and it takes whatever the line has spare, its longest
+    // wording that fits there first.
+    private var gaugeSlot: some View {
+        Color.clear
+            .frame(height: 26)
+            .frame(minWidth: Self.gaugeRoom, maxWidth: .infinity)
+            .overlay(alignment: .trailing) {
+                ViewThatFits(in: .horizontal) {
+                    ForEach(gaugeForms, id: \.self) { form in gauge(form) }
+                }
+            }
+    }
+
+    // The width of a gauge's shortest wording, "ctx 184k", in the caption's
+    // monospaced type, and the gap before it.
+    private static let gaugeRoom: CGFloat = {
+        let font = UIFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        return ("ctx 000k" as NSString).size(withAttributes: [.font: font]).width.rounded(.up) + 2 + 4
+    }()
 
     @ViewBuilder private func gauge(_ text: String?) -> some View {
         if let text, let context = header?.context {
@@ -742,6 +790,7 @@ private struct CaptionChip<Content: View>: View {
             .padding(.horizontal, 10)
             .frame(height: 26)
             .background(Capsule().fill(.white.opacity(busy ? 0.11 : 0.06)))
+            .animation(Motion.fade, value: busy)
             .frame(minHeight: height)
             .contentShape(Rectangle())
         }

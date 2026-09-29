@@ -37,7 +37,13 @@ struct Sidebar: View {
     @State private var marks = 0
     @State private var seen: [String: Int] = [:]
     @State private var confirmingForget = false
-    @GestureState private var drag: CGFloat = 0
+    // A drag let go springs back rather than jumping: to rest if the panel
+    // stays open, or along with it as it closes.
+    @GestureState(resetTransaction: Transaction(animation: Motion().panel)) private var drag: CGFloat = 0
+    @Namespace private var highlight
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var motion: Motion { Motion(reduced: reduceMotion) }
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -66,7 +72,7 @@ struct Sidebar: View {
         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { top = $0 }
         .task(id: fittingMarks) {
             do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
-            withAnimation(.smooth(duration: 0.25)) { marks = fittingMarks }
+            withAnimation(Motion.settle) { marks = fittingMarks }
         }
         .sensoryFeedback(.selection, trigger: selected)
         .sensoryFeedback(.impact(weight: .light), trigger: expanded)
@@ -155,7 +161,8 @@ struct Sidebar: View {
         return min(fit, Int(max(0, min(room, 7))))
     }
 
-    // One mark per session, the open one picked out.
+    // One mark per session, the open one picked out. The pick slides from
+    // mark to mark, as the agent tabs' thumb does.
     private var rail: some View {
         VStack(spacing: 0) {
             Capsule().fill(Palette.line).frame(width: 20, height: 1).padding(.bottom, 4)
@@ -167,7 +174,9 @@ struct Sidebar: View {
                                 .opacity(reachable(session) ? 1 : 0.35)
                                 .frame(width: 36, height: 36)
                                 .background {
-                                    if session.id == selected { Circle().fill(.white.opacity(0.13)) }
+                                    if session.id == selected {
+                                        Circle().fill(.white.opacity(0.13)).matchedGeometryEffect(id: "selected", in: highlight)
+                                    }
                                 }
                                 .frame(width: Self.railWidth, height: 44)
                                 .contentShape(Rectangle())
@@ -186,6 +195,7 @@ struct Sidebar: View {
         }
         .frame(width: Self.railWidth)
         .padding(.bottom, 4)
+        .animation(motion.snap, value: selected)
     }
 
     // The sessions by name, directory and last activity, over the Mac.
@@ -302,7 +312,7 @@ struct Sidebar: View {
 
     private func setExpanded(_ value: Bool) {
         if value { dismissKeyboard() }
-        withAnimation(.spring(duration: 0.45, bounce: 0.16)) { expanded = value }
+        withAnimation(motion.panel) { expanded = value }
     }
 }
 

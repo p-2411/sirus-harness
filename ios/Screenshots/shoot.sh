@@ -176,6 +176,9 @@ run() {
   scene "$udid" "$label" stress stress 7
   scene "$udid" "$label" question-keyboard question 8 -composerFocused YES
   scene "$udid" "$label" note-long conversation 5 -sendOnLaunch /long-note
+  # The caption before an agent has run, with no gauge yet, and after.
+  scene "$udid" "$label" caption-fresh caption-fresh 6
+  scene "$udid" "$label" caption caption 6
 
   # Offline: the Mac goes away while the conversation is on screen.
   if wanted offline; then
@@ -194,6 +197,11 @@ only=${ONLY:-$(cat "$here/only" 2>/dev/null || true)}
 wanted() {
   [ -z "$only" ] || [[ " $only " == *" $1 "* ]]
 }
+any_wanted() {
+  local name
+  for name in "$@"; do wanted "$name" && return 0; done
+  return 1
+}
 
 # The software keyboard, as on a phone, rather than the Mac's.
 defaults write com.apple.iphonesimulator ConnectHardwareKeyboard -bool false
@@ -210,6 +218,33 @@ if wanted conversation-largest-text || wanted question-largest-text; then
   sleep 3
   scene "$small" small conversation-largest-text conversation 10
   scene "$small" small question-largest-text question 10
+  xcrun simctl ui "$small" content_size large
+fi
+# The largest accessibility text size (Larger Accessibility Sizes on), on
+# the smallest screen.
+accessible=(setup-ax lobby-offline-ax conversation-ax question-ax approval-ax menu-command-ax picker-model-ax sidebar-ax composer-long-ax question-keyboard-ax)
+if any_wanted "${accessible[@]}"; then
+  xcrun simctl ui "$small" content_size accessibility-extra-extra-extra-large
+  sleep 3
+  if wanted setup-ax; then
+    launch "$small"
+    sleep 6
+    shot "$small" small-setup-ax
+  fi
+  if wanted lobby-offline-ax; then
+    launch "$small" -host nope.invalid
+    sleep 9
+    shot "$small" small-lobby-offline-ax
+  fi
+  scene "$small" small conversation-ax conversation 8
+  scene "$small" small question-ax question 8
+  scene "$small" small approval-ax approval 8
+  scene "$small" small menu-command-ax conversation 10 -composerDraft /mo -composerFocused YES
+  scene "$small" small picker-model-ax conversation 10 -openPicker /model
+  scene "$small" small sidebar-ax conversation 8 -sidebarExpanded YES
+  scene "$small" small composer-long-ax conversation 10 -composerFocused YES \
+    -composerDraft "Before you change the pickers, check how they look on the smallest phone with the keyboard up and the text as large as it goes."
+  scene "$small" small question-keyboard-ax question 10 -composerFocused YES
   xcrun simctl ui "$small" content_size large
 fi
 limit 120 xcrun simctl shutdown "$small" || echo "shutdown timed out" >&2

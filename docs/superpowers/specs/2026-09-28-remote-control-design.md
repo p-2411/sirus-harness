@@ -190,11 +190,15 @@ session and participant last selected in this process's TUI, if it is `/rc`'d.
   waiting, turn finished (not cancelled).
 - Payload: `aps.alert { title, body }`, `aps.thread-id` = session id,
   `aps.category`, and `sirus { sessionId, participant, requestId?, host, port }`.
-- Approval categories: `APPROVAL` (Allow, Deny) and `APPROVAL_ALWAYS` (Allow,
-  Always, Deny), chosen by which option kinds the request has. The payload
-  carries `sirus.options: { "allow_once": id, "allow_always": id, "reject_once": id }`
-  so the app answers by kind. Question and finish pushes open the app at that
-  session.
+- Approval categories give a button for each of the kinds `allow_once`
+  (Allow), `allow_always` (Always Allow) and `reject_once` (Deny) the request
+  offers, and no category when it offers none: `APPROVAL` (Allow, Deny),
+  `APPROVAL_ALWAYS` (Allow, Always Allow, Deny), and for any other set
+  `APPROVAL:` and its kinds in that order, as `APPROVAL:allow_always,reject_once`.
+  The app registers every set. The payload carries
+  `sirus.options: { "allow_once": id, "allow_always": id, "reject_once": id }`
+  (the kinds offered) so the app answers by kind. Question and finish pushes
+  open the app at that session.
 
 ### Keep-awake
 

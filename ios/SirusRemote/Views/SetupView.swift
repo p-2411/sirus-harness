@@ -95,7 +95,7 @@ struct SetupView: View {
             .padding(.trailing, 4)
             .padding(.vertical, 4)
             .glassEffect(.regular.interactive(), in: .capsule)
-            .animation(.easeOut(duration: 0.15), value: canConnect)
+            .animation(Motion.fade, value: canConnect)
             status
                 .frame(minHeight: 44, alignment: .topLeading)
                 .padding(.top, 14)
@@ -111,9 +111,9 @@ struct SetupView: View {
                 .contentShape(Rectangle())
                 .onTapGesture { typing = false }
         }
-        .animation(.smooth(duration: 0.3), value: showsChecklist)
-        .animation(.smooth(duration: 0.3), value: typing)
-        .animation(.easeOut(duration: 0.2), value: store.scanning)
+        .animation(Motion.settle, value: showsChecklist)
+        .animation(Motion.settle, value: typing)
+        .animation(Motion.fade, value: store.scanning)
         .sensoryFeedback(.error, trigger: store.problem?.errorDescription) { _, new in new != nil }
         #if DEBUG
         .task {

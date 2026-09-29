@@ -24,4 +24,30 @@ describe('lock-screen approval buttons', () => {
     expect(fields.options).toEqual({ allow_once: 'once', reject_once: 'no' });
     expect(fields.category).toBe('APPROVAL');
   });
+
+  test('offer no Allow when nothing allows once', () => {
+    // An Allow button here asked for Face ID and then couldn't answer.
+    const fields = approvalFields({ options: [
+      { optionId: 'always', name: 'Yes, always', kind: 'allow_always' },
+      { optionId: 'no', name: 'No', kind: 'reject_once' },
+    ] });
+    expect(fields.options).toEqual({ allow_always: 'always', reject_once: 'no' });
+    expect(fields.category).toBe('APPROVAL:allow_always,reject_once');
+  });
+
+  test('offer no Deny when nothing rejects once', () => {
+    const fields = approvalFields({ options: [
+      { optionId: 'once', name: 'Yes', kind: 'allow_once' },
+      { optionId: 'never', name: 'No, and never ask', kind: 'reject_always' },
+    ] });
+    expect(fields.category).toBe('APPROVAL:allow_once');
+  });
+
+  test('offer no buttons when no option has a button', () => {
+    const fields = approvalFields({ options: [
+      { optionId: 'never', name: 'No, and never ask', kind: 'reject_always' },
+    ] });
+    expect(fields.options).toEqual({});
+    expect(fields.category).toBeUndefined();
+  });
 });
