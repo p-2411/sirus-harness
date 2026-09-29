@@ -73,14 +73,16 @@ export function ChatHeader({ session, activity = new Map(), width = 100, onSelec
   return (
     <Box paddingLeft={3} paddingRight={1} justifyContent="space-between" alignItems="center" flexShrink={0} height={1}>
       <Box flexGrow={1} flexShrink={1} minWidth={0}>
-        <Text wrap="truncate-middle">
-          <Text color={theme.textMuted}>{terminalText(session.getName()).toUpperCase()}</Text>
-          <Text color={theme.textSubtle} dimColor> {session.getDirectory()}</Text>
-        </Text>
+        <Box flexShrink={1} minWidth={0}>
+          <Text wrap="truncate-middle">
+            <Text color={theme.textMuted}>{terminalText(session.getName()).toUpperCase()}</Text>
+            <Text color={theme.textSubtle} dimColor> {session.getDirectory()}</Text>
+          </Text>
+        </Box>
+        {remote && <Box flexShrink={0} marginLeft={1}><Text color={theme.success}>rc</Text></Box>}
       </Box>
       <AgentTabs participants={participants} selected={session.getSelectedParticipant()}
         activity={activity} colors={participantColorMap(participants)} width={tabWidth} onSelect={onSelect} />
-      {remote && <Box flexShrink={0} marginLeft={1}><Text color={theme.success}>/rc</Text></Box>}
     </Box>
   );
 }
